@@ -1,4 +1,4 @@
-"""Export a private entry Caddyfile without displaying credentials or templates."""
+"""Export a private entry proxy config without displaying credentials or templates."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,9 @@ class NoRedirect(HTTPRedirectHandler):
         raise ValueError("Panel redirects are not accepted")
 
 
-def export(panel: str, credentials: Path, entry: str, output: Path) -> None:
+def export(panel: str, credentials: Path, entry: str, output: Path, server: str = "caddy") -> None:
+    if server not in ("caddy", "nginx"):
+        raise ValueError("Unsupported proxy server")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,39}", entry):
         raise ValueError("Invalid entry ID")
     parsed = urlsplit(panel)
@@ -39,7 +41,7 @@ def export(panel: str, credentials: Path, entry: str, output: Path) -> None:
         raise ValueError("Invalid credential file")
     encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
     url = panel.rstrip("/") + "/api/integration/frontend?" + urlencode({
-        "server": "caddy", "entry": entry,
+        "server": server, "entry": entry,
     })
     request = Request(url, headers={"Authorization": "Basic " + encoded,
                                     "Accept": "application/json"})
@@ -63,9 +65,10 @@ def main() -> int:
     parser.add_argument("--credentials", required=True, type=Path)
     parser.add_argument("--entry", required=True)
     parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--server", choices=("caddy", "nginx"), default="caddy")
     args = parser.parse_args()
     try:
-        export(args.panel, args.credentials, args.entry, args.output)
+        export(args.panel, args.credentials, args.entry, args.output, args.server)
     except HTTPError as exc:
         print(f"Export refused: HTTP {exc.code}", file=sys.stderr)
         return 1

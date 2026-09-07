@@ -4,6 +4,81 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-07 — preserve entry proxy paths and prevent stale registry writes
+**Done**
+- Reproduced nine path-contract failures in the initial templates: nginx
+  re-escaped encoded filenames, both engines collapsed double slashes, nginx
+  refused a 12KB path, and bare/traversing reserved paths could reach Emby.
+  Preserve the raw suffix with Caddy `path_regexp` and nginx `$request_uri`
+  maps into fixed named upstreams. Four additional live failures exposed
+  encoded namespace aliases; reject these, dot segments and reserved fallbacks
+  before contacting an upstream. nginx now has an explicit 32KiB line budget.
+- Scope nginx maps/upstreams per exact entry identity, including case and
+  punctuation differences. Two original same-name Upgrade maps actually
+  parsed successfully; the risk was shared definitions, not a guaranteed
+  syntax error. Separate exported files now have independent names.
+- Generate the registered listen port and active certificate paths, with
+  explicit certificate/nginx-version/`nginx -t` prerequisites in config and UI.
+- Add atomic registry revision checks (409 on conflict, including rotations).
+  The UI preserves other row fields, prevents duplicate mutations, ignores
+  obsolete exports, clears credentials during mutations, and supports legacy
+  clipboard/manual selection. Escaping and credential storage/logging are
+  exercised in Chromium using the actual JavaScript.
+- Document both proxy engines and the settings workflow; the protected-file
+  export helper now supports `--server nginx` as well as its Caddy default.
+
+**Tests**
+- `ruff check app tests`: passed. `python -m pytest tests/ -q`: **1020 passed,
+  0 skipped**, four existing framework deprecation warnings (96.10s).
+  Set `MEDIADECK_NGINX_DOCKER=nginx:1.27-alpine` for this run.
+- Real nginx **1.27.5** (disposable host-network containers) and Caddy **2.6.2**:
+  both friends loaded together, TLS-verified fixed upstreams, raw encoded paths
+  and queries, signatures/Range/If-Range, credential stripping, WebSocket frames,
+  non-GET methods/bodies, reserved/encoded traversal refusal and long-path limits.
+- Chromium: **20 browser assertions**, covering injection, field preservation,
+  stale pages, duplicate writes, obsolete exports and all clipboard fallbacks.
+- Isolated mock uvicorn startup: `/healthz` 200 and anonymous `/api/settings`
+  401. No production data, settings or services used.
+
+**Next**
+- Review and merge separately. No release, deployment, DNS or host configuration
+  changes are part of this revision. Real friend deployment acceptance still
+  requires the operator's TLS and origin-to-panel setup.
+
+---
+
+## 2026-09-07 — entry management UI and nginx friend templates
+**Done**
+- Added an "external reverse-proxy entries" card to the settings page:
+  register an entry by ID and origin, generate its complete proxy
+  configuration, copy it in one click, rotate the credential and remove the
+  entry. Registration re-reads the stored list before writing, so an edit made
+  from a stale page cannot silently drop another entry.
+- Generated friend configuration is now available for nginx as well as Caddy.
+  Both engines are produced from one validated plan, so they cannot drift:
+  identical per-node prefix strip, identical refusal of unknown `/_n/` paths,
+  the entry credential only on the Emby hop, viewer credentials stripped before
+  a node hop, no response cache, and a 600s upstream read timeout so a long
+  direct-play connection is not cut by nginx's 60s default.
+- `GET /api/integration/frontend?...&entry=<id>` accepts `server=nginx`; it
+  previously rejected everything except Caddy. Unknown engine names still 400.
+
+**Tests**
+- `ruff check app tests` clean; entry/export/origin-scope suites 103 passed.
+- Real nginx 1.27 and real Caddy served the generated friend configuration
+  against recording upstreams: a percent-encoded CJK media path with its signed
+  query reached the node byte-identical, `Range` survived, entry key/viewer
+  `Authorization`/`Cookie` never reached a node, unknown node names and bare
+  `/_n/` returned 404 without contacting an upstream, and ordinary paths reached
+  Emby carrying the entry assertion.
+
+**Next**
+- The official front door on the Emby host still needs the playback-interception
+  rule installed; without it a friend proxying the main Emby domain never reaches
+  the panel and no entry redirect can happen.
+
+---
+
 ## 2026-09-07 — restrict origin interception to playback GET/HEAD (draft revision)
 **Done**
 - Fixed the origin templates capturing every video API and method. In the

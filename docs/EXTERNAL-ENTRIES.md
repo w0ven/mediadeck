@@ -10,7 +10,7 @@ https://friend.example.com/_n/edge-a/s/main/Movies/Demo.mkv?r=...&u=...&e=...&k=
 The friend strips only `/_n/edge-a` and proxies to the fixed HTTPS upstream for
 `edge-a`. The node sees its original `/s/main/...` path and the original signed
 query. Its signing key, expiration check, user attribution, rate limit and
-media cache are unchanged. Caddy does not receive the node signing key.
+media cache are unchanged. Neither friend proxy receives the node signing key.
 
 This feature is disabled by an empty entry registry on upgrade. It requires
 nodes with HTTPS base origins and media URL prefixes under `/s/`. A node URL
@@ -19,7 +19,20 @@ fleet with incompatible mappings instead of emitting a misleading proxy.
 
 ## Register an entry
 
-Use the existing administrator-authenticated API:
+In **Settings → 外部反代入口**, enter an ID and HTTPS origin, then click
+**登记**. Choose **Caddy** or **nginx** and click **生成配置** on that row.
+The generated text contains that entry's credential; share the private file
+only with its owner. **复制配置** uses the browser clipboard, falls back to
+legacy copy when needed, and selects the whole text for Ctrl+C / Cmd+C if
+clipboard access is unavailable. Nothing is written to browser storage or the
+console. **换凭据** and **删除** require confirmation and clear old exports.
+
+The UI blocks duplicate writes and rejects stale pages instead of replacing
+someone else's registry. Reload after a conflict, review the current entries,
+and repeat the intended action. A pending export cannot replace a newer one
+or repopulate the page after a local rotation/removal.
+
+The administrator-authenticated API is also available:
 
 ```http
 PUT /api/settings/integration
@@ -33,9 +46,17 @@ Content-Type: application/json
 }
 ```
 
-Read `GET /api/settings/integration` before editing. `external_entries` replaces
-the list, so preserve entries that should remain. Omitting the field keeps the
-list; an empty list removes it. Existing settings forms continue to work.
+Read `GET /api/settings/integration` before editing, and include its opaque
+`external_entries_revision` in the PUT alongside `external_entries`. The
+server atomically compares that revision and returns HTTP 409 without changing
+any fields if another writer won first. Rotations also change the revision;
+ordinary round trips and unrelated settings edits do not. The UI always sends
+this precondition. Legacy API clients may omit it for compatibility, but their
+whole-list writes are unguarded and should be updated.
+
+`external_entries` replaces the list, so preserve entries that should remain.
+Omitting the field keeps the list; an empty list removes it. Existing settings
+forms continue to work.
 IDs are stable labels, up to 40 ASCII letters/digits/underscores/hyphens, starting
 with a letter or digit. Origins are literal HTTPS DNS origins (optional port),
 with no userinfo, paths, query, fragment or wildcard. Duplicate IDs/origins and
@@ -50,23 +71,24 @@ entry's template again afterwards. A removed or rotated credential immediately
 stops selecting that entry. Already-issued node signatures retain their normal
 expiry; rotation is not node-link revocation.
 
-No new UI is required. A new friend needs a registry entry and its exported
-Caddy configuration; application code and the origin's generic forwarding
-rules do not change.
+A new friend needs a registry entry and its exported Caddy or nginx
+configuration; application code and the origin's generic forwarding rules do
+not change.
 
-## Export the friend's Caddyfile
+## Export the friend's configuration
 
 Set the official HTTPS Emby origin in `integration.emby_public_url`, then use:
 
 ```http
 GET /api/integration/frontend?server=caddy&entry=friend-one
+GET /api/integration/frontend?server=nginx&entry=friend-one
 ```
 
-This existing admin-only endpoint returns `{ "server": "caddy", "config": ... }`.
+This admin-only endpoint returns `{ "server": "caddy" | "nginx", "config": ... }`.
 **The explicit export contains the entry credential.** Responses use
 `Cache-Control: private, no-store`. Save `config` directly to a private file
-(mode 600, readable by the friend's Caddy process), rather than displaying,
-logging or pasting the response into a ticket/chat. Do not give the friend an
+(mode 600, readable by the friend's proxy process). The UI explicitly displays
+it for copying; do not log or paste the response into a public ticket/chat. Do not give the friend an
 administrator or Emby API credential. The standalone helper reads admin
 credentials from a local protected JSON file and creates a new output file:
 
@@ -75,6 +97,7 @@ python3 tools/export-entry-proxy.py \
   --panel https://panel.example.com \
   --credentials /secure/panel-admin.json \
   --entry friend-one \
+  --server caddy \
   --output /secure/friend.Caddyfile
 ```
 
@@ -82,7 +105,22 @@ The credentials file has `username` and `password` fields, created using the
 host's private credential setup. Values are read only inside the process;
 none belong in command arguments, URLs, shell variables or logs. The helper
 refuses HTTP, redirects, public-readable credentials and overwriting a file.
-Transfer the exported file through an existing private administrator channel.
+Use `--server nginx --output /secure/friend.conf` for nginx. Transfer the
+exported file through an existing private administrator channel.
+
+For nginx **1.25.1 or newer**, put the whole exported file in an `http {}`
+include such as `/etc/nginx/conf.d/friend.conf`. It contains `upstream`, `map`
+and `server` blocks; do not paste it inside an existing `server {}`. Exported
+variables and upstream names are scoped to the exact entry ID and origin,
+so different friends' files can coexist. Keep one current export per entry.
+
+Provision a certificate first and adjust the two active `ssl_certificate`
+paths, then run `nginx -t` before reloading. The export cannot obtain a
+certificate, and a fresh machine without those files will fail validation.
+`https://friend.example.com:8443` generates `listen 8443 ssl` (IPv4 and IPv6)
+and a hostname-only `server_name`. If an existing load balancer maps external
+and internal ports differently, adjust the listener to that deployment.
+Caddy keeps its normal automatic HTTPS behaviour.
 
 An example without credentials is in [examples/friend.Caddyfile](examples/friend.Caddyfile).
 The API exports a complete file from the current node registry, including
@@ -97,15 +135,29 @@ The generated file:
 - Overwrites the two entry assertion headers with fixed registered values;
   arbitrary incoming `Host`, `Forwarded`, `X-Forwarded-Host` and assertion
   headers cannot choose a signed redirect domain.
-- Routes `/_n/<known-node>/s/*` to that node's fixed HTTPS origin and strips only
-  `/_n/<known-node>`. Unknown nodes and other `/_n/*` paths return 404 locally.
+- Routes the raw `/_n/<known-node>/s/*` prefix to that node's fixed HTTPS
+  origin and removes only `/_n/<known-node>`. Both engines preserve percent
+  escapes (including `%3F`, `%23`, `%25`, `%20`), double slashes and the exact
+  query. Literal filename `?`, `#` and `%` must be URL-encoded by the client.
+  Caddy uses `uri path_regexp`, since `strip_prefix` cleans double slashes.
+  nginx uses the raw `$request_uri` suffix and a fixed named upstream; a
+  literal `proxy_pass .../s/` would normalise and re-escape the path.
+- Bare `/_n`, `/_n/`, unknown nodes, non-media reserved paths, and dot-segment
+  traversal (including `..%2f`, encoded dots and encoded namespace aliases
+  such as `/_n%2f` or `/%5f%6e/`) return 404 locally without
+  contacting Emby or a node. No normalisation may escape into the Emby fallback.
+  nginx accepts 12KB paths with its explicit 32KiB request-line buffer; larger
+  lines return 414 before contacting an upstream. Caddy's default limit is
+  larger. Oversized requests are never truncated into a different target.
 - Sets upstream Host and TLS SNI explicitly; certificate verification stays on.
-  Range, If-Range, methods, query order/escaping and WebSocket upgrades use
-  Caddy's normal proxy behaviour. No URL/query/header supplies an upstream.
+  Range, If-Range, methods, bodies, query order/escaping and WebSocket upgrades
+  pass through. No URL/query/header supplies an upstream. nginx needs no
+  runtime resolver because each named upstream is fixed when loading config.
 - Removes entry keys, Emby credentials, Authorization and cookies before node
   requests. Only the signed query is needed there.
-- Uses core Caddy without a cache handler, and marks responses private/no-store.
-  Do not add a CDN or response cache in front of these routes.
+- Uses core Caddy without a cache handler or nginx with `proxy_cache off`, and
+  marks responses private/no-store. nginx disables inherited access logging.
+  Do not enable header/debug logging or add a CDN/response cache on these routes.
 
 ## Connect the official Emby front door once
 
@@ -122,11 +174,11 @@ trust source IPs or Uvicorn's possibly rewritten `request.client` as proof of
 entry identity, nor derive destinations from Host/X-Forwarded-Host.
 
 ```text
-client -> friend's HTTPS Caddy (injects its entry ID/key)
+client -> friend's HTTPS Caddy/nginx (injects its entry ID/key)
        -> official Emby HTTPS nginx
           -> protected panel connection -> Emby authorization + node scheduling
           <- 302 to the registered entry /_n/<node>/s/... with original signature
-client -> friend's Caddy -> selected node HTTPS /s/... -> Range 206
+client -> friend's Caddy/nginx -> selected node HTTPS /s/... -> Range 206
 ```
 
 Export `GET /api/integration/frontend?server=nginx` for the generic origin rule.
@@ -191,10 +243,14 @@ rewritten; actual client video requests are the interception boundary.
 Repository tests cover both successful and refused entry selection, four video
 prefixes and GET/HEAD, credential rotation/removal, configuration persistence,
 encoded filenames, original signed query/rate/user tag, media-source/pool
-selection and cross-entry cache isolation. With Caddy and OpenSSL installed,
-`tests/test_entry_proxy_live.py` also runs a real loopback Caddy against TLS
-mock upstreams to check signatures, byte ranges, Host/SNI, cache absence and
-WebSocket frames. This is a local integration test, not live-fleet acceptance.
+selection and cross-entry cache isolation. `tests/test_entry_proxy_live.py`
+runs real Caddy and nginx against TLS mock upstreams to check signatures,
+raw paths/queries, byte ranges, Host/SNI, credential stripping, cache absence,
+WebSocket frames and non-GET bodies. Two friends' exports are loaded together;
+nginx checks separate files included from `conf.d/` with `nginx -t`.
+`tests/test_entry_ui.py` runs Chromium against the actual JavaScript to check
+escaping, mutation/export races, field preservation and clipboard fallbacks.
+These are local integration tests, not live-fleet acceptance.
 
 `tests/test_origin_proxy_scope.py` runs the generated **nginx and Caddy** origin
 templates against the actual FastAPI panel and a recording loopback Emby
@@ -204,12 +260,17 @@ prefixes still return GET/HEAD 302 for official and registered entries. Both
 the existing transcode fallback and absence of blanket 405 handling are
 covered. Set `MEDIADECK_NGINX_BINARY` to an extracted nginx executable to test
 without installing or changing a system service; otherwise nginx must be on
-PATH. Only cases for unavailable proxy binaries are skipped.
+PATH. Alternatively set `MEDIADECK_NGINX_DOCKER=nginx:1.27-alpine` to run both
+proxy suites using disposable `docker run --network host` containers. All
+listeners/upstreams remain on loopback; only temporary test directories are
+mounted, with no changes to installed services. Caddy and OpenSSL are needed
+for the TLS friend suite, Chromium for browser tests. Cases for unavailable
+tools are skipped.
 
 Before claiming a particular friend's deployment works, the operator still
 needs to install the reviewed release, register the entry, connect the actual
 origin-to-panel decision route, and have the friend install its private
-Caddyfile with working DNS/TLS and reachability to the official origin and
+Caddyfile or nginx configuration with working DNS/TLS and reachability to the official origin and
 **every configured node**. None of those operations is performed by this PR.
 
 Verify without logging credentials or signed URLs:

@@ -20,6 +20,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 import pytest
+from proxy_runtime import NGINX_AVAILABLE, nginx_command, stop_proxy
 from test_external_entries import (
     ADMIN,
     KEY_HEADER,
@@ -64,8 +65,10 @@ def test_reference_and_origin_caddyfiles_parse(client, tmp_path):  # noqa: F811 
         assert json.loads(result.stdout)["apps"]["http"]["servers"]
 
 
-@pytest.fixture
+@pytest.fixture(params=["caddy", pytest.param("nginx", marks=pytest.mark.skipif(
+    not NGINX_AVAILABLE, reason="nginx binary or MEDIADECK_NGINX_DOCKER is needed"))])
 def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
+    engine = request.param
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
     subprocess.run([
         "openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
@@ -95,7 +98,9 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
             self.do_GET()
 
         def do_GET(self):
-            requests.append({"path": self.path, "headers": dict(self.headers)})
+            body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            requests.append({"path": self.path, "headers": dict(self.headers),
+                             "method": self.command, "body": body})
             if self.path == "/socket":
                 accept = base64.b64encode(hashlib.sha1(
                     (self.headers["Sec-WebSocket-Key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11")
@@ -137,6 +142,8 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
             else:
                 self.send(200, b"Emby passthrough")
 
+        do_POST = do_DELETE = do_PUT = do_PATCH = do_OPTIONS = do_GET
+
     upstream = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.load_cert_chain(cert, key)
@@ -154,12 +161,13 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
     port = _port()
     config_parts = []
     for entry in ("friend-a", "friend-b"):
-        response = client.get(f"/api/integration/frontend?entry={entry}", auth=ADMIN)
+        response = client.get(f"/api/integration/frontend?server={engine}&entry={entry}", auth=ADMIN)
         assert response.status_code == 200
         config_parts.append(response.json()["config"].replace(
             "tls_server_name ", f"tls_trusted_ca_certs {cert}\n                tls_server_name "))
     caddyfile = tmp_path / "Caddyfile"
-    caddyfile.write_text("\n".join(config_parts))
+    caddyfile.write_text("\n".join(config_parts) if engine == "caddy" else client.get(
+        "/api/integration/frontend?entry=friend-a", auth=ADMIN).json()["config"])
     adapted = subprocess.run(["caddy", "adapt", "--config", str(caddyfile), "--adapter", "caddyfile"],
                              check=True, capture_output=True, timeout=15)
     config = json.loads(adapted.stdout)
@@ -176,9 +184,41 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
                 target["dial"] = f"127.0.0.1:{upstream.server_port}"
     config_file = tmp_path / "caddy.json"
     config_file.write_text(json.dumps(config))
+    command = ["caddy", "run", "--config", str(config_file)]
+    if engine == "nginx":
+        conf_d = tmp_path / "conf.d"
+        conf_d.mkdir()
+        for index, text in enumerate(config_parts):
+            for host in ("emby", "edge-a", "edge-b"):
+                text = text.replace(f"https://{host}.example.com",
+                                    f"https://127.0.0.1:{upstream.server_port}")
+                text = text.replace(f"server {host}.example.com:443;",
+                                    f"server 127.0.0.1:{upstream.server_port};")
+            text = text.replace("listen 443 ssl;", f"listen 127.0.0.1:{port};")
+            text = text.replace("listen [::]:443 ssl;", "")
+            text = text.replace("http2 on;", "")
+            text = text.replace("/etc/ssl/certs/ca-certificates.crt", str(cert))
+            for entry in ("friend-a", "friend-b"):
+                text = text.replace(f"/etc/letsencrypt/live/{entry}.example.com/fullchain.pem",
+                                    str(cert))
+                text = text.replace(f"/etc/letsencrypt/live/{entry}.example.com/privkey.pem",
+                                    str(key))
+            (conf_d / f"friend-{index}.conf").write_text(text)
+        config_file = tmp_path / "nginx.conf"
+        config_file.write_text(f"""pid {tmp_path}/nginx.pid;
+error_log {tmp_path}/nginx-error.log error;
+events {{}}
+http {{
+    access_log off;
+    include {conf_d}/*.conf;
+}}
+""")
+        checked = subprocess.run(nginx_command(tmp_path, "-t", "-c", str(config_file)),
+                                 capture_output=True, timeout=20, check=False)
+        assert checked.returncode == 0, "generated conf.d files must pass nginx -t"
+        command = nginx_command(tmp_path, "-c", str(config_file), "-g", "daemon off;")
     with (tmp_path / "caddy.log").open("wb") as log:
-        process = subprocess.Popen(["caddy", "run", "--config", str(config_file)],
-                                   stdout=log, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
         try:
             deadline = time.monotonic() + 8
             while time.monotonic() < deadline:
@@ -194,12 +234,83 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
                               follow_redirects=False, timeout=5) as http:
                 yield http, requests, server_names, port
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_proxy(process, command)
+
+
+@pytest.mark.parametrize("path", [
+    "/s/main/%E6%B5%8B%E8%AF%95%20%3f%23%25%2b.mkv",
+    "/s/main/a//b.mkv", "/s/main/%61%2fb.mkv", "/s/main/a%252Fb.mkv",
+    pytest.param("/s/main/" + "x" * 12000 + ".mkv", id="12k-path"),
+])
+def test_raw_node_path_and_query(proxy, path):
+    http, requests, _, _ = proxy
+    query = "k=a%2Bb&empty=&repeat=1&repeat=2&target=https://evil.example.com/"
+    http.get("/_n/edge-a" + path + "?" + query,
+             headers={"Host": "friend-a.example.com"})
+    assert requests[-1]["path"] == path + "?" + query
+
+
+@pytest.mark.parametrize("path", [
+    "/_n", "/_n/", "/_n/unknown/s/a", "/_n/edge-a/s/..%2f..%2fapi",
+    "/_n/unknown/..%2f..%2fapi", "/_n/edge-a/s/%2e%2e/api",
+    "/_n/edge-a/s/main/%2E.%2Fapi", "/_%6e/edge-a/s/main/demo.mkv",
+    "/_n%2funknown%2f..%2f..%2fapi", "/%2f_n/unknown/s/demo.mkv",
+    "/%5f%6e/unknown/..%2F..%2Fapi",
+])
+def test_reserved_routes_never_escape_to_emby(proxy, path):
+    http, requests, _, _ = proxy
+    before = len(requests)
+    result = http.get(path, headers={"Host": "friend-a.example.com"})
+    assert result.status_code == 404
+    assert len(requests) == before
+
+
+@pytest.mark.parametrize("method", ["POST", "DELETE", "PUT", "PATCH", "OPTIONS"])
+def test_friend_preserves_non_get_methods(proxy, method):
+    http, requests, _, _ = proxy
+    body = b'{"value":"example"}'
+    path = "/Items/item/Subtitles?tag=a%2Bb&tag=2"
+    result = http.request(method, path, content=body, headers={
+        "Host": "friend-a.example.com", "Authorization": "Bearer synthetic",
+        "Cookie": "session=synthetic", "X-Emby-Token": "synthetic"})
+    assert result.status_code == 200
+    assert requests[-1]["method"] == method
+    assert requests[-1]["body"] == body
+    assert requests[-1]["path"] == path
+    assert requests[-1]["headers"][KEY_HEADER] == entry_headers()[KEY_HEADER]
+    assert requests[-1]["headers"]["Authorization"] == "Bearer synthetic"
+    assert requests[-1]["headers"]["Cookie"] == "session=synthetic"
+    assert requests[-1]["headers"]["X-Emby-Token"] == "synthetic"
+    path = "/_n/edge-a/s/main/demo.mkv?k=invalid&target=https://evil.example.com/"
+    result = http.request(method, path, content=body, headers={
+        "Host": "friend-a.example.com", "Authorization": "Bearer synthetic",
+        "Cookie": "session=synthetic", "X-Emby-Token": "synthetic",
+        "X-MediaBrowser-Token": "synthetic", "X-Emby-Authorization": "synthetic",
+        "X-Mediadeck-Entry": "forged", KEY_HEADER: "forged",
+        "X-Forwarded-Host": "evil.example.com", "Range": "bytes=2-5",
+        "If-Range": '"example-etag"'})
+    assert result.status_code == 403
+    hit = requests[-1]
+    assert hit["path"] == path.removeprefix("/_n/edge-a")
+    assert hit["method"] == method and hit["body"] == body
+    headers = {k.lower(): v for k, v in hit["headers"].items()}
+    assert headers["host"] == "edge-a.example.com"
+    assert headers["range"] == "bytes=2-5" and headers["if-range"] == '"example-etag"'
+    assert not ({"authorization", "cookie", "x-emby-token", "x-mediabrowser-token",
+                 "x-emby-authorization", "x-mediadeck-entry", KEY_HEADER.lower()} & headers.keys())
+
+
+def test_proxy_request_line_limits_do_not_truncate_paths(proxy, request):
+    http, requests, _, _ = proxy
+    path = "/_n/edge-a/s/main/" + "x" * 40000
+    result = http.get(path, headers={"Host": "friend-a.example.com"})
+    if request.node.callspec.params["proxy"] == "nginx":
+        assert result.status_code == 414 and not requests
+    else:
+        # Caddy's default header budget is larger. It forwards the full path;
+        # the mock node correctly refuses its missing signature.
+        assert result.status_code == 403
+        assert requests[-1]["path"] == path.removeprefix("/_n/edge-a")
 
 
 def test_caddy_real_redirect_range_query_sni_and_auth(proxy, monkeypatch):

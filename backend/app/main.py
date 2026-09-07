@@ -39,7 +39,8 @@ from app.modules.edgelog import (
 )
 from app.modules.enforcement import EnforcementService
 from app.modules.entries import entry_target, identify_entry
-from app.modules.entry_proxy import friend_caddy
+from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
+from app.modules.entry_proxy import friend_config
 from app.modules.events import EventStream, safe_stream
 from app.modules.groups import GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
@@ -939,15 +940,15 @@ async def integration_frontend(response: Response, server: str = "caddy",
     integration = service.integration_config()
     emby_public = integration["emby_public_url"] or service.emby_config()["url"]
     if entry:
-        if server != "caddy":
-            raise HTTPException(400, "external entries support Caddy templates")
+        if server not in ENTRY_SERVERS:
+            raise HTTPException(400, "external entries support Caddy or nginx templates")
         registered = next((e for e in integration["external_entries"] if e["id"] == entry), None)
         if registered is None:
             raise HTTPException(404, "entry not found")
         # Explicit admin-only export; ordinary settings never return the key.
         response.headers["Cache-Control"] = "private, no-store"
-        return {"server": server, "config": friend_caddy(
-            registered, integration["emby_public_url"], service.nodes())}
+        return {"server": server, "config": friend_config(
+            registered, integration["emby_public_url"], service.nodes(), server)}
     panel_public = integration["panel_public_url"] or "http://127.0.0.1:8300"
     return {
         "server": server,

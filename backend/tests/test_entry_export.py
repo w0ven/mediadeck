@@ -23,7 +23,8 @@ def credentials(tmp_path):
     return path
 
 
-def test_export_private_file_and_no_overwrite(credentials, tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("server", ["caddy", "nginx"])
+def test_export_private_file_and_no_overwrite(credentials, tmp_path, monkeypatch, capsys, server):
     requests = []
     config = "synthetic-private-template"
 
@@ -34,9 +35,9 @@ def test_export_private_file_and_no_overwrite(credentials, tmp_path, monkeypatch
 
     monkeypatch.setattr(exporter, "build_opener", lambda *args: Opener())
     output = tmp_path / "friend.Caddyfile"
-    exporter.export("https://panel.example.com", credentials, "friend-one", output)
+    exporter.export("https://panel.example.com", credentials, "friend-one", output, server)
     assert requests[0].full_url == (
-        "https://panel.example.com/api/integration/frontend?server=caddy&entry=friend-one")
+        f"https://panel.example.com/api/integration/frontend?server={server}&entry=friend-one")
     assert "synthetic-password" not in requests[0].full_url
     assert requests[0].get_header("Authorization").startswith("Basic ")
     assert output.read_text() == config and output.stat().st_mode & 0o777 == 0o600

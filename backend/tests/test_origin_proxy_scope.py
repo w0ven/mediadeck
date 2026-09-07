@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import shutil
 import socket
 import subprocess
@@ -19,6 +18,7 @@ from urllib.parse import urlsplit
 
 import httpx
 import pytest
+from proxy_runtime import NGINX_AVAILABLE, nginx_command, stop_proxy
 from test_external_entries import (
     client,  # noqa: F401 - imported pytest fixture
     entry_headers,
@@ -26,11 +26,10 @@ from test_external_entries import (
 
 from app.modules.provisioning import emby_frontend_snippet
 
-NGINX = os.environ.get("MEDIADECK_NGINX_BINARY") or shutil.which("nginx")
 CADDY = shutil.which("caddy")
 ENGINES = [
     pytest.param("caddy", marks=pytest.mark.skipif(not CADDY, reason="Caddy is unavailable")),
-    pytest.param("nginx", marks=pytest.mark.skipif(not NGINX, reason="nginx is unavailable")),
+    pytest.param("nginx", marks=pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx is unavailable")),
 ]
 PREFIXES = ("/emby/Videos", "/emby/videos", "/Videos", "/videos")
 QUERY = "Language=eng&label=a%2Bb%20c&tag=first&tag=second&empty="
@@ -128,11 +127,12 @@ http {{
 }}
 """
         config_path = tmp_path / "nginx.conf"
-        command = [NGINX, "-p", str(tmp_path) + "/", "-c", str(config_path),
-                   "-g", "daemon off; master_process off;"]
+        command = nginx_command(tmp_path, "-p", str(tmp_path) + "/", "-c", str(config_path),
+                                "-g", "daemon off; master_process off;")
     config_path.write_text(config)
     if engine == "nginx":
-        subprocess.run([NGINX, "-t", "-q", "-p", str(tmp_path) + "/", "-c", str(config_path)],
+        subprocess.run(nginx_command(tmp_path, "-t", "-q", "-p", str(tmp_path) + "/",
+                                     "-c", str(config_path)),
                        capture_output=True, check=True, timeout=10)
     with (tmp_path / "proxy.log").open("wb") as log:
         process = subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
@@ -151,12 +151,7 @@ http {{
                               follow_redirects=False, timeout=5) as http:
                 yield http, hits, control
         finally:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+            stop_proxy(process, command)
 
 
 def _headers():
