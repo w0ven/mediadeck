@@ -110,8 +110,9 @@ class FlowMeter:
     """
 
     def __init__(self, persist_path: str, node: str = "local",
-                 enabled: bool = False) -> None:
+                 enabled: bool = False, deny_map_path: str | None = None) -> None:
         self.node = node
+        self._deny_map_path = deny_map_path
         self._lock = threading.RLock()
         os.makedirs(os.path.dirname(os.path.abspath(persist_path)) or ".", exist_ok=True)
         self._db = sqlite3.connect(persist_path, check_same_thread=False)
@@ -177,11 +178,13 @@ class FlowMeter:
 
     # -- register / allow ----------------------------------------------------
     def register(self, local_ip: str, local_port: int, remote_ip: str,
-                 remote_port: int, utag: str) -> dict[str, Any]:
+                 remote_port: int, utag: str,
+                 nginx_cid: str | None = None) -> dict[str, Any]:
         """Synchronously bind a 4-tuple to ``utag`` and install the counter.
 
         Returns ``allow=True`` only after the nft element exists (or nft is
         disabled in a unit test). Mixed identity on a live tuple is refused.
+        A closed kernel socket on the same 4-tuple is reuse, not mix.
         """
         utag = (utag or "").strip()
         if not utag or utag == "-":
@@ -214,19 +217,33 @@ class FlowMeter:
                 (local_ip, local_port, remote_ip, remote_port),
             ).fetchone()
             if live:
+                still = self._tuple_still_live(
+                    local_ip, local_port, remote_ip, remote_port,
+                    nginx_cid=nginx_cid, stored=dict(live))
                 if live["utag"] != utag:
+                    if still:
+                        return {
+                            "ok": False, "allow": False,
+                            "reason": "mixed_identity",
+                            "conn_id": live["conn_id"],
+                            "existing_utag": live["utag"],
+                        }
+                    self._db.execute(
+                        "UPDATE conns SET closed_at=? WHERE conn_id=? AND closed_at IS NULL",
+                        (now, live["conn_id"]))
+                    self._db.commit()
+                elif still:
                     return {
-                        "ok": False, "allow": False,
-                        "reason": "mixed_identity",
-                        "conn_id": live["conn_id"],
-                        "existing_utag": live["utag"],
+                        "ok": True, "allow": bool(self._enabled),
+                        "reason": "already_registered" if self._enabled else "not_enabled",
+                        "conn_id": live["conn_id"], "generation": live["generation"],
+                        "utag": utag, "family": family,
                     }
-                return {
-                    "ok": True, "allow": bool(self._enabled),
-                    "reason": "already_registered" if self._enabled else "not_enabled",
-                    "conn_id": live["conn_id"], "generation": live["generation"],
-                    "utag": utag, "family": family,
-                }
+                else:
+                    self._db.execute(
+                        "UPDATE conns SET closed_at=? WHERE conn_id=? AND closed_at IS NULL",
+                        (now, live["conn_id"]))
+                    self._db.commit()
 
             conn_id = uuid.uuid4().hex
             row = {
@@ -258,10 +275,10 @@ class FlowMeter:
             self._db.execute(
                 "INSERT INTO conns(conn_id,generation,utag,family,local_ip,"
                 "local_port,remote_ip,remote_port,created_at,closed_at,"
-                "last_counter,last_packets,settled) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)",
+                "last_counter,last_packets,settled,nginx_cid) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
                 (conn_id, 1, utag, family, local_ip, local_port, remote_ip,
-                 remote_port, now, None, 0, 0),
+                 remote_port, now, None, 0, 0, (nginx_cid or "")),
             )
             self._db.commit()
             return {
@@ -303,6 +320,7 @@ class FlowMeter:
                     nft_error = str(exc)
 
             samples: list[dict[str, Any]] = []
+            live_keys = self._live_tuples() if self._enabled else None
             conns = [dict(r) for r in self._db.execute("SELECT * FROM conns WHERE settled=0")]
             for conn in conns:
                 key = format_tuple(conn["local_ip"], conn["local_port"],
@@ -338,6 +356,12 @@ class FlowMeter:
                         "UPDATE conns SET last_counter=?, last_packets=? WHERE conn_id=?",
                         (counter, packets, conn["conn_id"]))
                 closed = conn["closed_at"] is not None
+                if (not closed and live_keys is not None
+                        and key not in live_keys):
+                    self._db.execute(
+                        "UPDATE conns SET closed_at=? WHERE conn_id=? AND closed_at IS NULL",
+                        (observed_at, conn["conn_id"]))
+                    closed = True
                 samples.append(self._sample_from(conn, counter, packets,
                                                  observed_at, closed=closed,
                                                  coverage="observed"))
@@ -379,6 +403,9 @@ class FlowMeter:
                 (boot_id, int(seq)))
             n = cur.rowcount or 0
             if n:
+                self._db.execute(
+                    "DELETE FROM pending WHERE boot_id=? AND seq=? AND acked=1",
+                    (boot_id, int(seq)))
                 self._recycle_settled()
             self._db.commit()
             return n
@@ -435,17 +462,26 @@ class FlowMeter:
 
     def apply_policy(self, blocked_tags: list[str] | None = None,
                      *, unblock_tags: list[str] | None = None,
-                     terminate: bool = True) -> dict[str, Any]:
-        """Merge deny tags. Empty blocked_tags never clears known blocks.
+                     terminate: bool = True,
+                     snapshot: bool = False) -> dict[str, Any]:
+        """Apply deny tags.
 
-        Unblock is explicit. A degraded panel that omits unblock_tags cannot
-        accidentally restore an exhausted account after a disconnect.
+        Merge mode (default): empty blocked_tags never clears known blocks.
+        Snapshot mode: ``blocked_tags`` is the full authoritative set and
+        may be empty. Only a successful panel sync uses snapshot=True.
         """
-        add = {str(t).strip() for t in (blocked_tags or []) if str(t).strip()}
+        want = {str(t).strip() for t in (blocked_tags or []) if str(t).strip()}
         drop = {str(t).strip() for t in (unblock_tags or []) if str(t).strip()}
         killed = 0
         with self._lock:
             now = time.time()
+            have = {r["utag"] for r in self._db.execute("SELECT utag FROM denied")}
+            if snapshot:
+                add = want - have
+                drop = have - want
+            else:
+                add = want - have
+                drop = drop & have
             for tag in add:
                 self._db.execute(
                     "INSERT INTO denied(utag, blocked_at) VALUES(?,?) "
@@ -453,13 +489,29 @@ class FlowMeter:
             for tag in drop:
                 self._db.execute("DELETE FROM denied WHERE utag=?", (tag,))
             self._db.commit()
-            have = [r["utag"] for r in self._db.execute(
+            have_list = [r["utag"] for r in self._db.execute(
                 "SELECT utag FROM denied ORDER BY utag")]
         if terminate:
             for tag in add:
                 killed += len(self.terminate_utag(tag))
-        return {"blocked": have, "killed": killed, "added": sorted(add),
-                "unblocked": sorted(drop)}
+        self.write_deny_map()
+        return {"blocked": have_list, "killed": killed, "added": sorted(add),
+                "unblocked": sorted(drop), "snapshot": snapshot}
+
+    def write_deny_map(self, path: str | None = None) -> str | None:
+        """Atomic nginx map include. Survives a dead meterd HTTP process."""
+        target = path or self._deny_map_path
+        if not target:
+            return None
+        tags = self.blocked_tags()
+        body = "".join(f'"{tag}" 1;\n' for tag in tags) or "# none\n"
+        directory = os.path.dirname(os.path.abspath(target)) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = f"{target}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.replace(tmp, target)
+        return target
 
     # -- nft -----------------------------------------------------------------
     def _ensure_table(self) -> None:
@@ -597,4 +649,68 @@ class FlowMeter:
             );
             """
         )
+        cols = {r[1] for r in self._db.execute("PRAGMA table_info(conns)")}
+        if "nginx_cid" not in cols:
+            self._db.execute(
+                "ALTER TABLE conns ADD COLUMN nginx_cid TEXT NOT NULL DEFAULT ''")
         self._db.commit()
+
+    def _tuple_still_live(self, local_ip: str, local_port: int,
+                          remote_ip: str, remote_port: int, *,
+                          nginx_cid: str | None, stored: dict[str, Any]) -> bool:
+        """True if this sqlite row is still the same kernel/nginx connection.
+
+        ss/nft sampling failure does not invent a close. Unit tests with
+        nft disabled keep the sqlite live-row meaning.
+        """
+        if nginx_cid and stored.get("nginx_cid") and nginx_cid != stored.get("nginx_cid"):
+            return False
+        if not self._enabled:
+            return True
+        live = self._live_tuples()
+        if live is None:
+            return True
+        key = format_tuple(local_ip, local_port, remote_ip, remote_port)
+        return key in live
+
+    def _live_tuples(self) -> set[str] | None:
+        """Established 4-tuples from ss. None means the sample failed."""
+        code, out, _err = _run(["ss", "-Htn", "state", "established"])
+        if code != 0:
+            return None
+        keys: set[str] = set()
+        for line in out.splitlines():
+            parts = line.split()
+            endpoints = [p for p in parts if ":" in p and p not in {"timer:", "users:("}]
+            if len(endpoints) < 2:
+                continue
+            parsed_l = self._split_endpoint(endpoints[-2])
+            parsed_r = self._split_endpoint(endpoints[-1])
+            if parsed_l is None or parsed_r is None:
+                continue
+            try:
+                keys.add(format_tuple(parsed_l[0], parsed_l[1], parsed_r[0], parsed_r[1]))
+            except (ValueError, ipaddress.AddressValueError):
+                continue
+        return keys
+
+    @staticmethod
+    def _split_endpoint(token: str) -> tuple[str, int] | None:
+        token = token.strip()
+        if not token or token == "*":
+            return None
+        if token.startswith("["):
+            end = token.find("]")
+            if end < 0 or end + 2 > len(token) or token[end + 1] != ":":
+                return None
+            try:
+                return normalize_ip(token[1:end]), int(token[end + 2:])
+            except (ValueError, ipaddress.AddressValueError):
+                return None
+        if ":" not in token:
+            return None
+        host, port = token.rsplit(":", 1)
+        try:
+            return normalize_ip(host), int(port)
+        except (ValueError, ipaddress.AddressValueError):
+            return None

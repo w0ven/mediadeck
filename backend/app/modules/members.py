@@ -18,7 +18,6 @@ v0.14: plans (products someone buys) are gone.  A member belongs to exactly one
 """
 from __future__ import annotations
 
-import contextlib
 import json
 import secrets
 import string
@@ -375,25 +374,42 @@ class MemberService:
 
         snap = None
         if self._metering is not None:
-            with contextlib.suppress(Exception):
+            try:
                 snap = self._metering.snapshot(out["emby_user_id"])
+            except Exception:  # noqa: BLE001
+                snap = None
         out["metering"] = snap
         cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
                        else self._metering_cutover)
-        if cutover and snap is not None:
-            out["measured_used_bytes"] = snap.get("measured_used_bytes")
+        out["quota_source"] = "measured" if cutover else "legacy_estimate"
+        # Always present under measured mode so UI/enforcement never fall
+        # through to the old estimate when the snapshot is missing.
+        if cutover:
+            out["measured_used_bytes"] = (
+                None if snap is None else snap.get("measured_used_bytes"))
+            out["measured_raw_bytes"] = (
+                None if snap is None else snap.get("measured_raw_bytes"))
+            out["credit_bytes"] = 0 if snap is None else int(snap.get("credit_bytes") or 0)
 
         state, reason = self.effective_state(out, group)
         out["state"] = state
         out["state_reason"] = reason
 
         quota = int(effective.get("traffic_quota_bytes") or 0)
-        used = int(out.get("traffic_used_bytes") or 0)
-        if cutover and snap is not None and snap.get("measured_used_bytes") is not None:
-            used = int(snap["measured_used_bytes"])
         out["traffic_quota_bytes"] = quota
-        out["traffic_remaining_bytes"] = max(0, quota - used) if quota else None
-        out["traffic_percent"] = round(used / quota * 100, 1) if quota else None
+        if cutover:
+            used_raw = out.get("measured_used_bytes")
+            if quota and used_raw is not None:
+                used = int(used_raw)
+                out["traffic_remaining_bytes"] = max(0, quota - used)
+                out["traffic_percent"] = round(used / quota * 100, 1)
+            else:
+                out["traffic_remaining_bytes"] = None
+                out["traffic_percent"] = None
+        else:
+            used = int(out.get("traffic_used_bytes") or 0)
+            out["traffic_remaining_bytes"] = max(0, quota - used) if quota else None
+            out["traffic_percent"] = round(used / quota * 100, 1) if quota else None
 
         expires = effective.get("expires_at")
         out["days_remaining"] = (
@@ -453,7 +469,7 @@ class MemberService:
             return "expired", "已过期"
 
         quota = int(effective.get("traffic_quota_bytes") or 0)
-        if "measured_used_bytes" in member:
+        if member.get("quota_source") == "measured" or "measured_used_bytes" in member:
             used_raw = member.get("measured_used_bytes")
             if used_raw is None:
                 return "active", "正常"
@@ -1027,14 +1043,17 @@ class MemberService:
             raise KeyError(user_id)
         now = int(time.time())
         used_before = int(member.get("traffic_used_bytes") or 0)
+        cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
+                       else self._metering_cutover)
+        if cutover and self._metering is not None:
+            # Fail before touching the estimate so a half-reset cannot
+            # claim success while measured credit is unchanged.
+            self._metering.reset_credit(user_id, now=now)
         self._db.execute(
             "UPDATE members SET traffic_used_bytes=0,traffic_period_start=?,"
             "status=CASE WHEN status='exhausted' THEN 'active' ELSE status END,"
             "updated_at=? WHERE emby_user_id=?",
             (period_start(now), now, user_id))
-        if self._metering is not None:
-            with contextlib.suppress(Exception):
-                self._metering.reset_credit(user_id, now=now)
         self.audit(actor, "member.reset_traffic", user_id, encode_audit_detail({
             "traffic_used_bytes": {"from": used_before, "to": 0},
         }))
@@ -1078,9 +1097,8 @@ class MemberService:
                 "overrides_json=?,updated_at=? WHERE emby_user_id=?",
                 (current, json.dumps(ov, ensure_ascii=False, sort_keys=True),
                  now, member["emby_user_id"]))
-            if self._metering is not None:
-                with contextlib.suppress(Exception):
-                    self._metering.reset_credit(member["emby_user_id"], now=now)
+            # Measured usage is already UTC-month bucketed. Do not reset_credit
+            # the new month — that would wipe the first reports of this period.
             self.audit("system", "member.period_roll", member["emby_user_id"],
                        encode_audit_detail({
                            "extra_traffic_bytes": {"from": extra_before, "to": 0},

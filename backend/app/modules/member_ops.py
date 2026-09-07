@@ -449,9 +449,11 @@ def live_pulse(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "sync_status": r.get("sync_status"),
         "last_seen_at": r.get("last_seen_at"),
         "traffic_used_bytes": r.get("traffic_used_bytes") or 0,
-        "measured_used_bytes": (r.get("metering") or {}).get("measured_used_bytes")
-        if isinstance(r.get("metering"), dict)
-        else r.get("measured_used_bytes"),
+        "measured_used_bytes": r.get("measured_used_bytes")
+        if "measured_used_bytes" in r
+        else ((r.get("metering") or {}).get("measured_used_bytes")
+              if isinstance(r.get("metering"), dict) else None),
+        "quota_source": r.get("quota_source"),
         "metering_source": (r.get("metering") or {}).get("source")
         if isinstance(r.get("metering"), dict) else None,
         "edge_30d": int((r.get("edge") or {}).get("bytes_30d") or 0),

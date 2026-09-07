@@ -85,8 +85,10 @@ def test_generated_site_contains_sync_auth_request_not_as_register() -> None:
     # Query on auth_request itself is not expanded on nginx 1.22 and
     # also breaks `location =`.
     assert "auth_request /_mediadeck/register?" not in text
-    # Billing register is not the async mirror.
-    assert "mirror /_mediadeck/announce;" not in text
+    # Billing stays synchronous; announce is a separate speed ping.
+    assert "mirror /_mediadeck/announce;" in text
+    assert "include /var/lib/mediadeck/deny.map;" in text
+    assert "if ($md_denied)" in text
 
 
 @pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
@@ -178,3 +180,82 @@ http {{
         stop_proxy(proc, cmd)
         httpd.shutdown()
         meter.close()
+
+
+@pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
+def test_deny_map_blocks_when_meterd_is_down(tmp_path: Path) -> None:
+    """Known deny is an nginx map, not the meterd HTTP process."""
+    flow_spec = importlib.util.spec_from_file_location(
+        "flowmeter", AGENT / "flowmeter.py")
+    flow = importlib.util.module_from_spec(flow_spec)
+    assert flow_spec.loader is not None
+    flow_spec.loader.exec_module(flow)
+    deny = tmp_path / "deny.map"
+    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a",
+                           deny_map_path=str(deny))
+    meter.apply_policy(["blockedtag"], terminate=False, snapshot=True)
+    assert deny.read_text(encoding="utf-8").find("blockedtag") >= 0
+    meter.close()
+
+    media_port = _port()
+    dead_port = _port()
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    (media_root / "file.bin").write_bytes(b"hello-media")
+    conf_dir = tmp_path / "ngx"
+    conf_dir.mkdir()
+    (conf_dir / "nginx.conf").write_text(f"""
+daemon off;
+master_process off;
+error_log {conf_dir}/error.log;
+pid {conf_dir}/nginx.pid;
+events {{}}
+http {{
+    map $arg_u $md_denied {{
+        default 0;
+        include {deny};
+    }}
+    access_log {conf_dir}/access.log;
+    server {{
+        listen 127.0.0.1:{media_port};
+        location /s/ {{
+            set $md_u $arg_u;
+            if ($md_denied) {{ return 403; }}
+            auth_request /_mediadeck/register;
+            alias {media_root}/;
+        }}
+        location = /_mediadeck/register {{
+            internal;
+            proxy_pass http://127.0.0.1:{dead_port}/register;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_intercept_errors on;
+            error_page 502 503 504 =200 /_mediadeck/allow;
+        }}
+        location = /_mediadeck/allow {{
+            internal;
+            return 204;
+        }}
+    }}
+}}
+""", encoding="utf-8")
+    cmd = nginx_command(conf_dir, "-p", str(conf_dir), "-c", str(conf_dir / "nginx.conf"))
+    check = subprocess.run([*cmd, "-t"], capture_output=True, text=True,
+                            timeout=10, check=False)
+    assert check.returncode == 0, check.stderr + check.stdout
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        time.sleep(0.3)
+        try:
+            urllib.request.urlopen(
+                f"http://127.0.0.1:{media_port}/s/file.bin?u=blockedtag", timeout=3)
+            blocked_code = 200
+        except urllib.error.HTTPError as exc:
+            blocked_code = exc.code
+        assert blocked_code == 403
+        ok = urllib.request.urlopen(
+            f"http://127.0.0.1:{media_port}/s/file.bin?u=othertag", timeout=3)
+        assert ok.status == 200
+        assert ok.read() == b"hello-media"
+    finally:
+        stop_proxy(proc, cmd)

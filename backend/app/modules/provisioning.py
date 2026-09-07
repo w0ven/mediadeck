@@ -111,7 +111,13 @@ def nginx_site(node: Any) -> str:
         set $md_lp $server_port;
         set $md_a $remote_addr;
         set $md_p $remote_port;
+        set $md_cid $connection;
+        # Known deny is an nginx map file written by meterd. It survives a
+        # dead HTTP process, so 502 fail-open cannot admit an exhausted tag.
+        if ($md_denied) {{ return 403; }}
         auth_request /_mediadeck/register;
+        # Speed attribution is independent of billing register.
+        mirror /_mediadeck/announce;
 
         # Emby clients seek constantly; byte ranges are mandatory.
         add_header Accept-Ranges bytes;
@@ -147,6 +153,13 @@ map $arg_u $mediadeck_user_key {{
 log_format mediadeck_speed
     '$msec a=$remote_addr p=$remote_port u=$arg_u r=$arg_r '
     '$bytes_sent $request_time';
+
+# Known exhausted / denied tags. Default 0 = unknown, fail-open for new
+# decisions. Meterd rewrites the include atomically; nginx reloads it.
+map $md_u $md_denied {{
+    default 0;
+    include /var/lib/mediadeck/deny.map;
+}}
 
 limit_conn_zone $mediadeck_user_key zone=mediadeck_peruser:10m;
 
@@ -192,7 +205,7 @@ server {{
     # Sync 4-tuple registration (server addr/port + client addr/port + signed u).
     location = /_mediadeck/register {{
         internal;
-        proxy_pass http://127.0.0.1:{METERD_PORT}/register?lip=$md_lip&lp=$md_lp&a=$md_a&p=$md_p&u=$md_u;
+        proxy_pass http://127.0.0.1:{METERD_PORT}/register?lip=$md_lip&lp=$md_lp&a=$md_a&p=$md_p&u=$md_u&cid=$md_cid;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header X-Mediadeck-Utag $md_u;
@@ -212,7 +225,7 @@ server {{
     # Optional speed-map ping; must not be treated as the billing register.
     location = /_mediadeck/announce {{
         internal;
-        proxy_pass http://127.0.0.1:{LOADPROBE_PORT}/announce?a=$remote_addr&p=$remote_port&u=$arg_u;
+        proxy_pass http://127.0.0.1:{LOADPROBE_PORT}/announce?a=$md_a&p=$md_p&u=$md_u;
         proxy_connect_timeout 300ms;
         proxy_read_timeout 500ms;
         proxy_pass_request_body off;
@@ -309,6 +322,7 @@ ExecStart=/usr/bin/python3 /opt/mediadeck-agent/meterd.py \\
     --node {shlex.quote(str(node.name))} \\
     --token-file /etc/mediadeck/report.token \\
     --persist /var/lib/mediadeck/flowmeter.db \\
+    --deny-map /var/lib/mediadeck/deny.map \\
     --bind 127.0.0.1 --port {METERD_PORT} \\
     --enable-nft
 Restart=always
@@ -443,6 +457,8 @@ grep -q '^user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fu
 {"".join(mount_steps) or 'echo "    (无媒体根，跳过)"'}
 
 echo "==> 5/6 配置 nginx 与证书"
+mkdir -p /var/lib/mediadeck
+printf '%s\n' '# none' > /var/lib/mediadeck/deny.map
 cat > /etc/nginx/sites-available/mediadeck-{node.name} <<'MEDIADECK_NGINX_EOF'
 {nginx_site(node)}
 MEDIADECK_NGINX_EOF

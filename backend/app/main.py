@@ -307,7 +307,6 @@ async def _startup() -> None:
         cutover=lambda: bool(
             app.state.settings_service.metering_config().get("cutover")),
     )
-    app.state.meter_unblocks: set[str] = set()
     # Points are a ledger, so the service is a thin wrapper over the database
     # and can be built as soon as it exists. The shop is what spends them.
     app.state.points = PointsService(app.state.db)
@@ -1079,6 +1078,27 @@ async def node_install_script(name: str) -> dict[str, Any]:
 
 
 # ---- edge traffic ingestion ------------------------------------------------
+def _meter_policy_snapshot() -> dict[str, Any]:
+    """Authoritative deny set. Empty list is a real snapshot, not 'keep last'.
+
+    Quota-exhausted tags are blocked under cutover. Manual suspended/pending
+    and expired members stay blocked so a reset or extra-traffic grant cannot
+    reopen them. Nodes apply this only on a successful ingest.
+    """
+    cutover = bool(app.state.settings_service.metering_config().get("cutover"))
+    blocked: list[str] = []
+    if cutover:
+        for member in app.state.members.list(limit=5000):
+            state = str(member.get("state") or "")
+            stored = str(member.get("status") or "")
+            if state == "exhausted":
+                blocked.append(user_tag(member["emby_user_id"]))
+            elif stored in ("suspended", "pending") or state in (
+                    "suspended", "pending", "expired"):
+                blocked.append(user_tag(member["emby_user_id"]))
+    return app.state.metering.publish_policy(blocked)
+
+
 def _tag_map() -> dict[str, str]:
     """Anonymised link tag -> member id.
 
@@ -1157,16 +1177,12 @@ async def edge_measured(name: str, request: Request,
         raise HTTPException(422, "unsupported unit")
     payload["node"] = name
     result = app.state.metering.ingest(payload)
-    cutover = bool(app.state.settings_service.metering_config().get("cutover"))
-    blocked: list[str] = []
-    if cutover:
-        for member in app.state.members.list(limit=5000):
-            if member.get("state") == "exhausted":
-                blocked.append(user_tag(member["emby_user_id"]))
-    unblocks = sorted(app.state.meter_unblocks)
-    app.state.meter_unblocks.clear()
-    result["blocked_tags"] = blocked
-    result["unblock_tags"] = unblocks
+    policy = _meter_policy_snapshot()
+    app.state.metering.ack_policy(name, int(policy["rev"]))
+    result["blocked_tags"] = policy["blocked_tags"]
+    result["unblock_tags"] = []
+    result["policy"] = policy
+    result["policy_rev"] = policy["rev"]
     return result
 
 
@@ -1399,15 +1415,16 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
         s = dict(session)
         tag = user_tag(str(s.get("UserId") or ""))
         sample = speed_view.get(tag) if tag else None
-        s["SpeedScope"] = "user"
         if sample is not None and sample.get("bps") is not None:
             # Node rates are per user tag, not per Emby session row.
+            s["SpeedScope"] = "user"
             s["SpeedBps"] = int(sample["bps"])
-            s["SpeedSource"] = "node"
+            s["SpeedSource"] = sample.get("source") or "node"
             s["SpeedReason"] = None
             s["SpeedCollectedAt"] = sample.get("collected_at")
             s["SpeedCoverage"] = sample.get("coverage")
         elif sample is not None:
+            s["SpeedScope"] = "user"
             s["SpeedBps"] = None
             s["SpeedSource"] = "unknown"
             s["SpeedReason"] = sample.get("reason") or "unmeasured"
@@ -1416,10 +1433,12 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
         else:
             sid = str(s.get("Id") or "")
             if sid in est:
+                s["SpeedScope"] = "session"
                 s["SpeedBps"] = int(est[sid])
                 s["SpeedSource"] = "estimate"
                 s["SpeedReason"] = "origin_or_unattributed"
             else:
+                s["SpeedScope"] = "user"
                 s["SpeedBps"] = None
                 s["SpeedSource"] = "unknown"
                 s["SpeedReason"] = "no_sample"
@@ -1875,6 +1894,7 @@ async def members_change_group(user_id: str, payload: dict[str, Any] = Body(...)
             actor=user)
     except ConfigError as exc:
         raise HTTPException(400, str(exc)) from None
+    _meter_policy_snapshot()
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
         remote = await app.state.enforcement.enforce_now(user_id, "group changed")
         return member_ops.merge_action(member, remote)
@@ -2061,7 +2081,7 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 async def members_reset_traffic(user_id: str, user: str = Depends(_auth)) -> dict[str, Any]:
     try:
         member = app.state.members.reset_traffic(user_id, actor=user)
-        app.state.meter_unblocks.add(user_tag(user_id))
+        _meter_policy_snapshot()
     except KeyError:
         raise HTTPException(404, "unknown member") from None
     if app.state.settings_service.membership_config()["enforcement_enabled"]:

@@ -161,10 +161,18 @@ def test_reset_credit_clears_month_keeps_later_deltas(tmp_path: Path) -> None:
     now = 1_700_000_000.0
     svc.ingest(_env("n1", "b", 1, [_sample("c1", tag, 80)], observed_at=now))
     out = svc.reset_credit("u1", now=now)
-    assert out["measured_used_bytes"] is None
-    assert svc.snapshot("u1", now=now)["measured_used_bytes"] is None
+    assert out["measured_used_bytes"] == 0
+    assert out["measured_raw_bytes"] == 80
+    assert out["credit_bytes"] == 80
+    snap = svc.snapshot("u1", now=now)
+    assert snap["measured_used_bytes"] == 0
+    assert snap["measured_raw_bytes"] == 80
+    assert svc.totals(now=now)["by_user"]["u1"] == 80
     svc.ingest(_env("n1", "b", 2, [_sample("c1", tag, 100)], observed_at=now))
-    assert svc.snapshot("u1", now=now)["measured_used_bytes"] == 20
+    later = svc.snapshot("u1", now=now)
+    assert later["measured_used_bytes"] == 20
+    assert later["measured_raw_bytes"] == 100
+    assert svc.totals(now=now)["by_user"]["u1"] == 100
 
 
 def test_expected_nodes_cover_never_reported(tmp_path: Path) -> None:
@@ -213,4 +221,7 @@ def test_cutover_uses_measured_not_estimate(tmp_path: Path) -> None:
     members.reset_traffic("u1")
     after = members.get("u1")
     assert after["state"] == "active"
-    assert after["metering"]["measured_used_bytes"] is None
+    assert after["quota_source"] == "measured"
+    assert after["measured_used_bytes"] == 0
+    assert after["metering"]["measured_raw_bytes"] == 1024 ** 4
+    assert after["traffic_remaining_bytes"] is not None

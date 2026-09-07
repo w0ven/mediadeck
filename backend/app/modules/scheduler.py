@@ -288,6 +288,7 @@ class Scheduler:
                         "bps": int(bps),
                         "collected_at": collected,
                         "coverage": "direct",
+                        "source": "node",
                         "nodes": [st.node.name],
                     }
                 else:

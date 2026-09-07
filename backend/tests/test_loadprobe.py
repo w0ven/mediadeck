@@ -149,12 +149,36 @@ def test_shared_address_is_split_correctly_when_ports_are_known() -> None:
     assert speeds["bob"] < 11 * 1024 * 1024
 
 
-def test_completed_requests_still_cover_clients_with_no_known_address() -> None:
-    """A brand-new viewer must not be invisible before their first log line."""
+def test_completed_requests_are_not_mixed_into_live_user_speeds() -> None:
+    """A finished log line is not a live node sample."""
     import time
     module = _load()
     log = module.SpeedLog("")
     now = time.time()
     log._ingest(f"{now:.3f} u=newcomer r=0 100000000 5.0")
+    live, fallback = log.speeds_split()
+    assert "newcomer" not in live
+    assert fallback.get("newcomer", 0) > 0
+
+
+def test_paused_live_socket_is_measured_zero_not_missing() -> None:
+    import time
+    module = _load()
+    log = module.SpeedLog("")
+    now = time.time()
+    log.learn("9.9.9.9", "44321", "viewer")
+    log._conns["9.9.9.9:44321"] = [(now - 1.0, 1000), (now, 1000)]
     speeds = log.speeds()
-    assert speeds.get("newcomer", 0) > 0
+    assert speeds["viewer"] == 0
+
+
+def test_announce_attributes_first_long_connection_without_a_log_line() -> None:
+    """Request-start ping, not the completed log, maps a live socket."""
+    import time
+    module = _load()
+    log = module.SpeedLog("")
+    now = time.time()
+    log.learn("9.9.9.9", "44321", "viewer")
+    log._conns["9.9.9.9:44321"] = [(now - 1.0, 0), (now, 20 * 1024 * 1024)]
+    speeds = log.speeds()
+    assert speeds["viewer"] > 19 * 1024 * 1024

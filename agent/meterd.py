@@ -53,6 +53,7 @@ class Meterd:
         remote_ip = (qs.get("a") or qs.get("rip") or qs.get("remote_ip") or [""])[0]
         remote_port = (qs.get("p") or qs.get("rp") or qs.get("remote_port") or [""])[0]
         utag = (qs.get("u") or qs.get("utag") or [""])[0]
+        cid = (qs.get("cid") or qs.get("connection") or [""])[0]
         if not local_ip:
             local_ip = headers.get("X-Mediadeck-Local-Addr", "")
         if not local_port:
@@ -65,7 +66,8 @@ class Meterd:
             utag = headers.get("X-Mediadeck-Utag", "")
         try:
             result = self.meter.register(
-                local_ip, int(local_port), remote_ip, int(remote_port), utag)
+                local_ip, int(local_port), remote_ip, int(remote_port), utag,
+                nginx_cid=cid or None)
         except (TypeError, ValueError) as exc:
             return 400, {"ok": False, "allow": False, "reason": f"bad_tuple:{exc}"}
         if result.get("allow"):
@@ -93,9 +95,17 @@ class Meterd:
             ack = (last or {}).get("ack") or {}
             if last.get("ok") and ack.get("boot_id") and ack.get("seq") is not None:
                 self.meter.ack(str(ack["boot_id"]), int(ack["seq"]))
-            blocked = last.get("blocked_tags") or []
-            unblock = last.get("unblock_tags") or []
-            self.meter.apply_policy(blocked, unblock_tags=unblock, terminate=True)
+            policy = (last or {}).get("policy") or {}
+            if last.get("ok") and policy.get("snapshot"):
+                self.meter.apply_policy(
+                    policy.get("blocked_tags") or last.get("blocked_tags") or [],
+                    terminate=True, snapshot=True)
+            elif last.get("ok"):
+                # Degraded reply without snapshot: merge-add only.
+                self.meter.apply_policy(
+                    last.get("blocked_tags") or [],
+                    unblock_tags=last.get("unblock_tags") or [],
+                    terminate=True, snapshot=False)
         return last
 
     def loop(self) -> None:
@@ -165,12 +175,16 @@ def main() -> int:
     parser.add_argument("--interval", type=float, default=15)
     parser.add_argument("--enable-nft", action="store_true",
                         default=os.environ.get("METERD_ENABLE") == "1")
+    parser.add_argument("--deny-map", default=os.environ.get(
+        "MEDIADECK_DENY_MAP", "/var/lib/mediadeck/deny.map"))
     args = parser.parse_args()
     token = ""
     if args.token_file:
         with open(args.token_file, encoding="utf-8") as fh:
             token = fh.read().strip()
-    meter = FlowMeter(args.persist, node=args.node, enabled=args.enable_nft)
+    meter = FlowMeter(args.persist, node=args.node, enabled=args.enable_nft,
+                      deny_map_path=args.deny_map)
+    meter.write_deny_map()
     daemon = Meterd(meter, panel=args.panel, node=args.node, token=token,
                     interval=args.interval)
     serve(daemon, args.bind, args.port)

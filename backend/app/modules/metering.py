@@ -14,6 +14,7 @@ Cutover onto this ledger is an explicit operator decision.
 """
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
@@ -219,19 +220,24 @@ class MeasuredMeteringService:
         """Stable member-facing view. Missing measurement is not zero."""
         now = time.time() if now is None else now
         month = month_key(now)
+        raw_row = self._db.one(
+            "SELECT SUM(bytes) AS b FROM measured_usage_monthly "
+            "WHERE emby_user_id=? AND month=?",
+            (user_id, month),
+        )
         has_row = self._db.one(
             "SELECT 1 AS n FROM measured_usage_monthly "
             "WHERE emby_user_id=? AND month=? LIMIT 1",
             (user_id, month),
         ) is not None
-        measured = None
-        if has_row:
-            row = self._db.one(
-                "SELECT SUM(bytes) AS b FROM measured_usage_monthly "
-                "WHERE emby_user_id=? AND month=?",
-                (user_id, month),
-            )
-            measured = int((row or {}).get("b") or 0)
+        raw = int((raw_row or {}).get("b") or 0) if has_row else None
+        credit_row = self._db.one(
+            "SELECT credit_bytes AS c FROM measured_credits "
+            "WHERE emby_user_id=? AND month=?",
+            (user_id, month),
+        )
+        credit = int((credit_row or {}).get("c") or 0)
+        used = None if raw is None else max(0, raw - credit)
         nodes = self._node_coverage(now)
         degraded = (not nodes) or any(not n["ok"] for n in nodes)
         as_of_vals = [n["as_of"] for n in nodes if n.get("as_of")]
@@ -239,7 +245,9 @@ class MeasuredMeteringService:
             "user_id": user_id,
             "source": SOURCE,
             "unit": UNIT,
-            "measured_used_bytes": measured,
+            "measured_used_bytes": used,
+            "measured_raw_bytes": raw,
+            "credit_bytes": credit,
             "period": month,
             "period_start": period_start(int(now)),
             "as_of": max(as_of_vals) if as_of_vals else None,
@@ -285,32 +293,91 @@ class MeasuredMeteringService:
         }
 
     def reset_credit(self, user_id: str, *, now: float | None = None) -> dict[str, Any]:
-        """Zero this user's current UTC month measured credit.
+        """Offset this user's current UTC month so quota-used is an explicit 0.
 
-        Watermarks stay so later reports only add new deltas. Does not
-        touch ``traffic_used_bytes`` or the edge log ledger.
+        History in ``measured_usage_monthly`` is kept. Watermarks stay so later
+        reports only add new deltas. ``totals.by_user`` still shows the raw
+        cumulative. Does not touch ``traffic_used_bytes`` or the edge ledger.
         """
         now = time.time() if now is None else now
         month = month_key(now)
-        self._db.execute(
-            "DELETE FROM measured_usage_monthly WHERE emby_user_id=? AND month=?",
+        raw_row = self._db.one(
+            "SELECT SUM(bytes) AS b FROM measured_usage_monthly "
+            "WHERE emby_user_id=? AND month=?",
             (user_id, month),
         )
-        return {"ok": True, "user_id": user_id, "period": month,
-                "measured_used_bytes": None}
+        has_row = self._db.one(
+            "SELECT 1 AS n FROM measured_usage_monthly "
+            "WHERE emby_user_id=? AND month=? LIMIT 1",
+            (user_id, month),
+        ) is not None
+        raw = int((raw_row or {}).get("b") or 0) if has_row else None
+        credit = 0 if raw is None else raw
+        self._db.execute(
+            "INSERT INTO measured_credits(month,emby_user_id,credit_bytes,updated_at) "
+            "VALUES(?,?,?,?) "
+            "ON CONFLICT(month,emby_user_id) DO UPDATE SET "
+            "credit_bytes=excluded.credit_bytes, updated_at=excluded.updated_at",
+            (month, user_id, credit, now),
+        )
+        used = None if raw is None else 0
+        return {
+            "ok": True, "user_id": user_id, "period": month,
+            "measured_used_bytes": used,
+            "measured_raw_bytes": raw,
+            "credit_bytes": credit,
+        }
 
     def used_bytes(self, user_id: str, *, now: float | None = None) -> int | None:
         snap = self.snapshot(user_id, now=now)
         return snap["measured_used_bytes"]
 
-    def exhausted_tags(self, *, now: float | None = None,
-                       tag_of: Callable[[str], str] | None = None,
-                       members: Any = None) -> list[str]:
-        """Tags the nodes must keep blocked. Empty if cutover is off.
+    def load_policy(self) -> dict[str, Any]:
+        row = self._db.one("SELECT rev, blocked_json, updated_at FROM meter_policy WHERE id=1")
+        if row is None:
+            return {"rev": 0, "blocked_tags": [], "updated_at": None, "snapshot": True}
+        try:
+            tags = json.loads(row["blocked_json"] or "[]")
+        except json.JSONDecodeError:
+            tags = []
+        if not isinstance(tags, list):
+            tags = []
+        return {
+            "rev": int(row["rev"] or 0),
+            "blocked_tags": [str(t) for t in tags if str(t).strip()],
+            "updated_at": row["updated_at"],
+            "snapshot": True,
+        }
 
-        Built from currently exhausted members, not from 'who reported last'.
-        """
-        return []  # filled by panel helper that knows cutover + members
+    def publish_policy(self, blocked_tags: list[str], *, now: float | None = None
+                       ) -> dict[str, Any]:
+        """Persist an authoritative deny snapshot. Empty list is a real snapshot."""
+        now = time.time() if now is None else now
+        tags = sorted({str(t).strip() for t in blocked_tags if str(t).strip()})
+        current = self.load_policy()
+        if current["rev"] and current["blocked_tags"] == tags:
+            return current
+        rev = int(current["rev"] or 0) + 1
+        payload = json.dumps(tags, separators=(",", ":"))
+        self._db.execute(
+            "INSERT INTO meter_policy(id,rev,blocked_json,updated_at) VALUES(1,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET rev=excluded.rev, "
+            "blocked_json=excluded.blocked_json, updated_at=excluded.updated_at",
+            (rev, payload, now),
+        )
+        return {"rev": rev, "blocked_tags": tags, "updated_at": now, "snapshot": True}
+
+    def ack_policy(self, node: str, rev: int, *, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        self._db.execute(
+            "INSERT INTO meter_policy_ack(node,rev,acked_at) VALUES(?,?,?) "
+            "ON CONFLICT(node) DO UPDATE SET rev=excluded.rev, acked_at=excluded.acked_at",
+            (node, int(rev), now),
+        )
+
+    def policy_acks(self) -> list[dict[str, Any]]:
+        return [dict(r) for r in self._db.query(
+            "SELECT node, rev, acked_at FROM meter_policy_ack ORDER BY node")]
 
     def _node_coverage(self, now: float, stale_after: float = 120.0) -> list[dict[str, Any]]:
         rows = self._db.query(

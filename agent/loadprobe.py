@@ -405,7 +405,11 @@ class SpeedLog:
                         if v[1] >= stale
                     }
 
-    def speeds(self) -> dict:
+    def speeds(self) -> dict[str, int]:
+        live, _completed = self.speeds_split()
+        return live
+
+    def speeds_split(self) -> tuple[dict[str, int], dict[str, int]]:
         """utag -> bytes/second, measured on connections that are live now.
 
         Primary source is the kernel: for every established socket, the delta
@@ -465,12 +469,13 @@ class SpeedLog:
                     out[utag] = 0.0
                     live_tags.add(utag)
 
-            # --- completed requests (fallback for unknown addresses) ---------
+            # Completed-request rates stay out of user_speeds. Mixing them in
+            # made the panel label a finished log line as a live node sample.
             self._events = [e for e in self._events if e[0] >= cutoff]
             fallback: dict[str, float] = {}
             for end_ts, start_ts, utag, sent in self._events:
-                if utag in out:
-                    continue  # already measured on the wire
+                if utag in live_tags:
+                    continue
                 duration = max(0.05, end_ts - start_ts)
                 overlap = max(0.0, min(end_ts, now) - max(start_ts, cutoff))
                 if overlap <= 0:
@@ -478,11 +483,9 @@ class SpeedLog:
                 fallback[utag] = fallback.get(utag, 0.0) + \
                     (sent / duration) * (overlap / self.WINDOW)
 
-        for utag, rate in fallback.items():
-            out.setdefault(utag, rate)
-        # Zero is kept for live-socket users (measured idle); the completed-
-        # request fallback still drops dust so finished viewers age out.
-        return {k: int(v) for k, v in out.items() if v >= 1 or k in live_tags}
+        live = {k: int(v) for k, v in out.items() if v >= 1 or k in live_tags}
+        completed = {k: int(v) for k, v in fallback.items() if v >= 1}
+        return live, completed
 
 
 class Sampler:
@@ -545,10 +548,13 @@ class Sampler:
                 self.active = active
 
     def snapshot(self) -> dict:
+        live, completed = self.speedlog.speeds_split()
         with self._lock:
             return {"ok": True, "active_streams": self.active,
                     "egress_mbps": self.egress_mbps,
-                    "user_speeds": self.speedlog.speeds()}
+                    "user_speeds": live,
+                    "user_speeds_source": "socket",
+                    "user_speeds_fallback": completed}
 
 
 def main() -> None:

@@ -501,6 +501,30 @@ CREATE TABLE IF NOT EXISTS measured_node_seq (
     PRIMARY KEY (node, boot_id)
 );
 
+-- Quota credit / offset. Does not delete measured_usage_monthly history.
+-- quota_used = max(0, SUM(bytes) - credit_bytes).
+CREATE TABLE IF NOT EXISTS measured_credits (
+    month         TEXT NOT NULL,
+    emby_user_id  TEXT NOT NULL,
+    credit_bytes  INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, emby_user_id)
+);
+
+-- Authoritative deny snapshot. Nodes ack a revision; empty list is a
+-- real snapshot (nobody blocked), not "keep last".
+CREATE TABLE IF NOT EXISTS meter_policy (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    rev         INTEGER NOT NULL DEFAULT 0,
+    blocked_json TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS meter_policy_ack (
+    node     TEXT PRIMARY KEY,
+    rev      INTEGER NOT NULL DEFAULT 0,
+    acked_at REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
