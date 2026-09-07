@@ -300,12 +300,13 @@ def test_entry_exports_require_admin_and_do_not_expose_keys_in_settings(client):
     assert "no-store" in response.headers["cache-control"]
     config = response.json()["config"]
     assert entry_headers()[KEY_HEADER] in config
-    assert "handle /_n/edge-a/s/*" in config and "handle /_n/edge-b/s/*" in config
-    assert "uri strip_prefix /_n/edge-a" in config
+    for node in ("edge-a", "edge-b"):
+        assert f".matches('^/_n/{node}/s/')" in config
+    assert 'uri path_regexp ^/_n/edge-a ""' in config
     assert "header_up Host edge-a.example.com" in config
     assert "tls_server_name edge-a.example.com" in config
     assert "reverse_proxy https://emby.example.com" in config
-    assert "handle /_n/*" in config and "respond 404" in config
+    assert "handle @reserved" in config and "respond 404" in config
     assert "header_up -X-Emby-Token" in config
     assert "{host}" not in config and "{query" not in config
     assert client.get(url.replace("friend-a", "missing"), auth=ADMIN).status_code == 404
@@ -318,10 +319,11 @@ def test_nginx_export_matches_caddy_contract(client):
     assert response.status_code == 200
     assert "no-store" in response.headers["cache-control"]
     config = response.json()["config"]
-    # Same prefix strip, per node, with a literal upstream (no resolver needed).
+    # Raw URI suffix with fixed named upstreams (no runtime DNS).
     for node in ("edge-a", "edge-b"):
         assert f"location ^~ /_n/{node}/s/ {{" in config
-        assert f"proxy_pass https://{node}.example.com/s/;" in config
+        assert f"server {node}.example.com:443;" in config
+        assert f"~^/_n/{node}(/s/.*)$ $1;" in config
         assert f"proxy_ssl_name {node}.example.com;" in config
     # An unknown node name is refused rather than guessed.
     assert "location ^~ /_n/ {" in config and "return 404;" in config
@@ -339,6 +341,72 @@ def test_nginx_export_matches_caddy_contract(client):
     # Long media reads must not die on nginx's 60s default.
     assert "proxy_read_timeout 600s;" in config
     assert "{host}" not in config and "{query" not in config
+
+
+def test_stale_entry_writes_conflict_without_changing_other_fields(client):
+    before = client.get("/api/settings/integration", auth=ADMIN).json()
+    changed = {**before, "external_entries": [*before["external_entries"],
+               {"id": "friend-c", "origin": "https://friend-c.example.com"}]}
+    result = client.put("/api/settings/integration", auth=ADMIN, json=changed)
+    assert result.status_code == 200
+    stale = {**before, "tmdb_language": "fr-FR", "external_entries": []}
+    assert client.put("/api/settings/integration", auth=ADMIN, json=stale).status_code == 409
+    assert client.get("/api/settings/integration", auth=ADMIN).json() == result.json()
+
+
+def test_rotation_changes_revision_but_roundtrip_and_unrelated_edits_do_not(client):
+    url = "/api/settings/integration"
+    before = client.get(url, auth=ADMIN).json()
+    same = client.put(url, auth=ADMIN, json=before).json()
+    assert same["external_entries_revision"] == before["external_entries_revision"]
+    same = client.put(url, auth=ADMIN, json={"tmdb_language": "en-US"}).json()
+    assert same["external_entries_revision"] == before["external_entries_revision"]
+    before["external_entries"][0]["rotate_proxy_key"] = True
+    rotated = client.put(url, auth=ADMIN, json=before).json()
+    assert rotated["external_entries_revision"] != before["external_entries_revision"]
+    assert client.put(url, auth=ADMIN, json=before).status_code == 409
+
+
+def test_concurrent_entry_compare_and_replace_is_atomic(client):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    from app.core.errors import ConflictError
+
+    service = app.state.settings_service
+    original = service.integration_public()
+    barrier = Barrier(2)
+
+    def save(entry_id):
+        payload = {**original, "external_entries": [*original["external_entries"],
+                   {"id": entry_id, "origin": f"https://{entry_id}.example.com"}]}
+        barrier.wait(timeout=5)
+        try:
+            service.save_integration(payload)
+            return "saved"
+        except ConflictError:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        assert sorted(pool.map(save, ("friend-c", "friend-d"))) == ["conflict", "saved"]
+    assert len(service.integration_public()["external_entries"]) == 3
+
+
+def test_nginx_listen_certificates_and_distinct_export_names(client):
+    from app.modules.entry_proxy import friend_config
+
+    configs = []
+    for entry_id in ("friend-a", "friend_a", "FRIEND-a"):
+        cfg = friend_config({"id": entry_id, "origin": "https://friend.example.com:8443",
+                             "proxy_key": "synthetic_" * 5},
+                            "https://emby.example.com:9443", app.state.settings_service.nodes(),
+                            "nginx")
+        assert "listen 8443 ssl;" in cfg and "listen [::]:8443 ssl;" in cfg
+        assert "listen 443" not in cfg and "server_name friend.example.com;" in cfg
+        assert "    ssl_certificate " in cfg and "    ssl_certificate_key " in cfg
+        assert "BEFORE nginx -t" in cfg
+        configs.append(cfg.split("map $http_upgrade ")[1].split()[0])
+    assert len(set(configs)) == 3
 
 
 def test_entry_export_rejects_unknown_server_for_both_shapes(client):

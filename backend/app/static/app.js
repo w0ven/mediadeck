@@ -903,9 +903,9 @@ PAGES.settings = async () => {
         <div class="muted" style="margin-bottom:12px">
           登记之后，从该入口进来的播放会 302 到
           <code>https://对方域名/_n/&lt;节点&gt;/s/...</code>：签名原样保留，推流节点不用改任何配置。
-          <b>未登记的入口行为完全不变</b>。每个入口有独立凭据，只出现在生成的配置里，页面和接口都不回显。
+          每个入口有独立凭据，普通设置只显示配置状态；点击「生成配置」后才显示完整凭据。
         </div>
-        <div id="ee-list">${entryRows(ig.external_entries || [])}</div>
+        <div id="ee-list" data-revision="${esc(ig.external_entries_revision)}">${entryRows(ig.external_entries || [])}</div>
         <div class="form-row" style="margin-top:12px">
           <label>新增入口</label>
           <input id="ee-id" placeholder="入口 ID，如 friend-a" style="width:180px">
@@ -917,7 +917,7 @@ PAGES.settings = async () => {
           <select id="ee-server" style="width:120px">
             <option value="caddy">Caddy</option><option value="nginx">nginx</option>
           </select>
-          <span class="muted">选好后点上面某个入口的「生成配置」，两种都能直接复制</span>
+          <span class="muted">nginx 配置需先安装 TLS 证书、确认端口，并通过 nginx -t</span>
         </div>
         <div id="ee-out" style="margin-top:10px"></div>
       </div>`)}
@@ -1022,7 +1022,8 @@ PAGES.settings = async () => {
   $('#ee-list').onclick = (ev) => {
     const btn = ev.target.closest('button[data-act]');
     if (!btn) return;
-    ({ export: exportEntry, rotate: rotateEntry, del: removeEntry })[btn.dataset.act](btn.dataset.id);
+    const action = { export: exportEntry, rotate: rotateEntry, del: removeEntry }[btn.dataset.act];
+    if (action) action(btn.dataset.id);
   };
   $('#mb-save').onclick = saveMembership;
   $('#ic-save').onclick = saveImageCache;
@@ -1059,70 +1060,96 @@ function entryRows(entries) {
       <button class="btn danger" data-act="del" data-id="${esc(e.id)}">删除</button>
     </div>`).join('');
 }
-/* Always re-read before writing: the whole list is replaced on save, so an
-   edit made from a stale page must not silently drop another entry. */
+let entryBusy = false;
+let entryExportGeneration = 0;
+/* A fresh read alone still races another writer. The server atomically checks
+   this revision, including rotations, before replacing the list. */
 async function entryList() {
-  const s = await api('/api/settings');
-  return ((s.integration || {}).external_entries || []);
+  const s = await api('/api/settings/integration');
+  if (s.external_entries_revision !== $('#ee-list').dataset.revision) {
+    throw new Error('入口已被其他页面修改，请刷新后重新操作');
+  }
+  return s;
 }
-async function writeEntries(entries) {
+async function writeEntries(entries, revision) {
   await api('/api/settings/integration', { method: 'PUT',
-    body: JSON.stringify({ external_entries: entries }) });
+    body: JSON.stringify({ external_entries: entries, external_entries_revision: revision }) });
+}
+async function changeEntries(change, success) {
+  if (entryBusy) return;
+  entryBusy = true;
+  entryExportGeneration++;
+  $('#ee-out').textContent = '';
+  const buttons = [...document.querySelectorAll('#ee-list button, #ee-add')];
+  buttons.forEach((button) => { button.disabled = true; });
+  try {
+    const s = await entryList();
+    await writeEntries(change(s.external_entries || []), s.external_entries_revision);
+    toast(success);
+    await renderPage('settings');
+  } catch (e) {
+    toast('保存失败: ' + e.message, 1);
+  } finally {
+    entryBusy = false;
+    buttons.forEach((button) => { button.disabled = false; });
+  }
 }
 async function addEntry() {
   const id = $('#ee-id').value.trim();
   const origin = $('#ee-origin').value.trim();
   if (!id || !origin) { toast('请填写入口 ID 和域名', 1); return; }
-  try {
-    const kept = (await entryList()).map((e) => ({ id: e.id, origin: e.origin }));
-    await writeEntries(kept.concat([{ id, origin }]));
-    toast('入口已登记，可以生成配置了'); renderPage('settings');
-  } catch (e) { toast('登记失败: ' + e.message, 1); }
+  await changeEntries((entries) => entries.concat([{ id, origin }]), '入口已登记，可以生成配置了');
 }
 async function removeEntry(id) {
   if (!confirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`)) return;
-  try {
-    const kept = (await entryList()).filter((e) => e.id !== id)
-      .map((e) => ({ id: e.id, origin: e.origin }));
-    await writeEntries(kept);
-    toast('入口已删除'); renderPage('settings');
-  } catch (e) { toast('删除失败: ' + e.message, 1); }
+  await changeEntries((entries) => entries.filter((e) => e.id !== id), '入口已删除');
 }
 async function rotateEntry(id) {
   if (!confirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`)) return;
-  try {
-    const kept = (await entryList()).map((e) => (
-      { id: e.id, origin: e.origin, rotate_proxy_key: e.id === id }));
-    await writeEntries(kept);
-    toast('凭据已轮换，请重新生成并发送配置'); renderPage('settings');
-  } catch (e) { toast('轮换失败: ' + e.message, 1); }
+  await changeEntries((entries) => {
+    if (!entries.some((e) => e.id === id)) throw new Error('入口已删除，请刷新页面');
+    return entries.map((e) => ({ ...e, rotate_proxy_key: e.id === id }));
+  }, '凭据已轮换，请重新生成并发送配置');
 }
 async function exportEntry(id) {
+  if (entryBusy) return;
+  const generation = ++entryExportGeneration;
   const el = $('#ee-out');
   const server = $('#ee-server').value;
   el.textContent = '生成中…';
   try {
     const r = await api('/api/integration/frontend?server='
       + encodeURIComponent(server) + '&entry=' + encodeURIComponent(id));
+    if (generation !== entryExportGeneration || !el.isConnected) return;
     el.innerHTML = `<div class="muted" style="margin-bottom:6px">
         <b>${esc(id)}</b> 的 ${esc(server === 'nginx' ? 'nginx' : 'Caddy')} 配置 ——
         含该入口专属凭据，<b>只发给这个入口的所有者</b>，不要公开粘贴。
       </div>
-      <pre class="codeblock">${esc(r.config)}</pre>
+      <textarea class="codeblock" id="ee-config" readonly aria-label="入口配置" style="width:100%;height:320px"></textarea>
       <div class="toolbar" style="margin-top:6px">
         <button class="btn" id="ee-copy">复制配置</button>
         <span class="muted" id="ee-copy-hint"></span>
       </div>`;
+    const config = $('#ee-config');
+    config.value = r.config;
     $('#ee-copy').onclick = async () => {
       try {
         await navigator.clipboard.writeText(r.config);
         toast('已复制到剪贴板');
       } catch (err) {
-        /* clipboard needs HTTPS or a user gesture; keep the text usable. */
-        $('#ee-copy-hint').textContent = '浏览器拒绝了剪贴板，请手动全选复制上面的内容';
+        config.focus();
+        config.select();
+        let copied = false;
+        try { copied = document.execCommand('copy'); } catch (e) { /* manual copy below */ }
+        $('#ee-copy-hint').textContent = copied ? '已复制到剪贴板'
+          : '配置已全选，请按 Ctrl+C / Cmd+C 复制';
       }
     };
-  } catch (e) { el.innerHTML = `<span class="tag bad">生成失败</span> ${esc(e.message)}`; }
+  } catch (e) {
+    if (generation === entryExportGeneration && el.isConnected) {
+      el.textContent = '生成失败: ' + e.message;
+    }
+  }
 }
 async function showFrontendConfig() {
   const el = $('#ig-out');

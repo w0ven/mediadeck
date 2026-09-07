@@ -5,8 +5,12 @@ https://friend.example.com {
     header Cache-Control "private, no-store"
     header -X-Mediadeck-Entry-Key
 
-    handle /_n/edge-a/s/* {
-        uri strip_prefix /_n/edge-a
+    route {
+    @dot_segment expression `{http.request.orig_uri}.matches('^/_n/[^?]*(/|%2[fF])([.]|%2[eE]){1,2}(/|%2[fF]|[?]|$)')`
+    respond @dot_segment 404
+    @node expression `{http.request.orig_uri}.matches('^/_n/edge-a/s/')`
+    handle @node {
+        uri path_regexp ^/_n/edge-a ""
         reverse_proxy https://edge-a.example.com {
             header_up Host edge-a.example.com
             header_up -X-Mediadeck-Entry
@@ -25,7 +29,8 @@ https://friend.example.com {
 
     # Repeat the fixed block above for each registered node; the API exporter
     # does this automatically. An arbitrary node/URL cannot select an upstream.
-    handle /_n/* {
+    @reserved expression `{http.request.orig_uri}.matches('^(/|%2[fF])+(_|%5[fF])(n|%6[eE])(/|%2[fF]|[?]|$)') || {http.request.uri.path}.matches('^/+_n(/|$)')`
+    handle @reserved {
         respond 404
     }
 
@@ -41,5 +46,6 @@ https://friend.example.com {
                 tls_server_name emby.example.com
             }
         }
+    }
     }
 }

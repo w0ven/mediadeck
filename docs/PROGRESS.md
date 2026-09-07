@@ -4,6 +4,49 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-07 — preserve entry proxy paths and prevent stale registry writes
+**Done**
+- Reproduced nine path-contract failures in the initial templates: nginx
+  re-escaped encoded filenames, both engines collapsed double slashes, nginx
+  refused a 12KB path, and bare/traversing reserved paths could reach Emby.
+  Preserve the raw suffix with Caddy `path_regexp` and nginx `$request_uri`
+  maps into fixed named upstreams. Four additional live failures exposed
+  encoded namespace aliases; reject these, dot segments and reserved fallbacks
+  before contacting an upstream. nginx now has an explicit 32KiB line budget.
+- Scope nginx maps/upstreams per exact entry identity, including case and
+  punctuation differences. Two original same-name Upgrade maps actually
+  parsed successfully; the risk was shared definitions, not a guaranteed
+  syntax error. Separate exported files now have independent names.
+- Generate the registered listen port and active certificate paths, with
+  explicit certificate/nginx-version/`nginx -t` prerequisites in config and UI.
+- Add atomic registry revision checks (409 on conflict, including rotations).
+  The UI preserves other row fields, prevents duplicate mutations, ignores
+  obsolete exports, clears credentials during mutations, and supports legacy
+  clipboard/manual selection. Escaping and credential storage/logging are
+  exercised in Chromium using the actual JavaScript.
+- Document both proxy engines and the settings workflow; the protected-file
+  export helper now supports `--server nginx` as well as its Caddy default.
+
+**Tests**
+- `ruff check app tests`: passed. `python -m pytest tests/ -q`: **1020 passed,
+  0 skipped**, four existing framework deprecation warnings (96.10s).
+  Set `MEDIADECK_NGINX_DOCKER=nginx:1.27-alpine` for this run.
+- Real nginx **1.27.5** (disposable host-network containers) and Caddy **2.6.2**:
+  both friends loaded together, TLS-verified fixed upstreams, raw encoded paths
+  and queries, signatures/Range/If-Range, credential stripping, WebSocket frames,
+  non-GET methods/bodies, reserved/encoded traversal refusal and long-path limits.
+- Chromium: **20 browser assertions**, covering injection, field preservation,
+  stale pages, duplicate writes, obsolete exports and all clipboard fallbacks.
+- Isolated mock uvicorn startup: `/healthz` 200 and anonymous `/api/settings`
+  401. No production data, settings or services used.
+
+**Next**
+- Review and merge separately. No release, deployment, DNS or host configuration
+  changes are part of this revision. Real friend deployment acceptance still
+  requires the operator's TLS and origin-to-panel setup.
+
+---
+
 ## 2026-09-07 — entry management UI and nginx friend templates
 **Done**
 - Added an "external reverse-proxy entries" card to the settings page:

@@ -8,6 +8,7 @@ guessed, and the entry credential is attached only on the Emby hop.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from urllib.parse import urlsplit
 
 from app.core.config import StreamNode
@@ -19,6 +20,11 @@ SERVERS = ("caddy", "nginx")
 # Long-lived media responses: a client may hold one connection for a whole
 # episode, so the default 60s upstream read timeout would cut playback.
 READ_TIMEOUT = "600s"
+# Inspect the raw URI before either proxy normalises dots or encoded slashes.
+DOT_SEGMENT = r"^/_n/[^?]*(/|%2[fF])([.]|%2[eE]){1,2}(/|%2[fF]|[?]|$)"
+# Recognise aliases in the raw request too: nginx may remove the namespace
+# altogether while decoding a traversal before choosing its fallback location.
+RESERVED_RAW = r"^(/|%2[fF])+(_|%5[fF])(n|%6[eE])(/|%2[fF]|[?]|$)"
 
 
 @dataclass(frozen=True)
@@ -89,9 +95,20 @@ def friend_caddy(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) 
     return friend_config(entry, emby_url, nodes, "caddy")
 
 
+def _namespace(plan: _Plan) -> str:
+    # nginx variables are case insensitive; IDs differing by case/punctuation
+    # must still be isolated when multiple exported files share http{}.
+    return "md_" + sha256(f"{plan.entry_id}:{plan.origin}".encode()).hexdigest()[:24]
+
+
 def _caddy(plan: _Plan) -> str:
-    blocks = [f"""    handle /_n/{node.name}/s/* {{
-        uri strip_prefix /_n/{node.name}
+    blocks = []
+    for index, node in enumerate(plan.nodes):
+        pattern = node.name.replace(".", "[.]")
+        # path_regexp preserves RawPath, unlike strip_prefix which cleans //.
+        blocks.append(f"""    @node_{index} expression `{{http.request.orig_uri}}.matches('^/_n/{pattern}/s/')`
+    handle @node_{index} {{
+        uri path_regexp ^/_n/{pattern} ""
         reverse_proxy {node.origin} {{
             header_up Host {node.host}
             header_up -X-Mediadeck-Entry
@@ -108,7 +125,7 @@ def _caddy(plan: _Plan) -> str:
             }}
         }}
     }}
-""" for node in plan.nodes]
+""")
     return f"""# Private file: contains this entry's proxy credential. Store with mode 600.
 # Core Caddy only: no cache handler or dynamic upstream. Range, query and
 # WebSocket upgrades pass through. Never log request headers or response bodies.
@@ -116,7 +133,12 @@ def _caddy(plan: _Plan) -> str:
     header Cache-Control "private, no-store"
     header -X-Mediadeck-Entry-Key
 
-{"".join(blocks)}    handle /_n/* {{
+    route {{
+    @dot_segment expression `{{http.request.orig_uri}}.matches('{DOT_SEGMENT}')`
+    respond @dot_segment 404
+
+{"".join(blocks)}    @reserved expression `{{http.request.orig_uri}}.matches('{RESERVED_RAW}') || {{http.request.uri.path}}.matches('^/+_n(/|$)')`
+    handle @reserved {{
         respond 404
     }}
 
@@ -133,25 +155,35 @@ def _caddy(plan: _Plan) -> str:
             }}
         }}
     }}
+    }}
 }}
 """
 
 
 def _nginx(plan: _Plan) -> str:
-    """Same contract for nginx.
+    """Forward the raw suffix, never nginx's decoded/normalised location URI.
 
-    ``location ^~ /_n/<node>/s/`` plus a ``proxy_pass`` that ends in ``/s/``
-    performs the prefix strip with a literal upstream, so nginx resolves the
-    host at config load and no ``resolver`` is required. ``^~`` also stops a
-    later regex location from stealing the media route. Percent-encoded media
-    paths survive because both sides compare the decoded form: the node signs
-    and verifies ``$uri``.
+    A variable URI stops proxy_pass re-escaping the path. Named upstreams are
+    fixed at config load: no runtime DNS and no client-selected destination.
     """
-    listen = ""
-    if ":" in plan.origin_host:
-        listen = f"    # 入口端口为 {plan.origin_host.rsplit(':', 1)[1]}，按需调整下面的 listen\n"
-    blocks = [f"""    location ^~ /_n/{node.name}/s/ {{
-        proxy_pass {node.origin}/s/;
+    ns = _namespace(plan)
+    origin = urlsplit(plan.origin)
+    port = origin.port or 443
+    maps, blocks = [], []
+    for index, node in enumerate(plan.nodes):
+        var = f"{ns}_{index}"
+        pattern = node.name.replace(".", "[.]")
+        maps.append(f"""upstream {var} {{
+    server {node.host}{'' if urlsplit(node.origin).port else ':443'};
+}}
+map $request_uri ${var}_uri {{
+    default "";
+    ~^/_n/{pattern}(/s/.*)$ $1;
+}}
+""")
+        blocks.append(f"""    location ^~ /_n/{node.name}/s/ {{
+        if (${var}_uri = "") {{ return 404; }}
+        proxy_pass https://{var}${var}_uri;
         proxy_set_header Host {node.host};
         proxy_ssl_server_name on;
         proxy_ssl_name {node.hostname};
@@ -176,35 +208,53 @@ def _nginx(plan: _Plan) -> str:
         proxy_read_timeout {READ_TIMEOUT};
         proxy_send_timeout {READ_TIMEOUT};
     }}
-""" for node in plan.nodes]
+""")
     return f"""# Private file: contains this entry's proxy credential. Store with mode 600.
 # Drop into a context that is already inside http{{}} (for example
 # /etc/nginx/conf.d/). No proxy_cache anywhere: signed URLs expire, and a
 # cached 302 or media body would serve one viewer's link to another.
-map $http_upgrade $mediadeck_connection {{
+# REQUIRES nginx >= 1.25.1 and an installed TLS certificate BEFORE nginx -t.
+# Provision the certificate and adjust BOTH active certificate paths below.
+# Test with nginx -t before reloading; this file alone cannot obtain a cert.
+{"".join(maps)}map $http_upgrade ${ns}_connection {{
     default upgrade;
     ''      close;
 }}
 
+map $request_uri ${ns}_reserved {{
+    default 0;
+    ~{RESERVED_RAW} 1;
+}}
+map $request_uri ${ns}_dot_segment {{
+    default 0;
+    "~{DOT_SEGMENT}" 1;
+}}
+
 server {{
-{listen}    listen 443 ssl;
-    listen [::]:443 ssl;
+    listen {port} ssl;
+    listen [::]:{port} ssl;
     http2 on;
-    server_name {plan.origin_host.rsplit(':', 1)[0] if ':' in plan.origin_host else plan.origin_host};
+    server_name {origin.hostname};
 
-    # ssl_certificate     /etc/letsencrypt/live/<域名>/fullchain.pem;
-    # ssl_certificate_key /etc/letsencrypt/live/<域名>/privkey.pem;
+    ssl_certificate     /etc/letsencrypt/live/{origin.hostname}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{origin.hostname}/privkey.pem;
 
+    access_log off;
+    merge_slashes off;
+    large_client_header_buffers 4 32k;
     client_max_body_size 0;
     add_header Cache-Control "private, no-store" always;
+    if (${ns}_dot_segment) {{ return 404; }}
 
 {"".join(blocks)}    # Unknown node names are refused rather than guessed: this must never
     # become an open proxy that any URL can steer.
+    location = /_n {{ return 404; }}
     location ^~ /_n/ {{
         return 404;
     }}
 
     location / {{
+        if (${ns}_reserved) {{ return 404; }}
         proxy_pass {plan.emby};
         proxy_set_header Host {plan.emby_host};
         proxy_ssl_server_name on;
@@ -220,7 +270,7 @@ server {{
         proxy_hide_header X-Mediadeck-Entry-Key;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection $mediadeck_connection;
+        proxy_set_header Connection ${ns}_connection;
         proxy_buffering off;
         proxy_cache off;
         proxy_read_timeout {READ_TIMEOUT};

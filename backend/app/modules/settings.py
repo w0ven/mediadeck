@@ -19,12 +19,15 @@ value on save to mean "leave the stored secret untouched".
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import secrets
+import threading
 from typing import Any
 
 from app.core.config import NodePool, Settings, StreamNode, demo_nodes
-from app.core.errors import ConfigError
+from app.core.errors import ConfigError, ConflictError
 from app.core.store import SettingsStore
 from app.modules.entries import validate_entries
 from app.modules.signing import MAX_TTL, MIN_TTL, generate_secret
@@ -119,6 +122,12 @@ def mask_secret(value: str) -> str:
     return f"{value[:4]}{'*' * 8}{value[-4:]}"
 
 
+def _entries_revision(entries: list[dict[str, Any]]) -> str:
+    # Includes rotations invisible in public rows. A digest cannot authenticate
+    # as an entry or recover the independently generated high-entropy keys.
+    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+
+
 def _require_http_url(value: str, field: str) -> str:
     value = (value or "").strip().rstrip("/")
     if not value:
@@ -139,6 +148,7 @@ class SettingsService:
     def __init__(self, store: SettingsStore, scheduler: Any = None) -> None:
         self._store = store
         self._scheduler = scheduler
+        self._integration_lock = threading.RLock()
 
     def bind_scheduler(self, scheduler: Any) -> None:
         self._scheduler = scheduler
@@ -297,6 +307,7 @@ class SettingsService:
             "tmdb_language": cfg["tmdb_language"],
             "tmdb_api_key_masked": mask_secret(cfg["tmdb_api_key"]),
             "tmdb_api_key_set": bool(cfg["tmdb_api_key"]),
+            "external_entries_revision": _entries_revision(cfg["external_entries"]),
             "external_entries": [
                 {"id": e["id"], "origin": e["origin"],
                  "proxy_key_set": bool(e.get("proxy_key"))}
@@ -305,7 +316,17 @@ class SettingsService:
         }
 
     def save_integration(self, payload: dict[str, Any]) -> dict[str, Any]:
+        # Compare and replace indivisibly, including saves of other fields.
+        # Runtime settings are owned by one panel process.
+        with self._integration_lock:
+            return self._save_integration(payload)
+
+    def _save_integration(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self.integration_config()
+        if ("external_entries" in payload and "external_entries_revision" in payload
+                and payload["external_entries_revision"] != _entries_revision(
+                    current["external_entries"])):
+            raise ConflictError("入口已被其他页面修改，请刷新后重新操作")
         panel = str(payload.get("panel_public_url", current["panel_public_url"]) or "").strip()
         emby = str(payload.get("emby_public_url", current["emby_public_url"]) or "").strip()
         if panel:
