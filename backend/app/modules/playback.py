@@ -238,7 +238,7 @@ class PlaybackRouter:
         self._cache.clear()
         self._auth_cache.clear()
 
-    async def _authorised(self, item_id: str, token: str) -> bool:
+    async def _authorised(self, item_id: str, token: str, cache_scope: str) -> bool:
         verify = getattr(self._emby, "verify_item_access", None)
         if verify is None:  # pragma: no cover - adapter contract guarantees it
             return False
@@ -247,7 +247,7 @@ class PlaybackRouter:
         # playback start. Cache positives only, and briefly: a revoked user
         # keeps access for at most this long, while a denial is always
         # re-checked so revocation cannot be cached into place.
-        key = f"auth:{item_id}:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
+        key = f"auth:{cache_scope}:{item_id}:{hashlib.sha256(token.encode()).hexdigest()[:16]}"
         if self._auth_cache.get(key):
             return True
         try:
@@ -258,8 +258,9 @@ class PlaybackRouter:
             self._auth_cache.set(key, True)
         return allowed
 
-    async def _media_path(self, item_id: str, media_source_id: str | None) -> str | None:
-        cache_key = f"{item_id}:{media_source_id or ''}"
+    async def _media_path(self, item_id: str, media_source_id: str | None,
+                          cache_scope: str) -> str | None:
+        cache_key = f"{cache_scope}:{item_id}:{media_source_id or ''}"
         cached = self._cache.get(cache_key)
         if cached is not None:
             return cached or None
@@ -280,7 +281,7 @@ class PlaybackRouter:
     async def route(self, item_id: str, request_path: str,
                     query: dict[str, str], caller_token: str = "",
                     require_auth: bool = False,
-                    caller_device: str = "") -> Decision:
+                    caller_device: str = "", cache_scope: str = "direct") -> Decision:
         cfg = self._config() or {}
 
         if not cfg.get("enabled"):
@@ -296,13 +297,13 @@ class PlaybackRouter:
         # caller could guess an item id and receive a signed media URL.
         # Falling back to the origin (rather than 403) keeps the fail-open
         # contract: Emby then rejects the request itself, exactly as before.
-        if require_auth and not await self._authorised(item_id, caller_token):
+        if require_auth and not await self._authorised(item_id, caller_token, cache_scope):
             decision = self._passthrough(request_path, query, "unauthorised")
             self._record(decision, item_id)
             return decision
 
         media_source_id = query.get("MediaSourceId") or query.get("mediaSourceId")
-        media_path = await self._media_path(item_id, media_source_id)
+        media_path = await self._media_path(item_id, media_source_id, cache_scope)
         if not media_path:
             decision = self._passthrough(request_path, query, "unresolved-item")
             self._record(decision, item_id)
@@ -342,7 +343,7 @@ class PlaybackRouter:
             if self._rate_resolver is not None and caller_token:
                 try:
                     rate_bps, utag = await self._rate_resolver(
-                        caller_token, caller_device)
+                        caller_token, caller_device, cache_scope)
                 except Exception:  # noqa: BLE001 - fail open: sign uncapped
                     rate_bps, utag = 0, ""
             target = sign_url(

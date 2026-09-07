@@ -38,6 +38,8 @@ from app.modules.edgelog import (
     parse_lines,
 )
 from app.modules.enforcement import EnforcementService
+from app.modules.entries import entry_target, identify_entry
+from app.modules.entry_proxy import friend_caddy
 from app.modules.events import EventStream, safe_stream
 from app.modules.groups import GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
@@ -237,7 +239,8 @@ async def _startup() -> None:
 
     # Playback interception: the piece that puts the scheduler on the real
     # client path instead of only the /stream test edge.
-    async def _member_rate(token: str, device: str = "") -> tuple[int, str]:
+    async def _member_rate(token: str, device: str = "",
+                           cache_scope: str = "direct") -> tuple[int, str]:
         """Caller credential -> (bandwidth cap in bytes/s, anonymised user tag).
 
         Signed into every node URL, so the node enforces the member's cap and
@@ -248,7 +251,7 @@ async def _startup() -> None:
         api_key is shared by every session it can see, so caching by token
         alone would hand the first resolved user's cap to everyone else.
         """
-        cache_key = f"rate:{user_tag(token)}:{user_tag(device)}"
+        cache_key = f"rate:{cache_scope}:{user_tag(token)}:{user_tag(device)}"
         cached = app.state.cache.get(cache_key)
         if cached is not None:
             return cached
@@ -918,11 +921,15 @@ async def settings_integration_get() -> dict[str, Any]:
 
 @app.put("/api/settings/integration", dependencies=[Depends(_auth)])
 async def settings_integration_save(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    return app.state.settings_service.save_integration(payload)
+    saved = app.state.settings_service.save_integration(payload)
+    app.state.playback.invalidate()
+    app.state.cache.drop_prefix("rate:")
+    return saved
 
 
 @app.get("/api/integration/frontend", dependencies=[Depends(_auth)])
-async def integration_frontend(server: str = "caddy") -> dict[str, Any]:
+async def integration_frontend(response: Response, server: str = "caddy",
+                               entry: str = "") -> dict[str, Any]:
     """Reverse-proxy rule that puts the panel on the real playback path.
 
     Answers "how does my existing Emby domain dispatch to nodes": the operator
@@ -931,10 +938,21 @@ async def integration_frontend(server: str = "caddy") -> dict[str, Any]:
     service = app.state.settings_service
     integration = service.integration_config()
     emby_public = integration["emby_public_url"] or service.emby_config()["url"]
+    if entry:
+        if server != "caddy":
+            raise HTTPException(400, "external entries support Caddy templates")
+        registered = next((e for e in integration["external_entries"] if e["id"] == entry), None)
+        if registered is None:
+            raise HTTPException(404, "entry not found")
+        # Explicit admin-only export; ordinary settings never return the key.
+        response.headers["Cache-Control"] = "private, no-store"
+        return {"server": server, "config": friend_caddy(
+            registered, integration["emby_public_url"], service.nodes())}
     panel_public = integration["panel_public_url"] or "http://127.0.0.1:8300"
     return {
         "server": server,
-        "config": emby_frontend_snippet(panel_public, emby_public, server),
+        "config": emby_frontend_snippet(panel_public, emby_public, server,
+                                         service.emby_config()["url"]),
     }
 
 
@@ -1153,6 +1171,10 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
     Emby applies its own decision and the fail-open contract still holds.
     """
     query = dict(request.query_params)
+    entry = identify_entry(request.headers,
+                           app.state.settings_service.integration_config()["external_entries"])
+    response_headers = {"Cache-Control": "private, no-store",
+                        "Vary": "X-Mediadeck-Entry, X-Mediadeck-Entry-Key"}
 
     # Access rules run before routing. They decide whether this caller may be
     # handed a signed node URL at all; refusing here rather than after routing
@@ -1170,7 +1192,7 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
                 remote_ip=request.client.host if request.client else "",
                 reason=verdict["reason"], rule_id=verdict["rule_id"],
                 item_id=item_id)
-        raise HTTPException(403, "access denied by rule")
+        raise HTTPException(403, "access denied by rule", headers=response_headers)
 
     # Preserve the exact incoming path: the fallback URL must point back at the
     # same Emby endpoint the client actually asked for, not a normalised guess.
@@ -1179,6 +1201,7 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
         caller_token=caller_token(request.headers, query),
         caller_device=caller_device(request.headers, query),
         require_auth=True,
+        cache_scope=entry.cache_scope if entry else "direct",
     )
 
     # Behind a front-door proxy, a "go to Emby instead" answer must not be a
@@ -1187,13 +1210,20 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
     # instead so the proxy serves the origin itself and the client never sees
     # the extra hop. Standalone callers still get the plain redirect.
     if not decision.redirected and request.headers.get("x-mediadeck-proxy"):
-        return Response(status_code=204, headers={
+        # nginx error_page can intercept 418; keep the existing 204 contract
+        # for other front doors. Both serve fallback without a redirect loop.
+        fallback_status = 418 if request.headers["x-mediadeck-proxy"] == "nginx" else 204
+        return Response(status_code=fallback_status, headers={
+            **response_headers,
             "X-Mediadeck-Fallback": decision.reason,
         })
 
     if not decision.target:
-        raise HTTPException(409, "Emby origin not configured")
+        raise HTTPException(409, "Emby origin not configured", headers=response_headers)
+    if decision.redirected and entry:
+        decision.target = entry_target(decision.target, decision.node or "", entry)
     return RedirectResponse(decision.target, status_code=302, headers={
+        **response_headers,
         "X-Mediadeck-Node": decision.node or "",
         "X-Mediadeck-Decision": decision.reason,
     })
@@ -1205,7 +1235,8 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
 # Starlette routes are case-sensitive, so registering only one shape means real
 # playback silently never reaches the panel and dispatch appears to do nothing.
 for _prefix in ("/emby/Videos", "/emby/videos", "/Videos", "/videos"):
-    app.get(_prefix + "/{item_id}/{rest:path}", include_in_schema=False)(
+    app.api_route(_prefix + "/{item_id}/{rest:path}", methods=["GET", "HEAD"],
+                  include_in_schema=False)(
         emby_video_stream
     )
 

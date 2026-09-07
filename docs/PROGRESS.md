@@ -4,6 +4,85 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-07 — restrict origin interception to playback GET/HEAD (draft revision)
+**Done**
+- Fixed the origin templates capturing every video API and method. In the
+  prior draft, subtitle POST/DELETE reached FastAPI's GET/HEAD-only video
+  handler, returned 405 and never reached Emby. New real-proxy regressions
+  reproduced that failure on both nginx and Caddy before changing the rules.
+- Both templates now share an end-anchored stream/original endpoint pattern
+  under the four exact supported video prefixes. Subtitle management,
+  AdditionalParts, HLS/DASH, similar endpoint names and other prefix spellings
+  go straight to Emby. Caddy combines the path matcher with GET/HEAD; nginx
+  routes other methods to its named Emby location before contacting the panel,
+  preserving method, body, query and authentication. No blanket 405 fallback.
+- Added real nginx/Caddy tests against the actual FastAPI panel and a recording
+  Emby origin: subtitle POST/DELETE, other methods even on playback paths,
+  non-playback GET/HEAD, a large subtitle upload exceeding nginx's body buffer,
+  official/registered entry playback on all four prefixes, ordinary transcode
+  fallback and unchanged handling of an unexpected panel 405.
+
+**Verification**
+- `ruff check app tests` plus the export helper: clean.
+- Full backend suite with **both proxy engines available: 966 passed**, zero
+  skipped, three existing dependency/lifespan deprecation warnings. Fourteen
+  new regressions execute real Caddy 2.6.2 and nginx 1.22.1; nginx is run from an
+  extracted package with isolated config, pid, logs and all temp directories.
+- No package installation or system service/config changes. Test proxies use
+  loopback sockets and are terminated by fixture cleanup.
+
+**Next**
+- Re-review the updated draft; no merge, release or deployment in this task.
+- Production and friend-side setup/real-client acceptance remain outstanding
+  as described in `docs/EXTERNAL-ENTRIES.md`.
+
+## 2026-09-07 — registered external playback entries (draft PR)
+**Done**
+- Added an optional HTTPS entry registry to the existing integration settings
+  API. Each entry gets a generated proxy credential; ordinary settings return
+  only its presence, and partial edits preserve it. Rotation/removal applies
+  immediately. Entries and credentials stay in the runtime settings store.
+- Authenticate the entry assertion separately from Emby's item authorization.
+  Only a matching registered ID/key selects an entry-local
+  `https://<entry>/_n/<node>/s/...` target; Host, forwarded hosts and source IPs
+  cannot select destinations. Preserve the chosen node and original signed
+  path/query, including user attribution, rate and expiry.
+- Partition playback authorization, metadata and member-rate caches by entry;
+  keep media-path scheduling affinity. Cover all four existing video prefixes
+  with GET/HEAD and mark decisions private/no-store. Ordinary/unknown entry,
+  access denials and non-direct playback keep their existing behaviour.
+- Export per-entry Caddyfiles through the existing admin frontend-config API,
+  with fixed HTTPS node upstreams, prefix stripping, explicit Host/TLS SNI,
+  credential stripping on node requests and no shared response cache. Added
+  a private-file export helper and a credential-free reference template.
+- Updated the generated origin proxy rules: cover the actual video paths,
+  forward entry assertions only to the panel, disable decision caching, and
+  serve non-accelerated requests from Emby without redirect loops. nginx uses
+  the opt-in 418 fallback mode; other front doors retain the 204 contract.
+- Documented onboarding, transport trust, cache rules, rollback and operator
+  acceptance in `docs/EXTERNAL-ENTRIES.md`. No frontend UI changes.
+
+**Verification**
+- `ruff check app tests` plus the export helper: clean.
+- Full backend suite: **952 passed** (97 new tests), with three existing
+  dependency/lifespan deprecation warnings.
+- Real Caddy 2.6.2 against loopback TLS mock upstreams: entry-local 302 followed
+  by signed Range 206, suffix ranges/HEAD, encoded filenames and unchanged
+  query, upstream Host/SNI with certificate verification, tampered signatures,
+  alternating entries, uncached 401s, unknown node rejection and WebSocket
+  handshake/data frames. Both the reference and origin Caddyfiles also pass
+  `caddy adapt`. Caddy tests skip when Caddy/OpenSSL are absent.
+- Real Uvicorn mock-mode boot: loopback `/healthz` returned HTTP 200 with
+  `{"status":"ok"}`; the test process was then shut down cleanly.
+
+**Next / open verification**
+- Review this draft; no merge, tag, production installation or DNS changes.
+- Connect the operator's actual Emby front door to the panel over a protected
+  hop, register entries at runtime and install each friend's private template.
+- Verify real authorized 302 -> node Range 206 for each friend/node/pool,
+  including warm-cache alternation and native clients. Local TLS mock tests
+  do not prove that an existing production proxy chain or friend is configured.
+
 ## 2026-09-06 — every deployment reported itself as modified (v0.24.1)
 **Done**
 - `backend/mediadeck.egg-info/` was committed to the repository, but it is

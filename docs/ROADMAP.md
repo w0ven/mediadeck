@@ -15,6 +15,14 @@ top-down without asking. Every item ships as its own PR + release tag.
 - [x] Media library overview
 - [~] Acquisition/downloads: dropped by owner decision (stays external)
 
+## Next — Registered external playback entries (draft PR)
+- Register HTTPS entries through the existing integration settings API.
+- Authenticate each proxy's entry assertion; keep Emby auth and node signing.
+- Return entry-local `/_n/<node>/s/...` URLs and isolate playback caches.
+- Export a fixed-upstream Caddy template; document the origin proxy hop and
+  local verification separately from operator-side end-to-end acceptance.
+- Delivery stops at a tested draft PR; rollout is a separate operator action.
+
 ## v0.6.0 — Mount health (shipped)
 Storage is the single most failure-prone layer in this stack: FUSE mounts go
 stale, a union mount loses allow_other and the whole library 403s, ffprobe

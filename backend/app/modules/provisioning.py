@@ -419,7 +419,15 @@ echo "==========================================================="
 
 
 
-def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy") -> str:
+# Match the four prefixes registered by main.py. Scope case-insensitivity to
+# the playback endpoint: capturing other prefix spellings would turn Emby's
+# otherwise valid requests into the panel's 404. Anchor the endpoint so video
+# management, subtitles, HLS segments and similarly named paths stay at Emby.
+_PLAYBACK_PATH_RE = r"^/(emby/)?[Vv]ideos/[^/]+/(?i:stream|original)(\.[A-Za-z0-9]+)?$"
+
+
+def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
+                          emby_origin_url: str = "") -> str:
     """Front-door rule that puts the panel on the real playback path.
 
     This is the answer to "how does my existing Emby domain dispatch to nodes":
@@ -428,45 +436,101 @@ def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy") 
     transcoding — must keep going straight to Emby.
     """
     panel_host = panel_url.rstrip("/") or "http://127.0.0.1:8300"
-    emby_host = emby_url.rstrip("/") or "http://127.0.0.1:8096"
+    emby_host = (emby_origin_url or emby_url).rstrip("/") or "http://127.0.0.1:8096"
     emby_domain = _host_of(emby_url) or "emby.example.com"
+    panel_authority = urlparse(panel_host).netloc
 
     if server == "nginx":
         return f"""# nginx — 加到 {emby_domain} 的 server 块里，放在 location / 之前
-# 只有直连播放请求交给面板，其它全部照旧走 Emby。
+# GET/HEAD stream/original under /emby/Videos, /emby/videos, /Videos and /videos.
+# Use a private tunnel or verified TLS between this host and the panel.
 
-location ~ ^/emby/Videos/[^/]+/(stream|original) {{
+location ~ {_PLAYBACK_PATH_RE} {{
+    # Method routing happens before proxying. A named error_page target keeps
+    # the original method, body and URI; no request reaches the panel first.
+    if ($request_method !~ "^(GET|HEAD)$") {{ return 418; }}
     proxy_pass {panel_host};
-    proxy_set_header Host $host;
+    proxy_set_header Host {panel_authority};
+    proxy_ssl_server_name on;
+    proxy_ssl_name {_host_of(panel_host)};
+    proxy_ssl_verify on;
+    proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    # 面板返回 302 指向节点，必须原样传给客户端
+    proxy_set_header X-Mediadeck-Proxy nginx;
+    proxy_set_header X-Mediadeck-Entry $http_x_mediadeck_entry;
+    proxy_set_header X-Mediadeck-Entry-Key $http_x_mediadeck_entry_key;
+    # Authentication and entry selection must run on every request. In
+    # particular, no inherited cache may replay another entry's 302 or 204.
+    proxy_cache off;
+    proxy_no_cache 1;
+    proxy_cache_bypass 1;
+    proxy_hide_header X-Mediadeck-Entry-Key;
+    add_header Cache-Control "private, no-store" always;
     proxy_redirect off;
-    proxy_intercept_errors off;
+    proxy_intercept_errors on;
+    error_page 418 500 502 503 504 = @mediadeck_emby_origin;
+}}
+
+location @mediadeck_emby_origin {{
+    proxy_pass {emby_host};
+    proxy_set_header Host $host;
+    proxy_set_header X-Mediadeck-Entry "";
+    proxy_set_header X-Mediadeck-Entry-Key "";
+    proxy_set_header X-Mediadeck-Proxy "";
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_cache off;
+    proxy_buffering off;
 }}
 
 location / {{
     proxy_pass {emby_host};
+    proxy_http_version 1.1;
     proxy_set_header Host $host;
+    proxy_set_header X-Mediadeck-Entry "";
+    proxy_set_header X-Mediadeck-Entry-Key "";
+    proxy_set_header X-Mediadeck-Proxy "";
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_cache off;
     proxy_buffering off;
 }}
 """
 
     return f"""# Caddy — {emby_domain} 站点配置
-# 只有直连播放请求交给面板；Web 界面、刮削、图片、转码仍直接走 Emby。
+# GET/HEAD stream/original under /emby/Videos, /emby/videos, /Videos and /videos.
+# Use core Caddy without a cache handler; preserve entry headers only to panel.
 {emby_domain} {{
-    @stream path_regexp stream ^/emby/Videos/[^/]+/(stream|original)
+    @stream {{
+        method GET HEAD
+        path_regexp stream {_PLAYBACK_PATH_RE}
+    }}
 
     handle @stream {{
-        # 面板判断能否分流：可以就 302 到节点，不能就 302 回 Emby。
-        # 任何异常都会回落 Emby，不会导致播放失败。
-        reverse_proxy {panel_host}
+        header Cache-Control "private, no-store"
+        reverse_proxy {panel_host} {{
+            header_up Host {panel_authority}
+            header_up X-Mediadeck-Proxy 1
+            @fallback status 204 500 502 503 504
+            handle_response @fallback {{
+                reverse_proxy {emby_host} {{
+                    header_up -X-Mediadeck-Entry
+                    header_up -X-Mediadeck-Entry-Key
+                    header_up -X-Mediadeck-Proxy
+                }}
+            }}
+        }}
     }}
 
     handle {{
-        reverse_proxy {emby_host}
+        reverse_proxy {emby_host} {{
+            header_up -X-Mediadeck-Entry
+            header_up -X-Mediadeck-Entry-Key
+            header_up -X-Mediadeck-Proxy
+        }}
     }}
 }}
 """

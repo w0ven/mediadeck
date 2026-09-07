@@ -26,6 +26,7 @@ from typing import Any
 from app.core.config import NodePool, Settings, StreamNode, demo_nodes
 from app.core.errors import ConfigError
 from app.core.store import SettingsStore
+from app.modules.entries import validate_entries
 from app.modules.signing import MAX_TTL, MIN_TTL, generate_secret
 
 SECRET_UNCHANGED = "__KEEP__"
@@ -48,6 +49,7 @@ PLAYBACK_DEFAULTS: dict[str, Any] = {
 INTEGRATION_DEFAULTS: dict[str, Any] = {
     "panel_public_url": "",
     "emby_public_url": "",
+    "external_entries": [],
     # Optional. Media requests work without it -- a request then carries the
     # TMDB id and no title, which is still actionable. See modules/tmdb.py.
     "tmdb_api_key": "",
@@ -282,7 +284,8 @@ class SettingsService:
         cfg = dict(INTEGRATION_DEFAULTS)
         for key in cfg:
             if key in section:
-                cfg[key] = str(section[key] or "")
+                cfg[key] = (section[key] if key == "external_entries"
+                            else str(section[key] or ""))
         return cfg
 
     def integration_public(self) -> dict[str, Any]:
@@ -294,6 +297,11 @@ class SettingsService:
             "tmdb_language": cfg["tmdb_language"],
             "tmdb_api_key_masked": mask_secret(cfg["tmdb_api_key"]),
             "tmdb_api_key_set": bool(cfg["tmdb_api_key"]),
+            "external_entries": [
+                {"id": e["id"], "origin": e["origin"],
+                 "proxy_key_set": bool(e.get("proxy_key"))}
+                for e in cfg["external_entries"]
+            ],
         }
 
     def save_integration(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -317,9 +325,14 @@ class SettingsService:
             language = str(INTEGRATION_DEFAULTS["tmdb_language"])
         if len(language) > 16:
             raise ConfigError("TMDB 语言代码过长")
+        entries = validate_entries(
+            payload.get("external_entries", current["external_entries"]),
+            current["external_entries"], emby,
+        )
         self._store.set_section("integration", {
             "panel_public_url": panel, "emby_public_url": emby,
             "tmdb_api_key": api_creds, "tmdb_language": language,
+            "external_entries": entries,
         })
         return self.integration_public()
 
