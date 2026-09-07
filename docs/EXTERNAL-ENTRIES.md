@@ -139,8 +139,22 @@ The snippet enables upstream TLS certificate verification when using HTTPS.
 Keep the existing origin's TLS settings and merge locations into its server
 block; do not replace a production site wholesale.
 
-The nginx rule matches all four implemented prefixes (`/emby/Videos`,
-`/emby/videos`, `/Videos`, `/videos`) with GET/HEAD support. It sends
+Both origin templates intercept **only GET/HEAD** for the `stream` and
+`original` endpoints (optionally followed by a single container extension)
+under the four implemented prefixes (`/emby/Videos`, `/emby/videos`, `/Videos`,
+`/videos`). The path is end-anchored: subtitle management, AdditionalParts,
+HLS/DASH paths, similarly named endpoints and unsupported prefix spellings go
+straight to Emby. POST/DELETE/PUT/PATCH/OPTIONS also stay at Emby, including
+when sent to a stream/original path. Their method, body, raw query and caller
+authentication headers are preserved without asking the panel first.
+
+Caddy uses a combined method/path matcher. nginx checks the method before
+proxying and routes other methods through an internal 418 to its named Emby
+upstream; a named location preserves the request method and body. This is a
+request-routing guard, not a blanket fallback for a panel 405. An unexpected
+405 from an intercepted playback request remains visible.
+
+For eligible playback, nginx sends
 `X-Mediadeck-Proxy: nginx`, preserves the assertion and caller authentication
 headers, and disables inherited response caching. Signed decisions remain
 302; denied access rules remain 403. Non-accelerated requests return internal
@@ -181,6 +195,16 @@ selection and cross-entry cache isolation. With Caddy and OpenSSL installed,
 `tests/test_entry_proxy_live.py` also runs a real loopback Caddy against TLS
 mock upstreams to check signatures, byte ranges, Host/SNI, cache absence and
 WebSocket frames. This is a local integration test, not live-fleet acceptance.
+
+`tests/test_origin_proxy_scope.py` runs the generated **nginx and Caddy** origin
+templates against the actual FastAPI panel and a recording loopback Emby
+upstream. It checks subtitle POST/DELETE and other non-playback requests reach
+only Emby with the original method/body/query/auth, while the four video
+prefixes still return GET/HEAD 302 for official and registered entries. Both
+the existing transcode fallback and absence of blanket 405 handling are
+covered. Set `MEDIADECK_NGINX_BINARY` to an extracted nginx executable to test
+without installing or changing a system service; otherwise nginx must be on
+PATH. Only cases for unavailable proxy binaries are skipped.
 
 Before claiming a particular friend's deployment works, the operator still
 needs to install the reviewed release, register the entry, connect the actual

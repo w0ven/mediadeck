@@ -314,7 +314,8 @@ def test_entry_exports_require_admin_and_do_not_expose_keys_in_settings(client):
 
 def test_nginx_origin_template_covers_routes_trust_and_cache(client):
     config = client.get("/api/integration/frontend?server=nginx", auth=ADMIN).json()["config"]
-    assert "location ~* ^/(emby/)?videos/[^/]+/" in config
+    assert r"location ~ ^/(emby/)?[Vv]ideos/[^/]+/(?i:stream|original)(\.[A-Za-z0-9]+)?$" in config
+    assert 'if ($request_method !~ "^(GET|HEAD)$") { return 418; }' in config
     assert "proxy_set_header X-Mediadeck-Entry-Key $http_x_mediadeck_entry_key;" in config
     assert "proxy_set_header X-Mediadeck-Proxy nginx;" in config
     assert "error_page 418 500 502 503 504 = @mediadeck_emby_origin;" in config

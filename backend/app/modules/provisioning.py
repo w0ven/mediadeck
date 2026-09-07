@@ -419,6 +419,13 @@ echo "==========================================================="
 
 
 
+# Match the four prefixes registered by main.py. Scope case-insensitivity to
+# the playback endpoint: capturing other prefix spellings would turn Emby's
+# otherwise valid requests into the panel's 404. Anchor the endpoint so video
+# management, subtitles, HLS segments and similarly named paths stay at Emby.
+_PLAYBACK_PATH_RE = r"^/(emby/)?[Vv]ideos/[^/]+/(?i:stream|original)(\.[A-Za-z0-9]+)?$"
+
+
 def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
                           emby_origin_url: str = "") -> str:
     """Front-door rule that puts the panel on the real playback path.
@@ -435,10 +442,13 @@ def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
 
     if server == "nginx":
         return f"""# nginx — 加到 {emby_domain} 的 server 块里，放在 location / 之前
-# /emby/Videos, /emby/videos, /Videos and /videos, including stream/original.
+# GET/HEAD stream/original under /emby/Videos, /emby/videos, /Videos and /videos.
 # Use a private tunnel or verified TLS between this host and the panel.
 
-location ~* ^/(emby/)?videos/[^/]+/ {{
+location ~ {_PLAYBACK_PATH_RE} {{
+    # Method routing happens before proxying. A named error_page target keeps
+    # the original method, body and URI; no request reaches the panel first.
+    if ($request_method !~ "^(GET|HEAD)$") {{ return 418; }}
     proxy_pass {panel_host};
     proxy_set_header Host {panel_authority};
     proxy_ssl_server_name on;
@@ -491,10 +501,13 @@ location / {{
 """
 
     return f"""# Caddy — {emby_domain} 站点配置
-# /emby/Videos, /emby/videos, /Videos and /videos (stream/original).
+# GET/HEAD stream/original under /emby/Videos, /emby/videos, /Videos and /videos.
 # Use core Caddy without a cache handler; preserve entry headers only to panel.
 {emby_domain} {{
-    @stream path_regexp stream (?i)^/(emby/)?videos/[^/]+/
+    @stream {{
+        method GET HEAD
+        path_regexp stream {_PLAYBACK_PATH_RE}
+    }}
 
     handle @stream {{
         header Cache-Control "private, no-store"

@@ -4,6 +4,38 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-07 — restrict origin interception to playback GET/HEAD (draft revision)
+**Done**
+- Fixed the origin templates capturing every video API and method. In the
+  prior draft, subtitle POST/DELETE reached FastAPI's GET/HEAD-only video
+  handler, returned 405 and never reached Emby. New real-proxy regressions
+  reproduced that failure on both nginx and Caddy before changing the rules.
+- Both templates now share an end-anchored stream/original endpoint pattern
+  under the four exact supported video prefixes. Subtitle management,
+  AdditionalParts, HLS/DASH, similar endpoint names and other prefix spellings
+  go straight to Emby. Caddy combines the path matcher with GET/HEAD; nginx
+  routes other methods to its named Emby location before contacting the panel,
+  preserving method, body, query and authentication. No blanket 405 fallback.
+- Added real nginx/Caddy tests against the actual FastAPI panel and a recording
+  Emby origin: subtitle POST/DELETE, other methods even on playback paths,
+  non-playback GET/HEAD, a large subtitle upload exceeding nginx's body buffer,
+  official/registered entry playback on all four prefixes, ordinary transcode
+  fallback and unchanged handling of an unexpected panel 405.
+
+**Verification**
+- `ruff check app tests` plus the export helper: clean.
+- Full backend suite with **both proxy engines available: 966 passed**, zero
+  skipped, three existing dependency/lifespan deprecation warnings. Fourteen
+  new regressions execute real Caddy 2.6.2 and nginx 1.22.1; nginx is run from an
+  extracted package with isolated config, pid, logs and all temp directories.
+- No package installation or system service/config changes. Test proxies use
+  loopback sockets and are terminated by fixture cleanup.
+
+**Next**
+- Re-review the updated draft; no merge, release or deployment in this task.
+- Production and friend-side setup/real-client acceptance remain outstanding
+  as described in `docs/EXTERNAL-ENTRIES.md`.
+
 ## 2026-09-07 — registered external playback entries (draft PR)
 **Done**
 - Added an optional HTTPS entry registry to the existing integration settings
