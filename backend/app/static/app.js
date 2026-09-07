@@ -1525,10 +1525,11 @@ function connectLive(page) {
   live.page = page;
   const topics = LIVE[page];
   if (!topics || !topics.length) { setLiveState(false, '按需更新'); return; }
-  const route = state.route;
   const src = new EventSource(`/api/stream?topics=${topics.join(',')}`);
   live.src = src;
-  const current = () => live.src === src && state.page === page && state.route === route;
+  // Same-page detail/tab URL changes do not replace this connection. A full
+  // navigation creates a different src, so obsolete callbacks still fail.
+  const current = () => live.src === src && state.page === page;
   src.onopen = () => { if (current()) { live.retry = 0; setLiveState(true); } };
   topics.forEach((topic) => src.addEventListener(topic, (event) => {
     if (!current()) return;
@@ -1546,7 +1547,7 @@ function connectLive(page) {
     live.retry = Math.min(live.retry + 1, 6);
     live.retryTimer = setTimeout(() => {
       live.retryTimer = null;
-      if (live.page === page && state.page === page && state.route === route) connectLive(page);
+      if (live.page === page && state.page === page) connectLive(page);
     }, Math.min(30000, 1000 * 2 ** (live.retry - 1)));
   };
 }

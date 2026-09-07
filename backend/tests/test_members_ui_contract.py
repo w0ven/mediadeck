@@ -28,9 +28,11 @@ def test_members_js_uses_live_updater_contract() -> None:
     assert "renderPage(" not in src
 
 
-def test_app_js_untouched_by_members_page() -> None:
+def test_app_js_owns_shell_not_members_page() -> None:
     src = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert "registerLiveUpdater" not in src
+    assert "function registerLiveUpdater" in src
+    assert "function pageContext" in src
+    assert "function renderView" in src
     assert "PAGES.members =" not in src
 
 

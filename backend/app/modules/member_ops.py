@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import time
+from datetime import UTC, datetime
 from typing import Any
 
 from app.core.errors import ConfigError, ConflictError
@@ -21,17 +22,30 @@ _SECRET_RE = re.compile(
 )
 _ABSENT_RE = re.compile(r"\b(404|not\s*found|no such user|user not found)\b", re.IGNORECASE)
 
+def activity_timestamp(member: dict[str, Any]) -> int:
+    """Sort by the same Emby activity timestamp displayed in the member row."""
+    raw = member.get("last_activity")
+    if raw:
+        try:
+            stamp = datetime.fromisoformat(str(raw))
+            if stamp.tzinfo is None:
+                stamp = stamp.replace(tzinfo=UTC)
+            return int(stamp.timestamp())
+        except (ValueError, OverflowError):
+            pass
+    return int(member.get("last_activity_ts") or member.get("last_seen_at") or 0)
+
+
 SORTS = {
     "username": lambda m: (m.get("username") or "").lower(),
     "group": lambda m: (m.get("group_name") or "").lower(),
-    "expires": lambda m: int(m.get("expires_at_effective") or m.get("expires_at") or 0),
+    "expires": lambda m: int(m.get("expires_at_effective", m.get("expires_at")) or 0),
     "state": lambda m: m.get("entitlement_state") or m.get("state") or "",
     "emby": lambda m: m.get("emby_status") or "",
     "sync": lambda m: m.get("sync_status") or "",
     "used": lambda m: int(m.get("traffic_used_bytes") or 0),
     "edge30": lambda m: int((m.get("edge") or {}).get("bytes_30d") or 0),
-    "last_seen": lambda m: int(
-        m.get("last_activity_ts") or m.get("last_seen_at") or 0),
+    "last_seen": activity_timestamp,
 }
 
 

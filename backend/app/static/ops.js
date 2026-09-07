@@ -158,6 +158,142 @@ function fmtKbps(n) {
   return (Number.isInteger(mb) ? String(mb) : mb.toFixed(1)) + ' MB/s';
 }
 
+function boolLabel(v) { return v ? '允许' : '禁止'; }
+function localInputFromTs(ts) {
+  const d = new Date(Number(ts) * 1000);
+  if (Number.isNaN(d.getTime())) return '';
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+function flagSelect(id, value) {
+  const cur = (value === 0 || value === false) ? '0' : (value === 1 || value === true) ? '1' : '';
+  return `<select id="${esc(id)}" aria-label="${esc(id)}">
+    <option value="" ${cur === '' ? 'selected' : ''}>继承</option>
+    <option value="1" ${cur === '1' ? 'selected' : ''}>允许</option>
+    <option value="0" ${cur === '0' ? 'selected' : ''}>禁止</option>
+  </select>`;
+}
+function ovSource(m, key, groupVal, effVal, fmt) {
+  const ov = (m.overrides || {});
+  const hit = (m.overridden_keys || []).includes(key) || Object.prototype.hasOwnProperty.call(ov, key);
+  const shown = fmt ? fmt(effVal) : String(effVal == null ? '-' : effVal);
+  const inherited = fmt ? fmt(groupVal) : String(groupVal == null ? '-' : groupVal);
+  if (hit) return `<span class="tag override">已覆盖(${esc(shown)})</span>`;
+  return `<span class="tag inherit">继承用户组(${esc(inherited)})</span>`;
+}
+const BW_PRESETS = [
+  { label: '不限速', mbps: 0 },
+  { label: '5 MB/s', mbps: 5 },
+  { label: '10 MB/s', mbps: 10 },
+  { label: '15 MB/s', mbps: 15 },
+  { label: '20 MB/s', mbps: 20 },
+];
+function bwPresetButtons(inputId) {
+  return BW_PRESETS.map((p) =>
+    `<button class="btn sm" type="button" onclick="document.getElementById('${inputId}').value='${p.mbps}'">${esc(p.label)}</button>`).join(' ');
+}
+function overrideEditor(m, libs) {
+  const ov = m.overrides || {};
+  const grp = m.group || {};
+  const eff = m.effective || {};
+  const sel = new Set(ov.libraries || []);
+  const libOpts = (libs || []).map((l) => {
+    const id = l.id || l.name;
+    return `<label style="margin-right:10px"><input type="checkbox" class="ov-lib" value="${esc(id)}" ${sel.has(id) ? 'checked' : ''}> ${esc(l.name)}</label>`;
+  }).join('') || '<span class="muted">无法读取媒体库</span>';
+  const num = (k) => (ov[k] != null ? ov[k] : '');
+  const mode = ov.libraries_mode || 'inherit';
+  const exp = ov.expires_at_override ? localInputFromTs(ov.expires_at_override) : '';
+  const expMode = Object.prototype.hasOwnProperty.call(ov, 'expires_at_override') ? (ov.expires_at_override == null ? 'forever' : 'date') : 'inherit';
+  const extraGib = ov.extra_traffic_bytes ? (ov.extra_traffic_bytes / (1024 ** 3)).toFixed(2) : '';
+  return `
+    <div class="ov-row"><div class="ov-label">并发</div>
+      <div class="ov-src">${ovSource(m, 'max_streams', grp.max_streams || 0, eff.max_streams, (v) => v ? v + ' 路' : '不限')}</div>
+      <div class="ov-controls"><input id="ov-streams" aria-label="并发覆盖" type="number" min="0" placeholder="继承" value="${esc(num('max_streams'))}" style="width:90px">
+        <span class="muted">0=不限</span>
+        <button class="btn sm" type="button" onclick="clearOverrideField('max_streams')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">带宽限速</div>
+      <div class="ov-src">${ovSource(m, 'bandwidth_limit_kbps', grp.bandwidth_limit_kbps || 0, eff.bandwidth_limit_kbps, fmtKbps)}</div>
+      <div class="ov-controls">
+        <div style="margin-bottom:4px">${bwPresetButtons('ov-bandwidth')}</div>
+        <input id="ov-bandwidth" aria-label="带宽覆盖" type="number" min="0" step="0.1" placeholder="继承" value="${esc(num('bandwidth_limit_kbps') === '' ? '' : kbpsToMBps(num('bandwidth_limit_kbps')))}" style="width:110px">
+        <span class="muted">MB/s，0=不限速。保存后正在播放的人会重签限速。</span>
+        <button class="btn sm" type="button" onclick="clearOverrideField('bandwidth_limit_kbps')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">设备</div>
+      <div class="ov-src">${ovSource(m, 'max_devices', grp.max_devices || 0, eff.max_devices, (v) => v ? v + ' 台' : '不限')}</div>
+      <div class="ov-controls"><input id="ov-devices" aria-label="设备上限覆盖" type="number" min="0" placeholder="继承" value="${esc(num('max_devices'))}" style="width:90px">
+        <button class="btn sm" type="button" onclick="clearOverrideField('max_devices')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">转码</div>
+      <div class="ov-src">${ovSource(m, 'allow_transcode', grp.allow_transcode, eff.allow_transcode, boolLabel)}</div>
+      <div class="ov-controls">${flagSelect('ov-transcode', ov.allow_transcode)}
+        <button class="btn sm" type="button" onclick="clearOverrideField('allow_transcode')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">下载</div>
+      <div class="ov-src">${ovSource(m, 'allow_download', grp.allow_download, eff.allow_download, boolLabel)}</div>
+      <div class="ov-controls">${flagSelect('ov-download', ov.allow_download)}
+        <button class="btn sm" type="button" onclick="clearOverrideField('allow_download')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">媒体库</div>
+      <div class="ov-src">${ovSource(m, 'libraries_mode', 'inherit', eff.libraries_mode || 'inherit')}</div>
+      <div class="ov-controls">
+        <select id="ov-libmode">
+          ${['inherit', 'replace', 'extend'].map((x) => `<option value="${x}" ${mode === x ? 'selected' : ''}>${esc({ inherit: '继承', replace: '替换', extend: '追加' }[x])}</option>`).join('')}
+        </select>
+        <button class="btn sm" type="button" onclick="clearOverrideField('libraries')">还原</button>
+        <div>${libOpts}</div></div></div>
+    <div class="ov-row"><div class="ov-label">到期覆盖</div>
+      <div class="ov-src">${ovSource(m, 'expires_at_override', grp.duration_days ? (grp.duration_days + ' 天') : '不限期', (m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at), (v) => typeof v === 'string' ? v : v ? fmtExpiry(v) : '不限期')}</div>
+      <div class="ov-controls"><select id="ov-exp-mode" aria-label="到期覆盖模式">${[['inherit','继承原期限'],['date','指定到期'],['forever','不限期覆盖']].map(([key,label]) => `<option value="${key}" ${expMode === key ? 'selected' : ''}>${label}</option>`).join('')}</select><input id="ov-exp" aria-label="指定到期时间" type="datetime-local" value="${esc(exp)}">
+        <button class="btn sm" type="button" onclick="clearOverrideField('expires_at_override')">还原</button></div></div>
+    <div class="ov-row"><div class="ov-label">额外流量</div>
+      <div class="ov-src">${ovSource(m, 'extra_traffic_bytes', 0, (m.overrides || {}).extra_traffic_bytes || 0, fmtBytes)}</div>
+      <div class="ov-controls"><input id="ov-extra" aria-label="额外流量GiB" type="number" min="0" step="0.01" placeholder="0" value="${esc(extraGib)}" style="width:110px">
+        <span class="muted">GiB，叠加在本月额度上，月初清零</span>
+        <button class="btn sm" type="button" onclick="clearOverrideField('extra_traffic_bytes')">还原</button></div></div>
+    <div class="toolbar" style="margin-top:10px">
+      <button class="btn primary" type="button" id="ov-save">保存覆盖</button>
+      <button class="btn" type="button" id="ov-clear">全部还原</button>
+    </div>`;
+}
+function collectOverridesFromForm(existing) {
+  const ov = Object.assign({}, existing || {});
+  const streams = ($('#ov-streams') || {}).value;
+  if (streams === '' || streams == null) delete ov.max_streams;
+  else ov.max_streams = parseInt(streams, 10);
+  const bandwidth = ($('#ov-bandwidth') || {}).value;
+  if (bandwidth === '' || bandwidth == null) delete ov.bandwidth_limit_kbps;
+  else ov.bandwidth_limit_kbps = mBpsToKbps(parseFloat(bandwidth));
+  const devices = ($('#ov-devices') || {}).value;
+  if (devices === '' || devices == null) delete ov.max_devices;
+  else ov.max_devices = parseInt(devices, 10);
+  const readFlag = (elId, key) => {
+    const v = (($('#' + elId) || {}).value || '');
+    if (v === '') delete ov[key];
+    else ov[key] = v === '1' ? 1 : 0;
+  };
+  readFlag('ov-transcode', 'allow_transcode');
+  readFlag('ov-download', 'allow_download');
+  const mode = (($('#ov-libmode') || {}).value || 'inherit');
+  const libs = [...document.querySelectorAll('.ov-lib:checked')].map((x) => x.value);
+  if (mode === 'inherit') {
+    delete ov.libraries_mode; delete ov.libraries;
+  } else {
+    ov.libraries_mode = mode;
+    ov.libraries = libs;
+  }
+  const exp = (($('#ov-exp') || {}).value || '').trim();
+  const expMode = ($('#ov-exp-mode') || {}).value || 'inherit';
+  if (expMode === 'inherit') delete ov.expires_at_override;
+  else if (expMode === 'forever') ov.expires_at_override = null;
+  else {
+    const stamp = Math.floor(new Date(exp).getTime() / 1000);
+    if (!Number.isFinite(stamp)) throw new Error('请选择有效的到期时间');
+    ov.expires_at_override = stamp;
+  }
+  const extra = (($('#ov-extra') || {}).value || '').trim();
+  if (extra === '') delete ov.extra_traffic_bytes;
+  else ov.extra_traffic_bytes = Math.round(parseFloat(extra) * 1024 ** 3);
+  return ov;
+}
+
 /* ---------------- user groups ---------------- */
 PAGES.groups = async () => {
   $('#view').innerHTML = pageLoading();

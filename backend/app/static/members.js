@@ -19,6 +19,8 @@
     writingHash: false,
     liveSrc: null,
     liveBound: false,
+    detailVersion: 0,
+    detail: null,
   };
 
   function hasLiveShell() {
@@ -55,6 +57,7 @@
       q: 'search', page: 'page', page_size: 'page_size', sort: 'sort',
       order: 'order', status: 'status', group_id: 'group_id', tg: 'tg',
       expiring: 'expiring', emby_status: 'emby_status', sync_status: 'sync_status',
+      role: 'role', register_via: 'register_via', inviter_id: 'inviter_id',
     };
     Object.keys(map).forEach((k) => {
       const v = params.get(k);
@@ -91,6 +94,7 @@
     ms.writingHash = true;
     const next = '#/' + route;
     if (location.hash !== next) history.replaceState(null, '', next);
+    if (hasLiveShell()) state.route = route;
     ms.writingHash = false;
     return 'local';
   }
@@ -157,7 +161,7 @@
   }
 
   function expiryCell(m) {
-    const ts = m.expires_at_effective || m.expires_at;
+    const ts = (m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at);
     const label = ts ? fmtExpiry(ts) : '不限期';
     const extra = m.overridden_keys && m.overridden_keys.includes('expires_at_override')
       ? '<div class="muted">个人覆盖</div>' : '';
@@ -177,7 +181,8 @@
       <td>${esc(m.last_activity ? fmtAgeTs(Date.parse(m.last_activity) / 1000) : (m.last_seen_at ? fmtAgeTs(m.last_seen_at) : '—'))}</td>
       <td class="row-actions">
         <button class="btn sm" type="button" data-act="open" data-id="${esc(id)}">详情</button>
-        <button class="btn sm danger" type="button" data-act="delete" data-id="${esc(id)}" data-name="${esc(m.username)}">删除</button>
+        <button class="btn sm danger" type="button" data-act="delete" data-id="${esc(id)}" data-name="${esc(m.username)}">删除本人</button>
+        ${m.inviter_id ? `<button class="btn sm danger" type="button" data-act="delete-cascade" data-id="${esc(id)}" data-name="${esc(m.username)}">连带邀请人…</button>` : ''}
       </td>
     </tr>`;
   }
@@ -204,13 +209,15 @@
       <button class="btn sm" type="button" data-act="page" data-page="${page + 1}" ${page >= pages ? 'disabled' : ''}>下一页</button>
       <label class="muted">每页
         <select id="m-page-size" aria-label="每页条数">
-          ${[25, 50, 100].map((n) => `<option value="${n}" ${n === size ? 'selected' : ''}>${n}</option>`).join('')}
+          ${[...new Set([Number(size), 25, 50, 100])].sort((a,b) => a-b).map((n) => `<option value="${n}" ${n === Number(size) ? 'selected' : ''}>${n}</option>`).join('')}
         </select>
       </label>
     </div>`;
   }
 
   function filterBar(params, groups) {
+    const pick = (id, key, label, options, fallback = '') => `<label>${label} <select id="${id}" aria-label="${label}">${options.map(([value,text]) => `<option value="${value}" ${(params.get(key) || fallback) === value ? 'selected' : ''}>${text}</option>`).join('')}</select></label>`;
+    const labels = {active:'正常',expired:'已过期',exhausted:'额度用尽',suspended:'手动停用',pending:'待开通',present:'存在',missing:'缺失',unknown:'未知',in_sync:'已同步',drift:'策略漂移',failed:'失败',never_applied:'从未下发',emby_missing:'账号缺失'};
     const gopts = groups.map((g) =>
       `<option value="${esc(g.id)}" ${params.get('group_id') === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
     return `<div class="toolbar members-filters" id="members-filters" data-live-preserve>
@@ -218,19 +225,27 @@
       <label>状态 <select id="m-status" aria-label="权益状态">
         <option value="">全部</option>
         ${['active', 'expired', 'exhausted', 'suspended', 'pending'].map((s) =>
-          `<option value="${s}" ${params.get('status') === s ? 'selected' : ''}>${s}</option>`).join('')}
+          `<option value="${s}" ${params.get('status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
       <label>用户组 <select id="m-group" aria-label="用户组"><option value="">全部</option>${gopts}</select></label>
       <label>Emby <select id="m-emby" aria-label="Emby 状态">
         <option value="">全部</option>
         ${['present', 'missing', 'unknown'].map((s) =>
-          `<option value="${s}" ${params.get('emby_status') === s ? 'selected' : ''}>${s}</option>`).join('')}
+          `<option value="${s}" ${params.get('emby_status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
       <label>同步 <select id="m-sync" aria-label="同步状态">
         <option value="">全部</option>
         ${['in_sync', 'drift', 'failed', 'never_applied', 'emby_missing'].map((s) =>
-          `<option value="${s}" ${params.get('sync_status') === s ? 'selected' : ''}>${s}</option>`).join('')}
+          `<option value="${s}" ${params.get('sync_status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
+      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['edge30','直链30天用量'],['last_seen','最近活跃']], 'username')}
+      ${pick('m-order','order','顺序',[['asc','升序'],['desc','降序']], 'asc')}
+      <details><summary>更多筛选</summary><div class="toolbar">
+        ${pick('m-tg','tg','TG绑定',[['','全部'],['bound','已绑定'],['unbound','未绑定']])}
+        ${pick('m-expiring','expiring','到期',[['','全部'],['soon','7天内'],['gone','已过期']])}
+        ${pick('m-role','role','角色',[['','全部'],['admin','管理员'],['uploader','上片员']])}
+        ${pick('m-via','register_via','注册渠道',[['','全部'],['admin','管理员授权'],['invite','邀请'],['redeem','卡密'],['legacy','历史导入']])}
+      </div></details>
       <button class="btn" type="button" id="m-reset">重置筛选</button>
     </div>`;
   }
@@ -247,6 +262,9 @@
         <span class="muted" id="m-sel-count">已选 ${ms.selected.size} 人（跨页勾选不会操作未选用户）</span>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="renew">续期</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="suspend">停用</button>
+        <button class="btn sm" type="button" data-act="bulk" data-bulk="activate">启用</button>
+        <button class="btn sm" type="button" data-act="bulk" data-bulk="reset-traffic">重置用量</button>
+        <button class="btn sm" type="button" data-act="clear-selection">取消选择</button>
         <button class="btn sm" type="button" data-act="enforce">策略预览</button>
       </div>
       ${err}
@@ -281,7 +299,8 @@
       };
     }
     [['m-status', 'status'], ['m-group', 'group_id'], ['m-emby', 'emby_status'],
-      ['m-sync', 'sync_status']].forEach(([id, key]) => {
+      ['m-sync', 'sync_status'], ['m-sort','sort'], ['m-order','order'], ['m-tg','tg'],
+      ['m-expiring','expiring'], ['m-role','role'], ['m-via','register_via']].forEach(([id, key]) => {
       const el = document.getElementById(id);
       if (el && !el.dataset.bound) {
         el.dataset.bound = '1';
@@ -322,18 +341,23 @@
     const root = $('#members-page');
     if (!root || root.dataset.bound) return;
     root.dataset.bound = '1';
-    root.onclick = (e) => {
+    root.onclick = async (e) => {
       const btn = e.target.closest('[data-act]');
-      if (!btn) return;
+      if (!btn || btn.disabled) return;
       const act = btn.dataset.act;
       const id = btn.dataset.id;
-      if (act === 'open') openDetail(id);
-      if (act === 'delete') confirmDelete(id, btn.dataset.name);
-      if (act === 'retry') retryRemote(id);
-      if (act === 'page') setParam('page', btn.dataset.page);
-      if (act === 'bulk') bulk(btn.dataset.bulk);
-      if (act === 'enforce') showEnforcement();
-      if (act === 'enrol') enrol(id, btn.dataset.name);
+      try {
+        if (act === 'open') await openDetail(id);
+        if (act === 'delete') await confirmDelete(id, btn.dataset.name, false);
+        if (act === 'delete-cascade') await confirmDelete(id, btn.dataset.name, true);
+        if (act === 'retry') await retryRemote(id);
+        if (act === 'page') setParam('page', btn.dataset.page);
+        if (act === 'bulk') await bulk(btn.dataset.bulk);
+        if (act === 'clear-selection') { ms.selected.clear(); patchSelection(); }
+        if (act === 'enforce') await showEnforcement();
+        if (act === 'enrol') await enrol(id, btn.dataset.name);
+        if (act === 'invitees') setParam('inviter_id', id);
+      } catch (error) { toast('操作失败: ' + error.message, 1); }
     };
     root.onchange = (e) => {
       const box = e.target.closest('.m-pick');
@@ -343,6 +367,7 @@
       patchSelection();
     };
     root.onkeydown = (e) => {
+      if (e.target.closest('button,input,select,textarea,a')) return;
       const tr = e.target.closest('tr[data-id]');
       if (tr && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
@@ -377,8 +402,6 @@
     if (!context.live) {
       if (typeof renderView === 'function') renderView(pageLoading(), context);
       else $('#view').innerHTML = pageLoading();
-    } else if (typeof isEditing === 'function' && isEditing()) {
-      return;
     }
     try {
       const [listing, groups] = await Promise.all([
@@ -434,12 +457,18 @@
   async function fillDetail(id, tab) {
     const host = $('#member-detail');
     if (!host) return;
+    const version = ++ms.detailVersion;
+    const current = () => version === ms.detailVersion && host.isConnected && host.dataset.uid === id;
     host.classList.remove('hidden');
     host.dataset.uid = id;
     host.innerHTML = '<div class="card"><div class="card-body">加载详情…</div></div>';
     try {
       const d = await api(`/api/members/${encodeURIComponent(id)}?days=30`);
+      if (!current()) return;
+      ms.detail = d;
       const m = d.member || {};
+      const libs = tab === 'entitlements' ? await api('/api/emby/libraries').catch(() => []) : [];
+      if (!current()) return;
       const tabs = TABS.map(([k, label]) =>
         `<button class="tab ${k === tab ? 'active' : ''}" type="button" data-tab="${k}">${esc(label)}</button>`).join('');
       let body = '';
@@ -449,7 +478,7 @@
         body = `<dl class="member-kv">
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')}</dd>
           <dt>Emby</dt><dd>${embySyncCell(m)}</dd>
-          <dt>到期</dt><dd>${esc(fmtExpiry(m.expires_at_effective || m.expires_at))}</dd>
+          <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>配额用量</dt><dd>${esc(fmtBytes(m.traffic_used_bytes || 0))} / ${esc(m.traffic_quota_bytes ? fmtBytes(m.traffic_quota_bytes) : '不限')}</dd>
           <dt>直链 7/30/累计</dt><dd>${esc(fmtBytes((d.edge && d.edge.bytes_7d) || (m.edge || {}).bytes_7d || 0))}
             · ${esc(fmtBytes((d.edge && d.edge.bytes_30d) || (m.edge || {}).bytes_30d || 0))}
@@ -466,17 +495,28 @@
             </select>
             <button class="btn sm" type="button" id="md-group-go">换组</button></label>
           <button class="btn sm" type="button" id="md-retry">重试远端</button>
-        </div>`;
+          <button class="btn sm" type="button" data-member-action="status">${m.state === 'suspended' ? '解除手动停用' : '停用账号'}</button>
+          <button class="btn sm" type="button" data-member-action="password">重置密码</button>
+          <button class="btn sm" type="button" data-member-action="kick">结束当前播放</button>
+          <button class="btn sm" type="button" data-member-action="reset-traffic">重置本月用量</button>
+          ${m.tg_user_id ? '<button class="btn sm" type="button" data-member-action="telegram/unbind">解除TG绑定</button>' : ''}
+        </div>
+        <h4>近30天统计</h4><p>播放 ${esc((d.usage || {}).plays || 0)} 次 · ${esc((d.usage || {}).hours || 0)} 小时 · 会话估算 ${fmtBytes((d.usage || {}).bytes || 0)}</p>
+        ${edgeHistory(d.edge)}`;
       } else if (tab === 'entitlements') {
-        body = `<p class="help">组 ${esc(m.group_name)} · 覆盖 ${esc((m.overridden_keys || []).join(', ') || '无')}</p>
-          <pre class="members-pre">${esc(JSON.stringify(m.effective || {}, null, 2))}</pre>`;
+        body = `<p class="help">组 ${esc(m.group_name)}；个人覆盖优先。修改后点击保存才生效。</p>
+          <div class="toolbar" id="md-roles">
+            ${[['admin','管理员（可登录面板）'],['uploader','上片员']].map(([role,label]) => `<label><input type="checkbox" class="md-role" value="${role}" ${(m.roles || []).includes(role) ? 'checked' : ''}> ${label}</label>`).join('')}
+            <button class="btn sm" type="button" id="md-roles-save">保存角色</button>
+          </div><div id="md-overrides">${overrideEditor(m, libs)}</div>`;
       } else if (tab === 'devices') {
         const devices = d.devices || [];
         const plays = d.plays || d.recent_plays || [];
         body = devices.length
           ? `<table><thead><tr><th>设备</th><th>客户端</th><th></th></tr></thead><tbody>${devices.map((x) => `<tr>
               <td>${esc(x.device_name || x.device_id)}</td><td>${esc(x.client || '')}</td>
-              <td><button class="btn sm" type="button" data-dev="${esc(x.device_id)}" data-block="${x.blocked ? '0' : '1'}">${x.blocked ? '解禁' : '封锁'}</button></td>
+              <td><button class="btn sm" type="button" data-dev="${esc(x.device_id)}" data-block="${x.blocked ? '0' : '1'}">${x.blocked ? '解禁' : '封锁'}</button>
+              <button class="btn sm" type="button" data-forget-device="${esc(x.device_id)}">移除设备记录</button></td>
             </tr>`).join('')}</tbody></table>`
           : '<div class="empty">无设备记录</div>';
         body += `<h4>最近播放</h4>` + (plays.length
@@ -484,6 +524,9 @@
           : '<div class="empty">暂无播放</div>');
       } else if (tab === 'invites') {
         body = `<p>积分 ${esc(d.points || 0)} · 邀请名额 ${esc(m.invite_quota || 0)} · 下级 ${esc(m.invitee_count || 0)}</p>
+          <p>邀请人：${esc(m.inviter_name || '—')} · 注册渠道：${esc(m.register_via || 'legacy')} <button class="btn sm" data-act="invitees" data-id="${esc(id)}">查看其邀请用户</button></p>
+          <div class="toolbar"><label>调整积分 <input id="md-points-delta" type="number" step="1" value="0"></label><label>原因 <input id="md-points-reason" maxlength="100"></label><button class="btn sm" id="md-points-save">提交调整</button></div>
+          <details><summary>积分流水</summary>${(d.points_ledger || []).map((entry) => `<p>${esc(entry.delta)} · ${esc(entry.reason || entry.action || '')}</p>`).join('') || '<p>暂无流水</p>'}</details>
           <p class="help">求片剩余 ${esc(d.request_remaining == null ? '—' : d.request_remaining)}</p>
           ${(d.requests || []).length
             ? `<ul>${d.requests.map((r) => `<li>${esc(r.title || r.query || r.id)} · ${esc(r.status)}</li>`).join('')}</ul>`
@@ -511,25 +554,135 @@
       const close = $('#md-close');
       if (close) close.onclick = () => {
         const p = currentParams(); p.delete('id'); p.delete('tab'); writeHash(p, { navigate: false });
+        ms.detailVersion++; ms.detail = null;
         host.classList.add('hidden'); host.innerHTML = ''; host.dataset.uid = '';
       };
+      bindMemberActions(host, id, m, tab);
       const renew = $('#md-renew');
-      if (renew) renew.onclick = () => memberRenew(id);
+      if (renew) renew.onclick = () => runMemberAction(renew, () => memberRenew(id));
       const groupGo = $('#md-group-go');
-      if (groupGo) groupGo.onclick = () => memberGroup(id);
+      if (groupGo) groupGo.onclick = () => runMemberAction(groupGo, () => memberGroup(id));
       const retry = $('#md-retry');
-      if (retry) retry.onclick = () => retryRemote(id);
+      if (retry) retry.onclick = () => runMemberAction(retry, () => retryRemote(id));
       host.querySelectorAll('[data-dev]').forEach((b) => {
-        b.onclick = async () => {
+        b.onclick = () => runMemberAction(b, async () => {
           const blocked = b.dataset.block === '1';
+          if (!confirm(`${blocked ? '封锁' : '解封'}这个设备？`)) return;
           const path = blocked ? 'block' : 'unblock';
-          await api(`/api/members/${encodeURIComponent(id)}/devices/${encodeURIComponent(b.dataset.dev)}/${path}`, { method: 'POST' });
+          const r = await api(`/api/members/${encodeURIComponent(id)}/devices/${encodeURIComponent(b.dataset.dev)}/${path}`, { method: 'POST' });
+          assertRemoteResult(r);
           fillDetail(id, 'devices');
-        };
+        });
       });
     } catch (e) {
+      if (!current()) return;
       host.innerHTML = `<div class="card"><div class="card-body">详情失败：${esc(e.message)}</div></div>`;
     }
+  }
+
+  function assertRemoteResult(result) {
+    if (!result || result.ok === false || result.remote_ok === false || result.local_ok === false) {
+      throw new Error((result && (result.error || result.errors?.[0]?.error)) || '远端操作未完成');
+    }
+    return result;
+  }
+
+  async function runMemberAction(button, action) {
+    if (button?.disabled) return;
+    if (button) button.disabled = true;
+    try { await action(); } catch (error) { toast('操作失败: ' + error.message, 1); }
+    finally { if (button?.isConnected) button.disabled = false; }
+  }
+
+  function edgeHistory(edge) {
+    if (!edge) return '';
+    const nodes = edge.by_node || [];
+    const days = edge.by_day || [];
+    return `<details><summary>直链节点与每日用量</summary>
+      ${nodes.length ? `<table><thead><tr><th>节点</th><th>发送字节</th><th>请求</th></tr></thead><tbody>${nodes.map((n) => `<tr><td>${esc(n.node)}</td><td>${fmtBytes(n.bytes)}</td><td>${esc(n.requests)}</td></tr>`).join('')}</tbody></table>` : '<p>暂无节点账本</p>'}
+      ${days.length ? `<table><thead><tr><th>日期</th><th>发送字节</th></tr></thead><tbody>${days.map((d) => `<tr><td>${esc(d.day)}</td><td>${fmtBytes(d.bytes)}</td></tr>`).join('')}</tbody></table>` : ''}</details>`;
+  }
+
+  function resetOverrideInput(key) {
+    const ids = {max_streams:'ov-streams',bandwidth_limit_kbps:'ov-bandwidth',max_devices:'ov-devices',
+      allow_transcode:'ov-transcode',allow_download:'ov-download',extra_traffic_bytes:'ov-extra'};
+    if (ids[key] && document.getElementById(ids[key])) document.getElementById(ids[key]).value = '';
+    if (key === 'libraries') {
+      $('#ov-libmode').value = 'inherit';
+      document.querySelectorAll('.ov-lib').forEach((box) => { box.checked = false; });
+    }
+    if (key === 'expires_at_override') {
+      $('#ov-exp-mode').value = 'inherit'; $('#ov-exp').value = '';
+    }
+  }
+
+  function bindMemberActions(host, id, member, tab) {
+    const endpoint = `/api/members/${encodeURIComponent(id)}`;
+    host.querySelectorAll('[data-member-action]').forEach((button) => {
+      button.onclick = () => runMemberAction(button, async () => {
+        const action = button.dataset.memberAction;
+        let body = {};
+        if (action === 'password') {
+          const value = prompt('新密码（至少6位；留空随机生成）', '');
+          if (value === null) return;
+          if (value && value.length < 6) throw new Error('密码至少6位');
+          body = value ? {password:value} : {};
+        } else {
+          const names = {status:member.state === 'suspended' ? '解除手动停用' : '停用账号',
+            kick:'结束当前所有播放','reset-traffic':'重置本月已用额度（保留历史账本）',
+            'telegram/unbind':'解除Telegram绑定'};
+          if (!confirm(`确认${names[action]}？`)) return;
+          if (action === 'status') body.status = member.state === 'suspended' ? 'active' : 'suspended';
+        }
+        const result = assertRemoteResult(await api(endpoint + '/' + action, {
+          method:'POST', body:JSON.stringify(body),
+        }));
+        if (action === 'password' && result.password) {
+          openModal('新密码（仅本次展示）', `<div class="card-body"><label>新密码 <input type="text" readonly autocomplete="off" value="${esc(result.password)}"></label><p>请妥善保存，关闭后不再显示。</p></div>`);
+        } else toast(action === 'kick' ? `已结束 ${result.stopped || 0} 路播放` : '操作已完成');
+        await refreshNow();
+        await fillDetail(id, tab);
+      });
+    });
+    host.querySelectorAll('[data-forget-device]').forEach((button) => {
+      button.onclick = () => runMemberAction(button, async () => {
+        if (!confirm('移除这个设备的面板记录？不会删除其它设备。')) return;
+        assertRemoteResult(await api(endpoint + '/devices/' + encodeURIComponent(button.dataset.forgetDevice), {method:'DELETE'}));
+        await fillDetail(id, 'devices');
+      });
+    });
+    const roles = $('#md-roles-save');
+    if (roles) roles.onclick = () => runMemberAction(roles, async () => {
+      const selected = [...host.querySelectorAll('.md-role:checked')].map((input) => input.value);
+      if (!confirm(`确认修改角色为 ${selected.join('、') || '普通成员'}？管理员角色允许登录管理面板。`)) return;
+      assertRemoteResult(await api(endpoint + '/roles', {method:'POST',body:JSON.stringify({roles:selected})}));
+      toast('角色已保存'); await refreshNow(); await fillDetail(id, 'entitlements');
+    });
+    const save = $('#ov-save');
+    if (save) save.onclick = () => runMemberAction(save, async () => {
+      if (![...host.querySelectorAll('#md-overrides input')].every((input) => input.reportValidity())) return;
+      const overrides = collectOverridesFromForm(member.overrides || {});
+      if (!confirm('保存个人权限覆盖？限速变化可能结束当前播放以重新生效。')) return;
+      const result = await api(endpoint + '/overrides', {method:'PUT',body:JSON.stringify(overrides)});
+      if (!toastResult(result, '权限覆盖已保存')) return;
+      await refreshNow(); await fillDetail(id, 'entitlements');
+    });
+    const clear = $('#ov-clear');
+    if (clear) clear.onclick = () => runMemberAction(clear, async () => {
+      if (!confirm('清除全部个人覆盖并继承用户组？')) return;
+      const result = await api(endpoint + '/overrides', {method:'PUT',body:'{}'});
+      if (!toastResult(result, '个人覆盖已清除')) return;
+      await refreshNow(); await fillDetail(id, 'entitlements');
+    });
+    const points = $('#md-points-save');
+    if (points) points.onclick = () => runMemberAction(points, async () => {
+      const delta = Number($('#md-points-delta').value);
+      const reason = $('#md-points-reason').value.trim();
+      if (!Number.isInteger(delta) || delta === 0 || !reason) throw new Error('请填写非零整数积分及调整原因');
+      if (!confirm(`确认调整积分 ${delta > 0 ? '+' : ''}${delta}？原因：${reason}`)) return;
+      assertRemoteResult(await api(`/api/points/${encodeURIComponent(id)}/adjust`, {method:'POST',body:JSON.stringify({delta,reason})}));
+      toast('积分已调整'); await fillDetail(id, 'invites');
+    });
   }
 
   async function memberRenew(id) {
@@ -570,43 +723,29 @@
     await refreshNow();
   }
 
-  async function confirmDelete(id, name) {
-    const preview = await api(`/api/members/${encodeURIComponent(id)}/delete-preview`);
-    const available = preview.available_cascade || [];
-    let cascade = false;
-    if (available.length) {
-      cascade = confirm(`删除 ${name || id}？\n默认只删本人。\n确定要连带邀请人（${available.map((c) => c.username).join('、')}）请再点一次确认。\n先取消则只删本人。`);
-      if (cascade) {
-        const casc = await api(`/api/members/${encodeURIComponent(id)}/delete-preview?cascade=true`);
-        const names = (casc.objects || []).map((o) => o.username || o.emby_user_id).join('、');
-        if (!confirm(`将删除：${names}\n提交不会扩大到预览之外的账号。`)) return;
-        const r = await api(`/api/members/${encodeURIComponent(id)}?cascade=true`, {
-          method: 'DELETE',
-          body: JSON.stringify({
-            cascade: true,
-            confirm_ids: (casc.objects || []).map((o) => o.emby_user_id),
-          }),
-        });
-        if (!toastResult(r, '已删除')) {
-          (r.emby_failed || []).forEach((f) => toast(`${f.user_id}: ${f.error}`, 1));
-        }
-        ms.selected.delete(id);
-        return refreshNow();
-      }
-    } else if (!confirm(`删除 ${name || id}？只删本人，不可恢复。`)) {
-      return;
-    }
-    const r = await api(`/api/members/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    if (!toastResult(r, '已删除')) {
-      (r.emby_failed || []).forEach((f) => toast(`${f.user_id}: ${f.error}`, 1));
-    }
-    ms.selected.delete(id);
+  async function confirmDelete(id, name, cascade = false) {
+    const preview = await api(`/api/members/${encodeURIComponent(id)}/delete-preview?cascade=${cascade}`);
+    const objects = preview.objects || [];
+    if (!objects.length || (cascade && objects.length < 2)) return toast('没有可确认的删除对象，请刷新后重试', 1);
+    const names = objects.map((o) => o.username || o.emby_user_id).join('、');
+    const message = cascade
+      ? `连带删除邀请人：${names}。\n将删除所列 Emby 账号及面板记录，不可恢复。`
+      : `仅删除 ${name || id}，保留邀请人。\n将删除该 Emby 账号及面板记录，不可恢复。`;
+    if (!confirm(message)) return;
+    const r = await api(`/api/members/${encodeURIComponent(id)}?cascade=${cascade}`, {
+      method: 'DELETE', body: JSON.stringify({cascade, confirm_ids: objects.map((o) => o.emby_user_id)}),
+    });
+    const ok = toastResult(r, '已删除');
+    if (!ok) (r.emby_failed || []).forEach((f) => toast(`${f.user_id}: ${f.error}`, 1));
+    if (ok) objects.forEach((o) => ms.selected.delete(o.emby_user_id));
+    else (r.removed || []).forEach((uid) => ms.selected.delete(uid));
     await refreshNow();
   }
 
   async function bulk(action) {
     const ids = [...ms.selected];
     if (!ids.length) return toast('没有选中的用户', 1);
+    if (!confirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'停用',activate:'启用','reset-traffic':'重置用量'})[action]}？`)) return;
     if (action === 'renew') {
       const days = Number(prompt('续期天数', '30') || '0');
       if (!days) return;
@@ -666,7 +805,6 @@
 
   async function onMembersLive(topic, payload, context) {
     if (context && typeof context.isCurrent === 'function' && !context.isCurrent()) return;
-    if (typeof isEditing === 'function' && isEditing()) return;
     if (!$('#members-page')) return;
     void topic;
     void payload;
@@ -698,6 +836,8 @@
     else PAGES.members(membersContext(false));
   });
 
+  window.enforcementPreview = showEnforcement;
+  window.clearOverrideField = resetOverrideInput;
   window.parseMembersHash = parseMembersHash;
   window.membersQueryFromParams = membersQueryFromParams;
   window.membersToastFromResult = toastResult;

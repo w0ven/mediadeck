@@ -4,6 +4,29 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — member browser integration and capability preservation
+
+- Ran the actual index/script order in Chromium through Playwright, using only
+  mock API/SSE data. Covered query entry, filters, sorting, paging/history,
+  detail tabs, operation failures, live updates and editor/selection/scroll state.
+- Fixed deletion confirmation: self-only and inviter-cascade are separate
+  buttons; cancelling either performs no DELETE. Failed objects remain selected.
+- Restored permission/role editing, password reset, playback stop, manual status,
+  quota reset, Telegram unbind, device removal and points adjustment instead of
+  replacing existing management capabilities with read-only JSON.
+- Restored shared bandwidth presets and policy preview used by the group page.
+  Explicit unlimited expiry overrides remain null when editing, not inheritance.
+- Same-page detail/tab URL changes keep the live stream working; late detail
+  responses cannot overwrite a newer selection. Focused editors no longer
+  suppress unrelated member status updates.
+- Added selectable sort/advanced filters and corrected sorting to use the same
+  effective expiry and Emby activity timestamp shown to the operator.
+- Validation: 45 relevant tests passed, including real browser flows and group
+  regressions. Playwright is a dev-only dependency; no browser or service
+  deployment is performed. Final measured-quota integration remains separate.
+
+---
+
 ## 2026-09-08 — live updates preserve the page (local development)
 
 - Confirmed the original browser failure: every SSE event called a page loader,
