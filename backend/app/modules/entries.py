@@ -46,7 +46,8 @@ def https_origin(value: Any) -> str:
 
 
 def validate_entries(raw: Any, current: list[dict[str, Any]],
-                     official_url: str = "") -> list[dict[str, str]]:
+                     official_url: str = "",
+                     node_names: set[str] | None = None) -> list[dict[str, str]]:
     if not isinstance(raw, list) or len(raw) > MAX_ENTRIES:
         raise ConfigError(f"外部入口必须是列表，最多 {MAX_ENTRIES} 个")
     previous = {entry["id"]: entry for entry in current}
@@ -69,11 +70,32 @@ def validate_entries(raw: Any, current: list[dict[str, Any]],
         rotate = entry.get("rotate_proxy_key", False)
         if not isinstance(rotate, bool):
             raise ConfigError("rotate_proxy_key 必须是布尔值")
+        # Pinned mode: a CDN that cannot route by path gets ONE stream domain
+        # that proxies ONE node. Both fields must be set together; a stream
+        # domain must not collide with the entry origin, the official Emby
+        # origin or another entry.
+        stream_origin = entry.get("stream_origin") or ""
+        pinned_node = entry.get("node") or ""
+        if bool(stream_origin) != bool(pinned_node):
+            raise ConfigError("推流域名和固定节点必须同时填写")
+        if stream_origin:
+            stream_origin = https_origin(stream_origin)
+            if not isinstance(pinned_node, str) or not NODE_RE.fullmatch(pinned_node):
+                raise ConfigError("固定节点名无效")
+            if node_names is not None and pinned_node not in node_names:
+                raise ConfigError(f"固定节点 {pinned_node} 不在节点池中")
+            if stream_origin in origins or stream_origin == origin or stream_origin == official:
+                raise ConfigError("推流域名不能与入口域名、官方 Emby 入口或其他入口重复")
         # Keys are minted by the panel, never accepted from a submitted form.
         # A partial edit or a GET -> PUT round trip keeps the existing key.
         old_key = previous.get(entry_id, {}).get("proxy_key", "")
-        result.append({"id": entry_id, "origin": origin,
-                       "proxy_key": secrets.token_urlsafe(32) if rotate or not old_key else old_key})
+        row = {"id": entry_id, "origin": origin,
+               "proxy_key": secrets.token_urlsafe(32) if rotate or not old_key else old_key}
+        if stream_origin:
+            row["stream_origin"] = stream_origin
+            row["node"] = pinned_node
+            origins.add(stream_origin)
+        result.append(row)
         ids.add(entry_id)
         origins.add(origin)
     return result
@@ -83,10 +105,17 @@ def validate_entries(raw: Any, current: list[dict[str, Any]],
 class PlaybackEntry:
     id: str
     origin: str
+    # Pinned mode (CDN without path routing): one stream domain -> one node.
+    stream_origin: str = ""
+    node: str = ""
 
     @property
     def cache_scope(self) -> str:
         return f"entry:{self.id}:{self.origin}"
+
+    @property
+    def pinned(self) -> bool:
+        return bool(self.stream_origin and self.node)
 
 
 def identify_entry(headers: Any, entries: list[dict[str, Any]]) -> PlaybackEntry | None:
@@ -106,7 +135,9 @@ def identify_entry(headers: Any, entries: list[dict[str, Any]]) -> PlaybackEntry
     for entry in entries:
         if (entry["id"] == ids[0] and entry.get("proxy_key")
                 and secrets.compare_digest(keys[0].encode(), entry["proxy_key"].encode())):
-            return PlaybackEntry(id=entry["id"], origin=entry["origin"])
+            return PlaybackEntry(id=entry["id"], origin=entry["origin"],
+                                 stream_origin=entry.get("stream_origin") or "",
+                                 node=entry.get("node") or "")
     return None
 
 
@@ -115,10 +146,20 @@ def entry_target(target: str, node: str, entry: PlaybackEntry) -> str:
 
     The node still verifies /s/... after the friend strips /_n/<node>. Signing
     the wrapper path would break every existing node's secure_link contract.
+
+    Pinned entries have a stream domain that proxies exactly one node, so the
+    path is passed through unchanged: ``https://<stream>/s/...``. If routing
+    somehow picked a different node the direct target is returned rather than
+    a URL the friend's CDN would 404 on.
     """
     parsed = urlsplit(target)
     if not NODE_RE.fullmatch(node) or not parsed.path.startswith("/s/"):
         return target
+    if entry.pinned:
+        if node != entry.node:
+            return target
+        stream = urlsplit(entry.stream_origin)
+        return urlunsplit((stream.scheme, stream.netloc, parsed.path, parsed.query, ""))
     origin = urlsplit(entry.origin)
     return urlunsplit((origin.scheme, origin.netloc,
                        f"/_n/{node}{parsed.path}", parsed.query, ""))

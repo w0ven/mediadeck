@@ -281,7 +281,12 @@ class PlaybackRouter:
     async def route(self, item_id: str, request_path: str,
                     query: dict[str, str], caller_token: str = "",
                     require_auth: bool = False,
-                    caller_device: str = "", cache_scope: str = "direct") -> Decision:
+                    caller_device: str = "", cache_scope: str = "direct",
+                    only_node: str = "") -> Decision:
+        """``only_node``: restrict selection to one node. Used by pinned
+        external entries whose stream domain proxies exactly that node; any
+        other choice would 404 on the friend's CDN. If that node cannot serve
+        the item the normal fail-open passthrough applies."""
         cfg = self._config() or {}
 
         if not cfg.get("enabled"):
@@ -311,11 +316,15 @@ class PlaybackRouter:
 
         # Only nodes that actually mirror this media root may serve it.
         def can_serve(state: Any) -> bool:
+            if only_node and getattr(state.node, "name", "") != only_node:
+                return False
             return match_pool(media_path, getattr(state.node, "pools", [])) is not None
 
         chosen = self._scheduler.pick(context=media_path, predicate=can_serve)
         if not chosen:
-            decision = self._passthrough(request_path, query, "no-capable-node")
+            decision = self._passthrough(
+                request_path, query,
+                "pinned-node-unavailable" if only_node else "no-capable-node")
             decision.media_path = media_path
             self._record(decision, item_id)
             return decision

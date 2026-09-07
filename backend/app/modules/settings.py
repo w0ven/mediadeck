@@ -310,6 +310,8 @@ class SettingsService:
             "external_entries_revision": _entries_revision(cfg["external_entries"]),
             "external_entries": [
                 {"id": e["id"], "origin": e["origin"],
+                 "stream_origin": e.get("stream_origin") or "",
+                 "node": e.get("node") or "",
                  "proxy_key_set": bool(e.get("proxy_key"))}
                 for e in cfg["external_entries"]
             ],
@@ -349,6 +351,7 @@ class SettingsService:
         entries = validate_entries(
             payload.get("external_entries", current["external_entries"]),
             current["external_entries"], emby,
+            node_names={n.name for n in self.nodes()},
         )
         self._store.set_section("integration", {
             "panel_public_url": panel, "emby_public_url": emby,

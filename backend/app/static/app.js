@@ -905,11 +905,24 @@ PAGES.settings = async () => {
           <code>https://对方域名/_n/&lt;节点&gt;/s/...</code>：签名原样保留，推流节点不用改任何配置。
           每个入口有独立凭据，普通设置只显示配置状态；点击「生成配置」后才显示完整凭据。
         </div>
+        <div class="muted" style="margin-bottom:12px">
+          对方 CDN <b>无法按路径分流</b>时，改填「推流域名 + 固定节点」：302 直接写成
+          <code>https://推流域名/s/...</code>，对方只需两个域名各回源一个固定源站。
+          代价是该入口的用户固定走这一个节点，不参与调度。
+        </div>
         <div id="ee-list" data-revision="${esc(ig.external_entries_revision)}">${entryRows(ig.external_entries || [])}</div>
         <div class="form-row" style="margin-top:12px">
           <label>新增入口</label>
           <input id="ee-id" placeholder="入口 ID，如 friend-a" style="width:180px">
           <input id="ee-origin" placeholder="https://对方域名" style="flex:1;min-width:180px">
+        </div>
+        <div class="form-row">
+          <label>推流域名</label>
+          <input id="ee-stream" placeholder="https://推流域名（留空＝按路径分流，走全部节点）" style="flex:1;min-width:200px">
+          <select id="ee-node" style="width:130px">
+            <option value="">固定节点…</option>
+            ${(s.nodes || []).map((n) => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('')}
+          </select>
           <button class="btn primary" id="ee-add">登记</button>
         </div>
         <div class="form-row">
@@ -1054,6 +1067,9 @@ function entryRows(entries) {
     <div class="form-row">
       <label style="min-width:150px"><code>${esc(e.id)}</code></label>
       <span class="muted" style="flex:1;min-width:160px">${esc(e.origin)}</span>
+      <span class="muted" style="min-width:150px">${e.stream_origin
+        ? '推流 ' + esc(e.stream_origin) + ' → ' + esc(e.node)
+        : '按路径分流（全部节点）'}</span>
       <span class="tag ${e.proxy_key_set ? 'ok' : 'bad'}">${e.proxy_key_set ? '凭据已生成' : '缺凭据'}</span>
       <button class="btn" data-act="export" data-id="${esc(e.id)}">生成配置</button>
       <button class="btn" data-act="rotate" data-id="${esc(e.id)}">换凭据</button>
@@ -1097,8 +1113,18 @@ async function changeEntries(change, success) {
 async function addEntry() {
   const id = $('#ee-id').value.trim();
   const origin = $('#ee-origin').value.trim();
+  const streamOrigin = $('#ee-stream').value.trim();
+  const node = $('#ee-node').value;
   if (!id || !origin) { toast('请填写入口 ID 和域名', 1); return; }
-  await changeEntries((entries) => entries.concat([{ id, origin }]), '入口已登记，可以生成配置了');
+  /* Pinned mode needs both halves: a stream domain proxies exactly one node,
+     so neither field alone describes a usable route. */
+  if (Boolean(streamOrigin) !== Boolean(node)) {
+    toast('推流域名和固定节点必须同时填写，或都留空', 1);
+    return;
+  }
+  const row = { id, origin };
+  if (streamOrigin) { row.stream_origin = streamOrigin; row.node = node; }
+  await changeEntries((entries) => entries.concat([row]), '入口已登记，可以生成配置了');
 }
 async function removeEntry(id) {
   if (!confirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`)) return;
