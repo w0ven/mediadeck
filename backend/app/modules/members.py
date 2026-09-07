@@ -557,6 +557,103 @@ class MemberService:
             enrolled += 1
         return enrolled
 
+    def sync_emby(self, emby_users: list[dict[str, Any]], apply: bool = False,
+                  enroll_new: bool = False, actor: str = "system") -> dict[str, Any]:
+        """Reconcile member rows against the accounts Emby actually has.
+
+        Membership rows outlive the Emby account: they carry the traffic
+        ledger, plan, expiry and operator notes. So a member whose Emby
+        account is gone is *flagged*, never deleted -- an accidental mass
+        delete in Emby (or a partial API response) must not silently destroy
+        billing history that the operator may need to restore from.
+
+        An empty user list is treated as "could not read Emby", not "Emby has
+        no users": marking every member an orphan on one failed poll is worse
+        than skipping a cycle.
+        """
+        if not isinstance(emby_users, list):
+            raise ConfigError("Emby 用户列表无效")
+        live: dict[str, str] = {}
+        for user in emby_users:
+            user_id = str(user.get("Id") or "")
+            if user_id:
+                live[user_id] = str(user.get("Name") or "")
+        rows = self._db.query(
+            "SELECT emby_user_id, username, emby_missing_since FROM members")
+        known = {str(r["emby_user_id"]) for r in rows}
+
+        missing = [r for r in rows if str(r["emby_user_id"]) not in live]
+        returned = [r for r in rows
+                    if str(r["emby_user_id"]) in live and r["emby_missing_since"]]
+        unmanaged = [uid for uid in live if uid not in known]
+        renamed = [r for r in rows
+                   if str(r["emby_user_id"]) in live
+                   and live[str(r["emby_user_id"])] != str(r["username"] or "")]
+
+        result = {
+            "checked": len(rows),
+            "emby_users": len(live),
+            "missing": [{"emby_user_id": str(r["emby_user_id"]),
+                         "username": str(r["username"] or ""),
+                         "since": r["emby_missing_since"]} for r in missing],
+            "returned": [str(r["emby_user_id"]) for r in returned],
+            "unmanaged": [{"emby_user_id": uid, "username": live[uid]}
+                          for uid in unmanaged],
+            "renamed": len(renamed),
+            "enrolled": 0,
+            "applied": False,
+        }
+        if not live:
+            # Fail closed: no readable users means no verdict about anybody.
+            result["skipped"] = "emby-user-list-empty"
+            return result
+        if not apply:
+            return result
+
+        now = int(time.time())
+        with self._db.write() as conn:
+            for row in missing:
+                if not row["emby_missing_since"]:
+                    conn.execute(
+                        "UPDATE members SET emby_missing_since=?,updated_at=?"
+                        " WHERE emby_user_id=?",
+                        (now, now, row["emby_user_id"]))
+            for row in returned:
+                # The account exists again: clear the flag rather than leaving
+                # a stale warning on a member who is demonstrably back.
+                conn.execute(
+                    "UPDATE members SET emby_missing_since=NULL,updated_at=?"
+                    " WHERE emby_user_id=?", (now, row["emby_user_id"]))
+            for row in renamed:
+                conn.execute(
+                    "UPDATE members SET username=?,updated_at=? WHERE emby_user_id=?",
+                    (live[str(row["emby_user_id"])], now, row["emby_user_id"]))
+        result["applied"] = True
+
+        if enroll_new and unmanaged:
+            result["enrolled"] = self.enroll_defaults(
+                [{"Id": u["emby_user_id"], "Name": u["username"]}
+                 for u in result["unmanaged"]], actor=actor)
+        return result
+
+    def purge_orphans(self, user_ids: list[str], actor: str = "operator") -> int:
+        """Delete member rows whose Emby account is confirmed gone.
+
+        Only rows already flagged by sync_emby can be purged: an operator
+        clicking through a stale page must not be able to delete a member whose
+        account is present right now.
+        """
+        removed = 0
+        for user_id in user_ids:
+            row = self._db.one(
+                "SELECT emby_missing_since FROM members WHERE emby_user_id=?",
+                (str(user_id),))
+            if not row or not row["emby_missing_since"]:
+                continue
+            self.delete(str(user_id), actor=actor)
+            removed += 1
+        return removed
+
     def set_roles(self, user_id: str, roles: Any,
                   actor: str = "operator") -> dict[str, Any]:
         member = self.get(user_id)

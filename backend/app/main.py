@@ -348,6 +348,7 @@ async def _startup() -> None:
         """
         housekeeping_due = 0.0
         prune_due = 0.0
+        member_sync_due = 0.0
         while True:
             membership = app.state.settings_service.membership_config()
             await asyncio.sleep(max(5, int(membership["sample_interval_seconds"])))
@@ -355,6 +356,14 @@ async def _startup() -> None:
                 await app.state.usage.tick(node_of=_node_for_item)
 
             now = time.time()
+            if now >= member_sync_due:
+                member_sync_due = now + 900
+                # Flag members whose Emby account disappeared, clear the flag
+                # for accounts that came back, and follow renames. Never
+                # deletes and never enrolls: both are operator decisions.
+                with contextlib.suppress(Exception):
+                    users = await app.state.emby.list_users()
+                    app.state.members.sync_emby(users, apply=True)
             if now >= housekeeping_due:
                 housekeeping_due = now + 600
                 with contextlib.suppress(Exception):
@@ -1538,6 +1547,40 @@ async def members_enroll_defaults(user: str = Depends(_auth)) -> dict[str, Any]:
              if not (u.get("Policy") or {}).get("IsAdministrator")]
     enrolled = app.state.members.enroll_defaults(users, actor=user)
     return {"enrolled": enrolled}
+
+
+@app.get("/api/members/emby-sync", dependencies=[Depends(_auth)])
+async def members_emby_sync_preview() -> dict[str, Any]:
+    """Which member rows disagree with Emby right now. Read-only."""
+    users = await app.state.emby.list_users()
+    return app.state.members.sync_emby(users, apply=False)
+
+
+@app.post("/api/members/emby-sync", dependencies=[Depends(_auth)])
+async def members_emby_sync(payload: dict[str, Any] = Body(default={}),  # noqa: B008
+                            user: str = Depends(_auth)) -> dict[str, Any]:
+    """Flag/unflag members against Emby, optionally enrolling new accounts.
+
+    Never deletes: an orphan keeps its ledger until the operator purges it.
+    """
+    users = await app.state.emby.list_users()
+    return app.state.members.sync_emby(
+        users, apply=True, enroll_new=bool(payload.get("enroll_new")), actor=user)
+
+
+@app.post("/api/members/purge-orphans", dependencies=[Depends(_auth)])
+async def members_purge_orphans(payload: dict[str, Any] = Body(...),  # noqa: B008
+                                user: str = Depends(_auth)) -> dict[str, Any]:
+    """Remove member rows already confirmed missing from Emby.
+
+    The ids must be named explicitly: a blanket "delete all orphans" button is
+    exactly how one bad Emby poll turns into mass data loss.
+    """
+    ids = payload.get("emby_user_ids")
+    if not isinstance(ids, list) or not ids:
+        raise HTTPException(422, "need emby_user_ids")
+    removed = app.state.members.purge_orphans([str(i) for i in ids], actor=user)
+    return {"removed": removed}
 
 
 @app.post("/api/members/{user_id}/roles", dependencies=[Depends(_auth)])
