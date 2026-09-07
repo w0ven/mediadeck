@@ -695,14 +695,16 @@ def test_intake_page_is_served_and_reachable() -> None:
 
 
 def test_intake_page_paints_before_awaiting() -> None:
-    """Every page paints a placeholder first; without it a slow first request
-    leaves the previous page on screen and the click reads as a no-op."""
+    """Navigation paints before awaiting; pushes use paintIntake without a loader."""
     from pathlib import Path as FilePath
 
     source = (FilePath(__file__).resolve().parents[1]
               / "app" / "static" / "intake.js").read_text(encoding="utf-8")
-    body = source.split("PAGES.intake = async () => {", 1)[1]
-    assert body.lstrip().startswith("$('#view').innerHTML = pageLoading();")
+    body = source.split("PAGES.intake = async (context = pageContext('intake')) => {", 1)[1]
+    assert body.lstrip().startswith("renderView(pageLoading(), context);")
+    live_handler = source.split("registerLiveUpdater('intake'", 1)[1]
+    assert "paintIntake(payload, context)" in live_handler
+    assert "pageLoading" not in live_handler
 
 
 def test_mock_emby_supports_intake_calls() -> None:

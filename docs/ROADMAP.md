@@ -3,6 +3,14 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## User-management rebuild — live UI foundation (local development)
+- [x] Replace SSE-triggered full-page loaders with cached-model DOM patches.
+- [x] Keep editor/selection/scroll state and guard route/reconnect races.
+- [x] Provide a live-page registration contract and query-aware navigation.
+- [x] Reproduce the original failure and verify in isolated Chromium.
+- [ ] Integrate the separately developed member lifecycle and measured-quota modules.
+- No deployment, node configuration change, or existing-user migration in this step.
+
 ## Done
 - [x] Backend scaffold, env-only config, mock/live adapter split
 - [x] Load-aware 302 stream scheduler (weights, health, kick, history, log)

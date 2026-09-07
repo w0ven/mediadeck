@@ -4,6 +4,31 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — live updates preserve the page (local development)
+
+- Confirmed the original browser failure: every SSE event called a page loader,
+  replacing the node form and losing unfocused edits. The new Chromium
+  regression failed on that exact assertion before the change.
+- Dashboard, nodes, intake, pipeline, tasks and mounts now paint from pushed
+  snapshots using stable-key DOM patches, not their navigation loaders. Keep
+  input/caret, selection, scroll, mounted selectors and enrollment previews.
+- Added route-aware generation guards and reconnect-timer cleanup; old responses
+  and closed EventSources cannot overwrite a newer live page. Query-only hash
+  changes and browser navigation keep the full route.
+- Added real overview/latest/dispatch SSE producers rather than repeatedly
+  refetching unrelated dashboard and node REST endpoints from the browser.
+- `registerLiveUpdater(page, topics, handler)` and `pageContext` are the contract
+  for the separately developed member module. Unknown bandwidth is not shown as
+  zero; paused playback no longer hides measured network activity; user-scoped
+  figures are labelled when the source supplies that scope.
+- Validation: 151 targeted tests passed, including real isolated Chromium and
+  provider/REST parity, plus ruff and JavaScript syntax checks. The old intake
+  source assertion now distinguishes navigation placeholders from push updates.
+- Not deployed. Member lifecycle, final metering fields and node enforcement
+  are separate development packages and are not claimed complete here.
+
+---
+
 ## 2026-09-08 — reconcile member rows against Emby accounts
 **Done**
 - Member rows never noticed when their Emby account disappeared: enrolment was

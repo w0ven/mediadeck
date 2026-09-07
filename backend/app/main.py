@@ -467,6 +467,9 @@ async def _startup() -> None:
 
     app.state.events = EventStream({
         "nodes": _nodes_topic,
+        "dispatch": lambda: asyncio.to_thread(app.state.scheduler.dispatch_log, 20),
+        "overview": lambda: asyncio.to_thread(app.state.stats.overview, 30),
+        "latest": lambda: emby_latest(12),
         # Must be the *decorated* payload: the live push and the manual
         # refresh have to agree, otherwise the dashboard shows speeds only
         # when you hit refresh and looks frozen the rest of the time.

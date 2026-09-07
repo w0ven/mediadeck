@@ -99,11 +99,11 @@ function esc(s) {
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 const stat = (icon, val, label, sub) => `
-  <div class="stat"><div class="ic-box">${icon}</div>
+  <div class="stat" data-live-key="stat:${esc(label)}"><div class="ic-box">${icon}</div>
     <div class="val">${val}</div><div class="label">${esc(label)}</div>
     <div class="sub">${esc(sub || '')}</div></div>`;
 const card = (title, sub, body, actions) => `
-  <div class="card">
+  <div class="card" data-live-key="card:${esc(title)}">
     <div class="card-head">
       <div><h3>${esc(title)}</h3>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>
       <div class="toolbar">${actions || ''}</div>
@@ -162,7 +162,7 @@ const playRow = (s) => {
   const pct = s.ProgressPercent;
   const known = pct !== null && pct !== undefined;
   return `
-  <div class="play-row">
+  <div class="play-row" data-live-key="session:${esc(s.Id)}">
     ${s.ItemId ? `<img class="thumb" src="${esc(posterUrl(s.ItemId, 180))}" alt="" loading="lazy">`
       : '<div class="thumb"></div>'}
     <div class="bd">
@@ -179,7 +179,7 @@ const playCard = (s) => {
   const meta = [s.ItemType === 'Episode' ? '剧集' : '电影',
     ...(s.Genres || [])].filter(Boolean).join(' / ');
   return `
-  <article class="play-card">
+  <article class="play-card" data-live-key="session:${esc(s.Id)}">
     <div class="pc-poster">
       ${s.ItemId ? `<img src="${esc(posterUrl(s.ItemId, 300))}" alt="" loading="lazy">` : ''}
       <span class="pc-live">${s.Paused ? '❚❚ 已暂停' : '● 播放中'}</span>
@@ -201,13 +201,14 @@ const playCard = (s) => {
 };
 
 function sessionSpeedCell(s) {
-  /* MB/s: the unit the owner reads on his own devices. A node-measured value
-     is real wire bytes; the sampler fallback is an estimate and says so,
-     because showing a guess as if it were measured is what misled before. */
-  if (s.Paused) return '<span class="muted">0 MB/s · 已暂停</span>';
-  const v = Number(s.SpeedMBps || 0).toFixed(1);
-  if (s.SpeedSource === 'node') return `${esc(v)} MB/s`;
-  return `<span title="源站会话，按码率估算">≈ ${esc(v)} MB/s</span>`;
+  const paused = s.Paused ? ' · 已暂停' : '';
+  const scope = s.SpeedScope === 'user' ? ' · 账号合计' : '';
+  if (s.SpeedBps == null || !Number.isFinite(Number(s.SpeedBps)) || s.SpeedSource === 'unknown') {
+    return `<span class="muted" title="${esc(s.SpeedReason || '没有新鲜的实际测量')}">未测${paused}</span>`;
+  }
+  const value = (Number(s.SpeedBps) / 1048576).toFixed(1);
+  if (s.SpeedSource === 'node') return `${esc(value)} MiB/s${scope}${paused}`;
+  return `<span title="按码率或已结束请求估算，不是实时实测">≈ ${esc(value)} MiB/s${scope}${paused}</span>`;
 }
 function pageError(err) {
   return `<div class="card"><div class="page-error">
@@ -290,42 +291,59 @@ function navMeta(id) {
   for (const g of NAV) for (const it of g.items) if (it.id === id) return it;
   return NAV[0].items[0];
 }
-function go(page) {
+function routeFromHash() {
+  return (location.hash || '').replace(/^#\/?/, '') || 'dashboard';
+}
+function go(route) {
+  route = String(route || 'dashboard').replace(/^#\/?/, '');
+  const page = route.split('?')[0] || 'dashboard';
   state.page = page;
+  state.route = route;
+  state.pageReady = false;
+  stopEnrollPoll();
   const meta = navMeta(page);
   document.querySelectorAll('.nav-item').forEach((n) =>
     n.classList.toggle('active', n.dataset.page === page));
   $('#page-title').textContent = meta.label;
   $('#page-sub').textContent = meta.sub;
-  location.hash = '#/' + page;
-  renderPage(page);
+  if (location.hash !== '#/' + route) location.hash = '#/' + route;
+  const pending = renderPage(page);
   connectLive(page);
+  return pending;
 }
-async function renderPage(page, manual, live) {
+window.addEventListener('hashchange', () => {
+  const route = routeFromHash();
+  if (route !== state.route) go(route);
+});
+async function renderPage(page, manual, liveUpdate) {
+  if (liveUpdate) { scheduleLiveFlush(); return; }
   const fn = PAGES[page];
   if (!fn) { $('#view').innerHTML = '<div class="empty">页面不存在</div>'; return; }
+  state.renderVersion = (state.renderVersion || 0) + 1;
+  state.pageReady = false;
+  const context = pageContext(page);
   try {
-    await fn();
+    await fn(context);
+    if (!context.isCurrent()) return;
+    state.pageReady = true;
     $('#last-updated').textContent = '最近更新: ' + new Date().toLocaleTimeString();
     if (manual) toast('已刷新');
+    scheduleLiveFlush();
   } catch (e) {
-    // A push-triggered re-render must stay silent: the operator did not ask
-    // for it, so a toast on every transient failure would be noise.
-    if (!live) {
-      $('#view').innerHTML = pageError(e);
-      const btn = $('#retry-page');
-      if (btn) btn.onclick = () => renderPage(page, true);
-      toast('加载失败: ' + e.message, 1);
-    }
+    if (!context.isCurrent()) return;
+    $('#view').innerHTML = pageError(e);
+    const btn = $('#retry-page');
+    if (btn) btn.onclick = () => renderPage(page, true);
+    toast('加载失败: ' + e.message, 1);
   }
 }
 
 /* ---------------- pages ---------------- */
-PAGES.dashboard = async () => {
+PAGES.dashboard = async (context = pageContext('dashboard')) => {
   // Every page paints a placeholder before awaiting. Without it a slow first
   // request leaves the previous page's content on screen, which reads as a
   // click that did nothing.
-  $('#view').innerHTML = pageLoading();
+  renderView(pageLoading(), context);
   const [sessions, pipe, nodes, libs, overview, latest] = await Promise.all([
     api('/api/emby/sessions').catch(() => []),
     api('/api/pipeline').catch(() => ({ available: false })),
@@ -334,6 +352,14 @@ PAGES.dashboard = async () => {
     api('/api/stats/overview?days=30').catch(() => null),
     api('/api/emby/latest?limit=12').catch(() => []),
   ]);
+  if (!context.isCurrent()) return;
+  PAGE_MODELS.dashboard = {sessions, pipe, nodes, libs, overview, latest};
+  paintDashboard(PAGE_MODELS.dashboard, context);
+};
+
+function paintDashboard(model, context) {
+  if (!context.isCurrent()) return;
+  const {sessions, pipe, nodes, libs, overview, latest} = model;
   const online = nodes.filter((n) => n.available).length;
   const d = pipe.available ? pipe.data : {};
   const queues = d.queues || [];
@@ -344,7 +370,7 @@ PAGES.dashboard = async () => {
   const expiring = (overview && overview.expiring_7d) || [];
   const exhaustedN = mem.exhausted || 0;
 
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${stat('☺', mem.total || 0, '成员', `${mem.active || 0} 正常 · ${mem.expired || 0} 过期`)}
       ${stat('⛁', `${online} / ${nodes.length}`, '在线节点', nodes.length ? '推流节点健康状态' : '尚未配置节点')}
@@ -366,17 +392,17 @@ PAGES.dashboard = async () => {
       `<div class="play-grid">${sessions.map(playCard).join('')}</div>`) : ''}
     <div class="grid-2">
       ${tableCard('当前播放', '实时会话 · 节点实测速率', ['用户', '客户端', '方式', '实时速度'],
-        sessions.map((s) => `<tr><td>${esc(s.UserName)}</td><td>${esc(s.Client)}</td>
+        sessions.map((s) => `<tr data-live-key="session:${esc(s.Id)}"><td>${esc(s.UserName)}</td><td>${esc(s.Client)}</td>
           <td>${esc(s.PlayMethod)}${s.Paused ? ' · 已暂停' : ''}</td>
           <td>${sessionSpeedCell(s)}</td></tr>`).join(''))}
       ${tableCard('管线队列', pipe.available ? `快照 ${Math.round(pipe.snapshot_age_seconds)}s 前` : '快照不可用',
         ['队列', '条目', '体积', '最老'],
-        queues.map((q) => `<tr><td>${esc(q.name)}</td><td>${q.items}</td>
+        queues.map((q) => `<tr data-live-key="queue:${esc(q.name)}"><td>${esc(q.name)}</td><td>${q.items}</td>
           <td>${fmtBytes(q.bytes)}</td><td>${fmtAge(q.oldest_age_seconds)}</td></tr>`).join(''))}
     </div>
     <div class="grid-2">
       ${tableCard('上传身份配额', '限额状态', ['身份', '状态', '受限起始'],
-        (d.quota || []).map((q) => `<tr><td>${esc(q.identity)}</td>
+        (d.quota || []).map((q) => `<tr data-live-key="quota:${esc(q.identity)}"><td>${esc(q.identity)}</td>
           <td><span class="tag ${q.state === 'ok' ? 'ok' : 'bad'}">${esc(q.state)}</span></td>
           <td>${esc(q.limited_since || '-')}</td></tr>`).join(''))}
       ${card('待处理事项', '系统关键状态',
@@ -395,8 +421,8 @@ PAGES.dashboard = async () => {
         (mem.exhausted || mem.expired)
           ? `<div class="card-body"><a href="#/members">超额 ${esc(mem.exhausted || 0)} · 过期 ${esc(mem.expired || 0)} · 停用 ${esc(mem.suspended || 0)}</a></div>`
           : `<div class="empty">没有超额或过期账号</div>`)}
-    </div>`;
-};
+    </div>`, context);
+}
 
 PAGES.library = async () => {
   $('#view').innerHTML = pageLoading();
@@ -454,14 +480,23 @@ async function cancelImport(id) {
   catch (e) { toast('取消失败: ' + e.message, 1); }
 }
 
-PAGES.nodes = async () => {
-  $('#view').innerHTML = pageLoading();
+PAGES.nodes = async (context = pageContext('nodes')) => {
+  renderView(pageLoading(), context);
   const [ns, log, dispatch, st] = await Promise.all([
     api('/api/nodes').catch(() => []),
     api('/api/dispatch/log?limit=20').catch(() => []),
     api('/api/settings/dispatch').catch(() => ({ policy: '-', load_threshold: 0 })),
     api('/api/settings').catch(() => ({ integration: {} })),
   ]);
+  if (!context.isCurrent()) return;
+  PAGE_MODELS.nodes = {ns, log, dispatch, st};
+  paintNodes(PAGE_MODELS.nodes, context);
+};
+
+function paintNodes(model, context) {
+  if (!context.isCurrent()) return;
+  const {ns, log, dispatch, st} = model;
+  const previous = new Set((state.nodes || []).map((n) => n.name));
   state.nodes = ns;
   const online = ns.filter((n) => n.available).length;
   const streams = ns.reduce((a, n) => a + (n.active_streams || 0), 0);
@@ -469,7 +504,7 @@ PAGES.nodes = async () => {
   const policyLabel = dispatch.policy === 'affinity' ? '文件亲和' : '最低负载';
   const panelSet = !!(st.integration || {}).panel_public_url;
 
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${ns.length}`, '在线节点', '可用于分发')}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
@@ -495,10 +530,10 @@ PAGES.nodes = async () => {
         <td>${e.utilisation == null ? '-' : Math.round(e.utilisation * 100) + '%'}</td>
         <td>${esc(e.candidates)}</td>
         <td><span class="tag idle">${esc(e.reason || e.policy || '-')}</span></td>
-        <td>${esc((e.context || '').slice(0, 44))}</td></tr>`).join(''))}`;
+        <td>${esc((e.context || '').slice(0, 44))}</td></tr>`).join(''))}`, context);
   $('#nd-go').onclick = addNode;
-  (state.nodes || []).forEach((n) => fillNodeMounts(n));
-};
+  ns.filter((n) => !context.live || !previous.has(n.name)).forEach((n) => fillNodeMounts(n));
+}
 
 /* 一个节点 = 一张卡：健康、媒体根、缓存、签名、安装命令全在这里。
    这些都是「这台机器」的属性，放全局设置里是错的。 */
@@ -562,7 +597,7 @@ function nodeCard(n) {
         <span class="tag warn">该节点仍保存独立 rclone.conf</span>
         <button class="btn sm" onclick="migrateNodeStorage('${esc(n.name)}')">迁移到全局挂载</button></div>` : ''}
       <div class="form-row"><label>全局挂载</label>
-        <div id="nmounts-${esc(n.name)}" class="muted">加载中…</div></div>
+        <div id="nmounts-${esc(n.name)}" data-live-preserve class="muted">加载中…</div></div>
       <div class="form-row"><label>接入状态</label>
         ${n.enrolled ? `<span class="tag ok">已接入</span> <span class="muted">${esc(fmtAgeTs(n.first_seen_at))} · ${esc(n.enrolled_host || n.base_url)}</span>`
                       : '<span class="tag warn">待接入</span>'}</div>
@@ -570,7 +605,7 @@ function nodeCard(n) {
         <button class="btn primary" onclick="saveNodeStorage('${esc(n.name)}')">保存</button>
         <button class="btn" onclick="showEnroll('${esc(n.name)}')">获取安装命令</button>
       </div>
-      <div id="enroll-${esc(n.name)}" style="margin-top:10px"></div>
+      <div id="enroll-${esc(n.name)}" data-live-preserve style="margin-top:10px"></div>
     </div>`);
 }
 
@@ -731,41 +766,49 @@ async function deleteNode(name) {
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 
-PAGES.pipeline = async () => {
-  $('#view').innerHTML = pageLoading();
-  const p = await api('/api/pipeline').catch(() => ({ available: false }));
-  if (!p.available) { $('#view').innerHTML = `<div class="card"><div class="empty">管线快照不可用</div></div>`; return; }
+PAGES.pipeline = async (context = pageContext('pipeline')) => {
+  renderView(pageLoading(), context);
+  const p = await api('/api/pipeline').catch(() => ({available:false}));
+  paintPipeline(p, context);
+};
+function paintPipeline(p, context) {
+  if (!context.isCurrent()) return;
+  if (!p.available) { renderView(`<div class="card"><div class="empty">管线快照不可用</div></div>`, context); return; }
   const d = p.data, f = d.fallback || {};
   const pct = f.capacity_bytes ? Math.round((f.bytes / f.capacity_bytes) * 100) : 0;
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${(d.queues || []).map((q) => stat('⇄', q.items, q.name, `${fmtBytes(q.bytes)} · 最老 ${fmtAge(q.oldest_age_seconds)}`)).join('')}
       ${stat('⛃', fmtBytes(f.bytes), '本地应急仓', `${f.items || 0} 个文件 · ${pct}% 容量`)}
     </div>
     ${tableCard('上传身份配额', `快照 ${Math.round(p.snapshot_age_seconds)}s 前${p.stale ? ' · 已过期' : ''}`,
       ['身份', '状态', '受限起始'],
-      (d.quota || []).map((q) => `<tr><td>${esc(q.identity)}</td>
+      (d.quota || []).map((q) => `<tr data-live-key="quota:${esc(q.identity)}"><td>${esc(q.identity)}</td>
         <td><span class="tag ${q.state === 'ok' ? 'ok' : 'bad'}">${esc(q.state)}</span></td>
         <td>${esc(q.limited_since || '-')}</td></tr>`).join(''))}
     ${card('告警', '管线异常', (d.alerts || []).length
       ? `<div class="card-body flush">${d.alerts.map((a) =>
           `<div class="list-row"><div class="t">${esc(a.message)}</div>
            <span class="tag ${a.level === 'warn' ? 'warn' : 'idle'}">${esc(a.level)}</span></div>`).join('')}</div>`
-      : `<div class="empty">无告警</div>`)}`;
-};
+      : `<div class="empty">无告警</div>`)}`, context);
+}
 
-PAGES.mounts = async () => {
-  $('#view').innerHTML = pageLoading();
-  const m = await api('/api/mounts').catch(() => ({ available: false }));
+PAGES.mounts = async (context = pageContext('mounts')) => {
+  renderView(pageLoading(), context);
+  const m = await api('/api/mounts').catch(() => ({available:false}));
+  paintMounts(m, context);
+};
+function paintMounts(m, context) {
+  if (!context.isCurrent()) return;
   if (!m.available) {
-    $('#view').innerHTML = `<div class="card"><div class="empty">挂载快照不可用</div></div>`;
+    renderView(`<div class="card"><div class="empty">挂载快照不可用</div></div>`, context);
     return;
   }
   const d = m.data, ms = d.mounts || [];
   const alive = ms.filter((x) => x.alive).length;
   const stuck = ms.reduce((a, x) => a + (x.stuck_processes || 0), 0);
   const cache = ms.reduce((a, x) => a + (x.cache_bytes || 0), 0);
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${stat('⛃', `${alive} / ${ms.length}`, '挂载存活', '可正常读取目录')}
       ${stat('⚠', stuck, '阻塞进程', stuck ? '存在不可中断 I/O' : '无卡死进程')}
@@ -776,7 +819,7 @@ PAGES.mounts = async () => {
       ms.map((x) => {
         const cachePct = x.cache_limit_bytes
           ? Math.round((x.cache_bytes / x.cache_limit_bytes) * 100) : null;
-        return `<tr><td>${esc(x.label)}<div class="s muted">${esc((x.options || []).join(','))}</div></td>
+        return `<tr data-live-key="mount:${esc(x.label)}"><td>${esc(x.label)}<div class="s muted">${esc((x.options || []).join(','))}</div></td>
           <td>${esc(x.kind)}</td>
           <td><span class="tag ${x.alive ? 'ok' : 'bad'}">${x.alive ? '正常' : '异常'}</span></td>
           <td>${x.readdir_ms == null ? '<span class="muted">超时</span>' : x.readdir_ms + ' ms'}</td>
@@ -789,14 +832,18 @@ PAGES.mounts = async () => {
       ? `<div class="card-body flush">${d.alerts.map((a) =>
           `<div class="list-row"><div class="t">${esc(a.message)}</div>
            <span class="tag ${a.level === 'warn' ? 'warn' : 'bad'}">${esc(a.level)}</span></div>`).join('')}</div>`
-      : `<div class="empty">无告警</div>`)}`;
-};
+      : `<div class="empty">无告警</div>`)}`, context);
+}
 
-PAGES.tasks = async () => {
-  $('#view').innerHTML = pageLoading();
-  const t = await api('/api/tasks').catch(() => ({ available: false }));
+PAGES.tasks = async (context = pageContext('tasks')) => {
+  renderView(pageLoading(), context);
+  const t = await api('/api/tasks').catch(() => ({available:false}));
+  paintTasks(t, context);
+};
+function paintTasks(t, context) {
+  if (!context.isCurrent()) return;
   if (!t.available) {
-    $('#view').innerHTML = `<div class="card"><div class="empty">调度快照不可用</div></div>`;
+    renderView(`<div class="card"><div class="empty">调度快照不可用</div></div>`, context);
     return;
   }
   const d = t.data, ts = d.tasks || [];
@@ -804,7 +851,7 @@ PAGES.tasks = async () => {
   const disabled = ts.filter((x) => !x.enabled).length;
   const statusCls = (st) => (st === 'ok' ? 'ok' : st === 'failed' ? 'bad'
     : st === 'unknown' ? 'idle' : 'warn');
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${stat('⏱', ts.length, '任务总数', '快照中的定时任务')}
       ${stat('⚠', failed, '当前失败', failed ? '最近一次运行失败' : '全部正常')}
@@ -821,7 +868,7 @@ PAGES.tasks = async () => {
           ? `<span class="tag bad">${esc(x.failure_streak)}</span>`
           : '<span class="muted">0</span>';
         const st = x.last_status || 'unknown';
-        return `<tr><td>${esc(x.name)}${x.enabled ? '' : '<div class="s muted">已禁用</div>'}</td>
+        return `<tr data-live-key="task:${esc(x.name)}"><td>${esc(x.name)}${x.enabled ? '' : '<div class="s muted">已禁用</div>'}</td>
           <td>${esc(x.schedule)}</td>
           <td><span class="tag ${statusCls(st)}">${esc(st)}</span></td>
           <td>${esc(age)}</td>
@@ -832,8 +879,8 @@ PAGES.tasks = async () => {
       ? `<div class="card-body flush">${d.alerts.map((a) =>
           `<div class="list-row"><div class="t">${esc(a.message)}</div>
            <span class="tag ${a.level === 'warn' ? 'warn' : 'bad'}">${esc(a.level)}</span></div>`).join('')}</div>`
-      : `<div class="empty">无告警</div>`)}`;
-};
+      : `<div class="empty">无告警</div>`)}`, context);
+}
 
 PAGES.settings = async () => {
   $('#view').innerHTML = pageLoading();
@@ -1337,66 +1384,195 @@ async function applyUpdate() {
 }
 
 /* ---------------- live updates ---------------- */
-/* Polling every 30s was wrong in both directions: a stream starting now stayed
-   invisible for up to 30s, while an idle panel hammered Emby forever -- and the
-   periodic re-render wiped whatever the operator was typing. The server now
-   pushes snapshots over SSE and only when something actually changed. */
-const LIVE = {
-  dashboard: ['nodes', 'sessions', 'pipeline'],
-  nodes: ['nodes'],
-  intake: ['intake'],
-  pipeline: ['pipeline'],
-  tasks: ['tasks'],
-  mounts: ['mounts'],
-};
-const live = { src: null, data: {}, page: null, retry: 0 };
+/* A push updates a cached model and patches the existing DOM. It never calls
+   the navigation loader, clears #view, or refetches unrelated REST data. */
+const PAGE_MODELS = Object.create(null);
+const LIVE = Object.create(null);
+const LIVE_UPDATERS = new Map();
+const live = {src: null, data: {}, page: null, retry: 0, retryTimer: null,
+  flushTimer: null, pending: new Map(), flushing: false};
 
-function setLiveState(ok) {
+function pageContext(page = state.page, liveUpdate = false) {
+  const version = state.renderVersion || 0;
+  const route = state.route || page;
+  return {page, route, live: liveUpdate,
+    isCurrent: () => state.page === page && (state.renderVersion || 0) === version
+      && (state.route || state.page) === route};
+}
+
+function registerLiveUpdater(page, topics, handler) {
+  LIVE[page] = [...new Set([...(LIVE[page] || []), ...topics])];
+  if (!LIVE_UPDATERS.has(page)) LIVE_UPDATERS.set(page, new Set());
+  LIVE_UPDATERS.get(page).add(handler);
+  return () => LIVE_UPDATERS.get(page)?.delete(handler);
+}
+
+function liveKey(node) {
+  if (node.nodeType !== Node.ELEMENT_NODE) return null;
+  if (node.id) return 'id:' + node.id;
+  if (node.dataset.liveKey) return 'key:' + node.dataset.liveKey;
+  return null;
+}
+
+function patchChildren(parent, incoming) {
+  const keyed = new Map([...parent.childNodes].map((node) => [liveKey(node), node])
+    .filter(([key]) => key !== null));
+  let cursor = parent.firstChild;
+  const keep = new Set();
+  for (const fresh of [...incoming.childNodes]) {
+    const key = liveKey(fresh);
+    let current = key ? keyed.get(key) : cursor;
+    if (!key && current && liveKey(current)) current = null;
+    if (current && (current.nodeType !== fresh.nodeType || current.nodeName !== fresh.nodeName)) current = null;
+    if (!current) {
+      current = fresh.cloneNode(true);
+      parent.insertBefore(current, cursor);
+    } else {
+      if (current !== cursor) parent.insertBefore(current, cursor);
+      patchNode(current, fresh);
+    }
+    keep.add(current);
+    cursor = current.nextSibling;
+  }
+  for (const old of [...parent.childNodes]) {
+    if (!keep.has(old) && !old.contains(document.activeElement)) old.remove();
+  }
+}
+
+function patchNode(current, fresh) {
+  if (current.isEqualNode(fresh)) return;
+  if (current.nodeType !== Node.ELEMENT_NODE) {
+    if (current.nodeValue !== fresh.nodeValue) current.nodeValue = fresh.nodeValue;
+    return;
+  }
+  // These islands belong to an editor / asynchronous mount selector, not SSE.
+  if (current.hasAttribute('data-live-preserve')) return;
+  if (['INPUT', 'TEXTAREA', 'SELECT'].includes(current.tagName)) return;
+  if (current.tagName === 'BUTTON' && current.disabled) return;
+  const preserve = current.tagName === 'DETAILS' ? new Set(['open']) : new Set();
+  for (const attr of [...current.attributes]) {
+    if (!fresh.hasAttribute(attr.name) && !preserve.has(attr.name)) current.removeAttribute(attr.name);
+  }
+  for (const attr of [...fresh.attributes]) {
+    if (!preserve.has(attr.name) && current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+  }
+  patchChildren(current, fresh);
+}
+
+function renderView(html, context) {
+  if (!context.isCurrent()) return false;
+  const view = $('#view');
+  if (!context.live) { view.innerHTML = html; return true; }
+  const template = document.createElement('template');
+  template.innerHTML = html;
+  const focused = document.activeElement;
+  const selection = focused && /^(INPUT|TEXTAREA)$/.test(focused.tagName)
+    ? [focused.selectionStart, focused.selectionEnd, focused.selectionDirection] : null;
+  const scrollers = [document.scrollingElement, view, ...view.querySelectorAll('*')]
+    .filter((el) => el && (el.scrollTop || el.scrollLeft))
+    .map((el) => [el, el.scrollTop, el.scrollLeft]);
+  patchChildren(view, template.content);
+  if (focused && focused.isConnected && document.activeElement !== focused) focused.focus({preventScroll:true});
+  if (selection && focused.isConnected && selection[0] !== null) {
+    try { focused.setSelectionRange(...selection); } catch (e) { /* number input */ }
+  }
+  for (const [el, top, left] of scrollers) if (el.isConnected) { el.scrollTop = top; el.scrollLeft = left; }
+  return true;
+}
+
+function setLiveState(ok, label) {
   const el = $('#live-state');
   if (!el) return;
   el.className = 'tag ' + (ok ? 'ok' : 'idle');
-  el.textContent = ok ? '实时' : '重连中';
+  el.textContent = label || (ok ? '实时' : '重连中');
+}
+
+function scheduleLiveFlush() {
+  if (live.flushTimer || live.flushing || !state.pageReady || !live.pending.size) return;
+  live.flushTimer = setTimeout(flushLive, 24);
+}
+
+async function flushLive() {
+  live.flushTimer = null;
+  if (!state.pageReady || live.flushing) return;
+  const context = pageContext(state.page, true);
+  const pending = [...live.pending];
+  live.pending.clear();
+  live.flushing = true;
+  try {
+    for (const [topic, payload] of pending) {
+      if (!context.isCurrent()) break;
+      for (const handler of LIVE_UPDATERS.get(context.page) || []) {
+        if (!context.isCurrent()) break;
+        await handler(topic, payload, context);
+      }
+    }
+    if (context.isCurrent()) $('#last-updated').textContent = '最近更新: ' + new Date().toLocaleTimeString();
+  } catch (error) {
+    if (context.isCurrent()) setLiveState(false, '更新失败 · 等待下一次推送');
+  } finally {
+    live.flushing = false;
+    scheduleLiveFlush();
+  }
 }
 
 function connectLive(page) {
-  stopEnrollPoll();
-  const topics = LIVE[page];
+  clearTimeout(live.retryTimer); live.retryTimer = null;
+  clearTimeout(live.flushTimer); live.flushTimer = null;
   if (live.src) { live.src.close(); live.src = null; }
+  live.pending.clear();
+  if (live.page !== page) live.data = {};
   live.page = page;
-  live.data = {};
-  if (!topics) { setLiveState(false); return; }
-
+  const topics = LIVE[page];
+  if (!topics || !topics.length) { setLiveState(false, '按需更新'); return; }
+  const route = state.route;
   const src = new EventSource(`/api/stream?topics=${topics.join(',')}`);
   live.src = src;
-  src.onopen = () => { live.retry = 0; setLiveState(true); };
-  topics.forEach((topic) => {
-    src.addEventListener(topic, (ev) => {
-      try { live.data[topic] = JSON.parse(ev.data); } catch (e) { return; }
-      setLiveState(true);
-      // Re-render only the page that asked for this data, and never while a
-      // form on it is focused -- that is what used to eat keystrokes.
-      if (live.page === state.page && !isEditing()) {
-        renderPage(state.page, false, true);
-      }
-    });
-  });
+  const current = () => live.src === src && state.page === page && state.route === route;
+  src.onopen = () => { if (current()) { live.retry = 0; setLiveState(true); } };
+  topics.forEach((topic) => src.addEventListener(topic, (event) => {
+    if (!current()) return;
+    let payload;
+    try { payload = JSON.parse(event.data); } catch (error) { return; }
+    live.data[topic] = payload;
+    live.pending.set(topic, payload);
+    setLiveState(true);
+    scheduleLiveFlush();
+  }));
   src.onerror = () => {
+    if (!current()) return;
     setLiveState(false);
-    src.close();
-    live.src = null;
-    // EventSource retries on its own, but only for transport errors; an auth
-    // or proxy failure needs an explicit backoff so we do not spin.
+    src.close(); live.src = null;
     live.retry = Math.min(live.retry + 1, 6);
-    setTimeout(() => { if (live.page === state.page) connectLive(state.page); },
-               1000 * live.retry);
+    live.retryTimer = setTimeout(() => {
+      live.retryTimer = null;
+      if (live.page === page && state.page === page && state.route === route) connectLive(page);
+    }, Math.min(30000, 1000 * 2 ** (live.retry - 1)));
   };
 }
 
 function isEditing() {
-  const el = document.activeElement;
-  if (!el) return false;
-  const tag = (el.tagName || '').toLowerCase();
-  return tag === 'input' || tag === 'select' || tag === 'textarea';
+  return !!document.activeElement && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
+}
+
+registerLiveUpdater('dashboard', ['nodes','sessions','pipeline','overview','latest'], (topic, payload, context) => {
+  const model = PAGE_MODELS.dashboard;
+  if (!model) return;
+  const key = {nodes:'nodes',sessions:'sessions',pipeline:'pipe',overview:'overview',latest:'latest'}[topic];
+  if (key) { model[key] = payload; paintDashboard(model, context); }
+});
+registerLiveUpdater('nodes', ['nodes','dispatch'], (topic, payload, context) => {
+  const model = PAGE_MODELS.nodes;
+  if (!model) return;
+  if (topic === 'nodes') model.ns = payload;
+  if (topic === 'dispatch') model.log = payload;
+  paintNodes(model, context);
+});
+for (const page of ['pipeline','mounts','tasks']) {
+  registerLiveUpdater(page, [page], (topic, payload, context) => {
+    if (topic !== page) return;
+    ({pipeline:paintPipeline,mounts:paintMounts,tasks:paintTasks})[page](payload, context);
+  });
 }
 
 /* ---------------- boot ---------------- */
@@ -1411,5 +1587,5 @@ function bootPanel() {
     $('#who').textContent = w.user;
     $('#who-initial').textContent = (w.user || '?').slice(0, 1).toUpperCase();
   }).catch(() => {});
-  go((location.hash || '').replace('#/', '') || 'dashboard');
+  go(routeFromHash());
 }
