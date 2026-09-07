@@ -57,7 +57,7 @@ def test_deleting_a_member_takes_their_inviter(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["alice", "bob"])
 
-    result = members.delete("emby-bob", actor="operator")
+    result = members.delete("emby-bob", actor="operator", cascade=True)
 
     assert set(result["deleted"]) == {"emby-bob", "emby-alice"}
     assert members.get("emby-bob") is None
@@ -69,7 +69,7 @@ def test_the_cascade_stops_at_the_direct_inviter(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["gran", "parent", "child"])
 
-    result = members.delete("emby-child", actor="operator")
+    result = members.delete("emby-child", actor="operator", cascade=True)
 
     assert set(result["deleted"]) == {"emby-child", "emby-parent"}
     assert members.get("emby-gran") is not None
@@ -79,7 +79,7 @@ def test_a_long_chain_loses_exactly_two_accounts(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["a", "b", "c", "d", "e"])
 
-    members.delete("emby-e", actor="operator")
+    members.delete("emby-e", actor="operator", cascade=True)
 
     survivors = {m["emby_user_id"] for m in members.list()}
     assert survivors == {"emby-a", "emby-b", "emby-c"}
@@ -155,11 +155,11 @@ def test_preview_names_the_inviter_that_delete_removes(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["alice", "bob"])
 
-    preview = members.delete_preview("emby-bob")
+    preview = members.delete_preview("emby-bob", cascade=True)
     assert preview["target"]["username"] == "bob"
     assert [c["emby_user_id"] for c in preview["cascade"]] == ["emby-alice"]
 
-    result = members.delete("emby-bob", actor="operator")
+    result = members.delete("emby-bob", actor="operator", cascade=True)
     promised = {preview["target"]["emby_user_id"]} | {
         c["emby_user_id"] for c in preview["cascade"]}
     assert promised == set(result["deleted"])
@@ -198,7 +198,7 @@ def test_both_deletions_are_audited_under_distinct_actions(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["alice", "bob"])
 
-    members.delete("emby-bob", actor="operator")
+    members.delete("emby-bob", actor="operator", cascade=True)
 
     assert "member.delete" in _actions_for(members, "emby-bob")
     # A distinct action: the operator never asked for alice's row to go.
@@ -210,7 +210,7 @@ def test_the_cascade_entry_names_who_it_came_from(tmp_path) -> None:
     members, groups, _db = _svc(tmp_path)
     _chain(members, groups, ["alice", "bob"])
 
-    members.delete("emby-bob", actor="operator")
+    members.delete("emby-bob", actor="operator", cascade=True)
 
     entries = [r for r in members.audit_log(50, subject="emby-alice")
                if r["action"] == "member.delete.cascade"]
@@ -282,12 +282,14 @@ def test_delete_preview_endpoint_matches_the_delete(tmp_path) -> None:
                    json={"username": "cascb", "group_id": gid,
                          "inviter_id": "casc-a", "register_via": "invite"})
 
-        preview = client.get("/api/members/casc-b/delete-preview",
+        preview = client.get("/api/members/casc-b/delete-preview?cascade=true",
                              auth=ADMIN).json()
         assert [c["emby_user_id"] for c in preview["cascade"]] == ["casc-a"]
+        ids = [o["emby_user_id"] for o in preview["objects"]]
 
         removed = client.request(
-            "DELETE", "/api/members/casc-b", auth=ADMIN).json()
+            "DELETE", "/api/members/casc-b?cascade=true", auth=ADMIN,
+            json={"cascade": True, "confirm_ids": ids}).json()
         assert set(removed["removed"]) == {"casc-b", "casc-a"}
         assert client.get("/api/members/casc-a", auth=ADMIN).status_code == 404
 

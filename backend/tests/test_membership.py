@@ -169,11 +169,15 @@ def test_renew_extends_from_expiry_not_from_now(stack) -> None:
 
 
 def test_assigning_a_timed_group_sets_an_expiry(stack) -> None:
-    """Otherwise a timed group silently becomes permanent."""
+    """New members still arm the clock; switching groups keeps the term."""
     stack["members"].upsert("u1", "alice", {"group_id": "standard"})
-    assert stack["members"].get("u1")["expires_at"] is not None
+    first = stack["members"].get("u1")["expires_at"]
+    assert first is not None
     stack["members"].upsert("u1", "alice", {"group_id": "vip"})
-    assert stack["members"].get("u1")["expires_at"] is None
+    assert stack["members"].get("u1")["expires_at"] == first
+    stack["members"].upsert(
+        "u1", "alice", {"group_id": "standard", "expiry_policy": "apply_group"})
+    assert stack["members"].get("u1")["expires_at"] is not None
 
 
 def test_monthly_rollover_resets_quota_and_revives_exhausted(stack) -> None:

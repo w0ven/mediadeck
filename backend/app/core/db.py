@@ -541,6 +541,12 @@ class Database:
             # a fact about Emby. Overloading status would let an orphan silently
             # clear itself the next time enforcement recomputed the state.
             self._ensure_column("members", "emby_missing_since", "INTEGER")
+            self._ensure_column(
+                "members", "last_remote_action", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("members", "last_remote_ok", "INTEGER")
+            self._ensure_column(
+                "members", "last_remote_error", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("members", "last_remote_at", "INTEGER")
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:

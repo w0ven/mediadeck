@@ -29,6 +29,39 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — member lifecycle + admin UI
+**Done**
+- Group switch default is `keep`: existing `expires_at` and personal overrides
+  stay put; timed groups no longer silently rewrite 180 days into 30. Permanent
+  accounts require an explicit `expiry_policy` (`keep` / `apply_group` / `clear`
+  / `set`) via group-preview + POST `/group`.
+- Renew extends from the effective expiry and writes `expires_at_override` when
+  that layer is present; permanent accounts are refused rather than converted.
+- Entitlement, Emby presence, and policy sync are separate observation fields.
+  `enforce_now` returns an envelope; fingerprint hits compare every MANAGED_KEY.
+  Remote failures are not reported as `ok`/`deleted:true`.
+- Delete is self-only by default. `cascade=true` requires exact `confirm_ids`.
+  Emby is deleted first; a confirmed remote failure keeps the local row and is
+  retryable. Bot `/rm` has separate `rm_self` / `rm_cascade` buttons.
+- `GET /api/members` paginates after decorating the full set; unmanaged is
+  computed from all known ids. Compact SSE topic `members` feeds local UI
+  updates.
+- New `members.js` page: real pagination, split status columns, action
+  envelopes, `registerLiveUpdater('members', ['members'], handler)` with
+  `renderView` / `data-live-key` / `data-live-preserve`. Does not wrap `go()`
+  or modify `app.js`.
+
+**Tests**
+- New `tests/test_member_lifecycle.py` and `tests/test_members_ui_contract.py`.
+- Existing cascade / membership / admin-command tests updated for the new
+  defaults. Targeted pytest + ruff run in this session.
+
+**Next**
+- Merge with the live-ui shell (`pageContext` / `renderView`) for browser
+  verification of query routes and differential updates.
+
+---
+
 ## 2026-09-08 — reconcile member rows against Emby accounts
 **Done**
 - Member rows never noticed when their Emby account disappeared: enrolment was

@@ -8,10 +8,10 @@ confirmation is tapped. A confirmation dialog can sit on somebody's screen for
 a long time, and the person who taps it may no longer be who they were when
 they typed it.
 
-**The irreversible ones ask first.** /rm deletes an account, its inviter and
-the Emby user; /renewall and /scoreall touch everybody. Each shows what it is
-about to do and does nothing until a button is pressed -- and the preview for
-/rm names the cascaded account, because that is the one nobody asked for.
+**The irreversible ones ask first.** /rm deletes an account (and optionally
+its inviter) plus the Emby user; /renewall and /scoreall touch everybody.
+Each shows what it is about to do and does nothing until a button is pressed
+-- cascade is a separate button, because that is the account nobody named.
 
 Every command is also tested for the two boring refusals that would otherwise
 be discovered in production: a non-admin sending it, and a username that does
@@ -297,7 +297,8 @@ def test_rm_previews_the_cascade_before_deleting_anything(bot) -> None:
     prompt = _run(bot, "/rm carol")
 
     assert "确认删除" in prompt
-    assert "连带删除" in prompt and "alice" in prompt
+    assert "连带邀请人" in prompt and "alice" in prompt
+    assert "只删本人" in prompt
     assert bot.members.get("u2") is not None
     assert bot.members.get("u1") is not None
 
@@ -307,7 +308,7 @@ def test_rm_deletes_the_member_the_inviter_and_the_emby_accounts(bot) -> None:
                                        "inviter_id": "u1"}, actor="test")
     _run(bot, "/rm carol")
 
-    result = _tap(bot, "admin_ok")
+    result = _tap(bot, "rm_cascade")
 
     assert "已删除" in result
     assert bot.members.get("u2") is None
@@ -325,6 +326,18 @@ def test_rm_can_be_cancelled_and_removes_nothing(bot) -> None:
 def test_rm_without_an_inviter_reports_no_cascade(bot) -> None:
     prompt = _run(bot, "/rm alice")
     assert "连带删除" not in prompt
+    assert "连带邀请人" not in prompt
+
+
+def test_rm_self_leaves_the_inviter(bot) -> None:
+    bot.members.upsert("u2", "carol", {"group_id": "standard",
+                                       "inviter_id": "u1"}, actor="test")
+    _run(bot, "/rm carol")
+    result = _tap(bot, "rm_self")
+    assert "仅本人" in result
+    assert bot.members.get("u2") is None
+    assert bot.members.get("u1") is not None
+    assert bot.emby.deleted == ["u2"]
 
 
 # -- /score and /scoreall ----------------------------------------------------

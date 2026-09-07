@@ -154,12 +154,16 @@ class EnforcementService:
 
             want = desired_policy(member)
             fp = fingerprint(want)
-            # Already applied and unchanged. Still verify Emby agrees on the
-            # one field that matters most, so drift caused by someone editing
-            # Emby directly is not invisible.
+            # Already applied and unchanged. Still verify every managed field,
+            # not just IsDisabled: an operator (or another tool) can drift
+            # streams/libraries/download flags without flipping the disable bit.
             unchanged = not force and fp == member.get("applied_fingerprint")
-            if unchanged and bool(current.get("IsDisabled")) == bool(want["IsDisabled"]):
-                continue
+            if unchanged:
+                drifted = any(
+                    _normalise(current.get(k)) != _normalise(want.get(k))
+                    for k in MANAGED_KEYS if k in want)
+                if not drifted:
+                    continue
 
             diff = {k: v for k, v in want.items()
                     if _normalise(current.get(k)) != _normalise(v)}
@@ -185,7 +189,8 @@ class EnforcementService:
                 ok = await self._emby.apply_policy(uid, want)
             except Exception as exc:  # noqa: BLE001
                 ok = False
-                errors.append({"user_id": uid, "error": str(exc)[:200]})
+                from app.modules.member_ops import redact
+                errors.append({"user_id": uid, "error": redact(exc)})
             if ok:
                 applied += 1
                 self._db.execute(
@@ -194,13 +199,21 @@ class EnforcementService:
                 self._members.audit(
                     "system", "enforce.apply", uid,
                     f"state={member.get('state')} changes={sorted(diff)}")
+                self._record_remote(uid, "enforce", ok=True)
             else:
+                if not any(e.get("user_id") == uid for e in errors):
+                    errors.append({"user_id": uid,
+                                   "error": "apply_policy returned false"})
                 self._members.audit(
                     "system", "enforce.fail", uid,
                     f"state={member.get('state')}", ok=False)
+                self._record_remote(
+                    uid, "enforce", ok=False,
+                    error=next((e["error"] for e in errors
+                                if e.get("user_id") == uid), "enforce failed"))
 
         return {
-            "ok": True,
+            "ok": not errors,
             "dry_run": not apply,
             "considered": len(rows),
             "planned": len(planned),
@@ -208,30 +221,89 @@ class EnforcementService:
             "changes": planned[:200],
             "skipped": skipped[:100],
             "errors": errors[:50],
+            "local_ok": True,
+            "remote_ok": (not errors) if apply else None,
+            "retryable": bool(errors),
+            "error": (errors[0].get("error") if errors else ""),
         }
 
-    async def enforce_now(self, user_id: str, reason: str = "") -> bool:
+    def _record_remote(self, user_id: str, action: str, *, ok: bool,
+                       error: str = "") -> None:
+        from app.modules.member_ops import redact
+        now = int(time.time())
+        self._db.execute(
+            "UPDATE members SET last_remote_action=?,last_remote_ok=?,"
+            "last_remote_error=?,last_remote_at=?,updated_at=? "
+            "WHERE emby_user_id=?",
+            (action[:40], 1 if ok else 0, redact(error), now, now, user_id))
+
+    async def enforce_now(self, user_id: str, reason: str = "") -> dict[str, Any]:
         """Apply one member immediately.
 
         Used when quota runs out mid-stream: waiting for the next timed pass
-        would let a user keep watching well past their limit.
+        would let a user keep watching well past their limit. Unenrolled
+        accounts and Emby administrators are skipped here the same way
+        reconcile skips them.
         """
         member = self._members.get(user_id)
         if not member:
-            return False
+            return {"ok": True, "skipped": "unenrolled", "local_ok": True,
+                    "remote_ok": None, "retryable": False, "error": "",
+                    "errors": []}
+        emby_user = None
+        try:
+            for user in await self._emby.list_users():
+                if str(user.get("Id")) == str(user_id):
+                    emby_user = user
+                    break
+        except Exception as exc:  # noqa: BLE001
+            from app.modules.member_ops import redact
+            err = redact(exc)
+            self._record_remote(user_id, "enforce", ok=False, error=err)
+            self._members.audit("system", "enforce.fail", user_id,
+                                reason or err, ok=False)
+            return {"ok": False, "local_ok": True, "remote_ok": False,
+                    "retryable": True, "error": err,
+                    "errors": [{"target": user_id, "stage": "emby",
+                                "error": err, "retryable": True}]}
+        if not emby_user:
+            self._record_remote(user_id, "enforce", ok=False,
+                                error="emby_user_missing")
+            return {"ok": False, "skipped": "emby_user_missing",
+                    "local_ok": True, "remote_ok": False, "retryable": True,
+                    "error": "Emby 账号不存在",
+                    "errors": [{"target": user_id, "stage": "emby",
+                                "error": "Emby 账号不存在", "retryable": True}]}
+        if (emby_user.get("Policy") or {}).get("IsAdministrator"):
+            return {"ok": True, "skipped": "administrator", "local_ok": True,
+                    "remote_ok": None, "retryable": False, "error": "",
+                    "errors": []}
         want = desired_policy(member)
         try:
             ok = await self._emby.apply_policy(user_id, want)
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             ok = False
+            from app.modules.member_ops import redact
+            err = redact(exc)
+        else:
+            err = "" if ok else "apply_policy returned false"
         if ok:
             self._db.execute(
                 "UPDATE members SET applied_fingerprint=?,applied_at=? "
                 "WHERE emby_user_id=?",
                 (fingerprint(want), int(time.time()), user_id))
+        self._record_remote(user_id, "enforce", ok=ok, error=err)
         self._members.audit("system", "enforce.immediate", user_id,
                             reason or member.get("state", ""), ok=ok)
-        return ok
+        return {
+            "ok": bool(ok),
+            "local_ok": True,
+            "remote_ok": bool(ok),
+            "retryable": not ok,
+            "error": err,
+            "errors": ([] if ok else [{"target": user_id, "stage": "enforce",
+                                       "error": err, "retryable": True}]),
+        }
 
     async def terminate_sessions(self, user_id: str, reason: str = "配额已用尽"
                                  ) -> int:
