@@ -1435,7 +1435,12 @@ class TelegramBot:
         args = parts[1:]
 
         member = self._member_for_chat(tg_user_id)
-        if command == "help" and not self.is_admin(member):
+        # /start is how anybody opens the bot -- it is the very first message
+        # every ordinary member ever sends. Routing it through the admin gate
+        # answered that message with "no permission", and admins fared no
+        # better: with no _cmd_start they were told the command was unknown.
+        # It always means "show me my home screen", for every role.
+        if command == "start" or (command == "help" and not self.is_admin(member)):
             body, keyboard = self._home(tg_user_id, tg_username or "朋友")
             await self.send(chat_id, body, keyboard)
             return
