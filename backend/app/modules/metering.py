@@ -1,21 +1,21 @@
 """Measured traffic ledger — kernel outbound IP bytes, idempotent across nodes.
 
-This is the panel half of measured metering. The node core is
-``agent/flowmeter.py``. Bytes here are **kernel outbound IP-packet bytes**
-as counted by nft on registered 4-tuples: headers included, possible
-retransmits included. They are not HTTP content length and not a NIC
-frame capture. A loopback header-overhead observation is not a general
-error bound.
+Bytes are **kernel outbound IP-packet bytes** as counted by nft on
+registered 4-tuples: headers included, possible retransmits included.
+They are not HTTP content length and not a NIC frame capture.
+
+Stream identity is ``(node, conn_id, generation)``. ``boot_id`` is only
+the reporting process epoch (spool / ack). A live connection that
+survives an agent restart keeps the same conn_id and must not be billed
+from zero.
 
 Old ``edge_usage_daily`` / ``members.traffic_used_bytes`` stay statistical.
-Nothing here imports that history as a billing baseline. Cutover of
-enforcement onto this ledger is an explicit operator decision; this
-module never flips ``enforcement_enabled``.
+Cutover onto this ledger is an explicit operator decision.
 """
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +25,10 @@ from app.modules.members import period_start
 UNIT = "kernel_outbound_ip_bytes"
 SOURCE = "measured"
 UNKNOWN_USER = ""
+BILLABLE_COVERAGE = frozenset({"observed", "retained"})
+# First observation after a month-crossing gap longer than this is not
+# attributed to the new month (and not invented for the old one).
+MONTH_GAP_SECONDS = 3 * 3600
 
 
 def month_key(ts: float | None = None) -> str:
@@ -39,20 +43,36 @@ def _as_int(value: Any, default: int = 0) -> int:
         return default
 
 
+def _billable(sample: dict[str, Any], envelope: dict[str, Any]) -> str | None:
+    """Return a reject reason, or None if the sample may move the watermark."""
+    if envelope.get("unit") not in (None, "", UNIT):
+        if str(envelope.get("unit")) != UNIT:
+            return "invalid_unit"
+    if envelope.get("nft_ok") is False:
+        return "nft_down"
+    coverage = str(sample.get("coverage") or "")
+    if coverage not in BILLABLE_COVERAGE:
+        return coverage or "unmeasured"
+    if _as_int(sample.get("counter_bytes"), -1) < 0:
+        return "unmeasured"
+    return None
+
+
 class MeasuredMeteringService:
     """Idempotent ingest of node envelopes + UTC-month snapshots.
 
-    High water is ``(node, boot_id, conn_id, generation)``. A smaller
-    ``counter_bytes`` on a later envelope with the same key is a duplicate
-    or out-of-order report, not a new generation. A new generation is only
-    accepted when the node sends a higher ``generation`` (or a new
-    ``conn_id`` / ``boot_id``).
+    High water is ``(node, conn_id, generation)``. Duplicate envelopes are
+    ``(node, boot_id, seq)``. A later envelope with a *lower* seq is still
+    processed if that seq was never seen — unique samples must not be lost.
     """
 
     def __init__(self, db: Database,
-                 tag_to_user: Callable[[], dict[str, str]] | None = None) -> None:
+                 tag_to_user: Callable[[], dict[str, str]] | None = None,
+                 expected_nodes: Callable[[], Iterable[str]] | None = None,
+                 ) -> None:
         self._db = db
         self._tag_to_user = tag_to_user or dict
+        self._expected_nodes = expected_nodes or (lambda: [])
 
     # -- ingest --------------------------------------------------------------
     def ingest(self, envelope: dict[str, Any]) -> dict[str, Any]:
@@ -70,90 +90,116 @@ class MeasuredMeteringService:
         tag_map = self._tag_to_user()
         credited = 0
         unattributed = 0
+        skipped = 0
         duplicate = False
 
         with self._db.write() as conn:
-            existing = conn.execute(
-                "SELECT seq, acked FROM measured_node_seq "
-                "WHERE node=? AND boot_id=?",
-                (node, boot_id),
+            seen = conn.execute(
+                "SELECT 1 FROM measured_envelopes WHERE node=? AND boot_id=? AND seq=?",
+                (node, boot_id, seq),
             ).fetchone()
-            if existing is not None and int(existing["seq"]) >= seq:
+            if seen is not None:
                 duplicate = True
             else:
+                conn.execute(
+                    "INSERT INTO measured_envelopes"
+                    "(node,boot_id,seq,nft_ok,observed_at) VALUES(?,?,?,?,?)",
+                    (node, boot_id, seq, 1 if nft_ok else 0, observed_at),
+                )
                 for sample in samples:
-                    add, unknown = self._credit_sample(
-                        conn, node, boot_id, sample, tag_map, observed_at)
+                    add, unknown, skip = self._credit_sample(
+                        conn, node, sample, tag_map, envelope)
                     credited += add
                     unattributed += unknown
-                conn.execute(
-                    "INSERT INTO measured_node_seq"
-                    "(node,boot_id,seq,nft_ok,observed_at,updated_at,acked) "
-                    "VALUES(?,?,?,?,?,?,1) "
-                    "ON CONFLICT(node,boot_id) DO UPDATE SET "
-                    "seq=excluded.seq, nft_ok=excluded.nft_ok, "
-                    "observed_at=excluded.observed_at, "
-                    "updated_at=excluded.updated_at, acked=1",
-                    (node, boot_id, seq, 1 if nft_ok else 0, observed_at,
-                     time.time()),
-                )
+                    skipped += skip
+            conn.execute(
+                "INSERT INTO measured_node_seq"
+                "(node,boot_id,seq,nft_ok,observed_at,updated_at,acked) "
+                "VALUES(?,?,?,?,?,?,1) "
+                "ON CONFLICT(node,boot_id) DO UPDATE SET "
+                "seq=MAX(measured_node_seq.seq, excluded.seq), "
+                "nft_ok=excluded.nft_ok, "
+                "observed_at=excluded.observed_at, "
+                "updated_at=excluded.updated_at, acked=1",
+                (node, boot_id, seq, 1 if nft_ok else 0, observed_at,
+                 time.time()),
+            )
 
         return {
             "ok": True,
             "duplicate": duplicate,
             "credited": credited,
             "unattributed": unattributed,
+            "skipped": skipped,
             "seq": seq,
             "boot_id": boot_id,
             "node": node,
             "ack": {"boot_id": boot_id, "seq": seq},
         }
 
-    def _credit_sample(self, conn: Any, node: str, boot_id: str,
-                       sample: dict[str, Any], tag_map: dict[str, str],
-                       envelope_ts: float) -> tuple[int, int]:
+    def _credit_sample(self, conn: Any, node: str, sample: dict[str, Any],
+                       tag_map: dict[str, str], envelope: dict[str, Any]
+                       ) -> tuple[int, int, int]:
         conn_id = str(sample.get("conn_id") or "").strip()
         generation = _as_int(sample.get("generation"), 0)
         if not conn_id or generation < 1:
-            return 0, 0
+            return 0, 0, 1
+        reject = _billable(sample, envelope)
+        if reject:
+            # Do not advance the billable watermark on unmeasured / untrusted
+            # bytes. A later observed sample must still be able to credit
+            # the gap from the last *trusted* counter.
+            return 0, 0, 1
+
         counter = _as_int(sample.get("counter_bytes"), -1)
-        if counter < 0:
-            return 0, 0
         utag = str(sample.get("utag") or "").strip()
-        coverage = str(sample.get("coverage") or "observed")
-        observed_at = float(sample.get("observed_at") or envelope_ts)
+        observed_at = float(sample.get("observed_at") or envelope.get("observed_at")
+                            or time.time())
         user_id = tag_map.get(utag, UNKNOWN_USER)
 
         row = conn.execute(
-            "SELECT counter_bytes FROM measured_watermarks "
-            "WHERE node=? AND boot_id=? AND conn_id=? AND generation=?",
-            (node, boot_id, conn_id, generation),
+            "SELECT counter_bytes, observed_at FROM measured_watermarks "
+            "WHERE node=? AND conn_id=? AND generation=?",
+            (node, conn_id, generation),
         ).fetchone()
         last = int(row["counter_bytes"]) if row is not None else 0
+        last_at = float(row["observed_at"] or 0) if row is not None else 0
         if counter < last:
-            # Duplicate / out-of-order. Not a new generation.
-            return 0, 0
+            return 0, 0, 0
         delta = counter - last
         conn.execute(
             "INSERT INTO measured_watermarks"
-            "(node,boot_id,conn_id,generation,utag,emby_user_id,counter_bytes,"
+            "(node,conn_id,generation,utag,emby_user_id,counter_bytes,observed_at,"
             "updated_at) VALUES(?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(node,boot_id,conn_id,generation) DO UPDATE SET "
+            "ON CONFLICT(node,conn_id,generation) DO UPDATE SET "
             "counter_bytes=excluded.counter_bytes, "
+            "observed_at=excluded.observed_at, "
             "utag=excluded.utag, "
             "emby_user_id=CASE WHEN excluded.emby_user_id<>'' "
             "THEN excluded.emby_user_id ELSE measured_watermarks.emby_user_id END, "
             "updated_at=excluded.updated_at",
-            (node, boot_id, conn_id, generation, utag, user_id, counter,
-             observed_at),
+            (node, conn_id, generation, utag, user_id, counter, observed_at,
+             time.time()),
         )
         if delta <= 0:
-            return 0, 0
-        if coverage not in ("observed", "retained"):
-            # Unknown coverage is not billed as measured.
-            return 0, 0
+            return 0, 0, 0
+
         month = month_key(observed_at)
-        bucket_user = user_id
+        if last_at and month_key(last_at) != month:
+            gap = observed_at - last_at
+            if gap > MONTH_GAP_SECONDS:
+                # Cannot place the bytes in either month without inventing a
+                # split. Record as unattributed period_gap, not this month.
+                conn.execute(
+                    "INSERT INTO measured_usage_monthly"
+                    "(month,node,utag,emby_user_id,bytes,unattributed) "
+                    "VALUES(?,?,?,?,0,?) "
+                    "ON CONFLICT(month,node,utag) DO UPDATE SET "
+                    "unattributed=unattributed+excluded.unattributed",
+                    (month, node, utag or "unknown", "", delta),
+                )
+                return 0, delta, 0
+
         unknown = 0 if user_id else delta
         conn.execute(
             "INSERT INTO measured_usage_monthly"
@@ -164,34 +210,31 @@ class MeasuredMeteringService:
             "unattributed=unattributed+excluded.unattributed, "
             "emby_user_id=CASE WHEN excluded.emby_user_id<>'' "
             "THEN excluded.emby_user_id ELSE measured_usage_monthly.emby_user_id END",
-            (month, node, utag or "unknown", bucket_user, delta, unknown),
+            (month, node, utag or "unknown", user_id, delta, unknown),
         )
-        return delta, unknown
+        return delta, unknown, 0
 
     # -- queries -------------------------------------------------------------
     def snapshot(self, user_id: str, *, now: float | None = None) -> dict[str, Any]:
         """Stable member-facing view. Missing measurement is not zero."""
         now = time.time() if now is None else now
         month = month_key(now)
-        row = self._db.one(
-            "SELECT SUM(bytes) AS b FROM measured_usage_monthly "
-            "WHERE emby_user_id=? AND month=?",
-            (user_id, month),
-        )
-        nodes = self._node_coverage(now)
-        any_ok = any(n["ok"] for n in nodes) if nodes else False
-        measured = None if (row is None or row.get("b") is None) and not any_ok else int(
-            (row or {}).get("b") or 0)
-        # Distinguish "user has a row of 0" from "never credited":
         has_row = self._db.one(
             "SELECT 1 AS n FROM measured_usage_monthly "
             "WHERE emby_user_id=? AND month=? LIMIT 1",
             (user_id, month),
         ) is not None
-        if not has_row:
-            measured = None
+        measured = None
+        if has_row:
+            row = self._db.one(
+                "SELECT SUM(bytes) AS b FROM measured_usage_monthly "
+                "WHERE emby_user_id=? AND month=?",
+                (user_id, month),
+            )
+            measured = int((row or {}).get("b") or 0)
+        nodes = self._node_coverage(now)
         degraded = (not nodes) or any(not n["ok"] for n in nodes)
-        as_of = max((n["as_of"] or 0) for n in nodes) if nodes else None
+        as_of_vals = [n["as_of"] for n in nodes if n.get("as_of")]
         return {
             "user_id": user_id,
             "source": SOURCE,
@@ -199,12 +242,13 @@ class MeasuredMeteringService:
             "measured_used_bytes": measured,
             "period": month,
             "period_start": period_start(int(now)),
-            "as_of": as_of,
+            "as_of": max(as_of_vals) if as_of_vals else None,
             "coverage": {
                 "nodes": nodes,
                 "degraded": degraded,
                 "reason": None if not degraded else (
-                    "no_node_reports" if not nodes else "node_stale_or_nft_down"),
+                    "no_node_reports" if not any(n.get("as_of") for n in nodes)
+                    else "node_stale_or_nft_down"),
             },
         }
 
@@ -243,7 +287,7 @@ class MeasuredMeteringService:
     def reset_credit(self, user_id: str, *, now: float | None = None) -> dict[str, Any]:
         """Zero this user's current UTC month measured credit.
 
-        Watermarks stay: later node reports only add *new* deltas. Does not
+        Watermarks stay so later reports only add new deltas. Does not
         touch ``traffic_used_bytes`` or the edge log ledger.
         """
         now = time.time() if now is None else now
@@ -255,20 +299,50 @@ class MeasuredMeteringService:
         return {"ok": True, "user_id": user_id, "period": month,
                 "measured_used_bytes": None}
 
+    def used_bytes(self, user_id: str, *, now: float | None = None) -> int | None:
+        snap = self.snapshot(user_id, now=now)
+        return snap["measured_used_bytes"]
+
+    def exhausted_tags(self, *, now: float | None = None,
+                       tag_of: Callable[[str], str] | None = None,
+                       members: Any = None) -> list[str]:
+        """Tags the nodes must keep blocked. Empty if cutover is off.
+
+        Built from currently exhausted members, not from 'who reported last'.
+        """
+        return []  # filled by panel helper that knows cutover + members
+
     def _node_coverage(self, now: float, stale_after: float = 120.0) -> list[dict[str, Any]]:
         rows = self._db.query(
             "SELECT node, boot_id, seq, nft_ok, observed_at FROM measured_node_seq"
         )
+        by_name = {r["node"]: r for r in rows}
+        expected = list(self._expected_nodes() or [])
+        names = list(expected) if expected else list(by_name)
+        # Always include expected nodes even if they have never reported.
+        for name in by_name:
+            if name not in names:
+                names.append(name)
         out = []
-        for row in rows:
+        for name in names:
+            row = by_name.get(name)
+            if row is None:
+                out.append({
+                    "name": name, "ok": False, "nft_ok": False,
+                    "boot_id": None, "seq": 0, "as_of": None,
+                    "reason": "never_reported",
+                })
+                continue
             observed = float(row["observed_at"] or 0)
             ok = bool(row["nft_ok"]) and (now - observed) <= stale_after
             out.append({
-                "name": row["node"],
+                "name": name,
                 "ok": ok,
                 "nft_ok": bool(row["nft_ok"]),
                 "boot_id": row["boot_id"],
                 "seq": int(row["seq"] or 0),
                 "as_of": observed or None,
+                "reason": None if ok else (
+                    "nft_down" if not row["nft_ok"] else "stale"),
             })
         return out

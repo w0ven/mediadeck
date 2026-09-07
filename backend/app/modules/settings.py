@@ -111,6 +111,14 @@ MEMBERSHIP_DEFAULTS: dict[str, Any] = {
     "retention_days": 400,
 }
 
+# Measured quota is opt-in. An upgrade must not start blocking accounts
+# against a ledger that was never confirmed as the billing baseline.
+METERING_DEFAULTS: dict[str, Any] = {
+    "cutover": False,
+    "baseline_confirmed": False,
+    "report_interval_seconds": 15,
+}
+
 
 def mask_secret(value: str) -> str:
     """Show enough to recognise a key, never enough to use it."""
@@ -175,6 +183,7 @@ class SettingsService:
         self._store.set_section("integration", dict(INTEGRATION_DEFAULTS), persist=False)
         self._store.set_section("image_cache", dict(IMAGE_CACHE_DEFAULTS), persist=False)
         self._store.set_section("membership", dict(MEMBERSHIP_DEFAULTS), persist=False)
+        self._store.set_section("metering", dict(METERING_DEFAULTS), persist=False)
         seed = cfg.nodes() or (demo_nodes() if cfg.mediadeck_mock else [])
         self._store.set("nodes", [n.model_dump() for n in seed], persist=False)
         self._store.save()
@@ -436,6 +445,48 @@ class SettingsService:
             "retention_days": retention,
         })
         return self.membership_config()
+
+    def metering_config(self) -> dict[str, Any]:
+        section = self._store.section("metering")
+        cfg = dict(METERING_DEFAULTS)
+        for key in cfg:
+            if key in section:
+                cfg[key] = section[key]
+        cfg["cutover"] = bool(cfg["cutover"])
+        cfg["baseline_confirmed"] = bool(cfg["baseline_confirmed"])
+        try:
+            cfg["report_interval_seconds"] = max(5, int(cfg["report_interval_seconds"]))
+        except (TypeError, ValueError):
+            cfg["report_interval_seconds"] = 15
+        # Cutover requires an explicit baseline confirmation. A lone True
+        # in a hand-edited document must not start blocking accounts.
+        if cfg["cutover"] and not cfg["baseline_confirmed"]:
+            cfg["cutover"] = False
+        cfg["status"] = (
+            "active" if cfg["cutover"] and cfg["baseline_confirmed"]
+            else "not_enabled"
+        )
+        return cfg
+
+    def save_metering(self, payload: dict[str, Any]) -> dict[str, Any]:
+        current = self.metering_config()
+        confirm = bool(payload.get("baseline_confirmed", current["baseline_confirmed"]))
+        want_cutover = bool(payload.get("cutover", current["cutover"]))
+        if want_cutover and not confirm:
+            raise ConfigError("启用实测配额前必须确认计费基线（baseline_confirmed）")
+        try:
+            interval = int(payload.get(
+                "report_interval_seconds", current["report_interval_seconds"]))
+        except (TypeError, ValueError):
+            raise ConfigError("上报间隔必须是整数") from None
+        if not 5 <= interval <= 120:
+            raise ConfigError("上报间隔必须在 5–120 秒之间")
+        self._store.set_section("metering", {
+            "cutover": want_cutover,
+            "baseline_confirmed": confirm,
+            "report_interval_seconds": interval,
+        })
+        return self.metering_config()
 
     # -- telegram -------------------------------------------------------------
     def telegram_config(self) -> dict[str, Any]:

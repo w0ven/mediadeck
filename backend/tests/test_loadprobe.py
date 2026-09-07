@@ -58,6 +58,10 @@ def test_parses_every_log_shape_nodes_actually_write() -> None:
     # original: purely positional
     assert parse("1788035116.082 5e51160de9 246314907 5.383") == (
         1788035116.082, "5e51160de9", 246314907, 5.383, "", "")
+    # suffix s=/uri must not be read as bytes/seconds
+    assert parse("1788616301.177 a=10.0.0.2 p=21956 u=68249a8004 r=15728625 "
+                 "167100416 31.282 s=206 /s/pool/Some/Path/file.mkv") == (
+        1788616301.177, "68249a8004", 167100416, 31.282, "10.0.0.2", "21956")
 
 
 def test_unattributable_or_empty_requests_are_ignored() -> None:

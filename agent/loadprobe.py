@@ -346,8 +346,10 @@ class SpeedLog:
                 peer_ip = token[2:]
             elif token.startswith("p="):
                 peer_port = token[2:]
-            elif token.startswith("r="):
-                continue          # the rate cap is not needed for speed
+            elif token.startswith("r=") or token.startswith("s="):
+                continue          # rate cap / status are not needed for speed
+            elif token.startswith("/") or "=" in token:
+                continue          # URI or unknown labelled field
             else:
                 rest.append(token)
         if not utag:
@@ -358,8 +360,8 @@ class SpeedLog:
         if len(rest) < 2:
             return None
         try:
-            sent = int(rest[-2])
-            took = max(0.05, float(rest[-1]))
+            sent = int(rest[0])
+            took = max(0.05, float(rest[1]))
         except ValueError:
             return None
         if not utag or utag == "-" or sent <= 0:

@@ -58,6 +58,11 @@ def test_tuple_reuse_after_close_mints_new_conn_id(tmp_path) -> None:
 
 
 def test_pending_survives_restart_and_ack_clears(tmp_path) -> None:
+    """Spool identity: a new process epoch must still resend the old envelope.
+
+    Billing identity is conn_id+generation, not boot_id. The 100→120
+    no-rebill invariant lives in test_metering.py; this only covers spool.
+    """
     module = _load()
     path = str(tmp_path / "fm.db")
     meter = module.FlowMeter(path, node="n1")

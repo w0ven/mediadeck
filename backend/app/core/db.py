@@ -469,14 +469,25 @@ CREATE INDEX IF NOT EXISTS idx_measured_user_month
 
 CREATE TABLE IF NOT EXISTS measured_watermarks (
     node          TEXT NOT NULL,
-    boot_id       TEXT NOT NULL,
     conn_id       TEXT NOT NULL,
     generation    INTEGER NOT NULL,
     utag          TEXT NOT NULL DEFAULT '',
     emby_user_id  TEXT NOT NULL DEFAULT '',
     counter_bytes INTEGER NOT NULL DEFAULT 0,
+    observed_at   REAL NOT NULL DEFAULT 0,
     updated_at    REAL NOT NULL DEFAULT 0,
-    PRIMARY KEY (node, boot_id, conn_id, generation)
+    PRIMARY KEY (node, conn_id, generation)
+);
+
+-- One row per accepted envelope. Dedup is (node, boot_id, seq), not
+-- "highest seq wins": an older unique sample must still credit.
+CREATE TABLE IF NOT EXISTS measured_envelopes (
+    node        TEXT NOT NULL,
+    boot_id     TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    nft_ok      INTEGER NOT NULL DEFAULT 0,
+    observed_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, boot_id, seq)
 );
 
 CREATE TABLE IF NOT EXISTS measured_node_seq (
@@ -586,6 +597,7 @@ class Database:
             self._ensure_column(
                 "members", "last_remote_error", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("members", "last_remote_at", "INTEGER")
+            self._reshape_measured_watermarks()
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:
@@ -611,6 +623,37 @@ class Database:
                     f"ALTER TABLE redeem_codes RENAME TO {archive}")
                 self._conn.commit()
                 return
+
+    def _reshape_measured_watermarks(self) -> None:
+        """Drop boot_id from the watermark key if an older table still has it.
+
+        Stream identity is (node, conn_id, generation). Keeping boot_id in
+        the PK double-counted a live connection after every agent restart.
+        """
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(measured_watermarks)")}
+        if not cols or "boot_id" not in cols:
+            self._ensure_column(
+                "measured_watermarks", "observed_at", "REAL NOT NULL DEFAULT 0")
+            return
+        self._conn.execute(
+            "ALTER TABLE measured_watermarks RENAME TO measured_watermarks_boot")
+        self._conn.execute(
+            "CREATE TABLE measured_watermarks ("
+            "node TEXT NOT NULL, conn_id TEXT NOT NULL, generation INTEGER NOT NULL, "
+            "utag TEXT NOT NULL DEFAULT '', emby_user_id TEXT NOT NULL DEFAULT '', "
+            "counter_bytes INTEGER NOT NULL DEFAULT 0, "
+            "observed_at REAL NOT NULL DEFAULT 0, "
+            "updated_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (node, conn_id, generation))")
+        self._conn.execute(
+            "INSERT INTO measured_watermarks"
+            "(node,conn_id,generation,utag,emby_user_id,counter_bytes,observed_at,updated_at) "
+            "SELECT node, conn_id, generation, utag, emby_user_id, "
+            "MAX(counter_bytes), MAX(updated_at), MAX(updated_at) "
+            "FROM measured_watermarks_boot "
+            "GROUP BY node, conn_id, generation")
+        self._conn.execute("DROP TABLE measured_watermarks_boot")
 
     def _ensure_column(self, table: str, name: str, ddl: str) -> None:
         """Idempotent ADD COLUMN for databases created before the column existed.

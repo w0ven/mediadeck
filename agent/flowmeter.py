@@ -28,12 +28,15 @@ close mints a new ``conn_id``.
 Persistence
 -----------
 Counters have **no short timeout**. Closed connections stay in the set and
-in the local spool until the panel acknowledges settlement. A process
-restart mints a new ``boot_id`` and resends unacked reports. A counter that
-goes backwards under the same ``conn_id`` bumps ``generation`` (table flush);
-a smaller number in a late report is **not** treated as a new generation
-by itself — that decision is explicit here, and the panel must key on
-``(boot_id, conn_id, generation)``.
+in the local spool until the panel acknowledges settlement. A process restart mints a new ``boot_id`` (**report epoch** only) and
+resends unacked envelopes. Persistent stream identity is ``conn_id`` +
+``generation``, which survive in sqlite and in the nft element. The panel
+watermarks ``(node, conn_id, generation)`` — never ``boot_id``, or a
+live connection would be billed from zero after every agent restart.
+
+A counter that goes backwards under the same ``conn_id`` bumps
+``generation`` (table/element flush). A smaller number in a late report
+is **not** a new generation by itself.
 """
 from __future__ import annotations
 
@@ -114,13 +117,14 @@ class FlowMeter:
         self._db = sqlite3.connect(persist_path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         self._init_db()
+        # Report epoch: identifies this process's envelopes. Distinct from
+        # conn_id, which is the durable stream identity stored in ``conns``.
         self._boot_id = uuid.uuid4().hex
         self._seq = 0
         self._enabled = False
-        self._nft = True  # subprocess backend; tests may set False
         with self._lock:
             self._db.execute(
-                "INSERT INTO meta(key,value) VALUES('boot_id',?) "
+                "INSERT INTO meta(key,value) VALUES('report_epoch',?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                 (self._boot_id,),
             )
@@ -144,6 +148,9 @@ class FlowMeter:
             for row in self._db.execute(
                 "SELECT * FROM conns WHERE settled=0"
             ).fetchall():
+                # Re-bind the existing element. Do NOT delete+add: that
+                # would zero a live kernel counter and look like a new
+                # generation after a process restart.
                 self._add_element(dict(row))
 
     def disable(self, *, delete_table: bool = False) -> None:
@@ -180,6 +187,9 @@ class FlowMeter:
         if not utag or utag == "-":
             return {"ok": False, "allow": False, "reason": "missing_utag",
                     "conn_id": None}
+        if self.is_blocked(utag):
+            return {"ok": False, "allow": False, "reason": "blocked",
+                    "conn_id": None, "utag": utag}
         try:
             local_ip = normalize_ip(local_ip)
             remote_ip = normalize_ip(remote_ip)
@@ -395,6 +405,62 @@ class FlowMeter:
         return {"ok": code == 0, "code": code, "out": out, "err": err,
                 "src": src, "dst": dst}
 
+    def terminate_utag(self, utag: str) -> list[dict[str, Any]]:
+        """Reset every live registered 4-tuple for this tag."""
+        utag = (utag or "").strip()
+        results = []
+        with self._lock:
+            rows = [dict(r) for r in self._db.execute(
+                "SELECT * FROM conns WHERE utag=? AND closed_at IS NULL AND settled=0",
+                (utag,))]
+        for row in rows:
+            results.append(self.terminate(
+                row["local_ip"], row["local_port"],
+                row["remote_ip"], row["remote_port"]))
+        return results
+
+    def is_blocked(self, utag: str) -> bool:
+        utag = (utag or "").strip()
+        if not utag:
+            return False
+        with self._lock:
+            row = self._db.execute(
+                "SELECT 1 FROM denied WHERE utag=?", (utag,)).fetchone()
+            return row is not None
+
+    def blocked_tags(self) -> list[str]:
+        with self._lock:
+            return [r["utag"] for r in self._db.execute(
+                "SELECT utag FROM denied ORDER BY utag")]
+
+    def apply_policy(self, blocked_tags: list[str] | None = None,
+                     *, unblock_tags: list[str] | None = None,
+                     terminate: bool = True) -> dict[str, Any]:
+        """Merge deny tags. Empty blocked_tags never clears known blocks.
+
+        Unblock is explicit. A degraded panel that omits unblock_tags cannot
+        accidentally restore an exhausted account after a disconnect.
+        """
+        add = {str(t).strip() for t in (blocked_tags or []) if str(t).strip()}
+        drop = {str(t).strip() for t in (unblock_tags or []) if str(t).strip()}
+        killed = 0
+        with self._lock:
+            now = time.time()
+            for tag in add:
+                self._db.execute(
+                    "INSERT INTO denied(utag, blocked_at) VALUES(?,?) "
+                    "ON CONFLICT(utag) DO NOTHING", (tag, now))
+            for tag in drop:
+                self._db.execute("DELETE FROM denied WHERE utag=?", (tag,))
+            self._db.commit()
+            have = [r["utag"] for r in self._db.execute(
+                "SELECT utag FROM denied ORDER BY utag")]
+        if terminate:
+            for tag in add:
+                killed += len(self.terminate_utag(tag))
+        return {"blocked": have, "killed": killed, "added": sorted(add),
+                "unblocked": sorted(drop)}
+
     # -- nft -----------------------------------------------------------------
     def _ensure_table(self) -> None:
         steps = [
@@ -524,6 +590,10 @@ class FlowMeter:
                 acked INTEGER NOT NULL DEFAULT 0,
                 created_at REAL NOT NULL,
                 PRIMARY KEY (boot_id, seq)
+            );
+            CREATE TABLE IF NOT EXISTS denied (
+                utag TEXT PRIMARY KEY,
+                blocked_at REAL NOT NULL
             );
             """
         )

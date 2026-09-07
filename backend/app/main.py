@@ -49,6 +49,8 @@ from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeStore
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
+from app.modules.metering import UNIT as METER_UNIT
+from app.modules.metering import MeasuredMeteringService
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
 from app.modules.playback import PlaybackRouter, caller_device, caller_token
@@ -295,6 +297,17 @@ async def _startup() -> None:
     # usage_daily: conflating a measurement with a guess is what made the old
     # traffic figure unsafe to act on.
     app.state.ledger = TrafficLedger(app.state.db)
+    app.state.metering = MeasuredMeteringService(
+        app.state.db,
+        tag_to_user=_tag_map,
+        expected_nodes=lambda: [n.name for n in app.state.settings_service.nodes()],
+    )
+    app.state.members.bind_metering(
+        app.state.metering,
+        cutover=lambda: bool(
+            app.state.settings_service.metering_config().get("cutover")),
+    )
+    app.state.meter_unblocks: set[str] = set()
     # Points are a ledger, so the service is a thin wrapper over the database
     # and can be built as soon as it exists. The shop is what spends them.
     app.state.points = PointsService(app.state.db)
@@ -548,20 +561,33 @@ async def event_stream(request: Request, topics: str = "") -> StreamingResponse:
     )
 
 
-@app.get("/agent/loadprobe.py", include_in_schema=False)
-async def agent_loadprobe() -> FileResponse:
-    """Serve the node probe agent so the installer can fetch it from here.
-
-    Kept as a route rather than a copy under static/ so there is exactly one
-    copy of the agent in the repo and it cannot drift.
-    """
+def _agent_file(name: str) -> FileResponse:
+    """Serve a node-agent file from the single copy in the repo."""
+    if name not in {"loadprobe.py", "flowmeter.py", "meterd.py"}:
+        raise HTTPException(404, "agent not found in this deployment")
     for candidate in (
-        FilePath(__file__).resolve().parents[2] / "agent" / "loadprobe.py",
-        FilePath(__file__).resolve().parents[3] / "agent" / "loadprobe.py",
+        FilePath(__file__).resolve().parents[2] / "agent" / name,
+        FilePath(__file__).resolve().parents[3] / "agent" / name,
     ):
         if candidate.is_file():
             return FileResponse(candidate, media_type="text/x-python")
     raise HTTPException(404, "agent not found in this deployment")
+
+
+@app.get("/agent/loadprobe.py", include_in_schema=False)
+async def agent_loadprobe() -> FileResponse:
+    """Serve the node probe agent so the installer can fetch it from here."""
+    return _agent_file("loadprobe.py")
+
+
+@app.get("/agent/flowmeter.py", include_in_schema=False)
+async def agent_flowmeter() -> FileResponse:
+    return _agent_file("flowmeter.py")
+
+
+@app.get("/agent/meterd.py", include_in_schema=False)
+async def agent_meterd() -> FileResponse:
+    return _agent_file("meterd.py")
 
 
 # ---- settings --------------------------------------------------------------
@@ -1042,6 +1068,8 @@ async def node_install_script(name: str) -> dict[str, Any]:
     node = service.node(name)
     if node is None:
         raise HTTPException(404, "unknown node")
+    service.node_report_token(node.name)
+    node = service.node(name) or node
     panel = service.integration_config()["panel_public_url"] or "http://127.0.0.1:8300"
     return {
         "node": name,
@@ -1118,6 +1146,51 @@ async def edge_report(name: str, request: Request,
             "unknown_bytes": result["unknown_bytes"]}
 
 
+@app.post("/api/edge/{name}/measured", include_in_schema=False)
+async def edge_measured(name: str, request: Request,
+                        payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+    """Idempotent measured-flow envelope from meterd."""
+    _edge_node_or_401(name, request)
+    if str(payload.get("node") or name) != name:
+        raise HTTPException(422, "node mismatch")
+    if payload.get("unit") not in (None, "", METER_UNIT) and payload.get("unit") != METER_UNIT:
+        raise HTTPException(422, "unsupported unit")
+    payload["node"] = name
+    result = app.state.metering.ingest(payload)
+    cutover = bool(app.state.settings_service.metering_config().get("cutover"))
+    blocked: list[str] = []
+    if cutover:
+        for member in app.state.members.list(limit=5000):
+            if member.get("state") == "exhausted":
+                blocked.append(user_tag(member["emby_user_id"]))
+    unblocks = sorted(app.state.meter_unblocks)
+    app.state.meter_unblocks.clear()
+    result["blocked_tags"] = blocked
+    result["unblock_tags"] = unblocks
+    return result
+
+
+@app.get("/api/metering", dependencies=[Depends(_auth)])
+async def metering_status() -> dict[str, Any]:
+    cfg = app.state.settings_service.metering_config()
+    totals = app.state.metering.totals()
+    return {
+        "config": cfg,
+        "totals": totals,
+        "cutover": cfg.get("cutover"),
+        "status": cfg.get("status"),
+    }
+
+
+@app.post("/api/metering/cutover", dependencies=[Depends(_auth)])
+async def metering_cutover(payload: dict[str, Any] = Body(...),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    saved = app.state.settings_service.save_metering(payload)
+    app.state.members.audit(user, "metering.cutover", "",
+                            f"cutover={saved.get('cutover')} confirmed={saved.get('baseline_confirmed')}")
+    return saved
+
+
 @app.get("/api/edge/status", dependencies=[Depends(_auth)])
 async def edge_status(days: int = 30) -> dict[str, Any]:
     """Ledger health: coverage, per-node totals and unattributed bytes."""
@@ -1179,6 +1252,8 @@ async def enroll_script(token: str) -> PlainTextResponse:
     node = service.node_by_enroll_token(token)
     if node is None:
         raise HTTPException(404, "invalid or expired enrollment token")
+    service.node_report_token(node.name)
+    node = service.node(node.name) or node
     panel = service.integration_config()["panel_public_url"] or "http://127.0.0.1:8300"
     return PlainTextResponse(install_script(node, panel),
                              media_type="text/x-shellscript")
@@ -1318,38 +1393,40 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
         "emby:sessions", app.state.emby.active_sessions, ttl=5
     )
     est = app.state.usage.live_speeds()
-    node_speeds = app.state.scheduler.user_speeds()
-    # A 302 to a node that the probe has not attributed yet is still on the
-    # node. Showing the sampler's bitrate estimate made those rows look like
-    # origin traffic (the ≈ the operator read as "did not go through ca1").
-    redirected_tags = {
-        str(entry.get("utag") or "")
-        for entry in app.state.playback.recent(200)
-        if entry.get("redirected") and entry.get("utag")
-    }
+    speed_view = app.state.scheduler.user_speed_view()
     out = []
     for session in sessions:
         s = dict(session)
         tag = user_tag(str(s.get("UserId") or ""))
-        real = node_speeds.get(tag)
-        if real is not None:
-            # Node speeds are per *user*: concurrent sessions of one account
-            # share the tag, so both rows show the account's wire rate.
-            # ZERO is a real measurement, not an absence: a player fills its
-            # buffer and then reads nothing for a minute, and during that
-            # pause the wire truly carries 0 B/s for this viewer. Treating 0
-            # as falsy pushed every buffered viewer back to the bitrate
-            # estimate, which is exactly the wrong number being reported.
-            s["SpeedBps"] = int(real)
+        sample = speed_view.get(tag) if tag else None
+        s["SpeedScope"] = "user"
+        if sample is not None and sample.get("bps") is not None:
+            # Node rates are per user tag, not per Emby session row.
+            s["SpeedBps"] = int(sample["bps"])
             s["SpeedSource"] = "node"
-        elif tag and tag in redirected_tags:
-            s["SpeedBps"] = 0
-            s["SpeedSource"] = "node"
+            s["SpeedReason"] = None
+            s["SpeedCollectedAt"] = sample.get("collected_at")
+            s["SpeedCoverage"] = sample.get("coverage")
+        elif sample is not None:
+            s["SpeedBps"] = None
+            s["SpeedSource"] = "unknown"
+            s["SpeedReason"] = sample.get("reason") or "unmeasured"
+            s["SpeedCollectedAt"] = sample.get("collected_at")
+            s["SpeedCoverage"] = sample.get("coverage")
         else:
-            s["SpeedBps"] = int(est.get(str(s.get("Id") or ""), 0))
-            s["SpeedSource"] = "estimate"
-        # MB/s (owner's unit of choice); bytes stay available for precision.
-        s["SpeedMBps"] = round(s["SpeedBps"] / 1048576, 1)
+            sid = str(s.get("Id") or "")
+            if sid in est:
+                s["SpeedBps"] = int(est[sid])
+                s["SpeedSource"] = "estimate"
+                s["SpeedReason"] = "origin_or_unattributed"
+            else:
+                s["SpeedBps"] = None
+                s["SpeedSource"] = "unknown"
+                s["SpeedReason"] = "no_sample"
+            s["SpeedCollectedAt"] = None
+            s["SpeedCoverage"] = "none"
+        s["SpeedMBps"] = (
+            round(s["SpeedBps"] / 1048576, 1) if s["SpeedBps"] is not None else None)
         out.append(s)
     return out
 
@@ -1984,6 +2061,7 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 async def members_reset_traffic(user_id: str, user: str = Depends(_auth)) -> dict[str, Any]:
     try:
         member = app.state.members.reset_traffic(user_id, actor=user)
+        app.state.meter_unblocks.add(user_tag(user_id))
     except KeyError:
         raise HTTPException(404, "unknown member") from None
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
