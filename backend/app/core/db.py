@@ -451,6 +451,45 @@ CREATE TABLE IF NOT EXISTS edge_cursors (
     PRIMARY KEY (node, path)
 );
 
+-- Measured kernel outbound IP bytes (nft per registered 4-tuple).
+-- Separate from edge_usage_daily (completed HTTP logs) and from
+-- members.traffic_used_bytes (bitrate estimate). Neither of those is
+-- imported here as a billing baseline.
+CREATE TABLE IF NOT EXISTS measured_usage_monthly (
+    month         TEXT NOT NULL,
+    node          TEXT NOT NULL,
+    utag          TEXT NOT NULL,
+    emby_user_id  TEXT NOT NULL DEFAULT '',
+    bytes         INTEGER NOT NULL DEFAULT 0,
+    unattributed  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, node, utag)
+);
+CREATE INDEX IF NOT EXISTS idx_measured_user_month
+    ON measured_usage_monthly(emby_user_id, month);
+
+CREATE TABLE IF NOT EXISTS measured_watermarks (
+    node          TEXT NOT NULL,
+    boot_id       TEXT NOT NULL,
+    conn_id       TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    utag          TEXT NOT NULL DEFAULT '',
+    emby_user_id  TEXT NOT NULL DEFAULT '',
+    counter_bytes INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, boot_id, conn_id, generation)
+);
+
+CREATE TABLE IF NOT EXISTS measured_node_seq (
+    node        TEXT NOT NULL,
+    boot_id     TEXT NOT NULL,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    nft_ok      INTEGER NOT NULL DEFAULT 0,
+    observed_at REAL NOT NULL DEFAULT 0,
+    updated_at  REAL NOT NULL DEFAULT 0,
+    acked       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, boot_id)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

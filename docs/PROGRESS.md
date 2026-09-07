@@ -62,6 +62,23 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — measured flow core + idempotent panel ledger
+**Done**
+- Node core `agent/flowmeter.py`: dedicated `inet mediadeck_meter` LOOKUP-only
+  4-tuple counters (IPv4+IPv6), sync register→allow, mixed-identity refuse,
+  `ss -K` on the full tuple, durable spool keyed by boot_id/seq/generation.
+  Import and tests do not touch host nft; `enable()` is explicit.
+- Panel `MeasuredMeteringService` + SQLite watermarks / monthly totals.
+  Unit is `kernel_outbound_ip_bytes` (not HTTP length). Unknown is `null`.
+  Old edge ledger and `traffic_used_bytes` are not imported as a baseline.
+- Isolated `unshare -n` test drives the real API: two TCP flows, unregistered
+  control, precise kill, close retain, IPv6, tuple reuse, restart pending.
+
+**Next**
+- nginx auth_request, deny-list / quota cutover, member snapshot injection, UI.
+
+---
+
 ## 2026-09-08 — reconcile member rows against Emby accounts
 **Done**
 - Member rows never noticed when their Emby account disappeared: enrolment was
