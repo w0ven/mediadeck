@@ -367,17 +367,40 @@ class MeasuredMeteringService:
         )
         return {"rev": rev, "blocked_tags": tags, "updated_at": now, "snapshot": True}
 
-    def ack_policy(self, node: str, rev: int, *, now: float | None = None) -> None:
+    def note_policy_sent(self, node: str, rev: int, *, now: float | None = None) -> None:
         now = time.time() if now is None else now
         self._db.execute(
-            "INSERT INTO meter_policy_ack(node,rev,acked_at) VALUES(?,?,?) "
-            "ON CONFLICT(node) DO UPDATE SET rev=excluded.rev, acked_at=excluded.acked_at",
+            "INSERT INTO meter_policy_ack(node,sent_rev,applied_rev,sent_at,applied_at) "
+            "VALUES(?,?,0,?,0) "
+            "ON CONFLICT(node) DO UPDATE SET "
+            "sent_rev=excluded.sent_rev, sent_at=excluded.sent_at",
             (node, int(rev), now),
         )
 
+    def note_policy_applied(self, node: str, rev: int, *, now: float | None = None) -> None:
+        now = time.time() if now is None else now
+        current = self._db.one(
+            "SELECT sent_rev FROM meter_policy_ack WHERE node=?", (node,))
+        sent = int((current or {}).get("sent_rev") or 0)
+        if int(rev) <= 0 or int(rev) > sent:
+            return
+        self._db.execute(
+            "INSERT INTO meter_policy_ack(node,sent_rev,applied_rev,sent_at,applied_at) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(node) DO UPDATE SET "
+            "applied_rev=MAX(meter_policy_ack.applied_rev, excluded.applied_rev), "
+            "applied_at=excluded.applied_at",
+            (node, sent, int(rev), now, now),
+        )
+
+    def ack_policy(self, node: str, rev: int, *, now: float | None = None) -> None:
+        """Compatibility: recording a send is not an applied confirmation."""
+        self.note_policy_sent(node, rev, now=now)
+
     def policy_acks(self) -> list[dict[str, Any]]:
         return [dict(r) for r in self._db.query(
-            "SELECT node, rev, acked_at FROM meter_policy_ack ORDER BY node")]
+            "SELECT node, sent_rev, applied_rev, sent_at, applied_at "
+            "FROM meter_policy_ack ORDER BY node")]
 
     def _node_coverage(self, now: float, stale_after: float = 120.0) -> list[dict[str, Any]]:
         rows = self._db.query(

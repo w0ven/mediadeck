@@ -89,6 +89,8 @@ def test_generated_site_contains_sync_auth_request_not_as_register() -> None:
     assert "mirror /_mediadeck/announce;" in text
     assert "include /var/lib/mediadeck/deny.map;" in text
     assert "if ($md_denied)" in text
+    assert "set $md_cid $pid.$connection;" in text
+    assert "cid=$md_cid" in text
 
 
 @pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
@@ -257,5 +259,187 @@ http {{
             f"http://127.0.0.1:{media_port}/s/file.bin?u=othertag", timeout=3)
         assert ok.status == 200
         assert ok.read() == b"hello-media"
+    finally:
+        stop_proxy(proc, cmd)
+
+
+def _get_code(url: str) -> int:
+    try:
+        r = urllib.request.urlopen(url, timeout=3)
+        return r.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+@pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
+def test_runtime_deny_map_reload_without_restarting_nginx(tmp_path: Path) -> None:
+    """Empty map at start, then apply_policy reloads workers; meterd HTTP may die."""
+    from proxy_runtime import NGINX
+    flow_spec = importlib.util.spec_from_file_location(
+        "flowmeter", AGENT / "flowmeter.py")
+    flow = importlib.util.module_from_spec(flow_spec)
+    assert flow_spec.loader is not None
+    flow_spec.loader.exec_module(flow)
+    meterd_mod = _load_meterd()
+
+    deny = tmp_path / "deny.map"
+    deny.write_text("# none\n", encoding="utf-8")
+    media_port = _port()
+    meter_port = _port()
+    media_root = tmp_path / "media"
+    media_root.mkdir()
+    (media_root / "file.bin").write_bytes(b"hello-media")
+    conf_dir = tmp_path / "ngx"
+    conf_dir.mkdir()
+    # Master process (needed for -s reload) drops to nobody; pytest tmp is 0700.
+    for path in (tmp_path, media_root, conf_dir, deny.parent):
+        path.chmod(0o755)
+    (media_root / "file.bin").chmod(0o644)
+    deny.chmod(0o644)
+    (conf_dir / "nginx.conf").write_text(f"""
+daemon off;
+user root;
+error_log {conf_dir}/error.log;
+pid {conf_dir}/nginx.pid;
+events {{}}
+http {{
+    map $arg_u $md_denied {{
+        default 0;
+        include {deny};
+    }}
+    server {{
+        listen 127.0.0.1:{media_port};
+        location /s/ {{
+            set $md_u $arg_u;
+            if ($md_denied) {{ return 403; }}
+            auth_request /_mediadeck/register;
+            alias {media_root}/;
+        }}
+        location = /_mediadeck/register {{
+            internal;
+            proxy_pass http://127.0.0.1:{meter_port}/register?u=$md_u&lip=127.0.0.1&lp={media_port}&a=$remote_addr&p=$remote_port;
+            proxy_pass_request_body off;
+            proxy_set_header Content-Length "";
+            proxy_connect_timeout 300ms;
+            proxy_read_timeout 500ms;
+            proxy_intercept_errors on;
+            error_page 502 503 504 =200 /_mediadeck/allow;
+        }}
+        location = /_mediadeck/allow {{
+            internal;
+            return 204;
+        }}
+    }}
+}}
+""", encoding="utf-8")
+    cmd = nginx_command(conf_dir, "-p", str(conf_dir), "-c", str(conf_dir / "nginx.conf"))
+    check = subprocess.run([*cmd, "-t"], capture_output=True, text=True,
+                            timeout=10, check=False)
+    assert check.returncode == 0, check.stderr + check.stdout
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a",
+                           deny_map_path=str(deny))
+    publisher = flow.DenyPublisher(
+        str(deny), nginx_bin=NGINX, nginx_conf=str(conf_dir / "nginx.conf"),
+        nginx_prefix=str(conf_dir))
+    daemon = meterd_mod.Meterd(meter, publisher=publisher)
+    httpd = meterd_mod.serve(daemon, "127.0.0.1", meter_port)
+    url = f"http://127.0.0.1:{media_port}/s/file.bin?u=blockedtag"
+    other = f"http://127.0.0.1:{media_port}/s/file.bin?u=othertag"
+    try:
+        time.sleep(0.4)
+        assert _get_code(url) == 200
+        assert _get_code(other) == 200
+
+        published = daemon.apply_remote_policy({
+            "ok": True,
+            "policy": {"rev": 2, "blocked_tags": ["blockedtag"], "snapshot": True},
+        })
+        assert published["ok"] is True
+        assert published["reloaded"] is True
+        time.sleep(0.3)
+        assert _get_code(url) == 403
+        assert _get_code(other) == 200
+
+        again = daemon.publish_deny()
+        assert again["ok"] is True
+        assert again["changed"] is False
+        assert again["reloaded"] is False
+        assert publisher.reload_count == 1
+
+        httpd.shutdown()
+        httpd.server_close()
+        time.sleep(0.3)
+        assert _get_code(url) == 403
+        assert _get_code(other) == 200
+
+        httpd = meterd_mod.serve(daemon, "127.0.0.1", meter_port)
+        cleared = daemon.apply_remote_policy({
+            "ok": True,
+            "policy": {"rev": 3, "blocked_tags": [], "snapshot": True},
+        })
+        assert cleared["ok"] is True
+        assert cleared["reloaded"] is True
+        time.sleep(0.3)
+        assert _get_code(url) == 200
+        assert daemon._applied_rev == 3
+    finally:
+        try:
+            httpd.shutdown()
+            httpd.server_close()
+        except OSError:
+            pass
+        stop_proxy(proc, cmd)
+        meter.close()
+
+
+@pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
+def test_invalid_deny_map_does_not_claim_loaded(tmp_path: Path) -> None:
+    from proxy_runtime import NGINX
+    flow_spec = importlib.util.spec_from_file_location(
+        "flowmeter", AGENT / "flowmeter.py")
+    flow = importlib.util.module_from_spec(flow_spec)
+    assert flow_spec.loader is not None
+    flow_spec.loader.exec_module(flow)
+    deny = tmp_path / "deny.map"
+    deny.write_text("# none\n", encoding="utf-8")
+    conf_dir = tmp_path / "ngx"
+    conf_dir.mkdir()
+    (conf_dir / "nginx.conf").write_text(f"""
+daemon off;
+user root;
+error_log {conf_dir}/error.log;
+pid {conf_dir}/nginx.pid;
+events {{}}
+http {{
+    map $arg_u $md_denied {{
+        default 0;
+        include {deny};
+    }}
+    server {{ listen 127.0.0.1:{_port()}; return 204; }}
+}}
+""", encoding="utf-8")
+    cmd = nginx_command(conf_dir, "-p", str(conf_dir), "-c", str(conf_dir / "nginx.conf"))
+    check = subprocess.run([*cmd, "-t"], capture_output=True, text=True,
+                            timeout=10, check=False)
+    assert check.returncode == 0, check.stderr
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        time.sleep(0.3)
+        pub = flow.DenyPublisher(
+            str(deny), nginx_bin=NGINX, nginx_conf=str(conf_dir / "nginx.conf"),
+            nginx_prefix=str(conf_dir))
+        ok = pub.publish([])
+        assert ok["ok"] is True
+        orig = flow.DenyPublisher.render
+        flow.DenyPublisher.render = staticmethod(lambda tags: "not a map {\n")
+        try:
+            bad = pub.publish(["x"], force=True)
+        finally:
+            flow.DenyPublisher.render = orig
+        assert bad["ok"] is False
+        assert bad["reloaded"] is False
+        assert "nginx_t" in (bad.get("error") or "")
+        assert deny.read_text(encoding="utf-8") == "# none\n"
     finally:
         stop_proxy(proc, cmd)

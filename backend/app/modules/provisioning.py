@@ -111,7 +111,7 @@ def nginx_site(node: Any) -> str:
         set $md_lp $server_port;
         set $md_a $remote_addr;
         set $md_p $remote_port;
-        set $md_cid $connection;
+        set $md_cid $pid.$connection;
         # Known deny is an nginx map file written by meterd. It survives a
         # dead HTTP process, so 502 fail-open cannot admit an exhausted tag.
         if ($md_denied) {{ return 403; }}
@@ -323,6 +323,8 @@ ExecStart=/usr/bin/python3 /opt/mediadeck-agent/meterd.py \\
     --token-file /etc/mediadeck/report.token \\
     --persist /var/lib/mediadeck/flowmeter.db \\
     --deny-map /var/lib/mediadeck/deny.map \\
+    --nginx-bin /usr/sbin/nginx \\
+    --nginx-conf /etc/nginx/nginx.conf \\
     --bind 127.0.0.1 --port {METERD_PORT} \\
     --enable-nft
 Restart=always

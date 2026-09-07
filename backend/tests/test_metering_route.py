@@ -70,6 +70,17 @@ def test_measured_route_requires_node_credential_and_acks() -> None:
         assert body["ack"] == {"boot_id": env["boot_id"], "seq": 1}
         assert "blocked_tags" in body
         assert "unblock_tags" in body
+        assert body["policy_sent_rev"] == body["policy_rev"]
+        acks = app.state.metering.policy_acks()
+        row = next(a for a in acks if a["node"] == "mock-a")
+        assert row["sent_rev"] == body["policy_rev"]
+        assert int(row["applied_rev"] or 0) == 0
+        env["policy_applied_rev"] = body["policy_rev"]
+        confirmed = client.post("/api/edge/mock-a/measured", json=env, headers=headers)
+        assert confirmed.json()["duplicate"] is True
+        acks = app.state.metering.policy_acks()
+        row = next(a for a in acks if a["node"] == "mock-a")
+        assert int(row["applied_rev"]) == body["policy_rev"]
         again = client.post("/api/edge/mock-a/measured", json=env, headers=headers)
         assert again.json()["duplicate"] is True
         assert again.json()["credited"] == 0

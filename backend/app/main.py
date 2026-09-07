@@ -1178,11 +1178,18 @@ async def edge_measured(name: str, request: Request,
     payload["node"] = name
     result = app.state.metering.ingest(payload)
     policy = _meter_policy_snapshot()
-    app.state.metering.ack_policy(name, int(policy["rev"]))
+    app.state.metering.note_policy_sent(name, int(policy["rev"]))
+    applied = payload.get("policy_applied_rev")
+    if applied is not None:
+        try:
+            app.state.metering.note_policy_applied(name, int(applied))
+        except (TypeError, ValueError):
+            pass
     result["blocked_tags"] = policy["blocked_tags"]
     result["unblock_tags"] = []
     result["policy"] = policy
     result["policy_rev"] = policy["rev"]
+    result["policy_sent_rev"] = policy["rev"]
     return result
 
 

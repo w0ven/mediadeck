@@ -23,9 +23,9 @@ def test_nginx_cid_change_is_reuse_not_mixed(tmp_path) -> None:
     module = _load()
     meter = module.FlowMeter(str(tmp_path / "fm.db"))
     first = meter.register("127.0.0.1", 443, "10.0.0.1", 50000, "alice",
-                           nginx_cid="9")
+                           nginx_cid="1.9")
     second = meter.register("127.0.0.1", 443, "10.0.0.1", 50000, "bob",
-                            nginx_cid="10")
+                            nginx_cid="2.9")
     assert first["allow"] is False
     assert second["reason"] != "mixed_identity"
     assert second["ok"] is True

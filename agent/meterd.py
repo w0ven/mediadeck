@@ -20,7 +20,7 @@ _AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
 if _AGENT_DIR not in sys.path:
     sys.path.insert(0, _AGENT_DIR)
 
-from flowmeter import FlowMeter
+from flowmeter import DenyPublisher, FlowMeter
 
 USER_AGENT = "mediadeck-meterd/1.0"
 
@@ -38,12 +38,16 @@ def _post(url: str, token: str, payload: dict, timeout: float = 30.0) -> dict:
 
 class Meterd:
     def __init__(self, meter: FlowMeter, *, panel: str = "", node: str = "",
-                 token: str = "", interval: float = 15.0) -> None:
+                 token: str = "", interval: float = 15.0,
+                 publisher: DenyPublisher | None = None) -> None:
         self.meter = meter
         self.panel = panel.rstrip("/")
         self.node = node or meter.node
         self.token = token
         self.interval = max(5.0, float(interval))
+        self.publisher = publisher
+        self._applied_rev: int | None = None
+        self._pending_rev: int | None = None
         self._stop = threading.Event()
 
     def handle_register(self, qs: dict[str, list[str]],
@@ -79,14 +83,49 @@ class Meterd:
             return 204, result
         return 403, result
 
+    def publish_deny(self, *, force: bool = False) -> dict:
+        """Write the deny map and optionally nginx -t/reload. Never claims loaded on failure."""
+        tags = self.meter.blocked_tags()
+        if self.publisher is None:
+            self.meter.write_deny_map()
+            return {"ok": True, "changed": True, "reloaded": False, "error": None}
+        return self.publisher.publish(tags, force=force)
+
+    def apply_remote_policy(self, last: dict) -> dict:
+        """Apply a panel policy reply. Returns publish result; applied only if publish ok."""
+        policy = (last or {}).get("policy") or {}
+        rev = policy.get("rev")
+        if last.get("ok") and policy.get("snapshot"):
+            self.meter.apply_policy(
+                policy.get("blocked_tags") or last.get("blocked_tags") or [],
+                terminate=True, snapshot=True)
+            self._pending_rev = int(rev) if rev is not None else None
+        elif last.get("ok"):
+            self.meter.apply_policy(
+                last.get("blocked_tags") or [],
+                unblock_tags=last.get("unblock_tags") or [],
+                terminate=True, snapshot=False)
+            self._pending_rev = None
+        else:
+            return {"ok": False, "error": "policy_not_ok"}
+        published = self.publish_deny()
+        if published.get("ok") and self._pending_rev is not None:
+            self._applied_rev = self._pending_rev
+        elif not published.get("ok"):
+            # Keep previous applied_rev. Next successful report retries.
+            published["applied"] = False
+        return published
+
     def report_once(self) -> dict:
         env = self.meter.collect()
+        env["policy_applied_rev"] = self._applied_rev
         if not self.panel or not self.token:
             return {"ok": False, "reason": "no_panel", "envelope": env}
         url = f"{self.panel}/api/edge/{self.node}/measured"
         pending = self.meter.pending()
         last = {"ok": False}
         for item in pending:
+            item["policy_applied_rev"] = self._applied_rev
             try:
                 last = _post(url, self.token, item)
             except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
@@ -95,17 +134,10 @@ class Meterd:
             ack = (last or {}).get("ack") or {}
             if last.get("ok") and ack.get("boot_id") and ack.get("seq") is not None:
                 self.meter.ack(str(ack["boot_id"]), int(ack["seq"]))
-            policy = (last or {}).get("policy") or {}
-            if last.get("ok") and policy.get("snapshot"):
-                self.meter.apply_policy(
-                    policy.get("blocked_tags") or last.get("blocked_tags") or [],
-                    terminate=True, snapshot=True)
-            elif last.get("ok"):
-                # Degraded reply without snapshot: merge-add only.
-                self.meter.apply_policy(
-                    last.get("blocked_tags") or [],
-                    unblock_tags=last.get("unblock_tags") or [],
-                    terminate=True, snapshot=False)
+            if last.get("ok"):
+                published = self.apply_remote_policy(last)
+                last = dict(last)
+                last["deny_publish"] = published
         return last
 
     def loop(self) -> None:
@@ -158,7 +190,10 @@ def serve(meterd: Meterd, bind: str, port: int) -> ThreadingHTTPServer:
         def log_message(self, *_args) -> None:
             pass
 
-    server = ThreadingHTTPServer((bind, port), Handler)
+    class ReuseServer(ThreadingHTTPServer):
+        allow_reuse_address = True
+
+    server = ReuseServer((bind, port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -177,6 +212,9 @@ def main() -> int:
                         default=os.environ.get("METERD_ENABLE") == "1")
     parser.add_argument("--deny-map", default=os.environ.get(
         "MEDIADECK_DENY_MAP", "/var/lib/mediadeck/deny.map"))
+    parser.add_argument("--nginx-bin", default=os.environ.get("MEDIADECK_NGINX_BIN", ""))
+    parser.add_argument("--nginx-conf", default=os.environ.get("MEDIADECK_NGINX_CONF", ""))
+    parser.add_argument("--nginx-prefix", default=os.environ.get("MEDIADECK_NGINX_PREFIX", ""))
     args = parser.parse_args()
     token = ""
     if args.token_file:
@@ -184,9 +222,15 @@ def main() -> int:
             token = fh.read().strip()
     meter = FlowMeter(args.persist, node=args.node, enabled=args.enable_nft,
                       deny_map_path=args.deny_map)
+    publisher = None
+    if args.nginx_bin:
+        publisher = DenyPublisher(
+            args.deny_map, nginx_bin=args.nginx_bin,
+            nginx_conf=args.nginx_conf or None,
+            nginx_prefix=args.nginx_prefix or None)
     meter.write_deny_map()
     daemon = Meterd(meter, panel=args.panel, node=args.node, token=token,
-                    interval=args.interval)
+                    interval=args.interval, publisher=publisher)
     serve(daemon, args.bind, args.port)
     print(f"meterd on {args.bind}:{args.port} nft={meter.enabled}", flush=True)
     try:

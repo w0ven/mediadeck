@@ -520,9 +520,11 @@ CREATE TABLE IF NOT EXISTS meter_policy (
     updated_at  REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS meter_policy_ack (
-    node     TEXT PRIMARY KEY,
-    rev      INTEGER NOT NULL DEFAULT 0,
-    acked_at REAL NOT NULL DEFAULT 0
+    node        TEXT PRIMARY KEY,
+    sent_rev    INTEGER NOT NULL DEFAULT 0,
+    applied_rev INTEGER NOT NULL DEFAULT 0,
+    sent_at     REAL NOT NULL DEFAULT 0,
+    applied_at  REAL NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -622,6 +624,7 @@ class Database:
                 "members", "last_remote_error", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("members", "last_remote_at", "INTEGER")
             self._reshape_measured_watermarks()
+            self._reshape_meter_policy_ack()
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:
@@ -678,6 +681,34 @@ class Database:
             "FROM measured_watermarks_boot "
             "GROUP BY node, conn_id, generation")
         self._conn.execute("DROP TABLE measured_watermarks_boot")
+
+    def _reshape_meter_policy_ack(self) -> None:
+        """sent_rev is what we shipped; applied_rev is what the node confirmed."""
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(meter_policy_ack)")}
+        if not cols:
+            return
+        if "sent_rev" in cols and "applied_rev" in cols:
+            return
+        if "rev" in cols:
+            self._conn.execute(
+                "ALTER TABLE meter_policy_ack RENAME TO meter_policy_ack_old")
+            self._conn.execute(
+                "CREATE TABLE meter_policy_ack ("
+                "node TEXT PRIMARY KEY, "
+                "sent_rev INTEGER NOT NULL DEFAULT 0, "
+                "applied_rev INTEGER NOT NULL DEFAULT 0, "
+                "sent_at REAL NOT NULL DEFAULT 0, "
+                "applied_at REAL NOT NULL DEFAULT 0)")
+            self._conn.execute(
+                "INSERT INTO meter_policy_ack(node,sent_rev,applied_rev,sent_at,applied_at) "
+                "SELECT node, rev, 0, acked_at, 0 FROM meter_policy_ack_old")
+            self._conn.execute("DROP TABLE meter_policy_ack_old")
+            return
+        self._ensure_column("meter_policy_ack", "sent_rev", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "applied_rev", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "sent_at", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "applied_at", "REAL NOT NULL DEFAULT 0")
 
     def _ensure_column(self, table: str, name: str, ddl: str) -> None:
         """Idempotent ADD COLUMN for databases created before the column existed.
