@@ -1,0 +1,45 @@
+# Reference only. Export the complete private file from:
+# GET /api/integration/frontend?server=caddy&entry=friend-one
+# Every upstream is a fixed administrator-configured HTTPS origin.
+https://friend.example.com {
+    header Cache-Control "private, no-store"
+    header -X-Mediadeck-Entry-Key
+
+    handle /_n/edge-a/s/* {
+        uri strip_prefix /_n/edge-a
+        reverse_proxy https://edge-a.example.com {
+            header_up Host edge-a.example.com
+            header_up -X-Mediadeck-Entry
+            header_up -X-Mediadeck-Entry-Key
+            header_up -Authorization
+            header_up -X-Emby-Token
+            header_up -X-MediaBrowser-Token
+            header_up -X-Emby-Authorization
+            header_up -Cookie
+            header_down -X-Mediadeck-Entry-Key
+            transport http {
+                tls_server_name edge-a.example.com
+            }
+        }
+    }
+
+    # Repeat the fixed block above for each registered node; the API exporter
+    # does this automatically. An arbitrary node/URL cannot select an upstream.
+    handle /_n/* {
+        respond 404
+    }
+
+    handle {
+        reverse_proxy https://emby.example.com {
+            header_up Host emby.example.com
+            header_up X-Mediadeck-Entry friend-one
+            # The private export supplies this line; this example has no key.
+            header_up X-Mediadeck-Entry-Key REPLACE_WITH_EXPORTED_ENTRY_KEY
+            header_up X-Forwarded-Host friend.example.com
+            header_down -X-Mediadeck-Entry-Key
+            transport http {
+                tls_server_name emby.example.com
+            }
+        }
+    }
+}
