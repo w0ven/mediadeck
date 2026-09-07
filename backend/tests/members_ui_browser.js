@@ -21,6 +21,7 @@
   let lastRenew = null;
   let lastGroup = null;
   let lastRetry = null;
+  let meterConfig = {cutover:false, baseline_confirmed:false, report_interval_seconds:15};
 
   class FakeSource {
     constructor(url) {
@@ -80,11 +81,14 @@
     mk('u-bob', 'bob', {
       entitlement_state: 'expired', state: 'expired',
       expires_at: now - 86400, expires_at_effective: now - 86400,
-      sync_status: 'drift',
+      sync_status: 'drift', quota_source:'measured', measured_used_bytes:null,
+      traffic_used_bytes:999999, metering:{source:'measured',measured_used_bytes:null,coverage:{degraded:true}},
     }),
     mk('u-carol', 'carol', {
       emby_status: 'missing', sync_status: 'emby_missing', retryable: true,
       last_remote_ok: false, last_remote_error: 'Emby unreachable',
+      quota_source:'measured', measured_used_bytes:0,
+      metering:{source:'measured',measured_used_bytes:0,coverage:{degraded:false}},
     }),
     mk('u-dave', 'dave', {
       group_id: 'perm', group_name: '永久', expires_at: now + 20 * 86400, expires_at_effective: null, overrides: {expires_at_override:null},
@@ -176,6 +180,8 @@
     requests.push({ path, method, body });
     const u = new URL(path, 'http://panel.local');
     const p = u.pathname;
+    if (p === '/api/metering') return {config:meterConfig, totals:{period:'2026-09',by_user:{'u-alice':4096},by_node:[{node:'node-a',bytes:4096}],unattributed_bytes:0,coverage:{nodes:[{name:'node-a',ok:true,as_of:now}]}}};
+    if (p === '/api/metering/cutover' && method === 'POST') { meterConfig = {...meterConfig,...body}; return meterConfig; }
     if (p === '/api/whoami') return { user: 'admin' };
     if (p === '/api/update/version') return { version: 'test' };
     if (p === '/api/groups') return GROUPS;
@@ -295,6 +301,8 @@
     assert(!/可正常播放|已启用/.test(carolText), 'missing Emby shown as playable');
     assert(carolText.includes('正常') || carolText.includes('权益'), 'carol entitlement missing');
     assert(carolRow.querySelector('[data-act="retry"]'), 'retry button missing for retryable carol');
+    assert(visibleText(document.querySelector('tr[data-id="u-bob"]')).includes('实测配额 未测'), 'missing measured quota fell back to legacy estimate or zero');
+    assert(carolText.includes('实测配额 0 B'), 'known measured zero was not distinguished from missing');
 
     const aliceRow = document.querySelector('tr[data-id="u-alice"]');
     assert(aliceRow && /Emby 在线/.test(visibleText(aliceRow)), 'alice emby present not shown');
@@ -490,6 +498,20 @@
     assert(unrelated.length === 0, 'live update fetched unrelated APIs');
 
     search.blur();
+    document.querySelector('[data-act="metering"]').click();
+    await waitFor(() => document.getElementById('meter-cutover'), 'metering preview missing');
+    document.getElementById('meter-cutover').click(); await tick();
+    assert(!requests.some((r) => r.path === '/api/metering/cutover'), 'cutover enabled without baseline confirmation');
+    document.getElementById('meter-baseline').checked = true;
+    confirmAnswers.splice(0, confirmAnswers.length, false);
+    document.getElementById('meter-cutover').click(); await tick();
+    assert(!requests.some((r) => r.path === '/api/metering/cutover'), 'cancelled cutover still wrote configuration');
+    confirmAnswers.splice(0, confirmAnswers.length, true);
+    document.getElementById('meter-cutover').click();
+    await waitFor(() => requests.some((r) => r.path === '/api/metering/cutover'), 'confirmed cutover not submitted');
+    const activation = requests.find((r) => r.path === '/api/metering/cutover').body;
+    assert(activation.cutover === true && activation.baseline_confirmed === true, 'cutover payload lost explicit confirmation');
+    await tick();
     await go('groups'); await tick();
     assert(document.getElementById('new-bandwidth'), 'group page broke after removing shared bandwidth presets');
     await go('members?page_size=50'); await tick();

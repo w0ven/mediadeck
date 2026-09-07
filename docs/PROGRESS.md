@@ -24,6 +24,10 @@ Newest entries first. Every working session appends one entry.
 - Validation: 45 relevant tests passed, including real browser flows and group
   regressions. Playwright is a dev-only dependency; no browser or service
   deployment is performed. Final measured-quota integration remains separate.
+- Member rows and detail now distinguish measured quota, legacy estimates and
+  unknown/zero readings. Metering preview shows node coverage and a paged ledger;
+  activation requires an unchecked-by-default baseline acknowledgement plus
+  explicit confirmation. Browser tests verify both cancellation gates.
 
 ---
 

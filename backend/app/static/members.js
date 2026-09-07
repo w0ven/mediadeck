@@ -147,11 +147,26 @@
       <span class="tag ${syncCls}">${esc(syncLabel)}</span>${retry}</div>`;
   }
 
+  function measuredBytes(value) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return '未测';
+    const units = ['B','KiB','MiB','GiB','TiB'];
+    let number = Number(value), index = 0;
+    while (number >= 1024 && index < units.length - 1) { number /= 1024; index++; }
+    return (index ? number.toFixed(1) : String(number)) + ' ' + units[index];
+  }
+
   function usageCell(m) {
-    const quota = m.traffic_quota_bytes ? fmtBytes(m.traffic_used_bytes || 0)
-      + ' / ' + fmtBytes(m.traffic_quota_bytes) : '配额 ' + fmtBytes(m.traffic_used_bytes || 0);
-    const edge = m.edge || {};
-    return `<div class="s">${esc(quota)}<div class="muted">直链 30 天 ${esc(fmtBytes(edge.bytes_30d || 0))}</div></div>`;
+    const measuredMode = m.quota_source === 'measured'
+      || Object.prototype.hasOwnProperty.call(m, 'measured_used_bytes');
+    const sample = m.metering || {};
+    const used = measuredMode ? m.measured_used_bytes : m.traffic_used_bytes;
+    const quota = m.traffic_quota_bytes ? measuredBytes(m.traffic_quota_bytes) : '不限';
+    const label = measuredMode ? '实测配额' : '旧估算配额';
+    const coverage = sample.coverage || {};
+    return `<div class="s"><b>${label}</b> ${esc(measuredBytes(used))} / ${esc(quota)}
+      ${!measuredMode && m.metering ? `<div class="muted">实测监测 ${esc(measuredBytes(sample.measured_used_bytes))}（未用于限额）</div>` : ''}
+      ${coverage.degraded ? '<div class="tag warn">采集不完整 · 待补报</div>' : ''}
+      <div class="muted">直链日志30天 ${esc(fmtBytes((m.edge || {}).bytes_30d || 0))}（独立统计）</div></div>`;
   }
 
   function accountCell(m) {
@@ -266,6 +281,7 @@
         <button class="btn sm" type="button" data-act="bulk" data-bulk="reset-traffic">重置用量</button>
         <button class="btn sm" type="button" data-act="clear-selection">取消选择</button>
         <button class="btn sm" type="button" data-act="enforce">策略预览</button>
+        <button class="btn sm" type="button" data-act="metering">实测计量与接管预览</button>
       </div>
       ${err}
       <div class="card" id="members-table-card">
@@ -355,6 +371,7 @@
         if (act === 'bulk') await bulk(btn.dataset.bulk);
         if (act === 'clear-selection') { ms.selected.clear(); patchSelection(); }
         if (act === 'enforce') await showEnforcement();
+        if (act === 'metering') await showMetering();
         if (act === 'enrol') await enrol(id, btn.dataset.name);
         if (act === 'invitees') setParam('inviter_id', id);
       } catch (error) { toast('操作失败: ' + error.message, 1); }
@@ -479,7 +496,8 @@
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')}</dd>
           <dt>Emby</dt><dd>${embySyncCell(m)}</dd>
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
-          <dt>配额用量</dt><dd>${esc(fmtBytes(m.traffic_used_bytes || 0))} / ${esc(m.traffic_quota_bytes ? fmtBytes(m.traffic_quota_bytes) : '不限')}</dd>
+          <dt>配额用量</dt><dd>${usageCell(m)}</dd>
+          ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
           <dt>直链 7/30/累计</dt><dd>${esc(fmtBytes((d.edge && d.edge.bytes_7d) || (m.edge || {}).bytes_7d || 0))}
             · ${esc(fmtBytes((d.edge && d.edge.bytes_30d) || (m.edge || {}).bytes_30d || 0))}
             · ${esc(fmtBytes((d.edge && d.edge.bytes_total) || (m.edge || {}).bytes_total || 0))}</dd>
@@ -772,6 +790,48 @@
     });
     toastResult(r, '已纳入');
     await refreshNow();
+  }
+
+  async function showMetering() {
+    const status = await api('/api/metering');
+    const config = status.config || {};
+    const totals = status.totals || {};
+    const nodes = (totals.coverage || {}).nodes || [];
+    const nodeTotals = new Map((totals.by_node || []).map((node) => [node.node, node]));
+    const incomplete = !nodes.length || nodes.some((node) => !node.ok);
+    const users = Object.entries(totals.by_user || {});
+    openModal('实测计量与接管预览', `<div class="card-body">
+      <p><b>${config.cutover ? '实测配额已启用' : '仅监测，尚未启用实测限额'}</b> · 周期 ${esc(totals.period || '未知')}（UTC自然月）</p>
+      <p class="help">计量只汇总已注册播放连接的内核出站IP字节，包含协议头及内核计入的重传；不是文件大小或物理网卡逐帧统计。旧会话估算和旧直链日志不会相加收费。</p>
+      ${incomplete ? '<p class="help danger-text">有节点尚未报告或已过期，计量覆盖不完整。未知数据不会当作零；同步故障优先保播放，已知阻断不应自动解除。</p>' : ''}
+      <table><thead><tr><th>节点</th><th>上报状态</th><th>最近报告</th><th>本月记录</th></tr></thead><tbody>${nodes.map((node) => `<tr><td>${esc(node.name)}</td><td>${node.ok ? '正常' : '未知/异常'}</td><td>${esc(node.as_of ? fmtAgeTs(node.as_of) : '从未上报')}</td><td>${measuredBytes((nodeTotals.get(node.name) || {}).bytes)}</td></tr>`).join('') || '<tr><td colspan="4">暂无节点报告</td></tr>'}</tbody></table>
+      <p>未归属/无法确定归期：${measuredBytes(totals.unattributed_bytes)}；上报间隔目标 ${esc(config.report_interval_seconds || 15)} 秒，实际以节点报告时间为准。</p>
+      <details><summary>核对本月用户实测记录（${users.length} 人）</summary><p class="help">此处是保留的计量记录；重置后的配额用量请同时核对用户详情。</p><div id="meter-users"></div><div class="toolbar"><button class="btn sm" id="meter-prev">上一页</button><span id="meter-page"></span><button class="btn sm" id="meter-next">下一页</button></div></details>
+      <p class="help">启用后，计流量用户达到额度将被中断并拒绝后续播放；不会替你迁移 embyboss 的用户权益。请先完成节点部署和旧用户资料核对。</p>
+      ${config.cutover ? '' : '<label><input type="checkbox" id="meter-baseline"> 我已核对计量覆盖和各用户配额余额，确认以当前实测账本接管限额</label>'}
+      <div class="toolbar"><button class="btn danger" id="meter-cutover">${config.cutover ? '停用实测限额' : '确认启用实测限额'}</button></div>
+    </div>`, {wide:true});
+    let page = 0;
+    const draw = () => {
+      const pages = Math.max(1, Math.ceil(users.length / 50));
+      $('#meter-users').innerHTML = `<table><thead><tr><th>用户ID</th><th>实测记录</th></tr></thead><tbody>${users.slice(page*50, page*50+50).map(([id,bytes]) => `<tr><td>${esc(id)}</td><td>${measuredBytes(bytes)}</td></tr>`).join('')}</tbody></table>`;
+      $('#meter-page').textContent = `${page+1} / ${pages}`;
+      $('#meter-prev').disabled = page === 0; $('#meter-next').disabled = page+1 >= pages;
+    };
+    $('#meter-prev').onclick = () => { page--; draw(); };
+    $('#meter-next').onclick = () => { page++; draw(); };
+    draw();
+    const button = $('#meter-cutover');
+    button.onclick = () => runMemberAction(button, async () => {
+      const enable = !config.cutover;
+      if (enable && !$('#meter-baseline').checked) throw new Error('请先明确确认计量基线与配额余额');
+      if (!confirm(enable
+        ? `确认启用实测配额并允许超额中断播放？${incomplete ? '当前存在未就绪节点，覆盖不完整。' : ''}`
+        : '确认停用实测限额并切回原计量来源？不会恢复过期或手动停用用户。')) return;
+      assertRemoteResult(await api('/api/metering/cutover', {method:'POST',body:JSON.stringify({cutover:enable,baseline_confirmed:enable || !!config.baseline_confirmed})}));
+      toast(enable ? '已启用实测限额' : '已停用实测限额');
+      closeModal(); await refreshNow();
+    });
   }
 
   async function showEnforcement() {
