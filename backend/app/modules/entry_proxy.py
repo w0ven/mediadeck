@@ -47,6 +47,9 @@ class _Plan:
     emby_host: str
     emby_hostname: str
     nodes: tuple[_Upstream, ...]
+    # Pinned mode: stream_origin proxies exactly ``pinned`` (one of ``nodes``).
+    stream_origin: str = ""
+    pinned: _Upstream | None = None
 
 
 def _plan(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) -> _Plan:
@@ -76,11 +79,19 @@ def _plan(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) -> _Pla
         raise ConfigError("请先配置至少一个带媒体根的 HTTPS 节点")
 
     emby_parsed = urlsplit(emby)
+    stream_origin = entry.get("stream_origin") or ""
+    pinned = None
+    if stream_origin:
+        stream_origin = https_origin(stream_origin)
+        pinned = next((u for u in upstreams if u.name == entry.get("node")), None)
+        if pinned is None:
+            raise ConfigError("固定节点不在节点池中，或没有媒体根")
     return _Plan(entry_id=entry["id"], key=key,
                  origin=origin, origin_host=urlsplit(origin).netloc,
                  emby=emby, emby_host=emby_parsed.netloc,
                  emby_hostname=emby_parsed.hostname or "",
-                 nodes=tuple(upstreams))
+                 nodes=tuple(upstreams),
+                 stream_origin=stream_origin, pinned=pinned)
 
 
 def friend_config(entry: dict[str, str], emby_url: str, nodes: list[StreamNode],
@@ -88,7 +99,179 @@ def friend_config(entry: dict[str, str], emby_url: str, nodes: list[StreamNode],
     if server not in SERVERS:
         raise ConfigError("反代类型仅支持 Caddy 或 nginx")
     plan = _plan(entry, emby_url, nodes)
+    if plan.pinned is not None:
+        return _caddy_pinned(plan) if server == "caddy" else _nginx_pinned(plan)
     return _caddy(plan) if server == "caddy" else _nginx(plan)
+
+
+# ---------------------------------------------------------------- pinned mode
+# For a CDN that can rewrite headers but cannot route by path: two hostnames,
+# each with exactly one fixed upstream. The main hostname carries the entry
+# credential to Emby; the stream hostname forwards /s/... untouched to ONE
+# node, which still verifies the signature. Nothing under /_n/ exists here.
+
+
+def _caddy_pinned(plan: _Plan) -> str:
+    node = plan.pinned
+    assert node is not None
+    return f"""# Private file: contains this entry's proxy credential. Store with mode 600.
+# Pinned mode: the stream hostname proxies exactly one node. No path routing
+# is needed on the CDN side. No cache handler anywhere.
+
+# --- main hostname: everything goes to Emby with this entry's credential ---
+{plan.origin} {{
+    header Cache-Control "private, no-store"
+    header -X-Mediadeck-Entry-Key
+
+    reverse_proxy {plan.emby} {{
+        header_up Host {plan.emby_host}
+        header_up X-Mediadeck-Entry {plan.entry_id}
+        header_up X-Mediadeck-Entry-Key {plan.key}
+        header_up X-Forwarded-Host {plan.origin_host}
+        header_down -X-Mediadeck-Entry-Key
+        transport http {{
+            tls_server_name {plan.emby_hostname}
+            read_timeout {READ_TIMEOUT}
+        }}
+    }}
+}}
+
+# --- stream hostname: /s/... goes to the pinned node, path untouched -------
+{plan.stream_origin} {{
+    header Cache-Control "private, no-store"
+
+    @media path /s/*
+    handle @media {{
+        reverse_proxy {node.origin} {{
+            header_up Host {node.host}
+            header_up -X-Mediadeck-Entry
+            header_up -X-Mediadeck-Entry-Key
+            header_up -Authorization
+            header_up -X-Emby-Token
+            header_up -X-MediaBrowser-Token
+            header_up -X-Emby-Authorization
+            header_up -Cookie
+            transport http {{
+                tls_server_name {node.hostname}
+                read_timeout {READ_TIMEOUT}
+            }}
+        }}
+    }}
+
+    # The stream hostname serves media only; anything else is refused.
+    handle {{
+        respond 404
+    }}
+}}
+"""
+
+
+def _nginx_pinned(plan: _Plan) -> str:
+    node = plan.pinned
+    assert node is not None
+    ns = _namespace(plan)
+    origin = urlsplit(plan.origin)
+    stream = urlsplit(plan.stream_origin)
+    port = origin.port or 443
+    sport = stream.port or 443
+    node_port = "" if urlsplit(node.origin).port else ":443"
+    return f"""# Private file: contains this entry's proxy credential. Store with mode 600.
+# Pinned mode: the stream hostname proxies exactly one node. Drop into a
+# context already inside http{{}}. No proxy_cache anywhere.
+# REQUIRES nginx >= 1.25.1 and installed TLS certificates for BOTH hostnames
+# BEFORE nginx -t. Adjust the four certificate paths below.
+upstream {ns}_node {{
+    server {node.host}{node_port};
+}}
+map $http_upgrade ${ns}_connection {{
+    default upgrade;
+    ''      close;
+}}
+
+# --- main hostname: everything goes to Emby with this entry's credential ---
+server {{
+    listen {port} ssl;
+    listen [::]:{port} ssl;
+    http2 on;
+    server_name {origin.hostname};
+
+    ssl_certificate     /etc/letsencrypt/live/{origin.hostname}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{origin.hostname}/privkey.pem;
+
+    access_log off;
+    client_max_body_size 0;
+    add_header Cache-Control "private, no-store" always;
+
+    location / {{
+        proxy_pass {plan.emby};
+        proxy_set_header Host {plan.emby_host};
+        proxy_ssl_server_name on;
+        proxy_ssl_name {plan.emby_hostname};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header X-Mediadeck-Entry {plan.entry_id};
+        proxy_set_header X-Mediadeck-Entry-Key {plan.key};
+        proxy_set_header X-Forwarded-Host {plan.origin_host};
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_hide_header X-Mediadeck-Entry-Key;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection ${ns}_connection;
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout {READ_TIMEOUT};
+        proxy_send_timeout {READ_TIMEOUT};
+    }}
+}}
+
+# --- stream hostname: /s/... goes to the pinned node, path untouched -------
+server {{
+    listen {sport} ssl;
+    listen [::]:{sport} ssl;
+    http2 on;
+    server_name {stream.hostname};
+
+    ssl_certificate     /etc/letsencrypt/live/{stream.hostname}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/{stream.hostname}/privkey.pem;
+
+    access_log off;
+    merge_slashes off;
+    large_client_header_buffers 4 32k;
+    add_header Cache-Control "private, no-store" always;
+
+    location ^~ /s/ {{
+        # $request_uri keeps the exact percent-encoded path the node signed.
+        proxy_pass https://{ns}_node$request_uri;
+        proxy_set_header Host {node.host};
+        proxy_ssl_server_name on;
+        proxy_ssl_name {node.hostname};
+        proxy_ssl_verify on;
+        proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Emby-Token "";
+        proxy_set_header X-MediaBrowser-Token "";
+        proxy_set_header X-Emby-Authorization "";
+        proxy_set_header Cookie "";
+        proxy_set_header X-Mediadeck-Entry "";
+        proxy_set_header X-Mediadeck-Entry-Key "";
+        proxy_http_version 1.1;
+        proxy_set_header Range $http_range;
+        proxy_set_header If-Range $http_if_range;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout {READ_TIMEOUT};
+        proxy_send_timeout {READ_TIMEOUT};
+    }}
+
+    # The stream hostname serves media only; anything else is refused.
+    location / {{
+        return 404;
+    }}
+}}
+"""
 
 
 def friend_caddy(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) -> str:

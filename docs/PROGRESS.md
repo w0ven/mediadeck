@@ -4,6 +4,41 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — pinned external entries (stream host -> one node)
+**Done**
+- Added a second external-entry mode for a CDN that can rewrite headers but
+  cannot route by path. Such an entry registers a `stream_origin` plus a
+  pinned `node`; the redirect becomes `https://<stream>/s/...` with the signed
+  path and query untouched, so the operator's friend needs only two hostnames,
+  each with one fixed upstream. The existing `/_n/<node>/` path-routing mode is
+  untouched and stays the default whenever those fields are empty.
+- Scheduling for a pinned entry is restricted to its node, so a redirect can
+  never name a node the friend's fixed upstream would 404 on. When that node
+  cannot serve the item, the ordinary fail-open passthrough to Emby applies
+  rather than a different node.
+- Validation requires both fields together, requires the node to exist in the
+  pool, and rejects a stream origin colliding with the entry origin, the
+  official Emby origin or another entry. A pinned export emits two fixed
+  hostnames and no `/_n/` route at all; only the pinned node appears in it.
+- The settings page gained stream-domain and node inputs, and the entry list
+  shows which mode each entry uses.
+
+**Tests**
+- `ruff check app tests` clean; full backend suite 1008 passed, 31 skipped.
+  The pre-change baseline was 989 passed with the same 31 skips, so the
+  path-routed mode is demonstrably unaffected.
+- New `tests/test_entry_pinned.py` (19 cases): redirect shape and signature
+  verification for GET/HEAD, percent-encoded paths, the pin winning over
+  affinity across repeated requests, fallback when the pinned node disappears,
+  refusal of half-configured or colliding pins, a read/edit/write round trip
+  preserving both pin and credential, and export contents for both engines.
+
+**Next**
+- Register the friend's entry with its stream hostname, hand over the generated
+  configuration, then verify a real client 302 -> node Range 206.
+
+---
+
 ## 2026-09-07 — preserve entry proxy paths and prevent stale registry writes
 **Done**
 - Reproduced nine path-contract failures in the initial templates: nginx

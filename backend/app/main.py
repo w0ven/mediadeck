@@ -1203,6 +1203,7 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
         caller_device=caller_device(request.headers, query),
         require_auth=True,
         cache_scope=entry.cache_scope if entry else "direct",
+        only_node=entry.node if entry and entry.pinned else "",
     )
 
     # Behind a front-door proxy, a "go to Emby instead" answer must not be a

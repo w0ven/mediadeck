@@ -22,6 +22,8 @@ def test_entry_management_browser(tmp_path):
     page.write_text("""<!doctype html><meta charset="utf-8">
 <div id="ee-list"></div><div id="ee-out"></div>
 <button id="ee-add">Add</button><input id="ee-id"><input id="ee-origin">
+<input id="ee-stream"><select id="ee-node"><option value=""></option>
+<option value="edge-b">edge-b</option></select>
 <select id="ee-server"><option value="nginx">nginx</option></select>
 <pre id="report">pending</pre>
 <script src="app.js"></script><script src="test.js"></script>
