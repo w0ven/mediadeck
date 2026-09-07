@@ -4,6 +4,38 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-07 — entry management UI and nginx friend templates
+**Done**
+- Added an "external reverse-proxy entries" card to the settings page:
+  register an entry by ID and origin, generate its complete proxy
+  configuration, copy it in one click, rotate the credential and remove the
+  entry. Registration re-reads the stored list before writing, so an edit made
+  from a stale page cannot silently drop another entry.
+- Generated friend configuration is now available for nginx as well as Caddy.
+  Both engines are produced from one validated plan, so they cannot drift:
+  identical per-node prefix strip, identical refusal of unknown `/_n/` paths,
+  the entry credential only on the Emby hop, viewer credentials stripped before
+  a node hop, no response cache, and a 600s upstream read timeout so a long
+  direct-play connection is not cut by nginx's 60s default.
+- `GET /api/integration/frontend?...&entry=<id>` accepts `server=nginx`; it
+  previously rejected everything except Caddy. Unknown engine names still 400.
+
+**Tests**
+- `ruff check app tests` clean; entry/export/origin-scope suites 103 passed.
+- Real nginx 1.27 and real Caddy served the generated friend configuration
+  against recording upstreams: a percent-encoded CJK media path with its signed
+  query reached the node byte-identical, `Range` survived, entry key/viewer
+  `Authorization`/`Cookie` never reached a node, unknown node names and bare
+  `/_n/` returned 404 without contacting an upstream, and ordinary paths reached
+  Emby carrying the entry assertion.
+
+**Next**
+- The official front door on the Emby host still needs the playback-interception
+  rule installed; without it a friend proxying the main Emby domain never reaches
+  the panel and no entry redirect can happen.
+
+---
+
 ## 2026-09-07 — restrict origin interception to playback GET/HEAD (draft revision)
 **Done**
 - Fixed the origin templates capturing every video API and method. In the

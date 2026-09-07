@@ -309,7 +309,42 @@ def test_entry_exports_require_admin_and_do_not_expose_keys_in_settings(client):
     assert "header_up -X-Emby-Token" in config
     assert "{host}" not in config and "{query" not in config
     assert client.get(url.replace("friend-a", "missing"), auth=ADMIN).status_code == 404
-    assert client.get(url.replace("caddy", "nginx"), auth=ADMIN).status_code == 400
+    assert client.get(url.replace("caddy", "apache"), auth=ADMIN).status_code == 400
+
+
+def test_nginx_export_matches_caddy_contract(client):
+    """Both engines must describe the same routing, stripping and header rules."""
+    response = client.get("/api/integration/frontend?server=nginx&entry=friend-a", auth=ADMIN)
+    assert response.status_code == 200
+    assert "no-store" in response.headers["cache-control"]
+    config = response.json()["config"]
+    # Same prefix strip, per node, with a literal upstream (no resolver needed).
+    for node in ("edge-a", "edge-b"):
+        assert f"location ^~ /_n/{node}/s/ {{" in config
+        assert f"proxy_pass https://{node}.example.com/s/;" in config
+        assert f"proxy_ssl_name {node}.example.com;" in config
+    # An unknown node name is refused rather than guessed.
+    assert "location ^~ /_n/ {" in config and "return 404;" in config
+    # The credential rides only on the Emby hop, never towards a node.
+    assert config.count(entry_headers()[KEY_HEADER]) == 1
+    emby_block = config.split("location / {")[1]
+    assert entry_headers()[KEY_HEADER] in emby_block
+    assert 'proxy_set_header X-Mediadeck-Entry-Key "";' in config.split("location / {")[0]
+    # Viewer credentials are stripped before reaching a node.
+    assert 'proxy_set_header Authorization "";' in config
+    assert 'proxy_set_header Cookie "";' in config
+    # No caching anywhere: signed URLs expire and are per-viewer.
+    assert "proxy_cache off;" in config and "proxy_cache_path" not in config
+    assert "proxy_hide_header X-Mediadeck-Entry-Key;" in config
+    # Long media reads must not die on nginx's 60s default.
+    assert "proxy_read_timeout 600s;" in config
+    assert "{host}" not in config and "{query" not in config
+
+
+def test_entry_export_rejects_unknown_server_for_both_shapes(client):
+    for server in ("apache", "traefik", "", "CADDY"):
+        result = client.get(f"/api/integration/frontend?server={server}&entry=friend-a", auth=ADMIN)
+        assert result.status_code == 400
 
 
 def test_nginx_origin_template_covers_routes_trust_and_cache(client):

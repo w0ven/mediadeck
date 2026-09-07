@@ -898,6 +898,29 @@ PAGES.settings = async () => {
         </div>
         <div id="ig-out" style="margin-top:10px"></div>
       </div>`)}
+    ${card('外部反代入口', '朋友用自己的域名反代时，让播放也留在他的域名上',
+      `<div class="card-body">
+        <div class="muted" style="margin-bottom:12px">
+          登记之后，从该入口进来的播放会 302 到
+          <code>https://对方域名/_n/&lt;节点&gt;/s/...</code>：签名原样保留，推流节点不用改任何配置。
+          <b>未登记的入口行为完全不变</b>。每个入口有独立凭据，只出现在生成的配置里，页面和接口都不回显。
+        </div>
+        <div id="ee-list">${entryRows(ig.external_entries || [])}</div>
+        <div class="form-row" style="margin-top:12px">
+          <label>新增入口</label>
+          <input id="ee-id" placeholder="入口 ID，如 friend-a" style="width:180px">
+          <input id="ee-origin" placeholder="https://对方域名" style="flex:1;min-width:180px">
+          <button class="btn primary" id="ee-add">登记</button>
+        </div>
+        <div class="form-row">
+          <label>配置类型</label>
+          <select id="ee-server" style="width:120px">
+            <option value="caddy">Caddy</option><option value="nginx">nginx</option>
+          </select>
+          <span class="muted">选好后点上面某个入口的「生成配置」，两种都能直接复制</span>
+        </div>
+        <div id="ee-out" style="margin-top:10px"></div>
+      </div>`)}
     ${card('播放调度策略', '决定同一个文件由哪个推流节点承载',
       `<div class="card-body">
         <div class="form-row"><label>策略</label>
@@ -995,6 +1018,12 @@ PAGES.settings = async () => {
   $('#pb-preview').onclick = previewPlayback;
   $('#ig-save').onclick = saveIntegration;
   $('#ig-show').onclick = showFrontendConfig;
+  $('#ee-add').onclick = addEntry;
+  $('#ee-list').onclick = (ev) => {
+    const btn = ev.target.closest('button[data-act]');
+    if (!btn) return;
+    ({ export: exportEntry, rotate: rotateEntry, del: removeEntry })[btn.dataset.act](btn.dataset.id);
+  };
   $('#mb-save').onclick = saveMembership;
   $('#ic-save').onclick = saveImageCache;
   $('#ic-sweep').onclick = sweepImageCache;
@@ -1014,6 +1043,86 @@ async function saveIntegration() {
     }) });
     toast('接入配置已保存'); renderPage('settings');
   } catch (e) { toast('保存失败: ' + e.message, 1); }
+}
+/* Registered reverse-proxy entries -------------------------------------- */
+function entryRows(entries) {
+  if (!entries.length) {
+    return '<div class="muted">还没有登记入口。留空即可，现有播放不受影响。</div>';
+  }
+  return entries.map((e) => `
+    <div class="form-row">
+      <label style="min-width:150px"><code>${esc(e.id)}</code></label>
+      <span class="muted" style="flex:1;min-width:160px">${esc(e.origin)}</span>
+      <span class="tag ${e.proxy_key_set ? 'ok' : 'bad'}">${e.proxy_key_set ? '凭据已生成' : '缺凭据'}</span>
+      <button class="btn" data-act="export" data-id="${esc(e.id)}">生成配置</button>
+      <button class="btn" data-act="rotate" data-id="${esc(e.id)}">换凭据</button>
+      <button class="btn danger" data-act="del" data-id="${esc(e.id)}">删除</button>
+    </div>`).join('');
+}
+/* Always re-read before writing: the whole list is replaced on save, so an
+   edit made from a stale page must not silently drop another entry. */
+async function entryList() {
+  const s = await api('/api/settings');
+  return ((s.integration || {}).external_entries || []);
+}
+async function writeEntries(entries) {
+  await api('/api/settings/integration', { method: 'PUT',
+    body: JSON.stringify({ external_entries: entries }) });
+}
+async function addEntry() {
+  const id = $('#ee-id').value.trim();
+  const origin = $('#ee-origin').value.trim();
+  if (!id || !origin) { toast('请填写入口 ID 和域名', 1); return; }
+  try {
+    const kept = (await entryList()).map((e) => ({ id: e.id, origin: e.origin }));
+    await writeEntries(kept.concat([{ id, origin }]));
+    toast('入口已登记，可以生成配置了'); renderPage('settings');
+  } catch (e) { toast('登记失败: ' + e.message, 1); }
+}
+async function removeEntry(id) {
+  if (!confirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`)) return;
+  try {
+    const kept = (await entryList()).filter((e) => e.id !== id)
+      .map((e) => ({ id: e.id, origin: e.origin }));
+    await writeEntries(kept);
+    toast('入口已删除'); renderPage('settings');
+  } catch (e) { toast('删除失败: ' + e.message, 1); }
+}
+async function rotateEntry(id) {
+  if (!confirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`)) return;
+  try {
+    const kept = (await entryList()).map((e) => (
+      { id: e.id, origin: e.origin, rotate_proxy_key: e.id === id }));
+    await writeEntries(kept);
+    toast('凭据已轮换，请重新生成并发送配置'); renderPage('settings');
+  } catch (e) { toast('轮换失败: ' + e.message, 1); }
+}
+async function exportEntry(id) {
+  const el = $('#ee-out');
+  const server = $('#ee-server').value;
+  el.textContent = '生成中…';
+  try {
+    const r = await api('/api/integration/frontend?server='
+      + encodeURIComponent(server) + '&entry=' + encodeURIComponent(id));
+    el.innerHTML = `<div class="muted" style="margin-bottom:6px">
+        <b>${esc(id)}</b> 的 ${esc(server === 'nginx' ? 'nginx' : 'Caddy')} 配置 ——
+        含该入口专属凭据，<b>只发给这个入口的所有者</b>，不要公开粘贴。
+      </div>
+      <pre class="codeblock">${esc(r.config)}</pre>
+      <div class="toolbar" style="margin-top:6px">
+        <button class="btn" id="ee-copy">复制配置</button>
+        <span class="muted" id="ee-copy-hint"></span>
+      </div>`;
+    $('#ee-copy').onclick = async () => {
+      try {
+        await navigator.clipboard.writeText(r.config);
+        toast('已复制到剪贴板');
+      } catch (err) {
+        /* clipboard needs HTTPS or a user gesture; keep the text usable. */
+        $('#ee-copy-hint').textContent = '浏览器拒绝了剪贴板，请手动全选复制上面的内容';
+      }
+    };
+  } catch (e) { el.innerHTML = `<span class="tag bad">生成失败</span> ${esc(e.message)}`; }
 }
 async function showFrontendConfig() {
   const el = $('#ig-out');
