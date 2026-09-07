@@ -4,6 +4,44 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — reconcile member rows against Emby accounts
+**Done**
+- Member rows never noticed when their Emby account disappeared: enrolment was
+  a one-shot manual import, so deleting accounts in Emby left orphaned rows
+  behind (139 Emby accounts vs 200 member rows in production).
+- `MemberService.sync_emby()` now compares member rows with the live Emby user
+  list: flags rows whose account is gone via a new `emby_missing_since`
+  column, clears the flag when an account comes back, follows renames, and
+  reports unmanaged accounts. Deletion is never automatic -- a member row
+  carries the traffic ledger, plan, expiry and notes, so an accidental mass
+  delete in Emby must not destroy billing history.
+- An empty user list is treated as "Emby unreadable", not "Emby has no users":
+  one failed poll cannot orphan the entire member base.
+- `purge_orphans()` deletes only rows already flagged, so an operator acting on
+  a stale page cannot remove a member whose account is present right now.
+- Endpoints: `GET /api/members/emby-sync` (read-only preview),
+  `POST /api/members/emby-sync` (apply, optional `enroll_new`),
+  `POST /api/members/purge-orphans` (explicit ids only). The background loop
+  runs the flag/unflag pass every 15 minutes; it never enrols or deletes.
+- Chose a separate column over a new status value: the billing state machine
+  describes what the operator owes a member, and overloading it would let an
+  orphan silently clear itself on the next enforcement recompute.
+
+**Tests**
+- `ruff check app tests` clean; full backend suite 1023 passed, 31 skipped
+  (baseline 1008 passed with the same skips).
+- New `tests/test_member_emby_sync.py` (15 cases): preview writes nothing,
+  flagging never deletes, first-seen timestamp is stable across syncs,
+  returning accounts clear the flag, renames are followed, an empty user list
+  is refused, enrolment only on request, purge refuses unflagged/unknown/
+  returned ids, and all three endpoints require auth.
+
+**Next**
+- Reverse direction (deleting in the panel removes the Emby account) is the
+  actual handover from embyboss and needs its own confirmation flow.
+
+---
+
 ## 2026-09-08 — pinned external entries (stream host -> one node)
 **Done**
 - Added a second external-entry mode for a CDN that can rewrite headers but

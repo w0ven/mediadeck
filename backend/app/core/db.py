@@ -535,6 +535,12 @@ class Database:
                 "members", "request_period", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(
                 "groups", "request_quota", "INTEGER NOT NULL DEFAULT 3")
+            # v0.28: when the Emby account behind a member row disappeared.
+            # A separate column rather than a status: the billing state machine
+            # describes what the operator owes this member, while this records
+            # a fact about Emby. Overloading status would let an orphan silently
+            # clear itself the next time enforcement recomputed the state.
+            self._ensure_column("members", "emby_missing_since", "INTEGER")
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:
