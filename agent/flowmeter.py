@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Node measured-flow core — register, count, spool, terminate.
 
 This is the kernel-facing half of measured metering. The panel ledger lives
@@ -61,7 +60,7 @@ FAMILY_V6 = "inet6"
 
 def _run(cmd: list[str], timeout: float = 8.0) -> tuple[int, str, str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         return proc.returncode, proc.stdout, proc.stderr
     except (OSError, subprocess.SubprocessError) as exc:
         return 99, "", f"{type(exc).__name__}: {exc}"

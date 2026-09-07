@@ -8,7 +8,8 @@ top-down without asking. Every item ships as its own PR + release tag.
 - [x] Keep editor/selection/scroll state and guard route/reconnect races.
 - [x] Provide a live-page registration contract and query-aware navigation.
 - [x] Reproduce the original failure and verify in isolated Chromium.
-- [ ] Integrate the separately developed member lifecycle and measured-quota modules.
+- [x] Integrate member lifecycle, measured-quota modules and real browser/kernel/nginx verification.
+- [ ] Operator-approved deployment, measured-baseline cutover and legacy-user migration (separate phase).
 - No deployment, node configuration change, or existing-user migration in this step.
 
 ## Done

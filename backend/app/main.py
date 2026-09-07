@@ -1091,10 +1091,8 @@ def _meter_policy_snapshot() -> dict[str, Any]:
         for member in app.state.members.list(limit=5000):
             state = str(member.get("state") or "")
             stored = str(member.get("status") or "")
-            if state == "exhausted":
-                blocked.append(user_tag(member["emby_user_id"]))
-            elif stored in ("suspended", "pending") or state in (
-                    "suspended", "pending", "expired"):
+            if stored in ("suspended", "pending") or state in (
+                    "exhausted", "suspended", "pending", "expired"):
                 blocked.append(user_tag(member["emby_user_id"]))
     return app.state.metering.publish_policy(blocked)
 

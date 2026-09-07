@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001
+# The installer sets executable mode on the downloaded agent.
 """mediadeck node load probe — single-file agent for streaming nodes.
 
 Deploy this one file to each streaming node; it exposes a tiny /load endpoint
@@ -290,7 +292,8 @@ class SpeedLog:
         while True:
             try:
                 if fh is None:
-                    fh = open(self.path, encoding="utf-8", errors="replace")
+                    # The tail keeps its descriptor between polls and across rotation checks.
+                    fh = open(self.path, encoding="utf-8", errors="replace")  # noqa: SIM115
                     inode = os.fstat(fh.fileno()).st_ino
                     fh.seek(0, os.SEEK_END)
                 line = fh.readline()
@@ -346,7 +349,7 @@ class SpeedLog:
                 peer_ip = token[2:]
             elif token.startswith("p="):
                 peer_port = token[2:]
-            elif token.startswith("r=") or token.startswith("s="):
+            elif token.startswith(("r=", "s=")):
                 continue          # rate cap / status are not needed for speed
             elif token.startswith("/") or "=" in token:
                 continue          # URI or unknown labelled field
@@ -502,7 +505,7 @@ class Sampler:
     INTERVAL = 1.0   # seconds between counter reads
     WINDOW = 8.0     # seconds of counter history averaged into the reading
 
-    def __init__(self, iface: str, ports: set[int], speedlog: "SpeedLog") -> None:
+    def __init__(self, iface: str, ports: set[int], speedlog: SpeedLog) -> None:
         self.iface = iface
         self.ports = ports
         self.speedlog = speedlog
@@ -578,7 +581,7 @@ def main() -> None:
     speedlog = sampler.speedlog
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             # Request-start attribution ping, mirrored by nginx on every media
             # request. Loopback-only in practice (nginx runs on the same box)
             # and carries no secrets: a hashed tag and a socket address.

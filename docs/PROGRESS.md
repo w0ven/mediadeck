@@ -4,6 +4,26 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — local user-management rebuild integrated
+
+- Integrated membership lifecycle/UI, non-destructive live DOM updates, node
+  measured accounting, durable multi-node policies and runtime nginx deny-map
+  publication. No live deployment, upstream push, or legacy-user migration.
+- Full integrated suite: 1068 passed, 56 skipped (optional cases); this includes
+  the actual Chromium member/live flows and isolated kernel/nginx regressions.
+- Runtime deny validation starts nginx with an empty map, applies a new policy
+  through the daemon publisher, verifies 403/200 after stopping meterd, then
+  verifies dynamic unblock. A written file alone is not claimed loaded.
+- Policy tracking separates sent from node-applied revisions. The stable socket
+  identity includes the nginx worker pid and connection number.
+- Final project-config lint and JavaScript syntax checks pass. Behaviour-neutral
+  lint cleanup was followed by 35 metering/policy/probe regressions passing.
+- Rollout still requires operator approval for node components/configuration and
+  an explicit measured-baseline cutover. Unregistered origin/transcode paths
+  must not be described as measured node traffic.
+
+---
+
 ## 2026-09-08 — member browser integration and capability preservation
 
 - Ran the actual index/script order in Chromium through Playwright, using only

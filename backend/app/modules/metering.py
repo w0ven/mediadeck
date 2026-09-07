@@ -46,9 +46,8 @@ def _as_int(value: Any, default: int = 0) -> int:
 
 def _billable(sample: dict[str, Any], envelope: dict[str, Any]) -> str | None:
     """Return a reject reason, or None if the sample may move the watermark."""
-    if envelope.get("unit") not in (None, "", UNIT):
-        if str(envelope.get("unit")) != UNIT:
-            return "invalid_unit"
+    if envelope.get("unit") not in (None, "", UNIT) and str(envelope.get("unit")) != UNIT:
+        return "invalid_unit"
     if envelope.get("nft_ok") is False:
         return "nft_down"
     coverage = str(sample.get("coverage") or "")
@@ -73,7 +72,7 @@ class MeasuredMeteringService:
                  ) -> None:
         self._db = db
         self._tag_to_user = tag_to_user or dict
-        self._expected_nodes = expected_nodes or (lambda: [])
+        self._expected_nodes = expected_nodes or list
 
     # -- ingest --------------------------------------------------------------
     def ingest(self, envelope: dict[str, Any]) -> dict[str, Any]:

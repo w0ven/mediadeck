@@ -16,9 +16,9 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "backend"))
 sys.path.insert(0, str(ROOT / "agent"))
 
-from app.core.db import Database  # noqa: E402
-from app.modules.metering import MeasuredMeteringService  # noqa: E402
-from app.modules.signing import user_tag  # noqa: E402
+from app.core.db import Database
+from app.modules.metering import MeasuredMeteringService
+from app.modules.signing import user_tag
 
 
 def load_flow():
