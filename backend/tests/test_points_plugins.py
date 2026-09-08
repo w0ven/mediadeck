@@ -323,11 +323,11 @@ def _bot(registry: PluginRegistry, points: PointsService,
 def test_disabled_points_plugins_show_no_buttons(stack) -> None:
     registry, points, members, _ = stack
     bot = _bot(registry, points, members)
-    actions = {b["callback_data"] for row in bot.member_menu() for b in row}
+    actions = {b["callback_data"] for row in (bot.member_menu() + bot.bag_menu()) for b in row}
     assert "checkin" not in actions
     assert "transfer" not in actions
     # The rest of the menu is unaffected by a points feature being off.
-    assert {"me", "bag", "top"} <= actions
+    assert {"me", "bag", "rank"} <= actions
 
 
 def test_enabling_a_plugin_makes_its_button_appear(stack) -> None:
@@ -335,11 +335,11 @@ def test_enabling_a_plugin_makes_its_button_appear(stack) -> None:
     bot = _bot(registry, points, members)
 
     registry.save("checkin", enabled=True)
-    actions = {b["callback_data"] for row in bot.member_menu() for b in row}
+    actions = {b["callback_data"] for row in (bot.member_menu() + bot.bag_menu()) for b in row}
     assert "checkin" in actions and "transfer" not in actions
 
     registry.save("points_transfer", enabled=True)
-    actions = {b["callback_data"] for row in bot.member_menu() for b in row}
+    actions = {b["callback_data"] for row in (bot.member_menu() + bot.bag_menu()) for b in row}
     assert {"checkin", "transfer"} <= actions
 
 
@@ -347,11 +347,11 @@ def test_switching_a_plugin_off_again_removes_its_button(stack) -> None:
     registry, points, members, _ = stack
     bot = _bot(registry, points, members)
     registry.save("checkin", enabled=True)
-    assert "checkin" in {b["callback_data"] for r in bot.member_menu() for b in r}
+    assert "checkin" in {b["callback_data"] for r in (bot.member_menu() + bot.bag_menu()) for b in r}
 
     registry.save("checkin", enabled=False)
     assert "checkin" not in {b["callback_data"]
-                             for r in bot.member_menu() for b in r}
+                             for r in (bot.member_menu() + bot.bag_menu()) for b in r}
 
 
 def test_a_bot_with_no_registry_offers_no_points_buttons(stack) -> None:
@@ -359,5 +359,5 @@ def test_a_bot_with_no_registry_offers_no_points_buttons(stack) -> None:
     _, points, members, _ = stack
     bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED},
                       members, points=points)
-    actions = {b["callback_data"] for row in bot.member_menu() for b in row}
+    actions = {b["callback_data"] for row in (bot.member_menu() + bot.bag_menu()) for b in row}
     assert "checkin" not in actions and "transfer" not in actions

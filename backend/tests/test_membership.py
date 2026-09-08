@@ -169,12 +169,12 @@ def test_renew_extends_from_expiry_not_from_now(stack) -> None:
 
 
 def test_assigning_a_timed_group_sets_an_expiry(stack) -> None:
-    """New members still arm the clock; switching groups keeps the term."""
+    """New time billing arms the clock; traffic-only groups have no expiry."""
     stack["members"].upsert("u1", "alice", {"group_id": "standard"})
     first = stack["members"].get("u1")["expires_at"]
     assert first is not None
     stack["members"].upsert("u1", "alice", {"group_id": "vip"})
-    assert stack["members"].get("u1")["expires_at"] == first
+    assert stack["members"].get("u1")["expires_at"] is None
     stack["members"].upsert(
         "u1", "alice", {"group_id": "standard", "expiry_policy": "apply_group"})
     assert stack["members"].get("u1")["expires_at"] is not None
@@ -235,9 +235,9 @@ def test_merge_prefers_overrides_field_by_field(stack) -> None:
     assert eff["overridden_keys"] == ["bandwidth_limit_kbps"]
 
 
-def test_expiry_override_beats_stored_expiry(stack) -> None:
+def test_expiry_override_beats_stored_expiry_in_timed_group(stack) -> None:
     m = stack["members"]
-    m.upsert("u1", "alice", {"group_id": "vip"})
+    m.upsert("u1", "alice", {"group_id": "standard"})
     past = int(time.time()) - 10
     m.set_overrides("u1", {"expires_at_override": past})
     assert m.get("u1")["state"] == "expired"

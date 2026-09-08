@@ -214,9 +214,15 @@ def test_kk_is_case_insensitive_on_the_emby_name(bot) -> None:
 
 # -- /prouser and /revuser ---------------------------------------------------
 
+def _confirm_group(bot, policy='keep'):
+    saved = bot._pending[ADMIN_CHAT][2]['group_confirm']
+    return _tap(bot, f"admin_group_apply:{policy}:{saved['nonce']}")
+
 def test_prouser_moves_the_account_into_the_whitelist(bot) -> None:
     reply = _run(bot, "/prouser alice")
     assert "白名单" in reply
+    assert bot.members.get("u1")["group_id"] == "standard"
+    _confirm_group(bot)
     assert bot.members.get("u1")["group_id"] == "whitelist"
 
 
@@ -225,14 +231,19 @@ def test_prouser_recreates_a_missing_whitelist_group(bot) -> None:
     operator never having tidied their group list."""
     bot.groups.delete("whitelist")
     _run(bot, "/prouser alice")
+    _confirm_group(bot)
     assert bot.members.get("u1")["group_id"] == "whitelist"
 
 
 def test_revuser_moves_the_account_back_to_the_default_group(bot) -> None:
     _run(bot, "/prouser alice")
+    _confirm_group(bot)
     reply = _run(bot, "/revuser alice")
-    assert "默认组" in reply
+    assert "确认换组" in reply
+    assert bot._pending[ADMIN_CHAT][2]['group_confirm']['group_id'] == 'standard'
+    _confirm_group(bot, 'apply_group')
     assert bot.members.get("u1")["group_id"] == "standard"
+    assert bot.members.get('u1')['expires_at_effective'] is not None
 
 
 # -- /renew ------------------------------------------------------------------

@@ -163,9 +163,12 @@
     const quota = m.traffic_quota_bytes ? measuredBytes(m.traffic_quota_bytes) : '不限';
     const label = measuredMode ? '实测配额' : '旧估算配额';
     const coverage = sample.coverage || {};
-    return `<div class="s"><b>${label}</b> ${esc(measuredBytes(used))} / ${esc(quota)}
+    const usageLabel = sample.measurement_status === 'no_usage_records'
+      ? '本月尚无实测记录' : measuredBytes(used);
+    const missingNodes = (coverage.nodes || []).filter(n => !n.ok).map(n => n.name).join('、');
+    return `<div class="s"><b>${label}</b> ${esc(usageLabel)} / ${esc(quota)}
       ${!measuredMode && m.metering ? `<div class="muted">实测监测 ${esc(measuredBytes(sample.measured_used_bytes))}（未用于限额）</div>` : ''}
-      ${coverage.degraded ? '<div class="tag warn">采集不完整 · 待补报</div>' : ''}
+      ${coverage.degraded ? `<div class="tag warn">采集不完整${missingNodes ? '：' + esc(missingNodes) : ''} · 待恢复核实</div>` : ''}
       <div class="muted">直链日志30天 ${esc(fmtBytes((m.edge || {}).bytes_30d || 0))}（独立统计）</div></div>`;
   }
 
@@ -507,7 +510,7 @@
             <button class="btn sm" type="button" id="md-renew">续期</button></label>
           <label>换组 <select id="md-group">${gopts}</select>
             <select id="md-policy">
-              <option value="keep">保留有效期</option>
+              <option value="keep">保留期限（不计时组改为不限期）</option>
               <option value="apply_group">套用目标组天数</option>
               <option value="clear">改为不限期</option>
             </select>
@@ -522,7 +525,7 @@
         <h4>近30天统计</h4><p>播放 ${esc((d.usage || {}).plays || 0)} 次 · ${esc((d.usage || {}).hours || 0)} 小时 · 会话估算 ${fmtBytes((d.usage || {}).bytes || 0)}</p>
         ${edgeHistory(d.edge)}`;
       } else if (tab === 'entitlements') {
-        body = `<p class="help">组 ${esc(m.group_name)}；个人覆盖优先。修改后点击保存才生效。</p>
+        body = `<p class="help">组 ${esc(m.group_name)}；个人权限覆盖优先，但不能开启用户组未启用的计费维度。不计时组不限期，不计流量组不限流量。修改后点击保存才生效。</p>
           <div class="toolbar" id="md-roles">
             ${[['admin','管理员（可登录面板）'],['uploader','上片员']].map(([role,label]) => `<label><input type="checkbox" class="md-role" value="${role}" ${(m.roles || []).includes(role) ? 'checked' : ''}> ${label}</label>`).join('')}
             <button class="btn sm" type="button" id="md-roles-save">保存角色</button>
@@ -722,11 +725,15 @@
     const policy = ($('#md-policy') || {}).value || 'keep';
     if (!gid) return;
     const preview = await api(`/api/members/${encodeURIComponent(id)}/group-preview?group_id=${encodeURIComponent(gid)}`);
-    if (preview.decision_required && policy === 'keep') {
-      if (!confirm('永久/无到期账号切到计时组。确定保留不限期？选“套用目标组天数”才会开始计时。')) return;
-    } else if ((preview.warnings || []).length) {
-      if (!confirm((preview.warnings || []).join('\n') + '\n确定换组？')) return;
-    }
+    const selected = (preview.policies || {})[policy] || {};
+    const lines = [
+      `用户组：${(preview.from_group || {}).name || '未分组'} → ${(preview.to_group || {}).name || gid}`,
+      `原有效期：${fmtExpiry(preview.current_expires_at_effective)}`,
+      `新有效期：${fmtExpiry(selected.expires_at)}`,
+      ...(preview.warnings || []),
+      '其他个人权限与历史用量保留。确认换组？'
+    ];
+    if (!confirm(lines.join('\n'))) return;
     const r = await api(`/api/members/${encodeURIComponent(id)}/group`, {
       method: 'POST', body: JSON.stringify({ group_id: gid, expiry_policy: policy }),
     });

@@ -79,8 +79,10 @@ def test_switching_timed_groups_keeps_existing_expiry(client) -> None:
     far = int(time.time()) + 180 * 86400
     client.put("/api/members/keep-1", auth=ADMIN,
                json={"username": "keep1", "expires_at": far})
+    client.post('/api/groups', auth=ADMIN, json={'id':'timed2','name':'Timed2',
+                'billing_mode':'both','duration_days':7,'traffic_quota_bytes':1024})
     switched = client.put("/api/members/keep-1", auth=ADMIN,
-                          json={"username": "keep1", "group_id": "vip"}).json()
+                          json={"username": "keep1", "group_id": "timed2"}).json()
     assert switched["expires_at"] == far
     assert switched["expires_at"] != original
 
@@ -107,7 +109,7 @@ def test_permanent_to_timed_keep_does_not_guess_days(client) -> None:
 
 
 def test_renew_writes_override_not_just_base(client) -> None:
-    _create(client, "ov-1", "ov1", group_id="vip")
+    _create(client, "ov-1", "ov1", group_id="standard")
     past = int(time.time()) - 10
     client.put("/api/members/ov-1/overrides", auth=ADMIN,
                json={"expires_at_override": past})

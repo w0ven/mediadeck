@@ -246,6 +246,8 @@ class MeasuredMeteringService:
             "unit": UNIT,
             "measured_used_bytes": used,
             "measured_raw_bytes": raw,
+            "measurement_status": ("unavailable" if degraded else "no_usage_records")
+                if raw is None else ("partial" if degraded else "measured"),
             "credit_bytes": credit,
             "period": month,
             "period_start": period_start(int(now)),
@@ -408,7 +410,8 @@ class MeasuredMeteringService:
         by_name = {r["node"]: r for r in rows}
         expected = list(self._expected_nodes() or [])
         names = list(expected) if expected else list(by_name)
-        # Always include expected nodes even if they have never reported.
+        # A previously reporting node remains visible: disabling scheduling
+        # does not prove old direct links or established connections ended.
         for name in by_name:
             if name not in names:
                 names.append(name)

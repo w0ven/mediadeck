@@ -16,6 +16,8 @@ after a few months of playback history.
 from __future__ import annotations
 
 import time
+import hashlib
+import json
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -31,9 +33,95 @@ def _day_list(days: int, end: datetime | None = None) -> list[str]:
             for i in range(days - 1, -1, -1)]
 
 
+def legacy_watch_fingerprint(rows: list[dict[str, Any]]) -> str:
+    records = sorted((str(r['event_id']), str(r['emby_user_id']), int(r['seconds']),
+                      int(r['started_at']), int(r['ended_at'])) for r in rows)
+    return hashlib.sha256(json.dumps(records, separators=(',', ':')).encode()).hexdigest()
+
+
 class StatsService:
     def __init__(self, db: Database) -> None:
         self._db = db
+        self._live_watch = lambda: []
+
+    def bind_live_watch(self, provider: Any) -> None:
+        self._live_watch = provider
+
+    def watch_summary(self, user_id: str, now: float | None = None) -> dict[str, Any]:
+        now = time.time() if now is None else now
+        row = self._db.one(
+            "SELECT SUM(CASE WHEN started_at>=? THEN seconds ELSE 0 END) AS day,"
+            "SUM(seconds) AS month FROM ("
+            "SELECT seconds,started_at FROM play_events WHERE emby_user_id=? AND started_at>=? "
+            "UNION ALL SELECT seconds,started_at FROM watch_legacy_events WHERE emby_user_id=? AND started_at>=?)",
+            (int(now)-86400, user_id, int(now)-30*86400, user_id, int(now)-30*86400)) or {}
+        total = self._db.one("SELECT seconds,first_at FROM watch_totals WHERE emby_user_id=?", (user_id,)) or {}
+        legacy = self._db.one("SELECT seconds,first_at,cutoff_at FROM watch_legacy_baselines WHERE emby_user_id=?", (user_id,)) or {}
+        day, month = int(row.get("day") or 0), int(row.get("month") or 0)
+        recorded = int(total.get("seconds") or 0) + int(legacy.get("seconds") or 0)
+        starts = [int(r["first_at"]) for r in (total, legacy) if r.get("first_at") is not None]
+        for live in self._live_watch() or []:
+            if live.get("user_id") != user_id:
+                continue
+            seconds, start = int(live.get("seconds") or 0), int(live.get("started_at") or now)
+            recorded += seconds
+            starts.append(start)
+            day += seconds if start >= now-86400 else 0
+            month += seconds if start >= now-30*86400 else 0
+        return {"seconds_24h": day, "seconds_30d": month, "recorded_seconds": recorded,
+                "first_at": min(starts) if starts else None,
+                "legacy_seconds": int(legacy.get("seconds") or 0),
+                "window_basis": "session_start", "source": "sampled_playing_seconds"}
+
+    def recent_watches(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        return self._db.query("SELECT item_name,series_name,seconds,started_at FROM play_events "
+                              "WHERE emby_user_id=? ORDER BY started_at DESC LIMIT ?", (user_id, max(1,min(limit,10))))
+
+    def import_legacy_watch(self, rows: list[dict[str, Any]], *, source: str) -> int:
+        """Explicit one-source import of completed, non-overlapping old sessions.
+
+        Event identities are content hashes, not mutable SQLite rowids. A fixed
+        source fingerprint makes retrying the same export harmless; another
+        source cannot silently add the same history again.
+        """
+        first = self._db.one("SELECT MIN(first_at) AS t FROM watch_totals") or {}
+        boundary = first.get("t")
+        if boundary is None or not source or len(rows) > 200000:
+            raise ValueError("缺少 Deck 统计起点或可信旧历史来源")
+        if source != legacy_watch_fingerprint(rows):
+            raise ValueError('旧历史文件指纹不符，未导入')
+        clean, seen = [], set()
+        for r in rows:
+            uid, event = str(r['emby_user_id']), str(r['event_id'])
+            seconds, start, end = int(r['seconds']), int(r['started_at']), int(r['ended_at'])
+            if not event or event in seen or not 0 <= seconds <= end-start or not 0 <= start < end <= int(boundary):
+                raise ValueError("旧历史重复、时间不明或与 Deck 重叠")
+            seen.add(event)
+            clean.append((event,uid,seconds,start,end,source))
+        with self._db.write() as conn:
+            completed = conn.execute("SELECT value FROM meta WHERE key='watch_legacy_import_source'").fetchone()
+            if completed:
+                if completed[0] != source:
+                    raise ValueError('已完成旧历史导入，不能叠加另一份历史')
+                return 0
+            if conn.execute('SELECT 1 FROM watch_legacy_baselines WHERE source<>? LIMIT 1',(source,)).fetchone():
+                raise ValueError('已有不同旧历史基线，禁止重复叠加')
+            for uid in {r[1] for r in clean}:
+                if not conn.execute('SELECT 1 FROM members WHERE emby_user_id=?',(uid,)).fetchone():
+                    raise ValueError('旧历史包含已清退账号，不恢复用户')
+            added = 0
+            for record in clean:
+                prior = conn.execute('SELECT event_id,emby_user_id,seconds,started_at,ended_at,source FROM watch_legacy_events WHERE event_id=?',(record[0],)).fetchone()
+                if prior:
+                    if tuple(prior)!=record:
+                        raise ValueError('旧记录身份冲突，未导入')
+                    continue
+                conn.execute('INSERT INTO watch_legacy_events VALUES(?,?,?,?,?,?)',record)
+                added += 1
+            for uid in {r[1] for r in clean}:
+                conn.execute('INSERT INTO watch_legacy_baselines SELECT emby_user_id,SUM(seconds),MIN(started_at),MAX(ended_at),? FROM watch_legacy_events WHERE emby_user_id=? GROUP BY emby_user_id ON CONFLICT(emby_user_id) DO NOTHING',(source,uid))
+            conn.execute("INSERT INTO meta(key,value) VALUES('watch_legacy_import_source',?)",(source,))
+        return added
 
     # -- headline ------------------------------------------------------------
     def overview(self, days: int = 30) -> dict[str, Any]:
@@ -160,21 +248,26 @@ class StatsService:
         hours = max(1, min(hours, 24 * MAX_DAYS))
         since = int(time.time()) - hours * 3600
         rows = self._db.query(
-            "SELECT p.emby_user_id,"
-            " COALESCE(NULLIF(m.username,''), NULLIF(p.username,''), p.emby_user_id) AS username,"
-            " SUM(p.seconds) AS secs, COUNT(*) AS plays"
-            " FROM play_events p LEFT JOIN members m ON m.emby_user_id=p.emby_user_id"
-            " WHERE p.started_at >= ?"
-            " GROUP BY p.emby_user_id"
-            " ORDER BY secs DESC, plays DESC LIMIT ?",
-            (since, max(1, min(int(limit), 50))))
-        return [{
-            "user_id": r["emby_user_id"],
-            "username": r["username"] or str(r["emby_user_id"])[:8],
-            "hours": round(int(r["secs"] or 0) / 3600, 1),
-            "seconds": int(r["secs"] or 0),
-            "plays": int(r["plays"] or 0),
-        } for r in rows]
+            "SELECT p.emby_user_id,m.username,SUM(p.seconds) AS secs,COUNT(*) AS plays "
+            "FROM (SELECT emby_user_id,seconds FROM play_events WHERE started_at>=? "
+            "UNION ALL SELECT emby_user_id,seconds FROM watch_legacy_events WHERE started_at>=?) p "
+            "JOIN members m ON m.emby_user_id=p.emby_user_id GROUP BY p.emby_user_id",
+            (since,since))
+        by_user = {r['emby_user_id']:r for r in rows}
+        for live in self._live_watch() or []:
+            uid = str(live.get('user_id') or '')
+            if int(live.get('started_at') or 0) < since:
+                continue
+            if uid not in by_user:
+                member = self._db.one('SELECT username FROM members WHERE emby_user_id=?',(uid,))
+                if not member:
+                    continue
+                by_user[uid] = {'emby_user_id':uid,'username':member['username'],'secs':0,'plays':0}
+            by_user[uid]['secs'] += int(live.get('seconds') or 0)
+        ordered = sorted(by_user.values(),key=lambda r:(-int(r['secs']),-int(r['plays']),r['emby_user_id']))[:max(1,min(int(limit),50))]
+        return [{'user_id':r['emby_user_id'],'username':r['username'] or r['emby_user_id'][:8],
+                 'hours':round(int(r['secs'] or 0)/3600,1),'seconds':int(r['secs'] or 0),
+                 'plays':int(r['plays'] or 0)} for r in ordered]
 
     def top_titles(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
@@ -311,6 +404,7 @@ class StatsService:
             "DELETE FROM play_events WHERE started_at < ?", (cutoff_ts,))
         usage = self._db.execute(
             "DELETE FROM usage_daily WHERE day < ?", (cutoff_day,))
+        self._db.execute('DELETE FROM watch_legacy_events WHERE started_at < ?', (cutoff_ts,))
         audit = self._db.execute(
             "DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
         return {"play_events": events, "usage_daily": usage, "audit_log": audit}
