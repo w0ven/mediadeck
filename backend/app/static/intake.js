@@ -36,7 +36,7 @@ function intakeBanner(health, ageSeconds, stale) {
   const alerts = (health && health.alerts) || [];
   const age = ageSeconds == null ? '—' : `${Math.round(ageSeconds)} 秒前采集`;
   return `
-    <div class="card">
+    <div class="card" data-live-key="intake-health">
       <div class="card-head">
         <div>
           <h3>流水线健康 <span class="tag ${cls}">${esc(label)}</span></h3>
@@ -224,25 +224,24 @@ function intakeDownloaderCard(downloader) {
     ['下载器', '任务总数', '下载中', '已完成'], rows);
 }
 
-PAGES.intake = async () => {
-  $('#view').innerHTML = pageLoading();
-  /* Prefer the pushed snapshot when the live stream already delivered one:
-     the page re-renders on every push, and re-fetching on each of those would
-     make the stream cost more than the polling it replaced. */
-  const snap = (live.data && live.data.intake)
-    || await api('/api/intake').catch((e) => ({ available: false, reason: e.message }));
-
+PAGES.intake = async (context = pageContext('intake')) => {
+  renderView(pageLoading(), context);
+  const snap = await api('/api/intake').catch((e) => ({available:false, reason:e.message}));
+  paintIntake(snap, context);
+};
+function paintIntake(snap, context) {
+  if (!context.isCurrent()) return;
   if (!snap || snap.available === false) {
-    $('#view').innerHTML = `<div class="card"><div class="card-head">
+    renderView(`<div class="card"><div class="card-head">
         <div><h3>入库流水线</h3><div class="sub">${esc(snap && snap.reason ? snap.reason : '快照不可用')}</div></div>
         <div class="toolbar"><button class="btn sm" id="intake-refresh">立即采集</button></div>
-      </div><div class="empty">${esc(snap && snap.reason ? snap.reason : '尚未采集')}</div></div>`;
+      </div><div class="empty">${esc(snap && snap.reason ? snap.reason : '尚未采集')}</div></div>`, context);
     bindIntakeRefresh();
     return;
   }
 
   const d = snap.data || {};
-  $('#view').innerHTML = `
+  renderView(`
     ${intakeBanner(d.health, snap.snapshot_age_seconds, snap.stale)}
     ${snap.error ? card('采集告警', '最近一次采集失败，下方数据为上一次成功结果',
     `<div class="card-body"><span class="danger-text">${esc(snap.error)}</span></div>`) : ''}
@@ -251,9 +250,12 @@ PAGES.intake = async () => {
     ${intakeNotifyCard(d.notify)}
     ${intakeUploadCard(d.upload)}
     ${intakeCloudCard(d.cloud)}
-    ${intakeDownloaderCard(d.downloader)}`;
+    ${intakeDownloaderCard(d.downloader)}`, context);
   bindIntakeRefresh();
-};
+}
+registerLiveUpdater('intake', ['intake'], (topic, payload, context) => {
+  if (topic === 'intake') paintIntake(payload, context);
+});
 
 function bindIntakeRefresh() {
   const btn = $('#intake-refresh');

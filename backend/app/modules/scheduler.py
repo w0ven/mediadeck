@@ -46,6 +46,9 @@ class NodeState:
     # Anonymised user tag -> measured bytes/second on this node's wire, as
     # reported by the node's speed collector. Display-only; never billing.
     user_speeds: dict[str, int] = None  # type: ignore[assignment]
+    user_speeds_at: float = 0.0
+    user_speeds_ok: bool = False
+    probe_error: str | None = None
 
     def __post_init__(self) -> None:
         if self.user_speeds is None:
@@ -171,10 +174,15 @@ class Scheduler:
                 speeds = data.get("user_speeds")
                 st.user_speeds = ({str(k): int(v) for k, v in speeds.items()}
                                   if isinstance(speeds, dict) else {})
+                st.user_speeds_at = st.last_probe_ts
+                st.user_speeds_ok = True
+                st.probe_error = None
             else:
                 st.ok = False
                 st.consecutive_failures += 1
-                st.user_speeds = {}
+                st.user_speeds_ok = False
+                st.probe_error = str(data.get("error") or "probe_failed")
+                # Keep last speeds with a stale timestamp; do not pretend 0.
             self._history[st.node.name].append({
                 "ts": st.last_probe_ts,
                 "ok": st.ok,
@@ -253,16 +261,41 @@ class Scheduler:
 
     # -- introspection -------------------------------------------------------
     def user_speeds(self) -> dict[str, int]:
-        """Anonymised user tag -> bytes/second, summed across all nodes.
+        """Anonymised user tag -> bytes/second, summed across fresh node samples."""
+        view = self.user_speed_view()
+        return {tag: int(v["bps"]) for tag, v in view.items()
+                if v.get("bps") is not None}
 
-        Summed because one account may stream from two nodes at once; the
-        dashboard shows what that account pulls in total.
+    def user_speed_view(self, *, stale_after: float = 45.0) -> dict[str, dict[str, Any]]:
+        """Per-tag rate with collection time and coverage. Missing is not zero.
+
+        NIC ``egress_mbps`` on the node snapshot is the whole interface and
+        is a different series; it is not added into these user rates.
         """
-        out: dict[str, int] = {}
+        now = time.time()
+        out: dict[str, dict[str, Any]] = {}
         for st in self._states.values():
+            fresh = bool(st.user_speeds_ok) and (now - (st.user_speeds_at or 0)) <= stale_after
+            collected = st.user_speeds_at or None
+            if not fresh:
+                continue
             for tag, bps in (st.user_speeds or {}).items():
-                if tag:
-                    out[tag] = out.get(tag, 0) + int(bps)
+                if not tag:
+                    continue
+                cur = out.get(tag)
+                if cur is None:
+                    out[tag] = {
+                        "bps": int(bps),
+                        "collected_at": collected,
+                        "coverage": "direct",
+                        "source": "node",
+                        "nodes": [st.node.name],
+                    }
+                else:
+                    cur["bps"] = int(cur["bps"]) + int(bps)
+                    cur["nodes"].append(st.node.name)
+                    if collected and (cur["collected_at"] or 0) < collected:
+                        cur["collected_at"] = collected
         return out
 
     def history(self, name: str, limit: int = 240) -> list[dict[str, Any]]:

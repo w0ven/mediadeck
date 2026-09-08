@@ -89,7 +89,7 @@ ADMIN_HELP = """🛠 <b>管理员命令</b>
 <code>/invite 用户 次数</code> 增加邀请名额
 
 <b>账号</b>
-<code>/rm 用户</code> 删号（需确认，连带邀请人 + Emby）
+<code>/rm 用户</code> 删号（默认只删本人；连带邀请人需单独确认）
 <code>/code 套餐id 天数 数量</code> 生成卡密
 <code>/auth TelegramID</code> 预授权注册
 
@@ -1580,29 +1580,28 @@ class TelegramBot:
         if not target:
             return
         user_id = str(target.get("emby_user_id"))
-        preview = self._members.delete_preview(user_id)
-        cascade = preview.get("cascade") or []
+        preview = self._members.delete_preview(user_id, cascade=False)
+        available = preview.get("available_cascade") or []
         lines = [
             "⚠ <b>确认删除</b>\n",
             f"账号：<b>{preview['target'].get('username') or user_id}</b>",
             f"注册渠道：{preview['target'].get('register_via') or 'legacy'}",
         ]
-        if cascade:
-            # Cascade means one click removes an account nobody named. The
-            # operator has to be told before they tap, not after.
-            lines.append("\n<b>连带删除：</b>")
+        if available:
+            lines.append("\n连带邀请人是单独操作，不会随「只删本人」一起执行：")
             lines.extend(
                 f"· {row.get('username') or row.get('emby_user_id')}"
-                f"（{row.get('reason') or ''}）" for row in cascade)
+                f"（{row.get('reason') or ''}）" for row in available)
         lines.append("\n同时会删除 Emby 账号，且<b>不可恢复</b>。")
         self._pending[str(chat_id)] = (
             "admin_confirm", time.time() + PENDING_TTL,
             {"action": "rm", "user_id": user_id, "actor": actor,
              "username": target.get("username") or user_id})
-        await self.send(
-            chat_id, "\n".join(lines),
-            [[{"text": "🗑 确认删除", "callback_data": "admin_ok"},
-              {"text": "✖ 取消", "callback_data": "admin_cancel"}]])
+        buttons = [[{"text": "🗑 只删本人", "callback_data": "rm_self"}]]
+        if available:
+            buttons.append([{"text": "⚠ 连带邀请人", "callback_data": "rm_cascade"}])
+        buttons.append([{"text": "✖ 取消", "callback_data": "admin_cancel"}])
+        await self.send(chat_id, "\n".join(lines), buttons)
 
     async def _cmd_score(self, chat_id: Any, actor: str,
                          args: list[str]) -> None:
@@ -1796,23 +1795,31 @@ class TelegramBot:
 
         if action == "rm":
             user_id = str(extra.get("user_id") or "")
-            result = self._members.delete(user_id, actor=actor, cascade=True)
-            removed = result.get("deleted") or []
-            emby_gone = 0
-            if self._emby is not None:
-                for victim in removed:
-                    ok = False
-                    with contextlib.suppress(Exception):
-                        ok = bool(await self._emby.delete_user(victim))
-                    if ok:
-                        emby_gone += 1
-                    self._members.audit(
-                        actor, "member.delete_emby", victim,
-                        "Emby account deleted" if ok else "Emby delete failed")
-            await self._edit(
-                chat_id, message_id,
-                f"🗑 已删除 <b>{extra.get('username')}</b>"
-                f"（连带 {len(removed) - 1} 个账号，Emby 已删 {emby_gone} 个）。")
+            cascade = bool(extra.get("cascade"))
+            from app.modules import member_ops
+            preview = self._members.delete_preview(user_id, cascade=cascade)
+            confirm_ids = [str(o.get("emby_user_id"))
+                           for o in (preview.get("objects") or [])]
+            result = await member_ops.execute_delete(
+                self._members, self._emby, user_id, actor=actor,
+                cascade=cascade, delete_emby=True, confirm_ids=confirm_ids)
+            removed = result.get("removed") or []
+            failed = result.get("emby_failed") or []
+            note = ""
+            if failed:
+                note = "；Emby 失败 " + ", ".join(
+                    f"{f.get('user_id')}: {f.get('error')}" for f in failed)
+            if cascade:
+                extra_n = max(0, len(removed) - 1)
+                await self._edit(
+                    chat_id, message_id,
+                    f"🗑 已删除 <b>{extra.get('username')}</b>"
+                    f"（连带 {extra_n} 个账号）{note}。")
+            else:
+                await self._edit(
+                    chat_id, message_id,
+                    f"🗑 已删除 <b>{extra.get('username')}</b>"
+                    f"（仅本人）{note}。")
             return
 
         await self._edit(chat_id, message_id, "未知操作。")
@@ -1938,6 +1945,14 @@ class TelegramBot:
             await self._edit(chat_id, message_id, body, keyboard)
             return
         if data == "admin_ok":
+            await self._admin_confirm(chat_id, message_id, member)
+            return
+        if data in ("rm_self", "rm_cascade"):
+            waiting = self._pending.get(str(chat_id))
+            if waiting and waiting[0] == "admin_confirm":
+                extra = dict(waiting[2] or {})
+                extra["cascade"] = data == "rm_cascade"
+                self._pending[str(chat_id)] = (waiting[0], waiting[1], extra)
             await self._admin_confirm(chat_id, message_id, member)
             return
         if data == "admin_cancel":

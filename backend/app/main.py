@@ -29,6 +29,7 @@ from app.core.config import settings
 from app.core.db import Database
 from app.core.errors import ConfigError, ConflictError, NotConfigured, UpstreamError
 from app.core.store import SettingsStore
+from app.modules import member_ops
 from app.modules.access import AccessRules
 from app.modules.downloaders import MockDownloader, QbittorrentClient
 from app.modules.edgelog import (
@@ -48,6 +49,8 @@ from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeStore
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
+from app.modules.metering import UNIT as METER_UNIT
+from app.modules.metering import MeasuredMeteringService
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
 from app.modules.playback import PlaybackRouter, caller_device, caller_token
@@ -294,6 +297,16 @@ async def _startup() -> None:
     # usage_daily: conflating a measurement with a guess is what made the old
     # traffic figure unsafe to act on.
     app.state.ledger = TrafficLedger(app.state.db)
+    app.state.metering = MeasuredMeteringService(
+        app.state.db,
+        tag_to_user=_tag_map,
+        expected_nodes=lambda: [n.name for n in app.state.settings_service.nodes()],
+    )
+    app.state.members.bind_metering(
+        app.state.metering,
+        cutover=lambda: bool(
+            app.state.settings_service.metering_config().get("cutover")),
+    )
     # Points are a ledger, so the service is a thin wrapper over the database
     # and can be built as soon as it exists. The shop is what spends them.
     app.state.points = PointsService(app.state.db)
@@ -465,8 +478,21 @@ async def _startup() -> None:
             out.append(row)
         return out
 
+    async def _members_topic() -> Any:
+        """Compact member pulse for the user page's local updater.
+
+        Not a full list payload: the page refetches the current query when
+        this snapshot changes, so filters/selection/scroll survive.
+        """
+        rows = await asyncio.to_thread(app.state.members.list, None, None, None,
+                                       None, 5000)
+        return member_ops.live_pulse(rows)
+
     app.state.events = EventStream({
         "nodes": _nodes_topic,
+        "dispatch": lambda: asyncio.to_thread(app.state.scheduler.dispatch_log, 20),
+        "overview": lambda: asyncio.to_thread(app.state.stats.overview, 30),
+        "latest": lambda: emby_latest(12),
         # Must be the *decorated* payload: the live push and the manual
         # refresh have to agree, otherwise the dashboard shows speeds only
         # when you hit refresh and looks frozen the rest of the time.
@@ -478,6 +504,7 @@ async def _startup() -> None:
         # Served from the cached snapshot, so pushing it costs nothing beyond
         # the collection that already happened on the plugin timer.
         "intake": lambda: asyncio.to_thread(app.state.intake_store.get),
+        "members": _members_topic,
     })
 
 
@@ -500,7 +527,8 @@ async def root(_: str = Depends(_auth)) -> HTMLResponse:
     except Exception:  # noqa: BLE001 - version stamping must never break the page
         ver = ""
     if ver:
-        for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js"):
+        for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js",
+                      "members.js"):
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     return HTMLResponse(html)
 
@@ -532,20 +560,33 @@ async def event_stream(request: Request, topics: str = "") -> StreamingResponse:
     )
 
 
-@app.get("/agent/loadprobe.py", include_in_schema=False)
-async def agent_loadprobe() -> FileResponse:
-    """Serve the node probe agent so the installer can fetch it from here.
-
-    Kept as a route rather than a copy under static/ so there is exactly one
-    copy of the agent in the repo and it cannot drift.
-    """
+def _agent_file(name: str) -> FileResponse:
+    """Serve a node-agent file from the single copy in the repo."""
+    if name not in {"loadprobe.py", "flowmeter.py", "meterd.py"}:
+        raise HTTPException(404, "agent not found in this deployment")
     for candidate in (
-        FilePath(__file__).resolve().parents[2] / "agent" / "loadprobe.py",
-        FilePath(__file__).resolve().parents[3] / "agent" / "loadprobe.py",
+        FilePath(__file__).resolve().parents[2] / "agent" / name,
+        FilePath(__file__).resolve().parents[3] / "agent" / name,
     ):
         if candidate.is_file():
             return FileResponse(candidate, media_type="text/x-python")
     raise HTTPException(404, "agent not found in this deployment")
+
+
+@app.get("/agent/loadprobe.py", include_in_schema=False)
+async def agent_loadprobe() -> FileResponse:
+    """Serve the node probe agent so the installer can fetch it from here."""
+    return _agent_file("loadprobe.py")
+
+
+@app.get("/agent/flowmeter.py", include_in_schema=False)
+async def agent_flowmeter() -> FileResponse:
+    return _agent_file("flowmeter.py")
+
+
+@app.get("/agent/meterd.py", include_in_schema=False)
+async def agent_meterd() -> FileResponse:
+    return _agent_file("meterd.py")
 
 
 # ---- settings --------------------------------------------------------------
@@ -1026,6 +1067,8 @@ async def node_install_script(name: str) -> dict[str, Any]:
     node = service.node(name)
     if node is None:
         raise HTTPException(404, "unknown node")
+    service.node_report_token(node.name)
+    node = service.node(name) or node
     panel = service.integration_config()["panel_public_url"] or "http://127.0.0.1:8300"
     return {
         "node": name,
@@ -1035,6 +1078,25 @@ async def node_install_script(name: str) -> dict[str, Any]:
 
 
 # ---- edge traffic ingestion ------------------------------------------------
+def _meter_policy_snapshot() -> dict[str, Any]:
+    """Authoritative deny set. Empty list is a real snapshot, not 'keep last'.
+
+    Quota-exhausted tags are blocked under cutover. Manual suspended/pending
+    and expired members stay blocked so a reset or extra-traffic grant cannot
+    reopen them. Nodes apply this only on a successful ingest.
+    """
+    cutover = bool(app.state.settings_service.metering_config().get("cutover"))
+    blocked: list[str] = []
+    if cutover:
+        for member in app.state.members.list(limit=5000):
+            state = str(member.get("state") or "")
+            stored = str(member.get("status") or "")
+            if stored in ("suspended", "pending") or state in (
+                    "exhausted", "suspended", "pending", "expired"):
+                blocked.append(user_tag(member["emby_user_id"]))
+    return app.state.metering.publish_policy(blocked)
+
+
 def _tag_map() -> dict[str, str]:
     """Anonymised link tag -> member id.
 
@@ -1102,6 +1164,54 @@ async def edge_report(name: str, request: Request,
             "unknown_bytes": result["unknown_bytes"]}
 
 
+@app.post("/api/edge/{name}/measured", include_in_schema=False)
+async def edge_measured(name: str, request: Request,
+                        payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+    """Idempotent measured-flow envelope from meterd."""
+    _edge_node_or_401(name, request)
+    if str(payload.get("node") or name) != name:
+        raise HTTPException(422, "node mismatch")
+    if payload.get("unit") not in (None, "", METER_UNIT) and payload.get("unit") != METER_UNIT:
+        raise HTTPException(422, "unsupported unit")
+    payload["node"] = name
+    result = app.state.metering.ingest(payload)
+    policy = _meter_policy_snapshot()
+    app.state.metering.note_policy_sent(name, int(policy["rev"]))
+    applied = payload.get("policy_applied_rev")
+    if applied is not None:
+        try:
+            app.state.metering.note_policy_applied(name, int(applied))
+        except (TypeError, ValueError):
+            pass
+    result["blocked_tags"] = policy["blocked_tags"]
+    result["unblock_tags"] = []
+    result["policy"] = policy
+    result["policy_rev"] = policy["rev"]
+    result["policy_sent_rev"] = policy["rev"]
+    return result
+
+
+@app.get("/api/metering", dependencies=[Depends(_auth)])
+async def metering_status() -> dict[str, Any]:
+    cfg = app.state.settings_service.metering_config()
+    totals = app.state.metering.totals()
+    return {
+        "config": cfg,
+        "totals": totals,
+        "cutover": cfg.get("cutover"),
+        "status": cfg.get("status"),
+    }
+
+
+@app.post("/api/metering/cutover", dependencies=[Depends(_auth)])
+async def metering_cutover(payload: dict[str, Any] = Body(...),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    saved = app.state.settings_service.save_metering(payload)
+    app.state.members.audit(user, "metering.cutover", "",
+                            f"cutover={saved.get('cutover')} confirmed={saved.get('baseline_confirmed')}")
+    return saved
+
+
 @app.get("/api/edge/status", dependencies=[Depends(_auth)])
 async def edge_status(days: int = 30) -> dict[str, Any]:
     """Ledger health: coverage, per-node totals and unattributed bytes."""
@@ -1163,6 +1273,8 @@ async def enroll_script(token: str) -> PlainTextResponse:
     node = service.node_by_enroll_token(token)
     if node is None:
         raise HTTPException(404, "invalid or expired enrollment token")
+    service.node_report_token(node.name)
+    node = service.node(node.name) or node
     panel = service.integration_config()["panel_public_url"] or "http://127.0.0.1:8300"
     return PlainTextResponse(install_script(node, panel),
                              media_type="text/x-shellscript")
@@ -1302,38 +1414,43 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
         "emby:sessions", app.state.emby.active_sessions, ttl=5
     )
     est = app.state.usage.live_speeds()
-    node_speeds = app.state.scheduler.user_speeds()
-    # A 302 to a node that the probe has not attributed yet is still on the
-    # node. Showing the sampler's bitrate estimate made those rows look like
-    # origin traffic (the ≈ the operator read as "did not go through ca1").
-    redirected_tags = {
-        str(entry.get("utag") or "")
-        for entry in app.state.playback.recent(200)
-        if entry.get("redirected") and entry.get("utag")
-    }
+    speed_view = app.state.scheduler.user_speed_view()
     out = []
     for session in sessions:
         s = dict(session)
         tag = user_tag(str(s.get("UserId") or ""))
-        real = node_speeds.get(tag)
-        if real is not None:
-            # Node speeds are per *user*: concurrent sessions of one account
-            # share the tag, so both rows show the account's wire rate.
-            # ZERO is a real measurement, not an absence: a player fills its
-            # buffer and then reads nothing for a minute, and during that
-            # pause the wire truly carries 0 B/s for this viewer. Treating 0
-            # as falsy pushed every buffered viewer back to the bitrate
-            # estimate, which is exactly the wrong number being reported.
-            s["SpeedBps"] = int(real)
-            s["SpeedSource"] = "node"
-        elif tag and tag in redirected_tags:
-            s["SpeedBps"] = 0
-            s["SpeedSource"] = "node"
+        sample = speed_view.get(tag) if tag else None
+        if sample is not None and sample.get("bps") is not None:
+            # Node rates are per user tag, not per Emby session row.
+            s["SpeedScope"] = "user"
+            s["SpeedBps"] = int(sample["bps"])
+            s["SpeedSource"] = sample.get("source") or "node"
+            s["SpeedReason"] = None
+            s["SpeedCollectedAt"] = sample.get("collected_at")
+            s["SpeedCoverage"] = sample.get("coverage")
+        elif sample is not None:
+            s["SpeedScope"] = "user"
+            s["SpeedBps"] = None
+            s["SpeedSource"] = "unknown"
+            s["SpeedReason"] = sample.get("reason") or "unmeasured"
+            s["SpeedCollectedAt"] = sample.get("collected_at")
+            s["SpeedCoverage"] = sample.get("coverage")
         else:
-            s["SpeedBps"] = int(est.get(str(s.get("Id") or ""), 0))
-            s["SpeedSource"] = "estimate"
-        # MB/s (owner's unit of choice); bytes stay available for precision.
-        s["SpeedMBps"] = round(s["SpeedBps"] / 1048576, 1)
+            sid = str(s.get("Id") or "")
+            if sid in est:
+                s["SpeedScope"] = "session"
+                s["SpeedBps"] = int(est[sid])
+                s["SpeedSource"] = "estimate"
+                s["SpeedReason"] = "origin_or_unattributed"
+            else:
+                s["SpeedScope"] = "user"
+                s["SpeedBps"] = None
+                s["SpeedSource"] = "unknown"
+                s["SpeedReason"] = "no_sample"
+            s["SpeedCollectedAt"] = None
+            s["SpeedCoverage"] = "none"
+        s["SpeedMBps"] = (
+            round(s["SpeedBps"] / 1048576, 1) if s["SpeedBps"] is not None else None)
         out.append(s)
     return out
 
@@ -1459,32 +1576,32 @@ async def groups_delete(group_id: str, user: str = Depends(_auth)) -> dict[str, 
 async def members_list(status: str | None = None, group_id: str | None = None,
                        role: str | None = None, search: str | None = None,
                        limit: int = 500, register_via: str | None = None,
-                       inviter_id: str | None = None) -> dict[str, Any]:
+                       inviter_id: str | None = None,
+                       page: int | None = None, page_size: int | None = None,
+                       offset: int | None = None, sort: str | None = None,
+                       order: str | None = None, tg: str | None = None,
+                       expiring: str | None = None,
+                       emby_status: str | None = None,
+                       sync_status: str | None = None) -> dict[str, Any]:
     """Members plus the Emby accounts that are not enrolled yet.
 
     Showing both in one payload is deliberate: the operator needs to see who is
     *not* being metered, which is exactly the population that costs money
-    silently.
+    silently. unmanaged is computed against every member id, not the current
+    page, so pagination cannot mis-label an enrolled account as unmanaged.
     """
-    limit = max(1, min(int(limit or 500), 5000))
+    paged = page is not None or offset is not None
+    fetch_limit = 5000 if paged else max(1, min(int(limit or 500), 5000))
     members = app.state.members.list(status=status, group_id=group_id,
-                                     role=role, search=search, limit=limit,
+                                     role=role, search=search, limit=fetch_limit,
                                      register_via=register_via,
                                      inviter_id=inviter_id)
-    # One query for the whole page, joined in memory: the alternative is a
-    # stats lookup per row, which is what makes a member list feel broken.
     hours = {}
     with contextlib.suppress(Exception):
         hours = app.state.stats.hours_this_month()
-    # Same reasoning for balances: one GROUP BY for the page rather than a
-    # SUM per row.
     balances = {}
     with contextlib.suppress(Exception):
         balances = app.state.points.balances()
-    # Measured edge bytes, in one GROUP BY for the whole page. The older
-    # traffic_used_bytes stays on the row but is labelled in the UI as the
-    # legacy figure: it is a sampled estimate that never saw a direct link,
-    # and hundreds of active accounts look idle by it.
     edge = {}
     with contextlib.suppress(Exception):
         edge = app.state.ledger.summary_for_users()
@@ -1494,11 +1611,31 @@ async def members_list(status: str | None = None, group_id: str | None = None,
         member["edge"] = edge.get(member["emby_user_id"],
                                   {"bytes_7d": 0, "bytes_30d": 0,
                                    "bytes_total": 0})
-    truncated = len(members) >= limit
-    known = {m["emby_user_id"] for m in members}
-    unmanaged: list[dict[str, Any]] = []
+    known = member_ops.known_member_ids(app.state.members)
+    emby_users: dict[str, Any] | None = None
+    unmanaged_error: str | None = None
     try:
-        for u in await app.state.emby.list_users():
+        emby_users = {u["Id"]: u for u in await app.state.emby.list_users()}
+    except Exception as exc:  # noqa: BLE001 - the member list must still render
+        unmanaged_error = str(exc)[:200]
+        emby_users = None
+    if emby_users:
+        for member in members:
+            user = emby_users.get(member["emby_user_id"]) or {}
+            stamp = user.get("LastActivityDate") or ""
+            if stamp:
+                member["last_activity"] = str(stamp)
+    members = member_ops.attach_observation(
+        members, emby_users, emby_error=unmanaged_error)
+    members = member_ops.apply_list_filters(
+        members, tg=tg, expiring=expiring, emby_status=emby_status,
+        sync_status=sync_status)
+    members = member_ops.sort_rows(members, sort, order)
+    counts = member_ops.counts_for(members)
+    total = len(members)
+    unmanaged: list[dict[str, Any]] = []
+    if emby_users is not None:
+        for u in emby_users.values():
             if u["Id"] in known:
                 continue
             policy = u.get("Policy") or {}
@@ -1508,16 +1645,31 @@ async def members_list(status: str | None = None, group_id: str | None = None,
                 "is_admin": bool(policy.get("IsAdministrator")),
                 "disabled": bool(policy.get("IsDisabled")),
             })
-    except Exception as exc:  # noqa: BLE001 - the member list must still render
-        return {"members": members, "unmanaged": [],
-                "unmanaged_error": str(exc)[:200], "truncated": truncated,
-                "limit": limit}
-    if search:
-        needle = search.lower()
-        unmanaged = [u for u in unmanaged if needle in (u["username"] or "").lower()]
-    return {"members": members, "unmanaged": unmanaged[:500],
-            "unmanaged_total": len(unmanaged), "truncated": truncated,
-            "limit": limit}
+        if search:
+            needle = search.lower()
+            unmanaged = [u for u in unmanaged
+                         if needle in (u["username"] or "").lower()]
+    if not paged:
+        truncated = total >= fetch_limit
+        return {"members": members, "unmanaged": unmanaged[:500],
+                "unmanaged_total": len(unmanaged),
+                "unmanaged_error": unmanaged_error, "truncated": truncated,
+                "limit": fetch_limit, "total": total, "counts": counts}
+    page_size_n = max(1, min(int(page_size or 50), 200))
+    if offset is not None:
+        off = max(0, int(offset))
+        page_n = off // page_size_n + 1
+        page_rows = members[off:off + page_size_n]
+    else:
+        page_rows, page_n, off = member_ops.paginate(
+            members, page=int(page or 1), page_size=page_size_n)
+    return {
+        "members": page_rows, "total": total, "page": page_n,
+        "page_size": page_size_n, "offset": off, "counts": counts,
+        "unmanaged": unmanaged[:500], "unmanaged_total": len(unmanaged),
+        "unmanaged_error": unmanaged_error, "truncated": False,
+        "limit": page_size_n,
+    }
 
 
 @app.get("/api/members-activity", dependencies=[Depends(_auth)])
@@ -1674,50 +1826,93 @@ async def members_upsert(user_id: str, payload: dict[str, Any] = Body(...),  # n
     if rate_changed:
         await _reissue_rate_caps(user_id=user_id, reason="成员限速已更新")
     elif app.state.settings_service.membership_config()["enforcement_enabled"]:
-        with contextlib.suppress(Exception):
-            await app.state.enforcement.enforce_now(user_id, "member updated")
-    return member
+        remote = await app.state.enforcement.enforce_now(user_id, "member updated")
+        return member_ops.merge_action(member, remote)
+    return member_ops.merge_action(member, member_ops.action_result(
+        local_ok=True, remote_ok=None))
 
 
 @app.get("/api/members/{user_id}/delete-preview", dependencies=[Depends(_auth)])
-async def members_delete_preview(user_id: str) -> dict[str, Any]:
+async def members_delete_preview(user_id: str, cascade: bool = False) -> dict[str, Any]:
     """Exactly who a delete would remove, before the operator commits to it."""
     try:
-        return app.state.members.delete_preview(user_id)
+        return app.state.members.delete_preview(user_id, cascade=cascade)
     except KeyError:
         raise HTTPException(404, "unknown member") from None
 
 
 @app.delete("/api/members/{user_id}", dependencies=[Depends(_auth)])
-async def members_delete(user_id: str, delete_emby: bool = True,
-                         cascade: bool = True,
+async def members_delete(user_id: str, request: Request, delete_emby: bool = True,
+                         cascade: bool = False,
                          user: str = Depends(_auth)) -> dict[str, Any]:
-    """Delete an account for real, and by default its inviter with it.
+    """Delete a member. Default is that member only.
 
-    Both defaults changed in v0.19 on the owner's definition: "delete" means
-    the Emby account is gone, not merely unmanaged, and whoever vouched for an
-    account answers for it. Cascade stops after one level -- see
-    MemberService.delete -- so one click can never unravel a whole chain.
+    Cascade of the direct inviter is a separate explicit action: cascade=true
+    requires confirm_ids matching the preview objects exactly. Emby is deleted
+    first; a remote failure keeps the local row so the operator can retry.
     """
+    payload: dict[str, Any] = {}
+    ctype = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ctype:
+        with contextlib.suppress(Exception):
+            body = await request.json()
+            if isinstance(body, dict):
+                payload = body
+    if "cascade" in payload:
+        cascade = bool(payload["cascade"])
+    if "delete_emby" in payload:
+        delete_emby = bool(payload["delete_emby"])
     try:
-        preview = app.state.members.delete_preview(user_id)
-        result = app.state.members.delete(user_id, actor=user, cascade=cascade)
+        return await member_ops.execute_delete(
+            app.state.members, app.state.emby, user_id, actor=user,
+            cascade=cascade, delete_emby=delete_emby,
+            confirm_ids=payload.get("confirm_ids"))
     except KeyError:
         raise HTTPException(404, "unknown member") from None
 
-    emby_deleted: list[str] = []
-    if delete_emby:
-        for victim in result["deleted"]:
-            ok = False
-            with contextlib.suppress(Exception):
-                ok = bool(await app.state.emby.delete_user(victim))
-            if ok:
-                emby_deleted.append(victim)
-            app.state.members.audit(
-                user, "member.delete_emby", victim,
-                "Emby account deleted" if ok else "Emby delete failed", ok=ok)
-    return {"deleted": True, "removed": result["deleted"],
-            "emby_deleted": emby_deleted, **preview}
+
+@app.get("/api/members/{user_id}/group-preview", dependencies=[Depends(_auth)])
+async def members_group_preview(user_id: str, group_id: str) -> dict[str, Any]:
+    try:
+        return member_ops.group_preview(app.state.members, user_id, group_id)
+    except KeyError:
+        raise HTTPException(404, "unknown member") from None
+
+
+@app.post("/api/members/{user_id}/group", dependencies=[Depends(_auth)])
+async def members_change_group(user_id: str, payload: dict[str, Any] = Body(...),  # noqa: B008
+                               user: str = Depends(_auth)) -> dict[str, Any]:
+    group_id = str(payload.get("group_id") or "")
+    if not group_id:
+        raise HTTPException(400, "缺少 group_id")
+    member = app.state.members.get(user_id)
+    if not member:
+        raise HTTPException(404, "unknown member")
+    try:
+        member = app.state.members.upsert(
+            user_id, member.get("username") or "",
+            {"group_id": group_id,
+             "expiry_policy": payload.get("expiry_policy") or "keep",
+             **({"expires_at": payload["expires_at"]}
+                if "expires_at" in payload and payload.get("expiry_policy") == "set"
+                else {})},
+            actor=user)
+    except ConfigError as exc:
+        raise HTTPException(400, str(exc)) from None
+    _meter_policy_snapshot()
+    if app.state.settings_service.membership_config()["enforcement_enabled"]:
+        remote = await app.state.enforcement.enforce_now(user_id, "group changed")
+        return member_ops.merge_action(member, remote)
+    return member_ops.merge_action(member, member_ops.action_result(
+        local_ok=True, remote_ok=None))
+
+
+@app.get("/api/members/{user_id}/renew-preview", dependencies=[Depends(_auth)])
+async def members_renew_preview(user_id: str, days: int | None = None) -> dict[str, Any]:
+    try:
+        return member_ops.renew_preview(app.state.members, user_id, days)
+    except KeyError:
+        raise HTTPException(404, "unknown member") from None
 
 
 @app.post("/api/members/{user_id}/renew", dependencies=[Depends(_auth)])
@@ -1728,9 +1923,26 @@ async def members_renew(user_id: str, payload: dict[str, Any] = Body(default={})
     except KeyError:
         raise HTTPException(404, "unknown member") from None
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
-        with contextlib.suppress(Exception):
-            await app.state.enforcement.enforce_now(user_id, "renewed")
-    return member
+        remote = await app.state.enforcement.enforce_now(user_id, "renewed")
+        return member_ops.merge_action(member, remote)
+    return member_ops.merge_action(member, member_ops.action_result(
+        local_ok=True, remote_ok=None))
+
+
+@app.post("/api/members/{user_id}/retry-remote", dependencies=[Depends(_auth)])
+async def members_retry_remote(user_id: str, user: str = Depends(_auth)
+                               ) -> dict[str, Any]:
+    member = app.state.members.get(user_id)
+    if not member:
+        raise HTTPException(404, "unknown member")
+    action = str(member.get("last_remote_action") or "enforce")
+    if action == "delete_emby":
+        return await member_ops.execute_delete(
+            app.state.members, app.state.emby, user_id, actor=user,
+            cascade=False, delete_emby=True, confirm_ids=None)
+    remote = await app.state.enforcement.enforce_now(user_id, "retry")
+    fresh = app.state.members.get(user_id) or member
+    return member_ops.merge_action(fresh, remote)
 
 
 @app.get("/api/access/rules", dependencies=[Depends(_auth)])
@@ -1854,25 +2066,34 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 
     # Enforcement runs once after the batch rather than per member: pushing the
     # same policy change 200 times would hammer Emby for no extra correctness.
+    remote_failed: list[dict[str, str]] = []
     if ok and app.state.settings_service.membership_config()["enforcement_enabled"]:
         for user_id in ok:
-            with contextlib.suppress(Exception):
-                await app.state.enforcement.enforce_now(user_id, f"bulk {action}")
+            remote = await app.state.enforcement.enforce_now(
+                user_id, f"bulk {action}")
+            if remote.get("ok") is False:
+                remote_failed.append({
+                    "user_id": user_id,
+                    "error": str(remote.get("error") or "enforcement failed"),
+                })
 
     return {"action": action, "requested": len(ids),
-            "ok": len(ok), "failed": failed}
+            "ok": len(ok), "failed": failed, "remote_failed": remote_failed,
+            "ok_flag": not failed and not remote_failed}
 
 
 @app.post("/api/members/{user_id}/reset-traffic", dependencies=[Depends(_auth)])
 async def members_reset_traffic(user_id: str, user: str = Depends(_auth)) -> dict[str, Any]:
     try:
         member = app.state.members.reset_traffic(user_id, actor=user)
+        _meter_policy_snapshot()
     except KeyError:
         raise HTTPException(404, "unknown member") from None
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
-        with contextlib.suppress(Exception):
-            await app.state.enforcement.enforce_now(user_id, "traffic reset")
-    return member
+        remote = await app.state.enforcement.enforce_now(user_id, "traffic reset")
+        return member_ops.merge_action(member, remote)
+    return member_ops.merge_action(member, member_ops.action_result(
+        local_ok=True, remote_ok=None))
 
 
 @app.post("/api/members/{user_id}/status", dependencies=[Depends(_auth)])
@@ -1884,12 +2105,13 @@ async def members_status(user_id: str, payload: dict[str, Any] = Body(...),  # n
     except KeyError:
         raise HTTPException(404, "unknown member") from None
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
-        with contextlib.suppress(Exception):
-            await app.state.enforcement.enforce_now(user_id, f"status={status}")
+        remote = await app.state.enforcement.enforce_now(user_id, f"status={status}")
         if status in ("suspended", "pending"):
             with contextlib.suppress(Exception):
                 await app.state.enforcement.terminate_sessions(user_id, "账号已停用")
-    return member
+        return member_ops.merge_action(member, remote)
+    return member_ops.merge_action(member, member_ops.action_result(
+        local_ok=True, remote_ok=None))
 
 
 async def _reset_member_password(user_id: str, payload: dict[str, Any],

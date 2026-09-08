@@ -265,6 +265,14 @@ class MemberService:
     def __init__(self, db: Database, groups: GroupService) -> None:
         self._db = db
         self._groups = groups
+        self._metering = None
+        self._metering_cutover = None
+
+    def bind_metering(self, metering: Any,
+                      cutover: Any = None) -> None:
+        """Optional measured ledger. cutover() -> bool; off by default."""
+        self._metering = metering
+        self._metering_cutover = cutover
 
     # -- read ----------------------------------------------------------------
     def get(self, user_id: str) -> dict[str, Any] | None:
@@ -364,15 +372,44 @@ class MemberService:
         out["libraries"] = list(effective["libraries"])
         out["expires_at_effective"] = effective["expires_at"]
 
+        snap = None
+        if self._metering is not None:
+            try:
+                snap = self._metering.snapshot(out["emby_user_id"])
+            except Exception:  # noqa: BLE001
+                snap = None
+        out["metering"] = snap
+        cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
+                       else self._metering_cutover)
+        out["quota_source"] = "measured" if cutover else "legacy_estimate"
+        # Always present under measured mode so UI/enforcement never fall
+        # through to the old estimate when the snapshot is missing.
+        if cutover:
+            out["measured_used_bytes"] = (
+                None if snap is None else snap.get("measured_used_bytes"))
+            out["measured_raw_bytes"] = (
+                None if snap is None else snap.get("measured_raw_bytes"))
+            out["credit_bytes"] = 0 if snap is None else int(snap.get("credit_bytes") or 0)
+
         state, reason = self.effective_state(out, group)
         out["state"] = state
         out["state_reason"] = reason
 
         quota = int(effective.get("traffic_quota_bytes") or 0)
-        used = int(out.get("traffic_used_bytes") or 0)
         out["traffic_quota_bytes"] = quota
-        out["traffic_remaining_bytes"] = max(0, quota - used) if quota else None
-        out["traffic_percent"] = round(used / quota * 100, 1) if quota else None
+        if cutover:
+            used_raw = out.get("measured_used_bytes")
+            if quota and used_raw is not None:
+                used = int(used_raw)
+                out["traffic_remaining_bytes"] = max(0, quota - used)
+                out["traffic_percent"] = round(used / quota * 100, 1)
+            else:
+                out["traffic_remaining_bytes"] = None
+                out["traffic_percent"] = None
+        else:
+            used = int(out.get("traffic_used_bytes") or 0)
+            out["traffic_remaining_bytes"] = max(0, quota - used) if quota else None
+            out["traffic_percent"] = round(used / quota * 100, 1) if quota else None
 
         expires = effective.get("expires_at")
         out["days_remaining"] = (
@@ -383,6 +420,17 @@ class MemberService:
         out["register_via"] = str(out.get("register_via") or "legacy")
         out["inviter_id"] = str(out.get("inviter_id") or "")
         out["invite_quota"] = int(out.get("invite_quota") or 0)
+        out["entitlement_state"] = state
+        out["last_remote_action"] = str(out.get("last_remote_action") or "")
+        last_ok = out.get("last_remote_ok")
+        if last_ok is None:
+            out["last_remote_ok"] = None
+        else:
+            out["last_remote_ok"] = bool(last_ok)
+        out["last_remote_error"] = str(out.get("last_remote_error") or "")
+        out["last_remote_at"] = out.get("last_remote_at")
+        out["retryable"] = (out["last_remote_ok"] is False
+                            and bool(out["last_remote_action"]))
         return out
 
     def detail(self, user_id: str, *, audit_limit: int = 50) -> dict[str, Any] | None:
@@ -421,7 +469,13 @@ class MemberService:
             return "expired", "已过期"
 
         quota = int(effective.get("traffic_quota_bytes") or 0)
-        used = int(member.get("traffic_used_bytes") or 0)
+        if member.get("quota_source") == "measured" or "measured_used_bytes" in member:
+            used_raw = member.get("measured_used_bytes")
+            if used_raw is None:
+                return "active", "正常"
+            used = int(used_raw or 0)
+        else:
+            used = int(member.get("traffic_used_bytes") or 0)
         if needs_traffic(mode) and quota and used >= quota:
             return "exhausted", "本月流量已用尽"
         return "active", "正常"
@@ -456,18 +510,31 @@ class MemberService:
         else:
             roles_csv = ",".join(parse_roles(roles))
 
-        # Expiry: explicit value wins; otherwise derive from the group when the
-        # member is new or the group changed, so assigning a timed group never
-        # silently leaves a member with no end date.
+        # Expiry: an explicit value always wins. Switching groups defaults to
+        # *keeping* the current term and per-member overrides so a 180-day
+        # account is never silently cut to the new group's 30 days. New members
+        # still arm the group's duration. Permanent -> timed requires an
+        # explicit expiry_policy (keep/apply_group/clear/set) rather than a
+        # guess.
         expires_at = payload.get("expires_at", "__keep__")
+        expiry_policy = str(payload.get("expiry_policy") or "keep")
+        if expiry_policy not in ("keep", "apply_group", "clear", "set"):
+            raise ConfigError("expiry_policy 必须是 keep/apply_group/clear/set")
         if expires_at == "__keep__":
             expires_at = existing["expires_at"] if existing else None
-            group_changed = bool(existing) and existing["group_id"] != group_id
-            if group and needs_duration(group["billing_mode"]) and (
-                    not existing or group_changed or not expires_at):
-                expires_at = now + int(group["duration_days"]) * 86400
-            if group and not needs_duration(group["billing_mode"]):
+            if not existing:
+                if group and needs_duration(group["billing_mode"]):
+                    expires_at = now + int(group["duration_days"]) * 86400
+            elif expiry_policy == "apply_group":
+                if group and needs_duration(group["billing_mode"]):
+                    expires_at = now + int(group["duration_days"]) * 86400
+                else:
+                    expires_at = None
+            elif expiry_policy == "clear":
                 expires_at = None
+            elif expiry_policy == "set":
+                raise ConfigError("expiry_policy=set 时必须提供 expires_at")
+            # keep: leave the stored term (and overrides) even if the group changed
         elif expires_at is not None:
             expires_at = int(expires_at)
 
@@ -650,7 +717,7 @@ class MemberService:
                 (str(user_id),))
             if not row or not row["emby_missing_since"]:
                 continue
-            self.delete(str(user_id), actor=actor)
+            self.delete(str(user_id), actor=actor, cascade=False)
             removed += 1
         return removed
 
@@ -785,28 +852,45 @@ class MemberService:
             (str(user_id),))
         return [self._decorate(r) for r in rows]
 
-    def delete_preview(self, user_id: str) -> dict[str, Any]:
+    def delete_preview(self, user_id: str, cascade: bool = False) -> dict[str, Any]:
         """Exactly who a delete would remove, for the confirmation dialog.
 
-        The operator has to be told before they click, not after: cascade means
-        one click can remove an account they never named.
+        Default is the named account only. Cascade is a separate explicit
+        choice: available_cascade always lists the inviter so the UI can ask,
+        while cascade/objects reflect this request.
         """
         target = self.get(user_id)
         if not target:
             raise KeyError(user_id)
         inviter = self.inviter_of(user_id)
-        cascade = [inviter] if inviter else []
+        available = [{
+            "emby_user_id": inviter["emby_user_id"],
+            "username": inviter.get("username") or "",
+            "reason": "邀请人连坐",
+        }] if inviter else []
+        cascade_rows = available if cascade else []
+        objects = [{
+            "emby_user_id": target["emby_user_id"],
+            "username": target.get("username") or "",
+            "role": "target",
+        }]
+        for row in cascade_rows:
+            objects.append({
+                "emby_user_id": row["emby_user_id"],
+                "username": row.get("username") or "",
+                "role": "inviter",
+            })
         return {
             "target": {
                 "emby_user_id": target["emby_user_id"],
                 "username": target.get("username") or "",
                 "register_via": target.get("register_via") or "legacy",
             },
-            "cascade": [{
-                "emby_user_id": m["emby_user_id"],
-                "username": m.get("username") or "",
-                "reason": "邀请人连坐",
-            } for m in cascade],
+            "cascade": cascade_rows,
+            "cascade_requested": bool(cascade),
+            "default_cascade": False,
+            "available_cascade": available,
+            "objects": objects,
         }
 
     def _remove_rows(self, user_id: str) -> None:
@@ -814,15 +898,14 @@ class MemberService:
         self._db.execute("DELETE FROM devices WHERE emby_user_id=?", (user_id,))
 
     def delete(self, user_id: str, actor: str = "system",
-               cascade: bool = True) -> dict[str, Any]:
-        """Delete a member, and by default their inviter too.
+               cascade: bool = False, *,
+               audit_action: str | None = None,
+               audit_detail: str | None = None) -> dict[str, Any]:
+        """Delete a member. Default is that member only.
 
-        Cascade stops at one level, deliberately. Walking the whole chain would
-        let a single bad account take out an arbitrarily long line of members
-        above it -- one deletion, an unbounded blast radius -- and no operator
-        clicking 'delete' on one row is asking for that. One level is the rule
-        the owner set: whoever vouched for an account answers for it, and
-        nobody answers for a deletion the system performed.
+        Cascade of the direct inviter is a separate explicit action and still
+        stops at one level: walking the whole chain would let a single bad
+        account take out an arbitrarily long line of members above it.
 
         Returns the ids removed rather than a bare True, because with cascade
         the caller cannot otherwise know what it just did.
@@ -834,9 +917,9 @@ class MemberService:
         inviter = self.inviter_of(user_id) if cascade else None
 
         self._remove_rows(user_id)
-        self.audit(actor, "member.delete", user_id,
-                   "membership removed" + ("; cascading to inviter"
-                                           if inviter else ""))
+        self.audit(actor, audit_action or "member.delete", user_id,
+                   audit_detail or ("membership removed" + (
+                       "; cascading to inviter" if inviter else "")))
         deleted = [str(user_id)]
 
         if inviter:
@@ -906,8 +989,13 @@ class MemberService:
     # -- lifecycle actions ---------------------------------------------------
     def renew(self, user_id: str, days: int | None = None,
               actor: str = "operator") -> dict[str, Any]:
-        """Extend the term. Extends from the later of now and current expiry, so
-        renewing early never costs the member the days they already have."""
+        """Extend the term from the *effective* expiry.
+
+        If a personal expires_at_override is set, the new date is written to
+        that overlay; otherwise the stored expires_at is updated. A permanent
+        account (no effective expiry) is refused rather than silently becoming
+        time-limited.
+        """
         member = self.get(user_id)
         if not member:
             raise KeyError(user_id)
@@ -916,15 +1004,35 @@ class MemberService:
         add_days = int(days if days is not None else default_days)
         if add_days <= 0:
             raise ConfigError("续期天数必须大于 0")
+        effective = member.get("expires_at_effective")
+        if not effective:
+            raise ConfigError("永久用户不能通过续期变为有限期，请先明确设置到期时间")
         now = int(time.time())
-        base = max(now, int(member.get("expires_at") or now))
+        base = max(now, int(effective))
         new_expiry = base + add_days * 86400
-        self._db.execute(
-            "UPDATE members SET expires_at=?,status=CASE WHEN status IN "
-            "('expired','exhausted') THEN 'active' ELSE status END,updated_at=? "
-            "WHERE emby_user_id=?", (new_expiry, now, user_id))
+        ov = dict(member.get("overrides") or {})
+        writes_override = "expires_at_override" in ov
+        override_before = ov.get("expires_at_override") if writes_override else None
+        if writes_override:
+            ov["expires_at_override"] = new_expiry
+            self._db.execute(
+                "UPDATE members SET overrides_json=?,status=CASE WHEN status IN "
+                "('expired','exhausted') THEN 'active' ELSE status END,updated_at=? "
+                "WHERE emby_user_id=?",
+                (json.dumps(ov, ensure_ascii=False, sort_keys=True), now, user_id))
+        else:
+            self._db.execute(
+                "UPDATE members SET expires_at=?,status=CASE WHEN status IN "
+                "('expired','exhausted') THEN 'active' ELSE status END,updated_at=? "
+                "WHERE emby_user_id=?", (new_expiry, now, user_id))
         self.audit(actor, "member.renew", user_id, encode_audit_detail({
-            "expires_at": {"from": member.get("expires_at"), "to": new_expiry},
+            "expires_at": {"from": member.get("expires_at"), "to": (
+                member.get("expires_at") if writes_override else new_expiry)},
+            "expires_at_effective": {
+                "from": effective, "to": new_expiry},
+            "expires_at_override": {
+                "from": override_before,
+                "to": new_expiry if writes_override else None},
             "days": {"from": None, "to": add_days},
         }))
         return self.get(user_id)  # type: ignore[return-value]
@@ -935,6 +1043,12 @@ class MemberService:
             raise KeyError(user_id)
         now = int(time.time())
         used_before = int(member.get("traffic_used_bytes") or 0)
+        cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
+                       else self._metering_cutover)
+        if cutover and self._metering is not None:
+            # Fail before touching the estimate so a half-reset cannot
+            # claim success while measured credit is unchanged.
+            self._metering.reset_credit(user_id, now=now)
         self._db.execute(
             "UPDATE members SET traffic_used_bytes=0,traffic_period_start=?,"
             "status=CASE WHEN status='exhausted' THEN 'active' ELSE status END,"
@@ -983,6 +1097,8 @@ class MemberService:
                 "overrides_json=?,updated_at=? WHERE emby_user_id=?",
                 (current, json.dumps(ov, ensure_ascii=False, sort_keys=True),
                  now, member["emby_user_id"]))
+            # Measured usage is already UTC-month bucketed. Do not reset_credit
+            # the new month — that would wipe the first reports of this period.
             self.audit("system", "member.period_roll", member["emby_user_id"],
                        encode_audit_detail({
                            "extra_traffic_bytes": {"from": extra_before, "to": 0},

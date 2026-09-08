@@ -690,6 +690,11 @@ def test_enroll_script_is_token_authenticated_and_self_contained() -> None:
         assert "user_allow_other" in script            # else nginx 403s
         assert "certbot" in script
         assert "/agent/loadprobe.py" in script
+        assert "/agent/flowmeter.py" in script
+        assert "/agent/meterd.py" in script
+        assert "auth_request /_mediadeck/register;" in script
+        assert "set $md_u $arg_u;" in script
+        assert "mediadeck-meterd.service" in script
         assert "[rc2]" in script                       # Drive identity pushed
         # both media roots must be mounted and served
         assert "/mnt/gdrive/Media" in script and "/mnt/gdrive3/Media" in script
@@ -743,6 +748,12 @@ def test_agent_is_downloadable() -> None:
         r = client.get("/agent/loadprobe.py")
         assert r.status_code == 200
         assert "active_streams" in r.text
+        flow = client.get("/agent/flowmeter.py")
+        assert flow.status_code == 200
+        assert "kernel_outbound_ip_bytes" in flow.text
+        meterd = client.get("/agent/meterd.py")
+        assert meterd.status_code == 200
+        assert "/api/edge/" in meterd.text and "measured" in meterd.text
 
 
 # ---- stream edge authentication --------------------------------------------
@@ -914,10 +925,9 @@ def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> Non
 
 
 def test_redirected_viewer_is_not_shown_as_estimate() -> None:
-    """A 302 the probe has not attributed yet is still on the node.
+    """A 302 the probe has not attributed yet must not look like origin ≈.
 
-    Showing the sampler bitrate made those rows look like origin traffic
-    (the ≈ the operator read as "did not go through the node").
+    Missing a sample is unknown, not a fake node zero and not an estimate.
     """
     with TestClient(app) as client:
         for node in client.get("/api/nodes", headers=_basic()).json():
@@ -931,8 +941,11 @@ def test_redirected_viewer_is_not_shown_as_estimate() -> None:
                        headers=_play(), follow_redirects=False)
         assert r.status_code == 302 and "u=" in r.headers["location"]
         sessions = client.get("/api/emby/sessions", headers=_basic()).json()
-        assert sessions and sessions[0]["SpeedSource"] == "node"
-        assert sessions[0]["SpeedMBps"] == 0.0
+        assert sessions
+        assert sessions[0]["SpeedSource"] != "estimate"
+        assert sessions[0]["SpeedBps"] is None
+        assert sessions[0]["SpeedMBps"] is None
+        assert sessions[0]["SpeedScope"] == "user"
 
 
 def test_real_client_path_shapes_reach_the_edge() -> None:

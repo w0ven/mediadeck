@@ -27,6 +27,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 LOADPROBE_PORT = 9800
+METERD_PORT = 9801
 
 
 def _host_of(url: str) -> str:
@@ -96,12 +97,27 @@ def nginx_site(node: Any) -> str:
         # Real transfer bytes per user for the panel's live-speed display.
         access_log /var/log/nginx/mediadeck-speed.log mediadeck_speed;
 
-        # Tell the probe who owns this socket the moment the request STARTS.
-        # The access log alone cannot do this: nginx writes it only when a
-        # request ends, and one playback request can run for an hour, so a
-        # viewer would stay "estimated" for their whole session otherwise.
+        # Synchronous register-then-allow. mirror is fire-and-forget and
+        # cannot promise the nft element exists before the first payload.
+        # 403 from meterd (blocked / mixed identity) rejects this request,
+        # including a six-hour-old signed URL. 5xx from meterd fail-open
+        # inside the subrequest so a down agent does not invent new bans.
+        #
+        # Capture the parent 4-tuple + signed u HERE. nginx 1.22 does not
+        # expand variables in an auth_request query string, and a literal
+        # "?..." also breaks `location = /_mediadeck/register`.
+        set $md_u $arg_u;
+        set $md_lip $server_addr;
+        set $md_lp $server_port;
+        set $md_a $remote_addr;
+        set $md_p $remote_port;
+        set $md_cid $pid.$connection;
+        # Known deny is an nginx map file written by meterd. It survives a
+        # dead HTTP process, so 502 fail-open cannot admit an exhausted tag.
+        if ($md_denied) {{ return 403; }}
+        auth_request /_mediadeck/register;
+        # Speed attribution is independent of billing register.
         mirror /_mediadeck/announce;
-        mirror_request_body off;
 
         # Emby clients seek constantly; byte ranges are mandatory.
         add_header Accept-Ranges bytes;
@@ -137,6 +153,13 @@ map $arg_u $mediadeck_user_key {{
 log_format mediadeck_speed
     '$msec a=$remote_addr p=$remote_port u=$arg_u r=$arg_r '
     '$bytes_sent $request_time';
+
+# Known exhausted / denied tags. Default 0 = unknown, fail-open for new
+# decisions. Meterd rewrites the include atomically; nginx reloads it.
+map $md_u $md_denied {{
+    default 0;
+    include /var/lib/mediadeck/deny.map;
+}}
 
 limit_conn_zone $mediadeck_user_key zone=mediadeck_peruser:10m;
 
@@ -179,11 +202,30 @@ server {{
 {secure}
 {"".join(locations) or "    # NOTE: no media roots configured for this node yet."}
 
-    # Async request-start ping to the local probe (see mirror above). Fire
-    # and forget: if the probe is down the main media request is unaffected.
+    # Sync 4-tuple registration (server addr/port + client addr/port + signed u).
+    location = /_mediadeck/register {{
+        internal;
+        proxy_pass http://127.0.0.1:{METERD_PORT}/register?lip=$md_lip&lp=$md_lp&a=$md_a&p=$md_p&u=$md_u&cid=$md_cid;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Mediadeck-Utag $md_u;
+        proxy_connect_timeout 300ms;
+        proxy_read_timeout 500ms;
+        proxy_intercept_errors on;
+        error_page 502 503 504 =200 /_mediadeck/allow;
+        access_log off;
+    }}
+
+    location = /_mediadeck/allow {{
+        internal;
+        access_log off;
+        return 204;
+    }}
+
+    # Optional speed-map ping; must not be treated as the billing register.
     location = /_mediadeck/announce {{
         internal;
-        proxy_pass http://127.0.0.1:9800/announce?a=$remote_addr&p=$remote_port&u=$arg_u;
+        proxy_pass http://127.0.0.1:{LOADPROBE_PORT}/announce?a=$md_a&p=$md_p&u=$md_u;
         proxy_connect_timeout 300ms;
         proxy_read_timeout 500ms;
         proxy_pass_request_body off;
@@ -261,6 +303,38 @@ WantedBy=multi-user.target
 """
 
 
+def meterd_unit(node: Any, panel_url: str) -> str:
+    """systemd unit for the measured-flow agent. Generated text only."""
+    panel = (panel_url or "").rstrip("/")
+    return f"""# /etc/systemd/system/mediadeck-meterd.service
+# Synchronous register (nginx auth_request) + measured envelope reports.
+# --enable-nft is the production switch; importing the module never
+# touches host tables.
+[Unit]
+Description=mediadeck measured-flow agent ({node.name})
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mediadeck-agent/meterd.py \\
+    --panel {shlex.quote(panel)} \\
+    --node {shlex.quote(str(node.name))} \\
+    --token-file /etc/mediadeck/report.token \\
+    --persist /var/lib/mediadeck/flowmeter.db \\
+    --deny-map /var/lib/mediadeck/deny.map \\
+    --nginx-bin /usr/sbin/nginx \\
+    --nginx-conf /etc/nginx/nginx.conf \\
+    --bind 127.0.0.1 --port {METERD_PORT} \\
+    --enable-nft
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def install_script(node: Any, panel_url: str) -> str:
     """One-shot installer, fully parameterised from stored node config."""
     host = _host_of(node.base_url) or f"{node.name}.example.com"
@@ -268,6 +342,7 @@ def install_script(node: Any, panel_url: str) -> str:
     pools = list(node.pools or [])
     secret = str(getattr(node, "sign_secret", "") or "")
     rclone_conf = str(getattr(node, "rclone_conf", "") or "")
+    report_token = str(getattr(node, "report_token", "") or "")
 
     sign_note = ("已启用签名：nginx 校验有效期，过期链接自动失效"
                  if secret else
@@ -384,6 +459,8 @@ grep -q '^user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fu
 {"".join(mount_steps) or 'echo "    (无媒体根，跳过)"'}
 
 echo "==> 5/6 配置 nginx 与证书"
+mkdir -p /var/lib/mediadeck
+printf '%s\n' '# none' > /var/lib/mediadeck/deny.map
 cat > /etc/nginx/sites-available/mediadeck-{node.name} <<'MEDIADECK_NGINX_EOF'
 {nginx_site(node)}
 MEDIADECK_NGINX_EOF
@@ -397,18 +474,29 @@ if [ ! -d /etc/letsencrypt/live/{host} ]; then
 fi
 nginx -t && systemctl reload nginx
 
-echo "==> 6/6 安装负载探针"
+echo "==> 6/6 安装负载探针与计量代理"
 curl -fsSL {panel}/agent/loadprobe.py -o /opt/mediadeck-agent/loadprobe.py
+curl -fsSL {panel}/agent/flowmeter.py -o /opt/mediadeck-agent/flowmeter.py
+curl -fsSL {panel}/agent/meterd.py -o /opt/mediadeck-agent/meterd.py
+mkdir -p /etc/mediadeck /var/lib/mediadeck
+install -m 600 /dev/stdin /etc/mediadeck/report.token <<'MEDIADECK_TOKEN_EOF'
+{report_token}
+MEDIADECK_TOKEN_EOF
 cat > /etc/systemd/system/mediadeck-loadprobe.service <<'MEDIADECK_PROBE_EOF'
 {loadprobe_unit(node)}
 MEDIADECK_PROBE_EOF
+cat > /etc/systemd/system/mediadeck-meterd.service <<'MEDIADECK_METERD_EOF'
+{meterd_unit(node, panel)}
+MEDIADECK_METERD_EOF
 systemctl daemon-reload
 systemctl enable --now mediadeck-loadprobe.service
+systemctl enable --now mediadeck-meterd.service
 sleep 2
 
 echo
 echo "==> 自检"
 curl -fsS http://127.0.0.1:{LOADPROBE_PORT}/load >/dev/null && echo "    [OK] 负载探针" || echo "    [!!] 探针未响应"
+curl -fsS http://127.0.0.1:{METERD_PORT}/healthz >/dev/null && echo "    [OK] 计量代理" || echo "    [!!] 计量代理未响应"
 curl -fsS https://{host}/healthz >/dev/null && echo "    [OK] nginx 对外服务" || echo "    [!!] nginx 未响应"
 echo
 echo "==========================================================="

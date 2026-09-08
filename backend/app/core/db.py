@@ -451,6 +451,82 @@ CREATE TABLE IF NOT EXISTS edge_cursors (
     PRIMARY KEY (node, path)
 );
 
+-- Measured kernel outbound IP bytes (nft per registered 4-tuple).
+-- Separate from edge_usage_daily (completed HTTP logs) and from
+-- members.traffic_used_bytes (bitrate estimate). Neither of those is
+-- imported here as a billing baseline.
+CREATE TABLE IF NOT EXISTS measured_usage_monthly (
+    month         TEXT NOT NULL,
+    node          TEXT NOT NULL,
+    utag          TEXT NOT NULL,
+    emby_user_id  TEXT NOT NULL DEFAULT '',
+    bytes         INTEGER NOT NULL DEFAULT 0,
+    unattributed  INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, node, utag)
+);
+CREATE INDEX IF NOT EXISTS idx_measured_user_month
+    ON measured_usage_monthly(emby_user_id, month);
+
+CREATE TABLE IF NOT EXISTS measured_watermarks (
+    node          TEXT NOT NULL,
+    conn_id       TEXT NOT NULL,
+    generation    INTEGER NOT NULL,
+    utag          TEXT NOT NULL DEFAULT '',
+    emby_user_id  TEXT NOT NULL DEFAULT '',
+    counter_bytes INTEGER NOT NULL DEFAULT 0,
+    observed_at   REAL NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, conn_id, generation)
+);
+
+-- One row per accepted envelope. Dedup is (node, boot_id, seq), not
+-- "highest seq wins": an older unique sample must still credit.
+CREATE TABLE IF NOT EXISTS measured_envelopes (
+    node        TEXT NOT NULL,
+    boot_id     TEXT NOT NULL,
+    seq         INTEGER NOT NULL,
+    nft_ok      INTEGER NOT NULL DEFAULT 0,
+    observed_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, boot_id, seq)
+);
+
+CREATE TABLE IF NOT EXISTS measured_node_seq (
+    node        TEXT NOT NULL,
+    boot_id     TEXT NOT NULL,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    nft_ok      INTEGER NOT NULL DEFAULT 0,
+    observed_at REAL NOT NULL DEFAULT 0,
+    updated_at  REAL NOT NULL DEFAULT 0,
+    acked       INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (node, boot_id)
+);
+
+-- Quota credit / offset. Does not delete measured_usage_monthly history.
+-- quota_used = max(0, SUM(bytes) - credit_bytes).
+CREATE TABLE IF NOT EXISTS measured_credits (
+    month         TEXT NOT NULL,
+    emby_user_id  TEXT NOT NULL,
+    credit_bytes  INTEGER NOT NULL DEFAULT 0,
+    updated_at    REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (month, emby_user_id)
+);
+
+-- Authoritative deny snapshot. Nodes ack a revision; empty list is a
+-- real snapshot (nobody blocked), not "keep last".
+CREATE TABLE IF NOT EXISTS meter_policy (
+    id          INTEGER PRIMARY KEY CHECK (id = 1),
+    rev         INTEGER NOT NULL DEFAULT 0,
+    blocked_json TEXT NOT NULL DEFAULT '[]',
+    updated_at  REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS meter_policy_ack (
+    node        TEXT PRIMARY KEY,
+    sent_rev    INTEGER NOT NULL DEFAULT 0,
+    applied_rev INTEGER NOT NULL DEFAULT 0,
+    sent_at     REAL NOT NULL DEFAULT 0,
+    applied_at  REAL NOT NULL DEFAULT 0
+);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -541,6 +617,14 @@ class Database:
             # a fact about Emby. Overloading status would let an orphan silently
             # clear itself the next time enforcement recomputed the state.
             self._ensure_column("members", "emby_missing_since", "INTEGER")
+            self._ensure_column(
+                "members", "last_remote_action", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("members", "last_remote_ok", "INTEGER")
+            self._ensure_column(
+                "members", "last_remote_error", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("members", "last_remote_at", "INTEGER")
+            self._reshape_measured_watermarks()
+            self._reshape_meter_policy_ack()
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:
@@ -566,6 +650,65 @@ class Database:
                     f"ALTER TABLE redeem_codes RENAME TO {archive}")
                 self._conn.commit()
                 return
+
+    def _reshape_measured_watermarks(self) -> None:
+        """Drop boot_id from the watermark key if an older table still has it.
+
+        Stream identity is (node, conn_id, generation). Keeping boot_id in
+        the PK double-counted a live connection after every agent restart.
+        """
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(measured_watermarks)")}
+        if not cols or "boot_id" not in cols:
+            self._ensure_column(
+                "measured_watermarks", "observed_at", "REAL NOT NULL DEFAULT 0")
+            return
+        self._conn.execute(
+            "ALTER TABLE measured_watermarks RENAME TO measured_watermarks_boot")
+        self._conn.execute(
+            "CREATE TABLE measured_watermarks ("
+            "node TEXT NOT NULL, conn_id TEXT NOT NULL, generation INTEGER NOT NULL, "
+            "utag TEXT NOT NULL DEFAULT '', emby_user_id TEXT NOT NULL DEFAULT '', "
+            "counter_bytes INTEGER NOT NULL DEFAULT 0, "
+            "observed_at REAL NOT NULL DEFAULT 0, "
+            "updated_at REAL NOT NULL DEFAULT 0, "
+            "PRIMARY KEY (node, conn_id, generation))")
+        self._conn.execute(
+            "INSERT INTO measured_watermarks"
+            "(node,conn_id,generation,utag,emby_user_id,counter_bytes,observed_at,updated_at) "
+            "SELECT node, conn_id, generation, utag, emby_user_id, "
+            "MAX(counter_bytes), MAX(updated_at), MAX(updated_at) "
+            "FROM measured_watermarks_boot "
+            "GROUP BY node, conn_id, generation")
+        self._conn.execute("DROP TABLE measured_watermarks_boot")
+
+    def _reshape_meter_policy_ack(self) -> None:
+        """sent_rev is what we shipped; applied_rev is what the node confirmed."""
+        cols = {r[1] for r in self._conn.execute(
+            "PRAGMA table_info(meter_policy_ack)")}
+        if not cols:
+            return
+        if "sent_rev" in cols and "applied_rev" in cols:
+            return
+        if "rev" in cols:
+            self._conn.execute(
+                "ALTER TABLE meter_policy_ack RENAME TO meter_policy_ack_old")
+            self._conn.execute(
+                "CREATE TABLE meter_policy_ack ("
+                "node TEXT PRIMARY KEY, "
+                "sent_rev INTEGER NOT NULL DEFAULT 0, "
+                "applied_rev INTEGER NOT NULL DEFAULT 0, "
+                "sent_at REAL NOT NULL DEFAULT 0, "
+                "applied_at REAL NOT NULL DEFAULT 0)")
+            self._conn.execute(
+                "INSERT INTO meter_policy_ack(node,sent_rev,applied_rev,sent_at,applied_at) "
+                "SELECT node, rev, 0, acked_at, 0 FROM meter_policy_ack_old")
+            self._conn.execute("DROP TABLE meter_policy_ack_old")
+            return
+        self._ensure_column("meter_policy_ack", "sent_rev", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "applied_rev", "INTEGER NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "sent_at", "REAL NOT NULL DEFAULT 0")
+        self._ensure_column("meter_policy_ack", "applied_at", "REAL NOT NULL DEFAULT 0")
 
     def _ensure_column(self, table: str, name: str, ddl: str) -> None:
         """Idempotent ADD COLUMN for databases created before the column existed.

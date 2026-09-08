@@ -4,6 +4,128 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-08 — local user-management rebuild integrated
+
+- Integrated membership lifecycle/UI, non-destructive live DOM updates, node
+  measured accounting, durable multi-node policies and runtime nginx deny-map
+  publication. No live deployment, upstream push, or legacy-user migration.
+- Full integrated suite: 1068 passed, 56 skipped (optional cases); this includes
+  the actual Chromium member/live flows and isolated kernel/nginx regressions.
+- Runtime deny validation starts nginx with an empty map, applies a new policy
+  through the daemon publisher, verifies 403/200 after stopping meterd, then
+  verifies dynamic unblock. A written file alone is not claimed loaded.
+- Policy tracking separates sent from node-applied revisions. The stable socket
+  identity includes the nginx worker pid and connection number.
+- Final project-config lint and JavaScript syntax checks pass. Behaviour-neutral
+  lint cleanup was followed by 35 metering/policy/probe regressions passing.
+- Rollout still requires operator approval for node components/configuration and
+  an explicit measured-baseline cutover. Unregistered origin/transcode paths
+  must not be described as measured node traffic.
+
+---
+
+## 2026-09-08 — member browser integration and capability preservation
+
+- Ran the actual index/script order in Chromium through Playwright, using only
+  mock API/SSE data. Covered query entry, filters, sorting, paging/history,
+  detail tabs, operation failures, live updates and editor/selection/scroll state.
+- Fixed deletion confirmation: self-only and inviter-cascade are separate
+  buttons; cancelling either performs no DELETE. Failed objects remain selected.
+- Restored permission/role editing, password reset, playback stop, manual status,
+  quota reset, Telegram unbind, device removal and points adjustment instead of
+  replacing existing management capabilities with read-only JSON.
+- Restored shared bandwidth presets and policy preview used by the group page.
+  Explicit unlimited expiry overrides remain null when editing, not inheritance.
+- Same-page detail/tab URL changes keep the live stream working; late detail
+  responses cannot overwrite a newer selection. Focused editors no longer
+  suppress unrelated member status updates.
+- Added selectable sort/advanced filters and corrected sorting to use the same
+  effective expiry and Emby activity timestamp shown to the operator.
+- Validation: 45 relevant tests passed, including real browser flows and group
+  regressions. Playwright is a dev-only dependency; no browser or service
+  deployment is performed. Final measured-quota integration remains separate.
+- Member rows and detail now distinguish measured quota, legacy estimates and
+  unknown/zero readings. Metering preview shows node coverage and a paged ledger;
+  activation requires an unchecked-by-default baseline acknowledgement plus
+  explicit confirmation. Browser tests verify both cancellation gates.
+
+---
+
+## 2026-09-08 — live updates preserve the page (local development)
+
+- Confirmed the original browser failure: every SSE event called a page loader,
+  replacing the node form and losing unfocused edits. The new Chromium
+  regression failed on that exact assertion before the change.
+- Dashboard, nodes, intake, pipeline, tasks and mounts now paint from pushed
+  snapshots using stable-key DOM patches, not their navigation loaders. Keep
+  input/caret, selection, scroll, mounted selectors and enrollment previews.
+- Added route-aware generation guards and reconnect-timer cleanup; old responses
+  and closed EventSources cannot overwrite a newer live page. Query-only hash
+  changes and browser navigation keep the full route.
+- Added real overview/latest/dispatch SSE producers rather than repeatedly
+  refetching unrelated dashboard and node REST endpoints from the browser.
+- `registerLiveUpdater(page, topics, handler)` and `pageContext` are the contract
+  for the separately developed member module. Unknown bandwidth is not shown as
+  zero; paused playback no longer hides measured network activity; user-scoped
+  figures are labelled when the source supplies that scope.
+- Validation: 151 targeted tests passed, including real isolated Chromium and
+  provider/REST parity, plus ruff and JavaScript syntax checks. The old intake
+  source assertion now distinguishes navigation placeholders from push updates.
+- Not deployed. Member lifecycle, final metering fields and node enforcement
+  are separate development packages and are not claimed complete here.
+
+---
+
+## 2026-09-08 — member lifecycle + admin UI
+**Done**
+- Group switch default is `keep`: existing `expires_at` and personal overrides
+  stay put; timed groups no longer silently rewrite 180 days into 30. Permanent
+  accounts require an explicit `expiry_policy` (`keep` / `apply_group` / `clear`
+  / `set`) via group-preview + POST `/group`.
+- Renew extends from the effective expiry and writes `expires_at_override` when
+  that layer is present; permanent accounts are refused rather than converted.
+- Entitlement, Emby presence, and policy sync are separate observation fields.
+  `enforce_now` returns an envelope; fingerprint hits compare every MANAGED_KEY.
+  Remote failures are not reported as `ok`/`deleted:true`.
+- Delete is self-only by default. `cascade=true` requires exact `confirm_ids`.
+  Emby is deleted first; a confirmed remote failure keeps the local row and is
+  retryable. Bot `/rm` has separate `rm_self` / `rm_cascade` buttons.
+- `GET /api/members` paginates after decorating the full set; unmanaged is
+  computed from all known ids. Compact SSE topic `members` feeds local UI
+  updates.
+- New `members.js` page: real pagination, split status columns, action
+  envelopes, `registerLiveUpdater('members', ['members'], handler)` with
+  `renderView` / `data-live-key` / `data-live-preserve`. Does not wrap `go()`
+  or modify `app.js`.
+
+**Tests**
+- New `tests/test_member_lifecycle.py` and `tests/test_members_ui_contract.py`.
+- Existing cascade / membership / admin-command tests updated for the new
+  defaults. Targeted pytest + ruff run in this session.
+
+**Next**
+- Merge with the live-ui shell (`pageContext` / `renderView`) for browser
+  verification of query routes and differential updates.
+
+---
+
+## 2026-09-08 — measured flow core + idempotent panel ledger
+**Done**
+- Node core `agent/flowmeter.py`: dedicated `inet mediadeck_meter` LOOKUP-only
+  4-tuple counters (IPv4+IPv6), sync register→allow, mixed-identity refuse,
+  `ss -K` on the full tuple, durable spool keyed by boot_id/seq/generation.
+  Import and tests do not touch host nft; `enable()` is explicit.
+- Panel `MeasuredMeteringService` + SQLite watermarks / monthly totals.
+  Unit is `kernel_outbound_ip_bytes` (not HTTP length). Unknown is `null`.
+  Old edge ledger and `traffic_used_bytes` are not imported as a baseline.
+- Isolated `unshare -n` test drives the real API: two TCP flows, unregistered
+  control, precise kill, close retain, IPv6, tuple reuse, restart pending.
+
+**Next**
+- nginx auth_request, deny-list / quota cutover, member snapshot injection, UI.
+
+---
+
 ## 2026-09-08 — reconcile member rows against Emby accounts
 **Done**
 - Member rows never noticed when their Emby account disappeared: enrolment was

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# ruff: noqa: EXE001
+# The installer sets executable mode on the downloaded agent.
 """mediadeck node load probe — single-file agent for streaming nodes.
 
 Deploy this one file to each streaming node; it exposes a tiny /load endpoint
@@ -290,7 +292,8 @@ class SpeedLog:
         while True:
             try:
                 if fh is None:
-                    fh = open(self.path, encoding="utf-8", errors="replace")
+                    # The tail keeps its descriptor between polls and across rotation checks.
+                    fh = open(self.path, encoding="utf-8", errors="replace")  # noqa: SIM115
                     inode = os.fstat(fh.fileno()).st_ino
                     fh.seek(0, os.SEEK_END)
                 line = fh.readline()
@@ -346,8 +349,10 @@ class SpeedLog:
                 peer_ip = token[2:]
             elif token.startswith("p="):
                 peer_port = token[2:]
-            elif token.startswith("r="):
-                continue          # the rate cap is not needed for speed
+            elif token.startswith(("r=", "s=")):
+                continue          # rate cap / status are not needed for speed
+            elif token.startswith("/") or "=" in token:
+                continue          # URI or unknown labelled field
             else:
                 rest.append(token)
         if not utag:
@@ -358,8 +363,8 @@ class SpeedLog:
         if len(rest) < 2:
             return None
         try:
-            sent = int(rest[-2])
-            took = max(0.05, float(rest[-1]))
+            sent = int(rest[0])
+            took = max(0.05, float(rest[1]))
         except ValueError:
             return None
         if not utag or utag == "-" or sent <= 0:
@@ -403,7 +408,11 @@ class SpeedLog:
                         if v[1] >= stale
                     }
 
-    def speeds(self) -> dict:
+    def speeds(self) -> dict[str, int]:
+        live, _completed = self.speeds_split()
+        return live
+
+    def speeds_split(self) -> tuple[dict[str, int], dict[str, int]]:
         """utag -> bytes/second, measured on connections that are live now.
 
         Primary source is the kernel: for every established socket, the delta
@@ -463,12 +472,13 @@ class SpeedLog:
                     out[utag] = 0.0
                     live_tags.add(utag)
 
-            # --- completed requests (fallback for unknown addresses) ---------
+            # Completed-request rates stay out of user_speeds. Mixing them in
+            # made the panel label a finished log line as a live node sample.
             self._events = [e for e in self._events if e[0] >= cutoff]
             fallback: dict[str, float] = {}
             for end_ts, start_ts, utag, sent in self._events:
-                if utag in out:
-                    continue  # already measured on the wire
+                if utag in live_tags:
+                    continue
                 duration = max(0.05, end_ts - start_ts)
                 overlap = max(0.0, min(end_ts, now) - max(start_ts, cutoff))
                 if overlap <= 0:
@@ -476,11 +486,9 @@ class SpeedLog:
                 fallback[utag] = fallback.get(utag, 0.0) + \
                     (sent / duration) * (overlap / self.WINDOW)
 
-        for utag, rate in fallback.items():
-            out.setdefault(utag, rate)
-        # Zero is kept for live-socket users (measured idle); the completed-
-        # request fallback still drops dust so finished viewers age out.
-        return {k: int(v) for k, v in out.items() if v >= 1 or k in live_tags}
+        live = {k: int(v) for k, v in out.items() if v >= 1 or k in live_tags}
+        completed = {k: int(v) for k, v in fallback.items() if v >= 1}
+        return live, completed
 
 
 class Sampler:
@@ -497,7 +505,7 @@ class Sampler:
     INTERVAL = 1.0   # seconds between counter reads
     WINDOW = 8.0     # seconds of counter history averaged into the reading
 
-    def __init__(self, iface: str, ports: set[int], speedlog: "SpeedLog") -> None:
+    def __init__(self, iface: str, ports: set[int], speedlog: SpeedLog) -> None:
         self.iface = iface
         self.ports = ports
         self.speedlog = speedlog
@@ -543,10 +551,13 @@ class Sampler:
                 self.active = active
 
     def snapshot(self) -> dict:
+        live, completed = self.speedlog.speeds_split()
         with self._lock:
             return {"ok": True, "active_streams": self.active,
                     "egress_mbps": self.egress_mbps,
-                    "user_speeds": self.speedlog.speeds()}
+                    "user_speeds": live,
+                    "user_speeds_source": "socket",
+                    "user_speeds_fallback": completed}
 
 
 def main() -> None:
@@ -570,7 +581,7 @@ def main() -> None:
     speedlog = sampler.speedlog
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:  # noqa: N802
+        def do_GET(self) -> None:
             # Request-start attribution ping, mirrored by nginx on every media
             # request. Loopback-only in practice (nginx runs on the same box)
             # and carries no secrets: a hashed tag and a socket address.
