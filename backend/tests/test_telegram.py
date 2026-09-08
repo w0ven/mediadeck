@@ -185,6 +185,12 @@ class _FakeMembers:
     def devices(self, user_id):
         return []
 
+    def invitees_of(self, user_id):
+        return []
+
+    def inviter_of(self, user_id):
+        return {}
+
     def list(self, **kw):
         return list(self._linked.values())
 
@@ -233,6 +239,7 @@ def test_guest_and_member_see_different_menus() -> None:
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
     assert {"me", "bag", "top"} <= member_actions
+    assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
     assert {"devices", "usage", "me_points", "me_nodes", "resetpw"} <= info_actions
@@ -1286,3 +1293,176 @@ def test_member_help_is_not_a_permission_error() -> None:
     asyncio.run(bot._handle_command(1, "999", "someone", "/help"))
     assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
     assert "使用说明" in bot.sent[-1]  # type: ignore[attr-defined]
+
+
+# -- response latency -------------------------------------------------------
+
+class _FakeHttp:
+    def __init__(self, *a, **k) -> None:
+        self.posts: list[tuple] = []
+
+    async def post(self, url, json=None, timeout=None):
+        self.posts.append((url, json, timeout))
+
+        class _Resp:
+            def json(self):
+                return {"ok": True, "result": {"ok": True}}
+
+        return _Resp()
+
+    async def aclose(self) -> None:
+        return None
+
+
+def test_telegram_http_client_is_reused_across_calls(monkeypatch) -> None:
+    """A tap answers the callback and then edits. Paying TLS twice is the lag."""
+    created: list[_FakeHttp] = []
+
+    def factory(*a, **k):
+        client = _FakeHttp()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("app.modules.telegram.httpx.AsyncClient", factory)
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED},
+                      _FakeMembers())
+
+    async def go():
+        await bot._call("answerCallbackQuery", {"callback_query_id": "1"})
+        await bot._call("editMessageText", {"chat_id": 1, "text": "x"})
+        await bot._close_http()
+
+    asyncio.run(go())
+    assert len(created) == 1
+    assert len(created[0].posts) == 2
+
+
+def test_telegram_http_client_is_recreated_when_the_token_changes(
+        monkeypatch) -> None:
+    created: list[_FakeHttp] = []
+    token = {"value": "token-a"}
+
+    def factory(*a, **k):
+        client = _FakeHttp()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("app.modules.telegram.httpx.AsyncClient", factory)
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": token["value"]},
+                      _FakeMembers())
+
+    async def go():
+        await bot._call("getMe")
+        token["value"] = "token-b"
+        await bot._call("getMe")
+        await bot._close_http()
+
+    asyncio.run(go())
+    assert len(created) == 2
+
+
+def test_callback_ack_does_not_block_the_edit() -> None:
+    """Telegram keeps a spinner until answerCallbackQuery lands.
+
+    Waiting for that round-trip before editing the message is what made a
+    simple 「我的信息」 tap feel stuck.
+    """
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400}
+    bot = _bot(_FakeMembers({"42": member}))
+    order: list[str] = []
+
+    async def slow_ack(callback_id, text=""):
+        order.append("ack-start")
+        await asyncio.sleep(0.05)
+        order.append("ack-end")
+
+    async def fake_edit(chat, mid, text, keyboard=None):
+        order.append("edit")
+
+    bot._answer_callback = slow_ack  # type: ignore[assignment]
+    bot._edit = fake_edit  # type: ignore[assignment]
+    asyncio.run(bot._handle_callback({
+        "id": "cb", "data": "me",
+        "message": {"chat": {"id": 1, "type": "private"}, "message_id": 7},
+        "from": {"id": 42, "first_name": "Ada"},
+    }))
+    assert order[0] == "ack-start"
+    assert order.index("edit") < order.index("ack-end")
+
+
+def test_two_chats_are_handled_without_waiting_for_each_other() -> None:
+    bot = _bot()
+    order: list[str] = []
+
+    async def fake_call(method, payload=None, timeout=20):
+        if method != "getUpdates":
+            return None
+        return [
+            {"update_id": 1, "message": {
+                "chat": {"id": "slow", "type": "private"},
+                "from": {"id": "slow", "first_name": "A"},
+                "text": "hi",
+            }},
+            {"update_id": 2, "message": {
+                "chat": {"id": "fast", "type": "private"},
+                "from": {"id": "fast", "first_name": "B"},
+                "text": "hi",
+            }},
+        ]
+
+    async def handle(message):
+        chat = str((message.get("chat") or {}).get("id"))
+        if chat == "slow":
+            await asyncio.sleep(0.05)
+        order.append(chat)
+
+    bot._call = fake_call  # type: ignore[assignment]
+    bot._handle_message = handle  # type: ignore[assignment]
+
+    async def go():
+        await bot._poll_once()
+        pending = list(bot._in_flight)
+        if pending:
+            await asyncio.gather(*pending)
+
+    asyncio.run(go())
+    assert order[0] == "fast"
+    assert order == ["fast", "slow"]
+
+
+def test_one_chat_still_handles_updates_in_order() -> None:
+    bot = _bot()
+    order: list[str] = []
+
+    async def fake_call(method, payload=None, timeout=20):
+        return [
+            {"update_id": 1, "message": {
+                "chat": {"id": "1", "type": "private"},
+                "from": {"id": "1", "first_name": "A"},
+                "text": "first",
+            }},
+            {"update_id": 2, "message": {
+                "chat": {"id": "1", "type": "private"},
+                "from": {"id": "1", "first_name": "A"},
+                "text": "second",
+            }},
+        ]
+
+    async def handle(message):
+        text = str(message.get("text") or "")
+        if text == "first":
+            await asyncio.sleep(0.03)
+        order.append(text)
+
+    bot._call = fake_call  # type: ignore[assignment]
+    bot._handle_message = handle  # type: ignore[assignment]
+
+    async def go():
+        await bot._poll_once()
+        pending = list(bot._in_flight)
+        if pending:
+            await asyncio.gather(*pending)
+
+    asyncio.run(go())
+    assert order == ["first", "second"]

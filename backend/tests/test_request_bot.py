@@ -160,11 +160,10 @@ def test_a_link_resolves_to_a_title_with_a_poster_and_a_confirmation(bot) -> Non
     _tap(bot, "req_new")
     _message(bot, "https://www.themoviedb.org/movie/550")
 
-    assert bot.photos, "a poster should be sent when TMDB has one"
-    chat, photo, caption = bot.photos[-1]
-    assert chat == MEMBER_CHAT
-    assert photo.endswith("/w342/p.jpg")
-    assert "搏击俱乐部" in caption and "1999" in caption
+    body = _edits_for(bot, MEMBER_CHAT)[-1]
+    assert "搏击俱乐部" in body and "1999" in body
+    assert "w342/p.jpg" in body
+    assert not bot.photos, "the confirmation stays on the same message"
     # Nothing is written until the member confirms.
     assert bot.requests.list() == []
     assert bot._pending[MEMBER_CHAT][0] == "request_confirm"
@@ -177,18 +176,18 @@ def test_confirming_creates_the_request_and_reports_the_number(bot) -> None:
 
     rows = bot.requests.list()
     assert len(rows) == 1 and rows[0]["tmdb_id"] == 550
-    reply = _texts(bot, MEMBER_CHAT)[-1]
+    reply = _edits_for(bot, MEMBER_CHAT)[-1]
     assert "已提交" in reply and "#1" in reply
     assert "2 次" in reply, "the remaining allowance should be updated"
 
 
-def test_an_unrecognisable_link_explains_the_format_and_ends_the_step(bot) -> None:
+def test_an_unrecognisable_link_explains_the_format_and_keeps_the_step(bot) -> None:
     _tap(bot, "req_new")
     _message(bot, "随便来部好看的")
 
-    reply = _texts(bot, MEMBER_CHAT)[-1]
+    reply = _edits_for(bot, MEMBER_CHAT)[-1]
     assert "没能识别" in reply and "themoviedb.org" in reply
-    assert MEMBER_CHAT not in bot._pending
+    assert bot._pending[MEMBER_CHAT][0] == "request_link"
     assert bot.requests.list() == []
 
 
@@ -197,7 +196,7 @@ def test_with_no_metadata_the_confirmation_still_offers_the_id(bot) -> None:
     _tap(bot, "req_new")
     _message(bot, "99999")
 
-    reply = _texts(bot, MEMBER_CHAT)[-1]
+    reply = _edits_for(bot, MEMBER_CHAT)[-1]
     assert "99999" in reply and "查不到片名" in reply
     assert not bot.photos
 
@@ -226,7 +225,7 @@ def test_a_duplicate_request_is_refused_with_a_readable_reason(bot) -> None:
     _message(bot, "550")
     _tap(bot, "req_ok")
 
-    assert "已经有人求过" in _texts(bot, MEMBER_CHAT)[-1]
+    assert "已经有人求过" in _edits_for(bot, MEMBER_CHAT)[-1]
     assert len(bot.requests.list()) == 1
 
 
