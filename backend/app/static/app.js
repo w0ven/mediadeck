@@ -272,7 +272,7 @@ function openModal(title, bodyHtml, opts) {
 
 /* ---------------- shell ---------------- */
 function buildNav() {
-  $('#nav').innerHTML = NAV.map(g => `<a class="nav-item" href="#/${g.items[0].id}" data-page="${g.items[0].id}"><span class="ic" aria-hidden="true">${g.icon}</span><span>${esc(g.group)}</span></a>`).join('');
+  $('#nav').innerHTML = NAV.map(g => `<a class="nav-item" href="#/${g.items[0].id}" data-page="${g.items[0].id}"><span class="ic" aria-hidden="true">${workspaceIcon(g.items[0].id)}</span><span>${esc(g.group)}</span></a>`).join('');
 }
 function updateWorkspaceNav(page) {
   const group = NAV.find(g => g.items.some(it => it.id === page)) || NAV[0];
@@ -304,7 +304,8 @@ function go(route) {
     activateConfigSection(new URLSearchParams(route.split('?')[1]).get('section'));
     return;
   }
-  if (!configCanLeave()) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
+  if (!configCanLeave() || (typeof membersCanLeave === 'function' && !membersCanLeave())) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
+  if (typeof membersDispose === 'function') membersDispose();
   state.page = page;
   state.route = route;
   state.pageReady = false;
@@ -324,7 +325,8 @@ window.addEventListener('hashchange', () => {
 });
 async function renderPage(page, manual, liveUpdate) {
   if (liveUpdate) { scheduleLiveFlush(); return; }
-  if (manual && !configCanLeave()) return;
+  if (manual && (!configCanLeave() || (typeof membersCanLeave === 'function' && !membersCanLeave()))) return;
+  if (manual && typeof membersDispose === 'function') membersDispose();
   const fn = PAGES[page];
   if (!fn) { $('#view').innerHTML = '<div class="empty">页面不存在</div>'; return; }
   state.renderVersion = (state.renderVersion || 0) + 1;

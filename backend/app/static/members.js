@@ -4,7 +4,7 @@
    exists. Live updates use registerLiveUpdater(topic,payload,context) or a
    dedicated EventSource on the members topic (never renderPage). */
 (function () {
-  const COLS = ['', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '活跃', ''];
+  const COLS = ['<input type="checkbox" id="m-pick-page" aria-label="选择当前页全部用户">', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '活跃', ''];
   const TABS = [
     ['overview', '概况'],
     ['entitlements', '权益权限'],
@@ -21,7 +21,69 @@
     liveBound: false,
     detailVersion: 0,
     detail: null,
+    drawerActive: false,
+    drawerFocus: null,
+    drawerScroll: 0,
+    drawerInert: [],
+    detailBaseline: new Map(),
   };
+
+  function detailDirty() {
+    return [...ms.detailBaseline].some(([el,value]) => el.isConnected && (el.type === 'checkbox' ? el.checked : el.value) !== value);
+  }
+  function canLeaveDetail() {
+    return !detailDirty() || confirm('详情中有未保存的修改。离开将丢弃这些修改，仍要继续吗？');
+  }
+  function rememberDetailForm(host) {
+    ms.detailBaseline = new Map([...host.querySelectorAll('input,select,textarea')].filter(el=>!el.readOnly && !el.disabled)
+      .map(el=>[el,el.type === 'checkbox' ? el.checked : el.value]));
+  }
+  function mountDrawer(host) {
+    if (!ms.drawerActive) {
+      ms.drawerFocus = document.activeElement;
+      ms.drawerScroll = window.scrollY;
+      ms.drawerInert = [...document.querySelectorAll('#sidebar,#topbar,#subnav,#meta-line,#members-page > :not(#member-detail)')]
+        .map(el=>[el,el.inert]);
+      ms.drawerInert.forEach(([el])=>{ el.inert=true; });
+      document.body.classList.add('member-drawer-open');
+      ms.drawerActive = true;
+    }
+    host.classList.remove('hidden');
+    host.onclick = e=>{if(e.target===host) closeDetail();};
+  }
+  function disposeDrawer(restoreFocus=false) {
+    ms.detailVersion++;
+    ms.detailBaseline.clear();
+    ms.drawerInert.forEach(([el,prior])=>{el.inert=prior;});
+    ms.drawerInert=[];
+    document.body.classList.remove('member-drawer-open');
+    const host=$('#member-detail');
+    if(host){host.classList.add('hidden');host.innerHTML='';host.dataset.uid='';}
+    if(restoreFocus && ms.drawerActive){
+      window.scrollTo(0,ms.drawerScroll);
+      const focus=ms.drawerFocus?.isConnected ? ms.drawerFocus : $('#m-q');
+      focus?.focus({preventScroll:true});
+    }
+    ms.drawerActive=false;ms.detail=null;
+  }
+  function closeDetail() {
+    if(!canLeaveDetail()) return;
+    const params=currentParams();params.delete('id');params.delete('tab');writeHash(params);
+    disposeDrawer(true);
+  }
+  window.membersCanLeave=canLeaveDetail;
+  window.membersDispose=()=>disposeDrawer(false);
+  window.addEventListener('beforeunload',e=>{if(detailDirty()){e.preventDefault();e.returnValue='';}});
+  document.addEventListener('keydown',e=>{
+    if(!ms.drawerActive || $('#modal-root')) return;
+    if(e.key==='Escape'){e.preventDefault();closeDetail();return;}
+    if(e.key!=='Tab') return;
+    const els=[...document.querySelectorAll('#member-detail button,#member-detail a,#member-detail input,#member-detail select,#member-detail textarea,#member-detail summary')]
+      .filter(el=>!el.disabled && el.offsetParent!==null);
+    const first=els[0],last=els[els.length-1];
+    if(e.shiftKey && document.activeElement===first){e.preventDefault();last?.focus();}
+    else if(!e.shiftKey && document.activeElement===last){e.preventDefault();first?.focus();}
+  });
 
   function hasLiveShell() {
     return typeof pageContext === 'function' && typeof renderView === 'function';
@@ -88,7 +150,9 @@
   function writeHash(params, { navigate = false } = {}) {
     const route = routeFromParams(params);
     if (navigate && hasLiveShell() && typeof go === 'function') {
-      go(route);
+      const searchFocused=document.activeElement?.id==='m-q';
+      const pending=go(route);
+      if(searchFocused) Promise.resolve(pending).then(()=>{if(state.route===route) $('#m-q')?.focus({preventScroll:true});});
       return 'go';
     }
     ms.writingHash = true;
@@ -104,7 +168,9 @@
     if (value == null || value === '') params.delete(key);
     else params.set(key, String(value));
     if (key !== 'page' && key !== 'id' && key !== 'tab') params.set('page', '1');
+    if (!['id','tab'].includes(key)) { params.delete('id'); params.delete('tab'); }
     if (key === 'tab') {
+      if (!canLeaveDetail()) return;
       writeHash(params, { navigate: false });
       const id = params.get('id');
       if (id) fillDetail(id, value || 'overview');
@@ -173,8 +239,11 @@
 
   function accountCell(m) {
     const tg = m.tg_username ? '@' + m.tg_username : (m.tg_user_id ? '已绑定' : '');
-    return `<button class="linkish" type="button" data-act="open" data-id="${esc(m.emby_user_id)}">${esc(m.username || m.emby_user_id)}</button>
-      <div class="s muted">${esc(tg || '未绑定 TG')}</div>`;
+    const white = isWhitelistGroup(m.group_id);
+    return `<div class="hg-account ${white?'is-whitelist':''}"><span class="hg-avatar" aria-hidden="true">${white?whitelistEmblem():esc((m.username || '?').slice(0,2).toUpperCase())}</span><div>
+      <button class="linkish" type="button" data-act="open" data-id="${esc(m.emby_user_id)}">${esc(m.username || m.emby_user_id)}</button>
+      <div class="s muted">${esc(tg || '未绑定 TG')}</div>
+      <span class="hg-mobile-account">${esc(m.group_name || '未分组')} · ${esc(m.expires_at_effective ? fmtExpiry(m.expires_at_effective) : '不限期')}</span></div></div>`;
   }
 
   function expiryCell(m) {
@@ -191,15 +260,17 @@
     return `<tr data-live-key="member:${esc(id)}" data-id="${esc(id)}" tabindex="0">
       <td><input type="checkbox" class="m-pick" data-id="${esc(id)}" ${checked} aria-label="选择 ${esc(m.username)}"></td>
       <td>${accountCell(m)}</td>
-      <td>${esc(m.group_name || '—')}</td>
+      <td>${groupBadge(m.group_id,m.group_name || '—')}</td>
       <td>${expiryCell(m)}</td>
       <td>${embySyncCell(m)}</td>
       <td>${usageCell(m)}</td>
       <td>${esc(m.last_activity ? fmtAgeTs(Date.parse(m.last_activity) / 1000) : (m.last_seen_at ? fmtAgeTs(m.last_seen_at) : '—'))}</td>
       <td class="row-actions">
         <button class="btn sm" type="button" data-act="open" data-id="${esc(id)}">详情</button>
-        <button class="btn sm danger" type="button" data-act="delete" data-id="${esc(id)}" data-name="${esc(m.username)}">删除本人</button>
+        <details class="hg-row-more"><summary aria-label="${esc(m.username)}的更多操作">${workspaceIcon('more')}</summary><div class="hg-row-menu">
+        <button class="btn sm danger" type="button" data-act="delete" data-id="${esc(id)}" data-name="${esc(m.username)}">仅删除本人…</button>
         ${m.inviter_id ? `<button class="btn sm danger" type="button" data-act="delete-cascade" data-id="${esc(id)}" data-name="${esc(m.username)}">连带邀请人…</button>` : ''}
+        </div></details>
       </td>
     </tr>`;
   }
@@ -208,7 +279,7 @@
     const c = listing.counts || {};
     return `<div class="stat-grid" id="members-stats">
       ${stat('☺', c.total || 0, '总用户', '全量筛选结果，不是当前页')}
-      ${stat('✓', c.active || 0, '权益正常', 'entitlement，不是 Emby 播放')}
+      ${stat('✓', c.active || 0, '权益正常', '账号权益状态，与 Emby 同步状态分开')}
       ${stat('⌛', (c.expired || 0) + (c.exhausted || 0), '到期/用尽', `${c.expired || 0} 过期 · ${c.exhausted || 0} 用尽`)}
       ${stat('⚠', (c.emby_missing || 0) + (c.sync_drift || 0) + (c.sync_failed || 0), 'Emby/同步',
         `${c.emby_missing || 0} 缺失 · ${c.sync_drift || 0} 漂移 · ${c.sync_failed || 0} 失败`)}
@@ -238,13 +309,15 @@
     const gopts = groups.map((g) =>
       `<option value="${esc(g.id)}" ${params.get('group_id') === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
     return `<div class="toolbar members-filters" id="members-filters" data-live-preserve>
-      <label>搜索 <input id="m-q" type="search" value="${esc(params.get('q') || '')}" placeholder="账号 / 备注 / 联系方式" aria-label="搜索用户"></label>
+      <label>搜索 <input id="m-q" type="search" value="${esc(params.get('q') || '')}" placeholder="搜索账号、备注或联系方式…" aria-label="搜索用户" autocomplete="off" name="member-search" spellcheck="false"></label>
       <label>状态 <select id="m-status" aria-label="权益状态">
         <option value="">全部</option>
         ${['active', 'expired', 'exhausted', 'suspended', 'pending'].map((s) =>
           `<option value="${s}" ${params.get('status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
       <label>用户组 <select id="m-group" aria-label="用户组"><option value="">全部</option>${gopts}</select></label>
+      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最近活跃']], 'username')}
+      <details class="hg-advanced-filters" ${['emby_status','sync_status','tg','expiring','role','register_via','order'].some(k=>params.get(k))?'open':''}><summary>${workspaceIcon('filter')}更多筛选</summary><div class="toolbar">
       <label>Emby <select id="m-emby" aria-label="Emby 状态">
         <option value="">全部</option>
         ${['present', 'missing', 'unknown'].map((s) =>
@@ -255,9 +328,7 @@
         ${['in_sync', 'drift', 'failed', 'never_applied', 'emby_missing'].map((s) =>
           `<option value="${s}" ${params.get('sync_status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
-      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最近活跃']], 'username')}
       ${pick('m-order','order','顺序',[['asc','升序'],['desc','降序']], 'asc')}
-      <details><summary>更多筛选</summary><div class="toolbar">
         ${pick('m-tg','tg','TG绑定',[['','全部'],['bound','已绑定'],['unbound','未绑定']])}
         ${pick('m-expiring','expiring','到期',[['','全部'],['soon','7天内'],['gone','已过期']])}
         ${pick('m-role','role','角色',[['','全部'],['admin','管理员'],['uploader','上片员']])}
@@ -272,30 +343,29 @@
     const err = listing.unmanaged_error
       ? `<div class="help danger-text">Emby 列表不可用：${esc(listing.unmanaged_error)}</div>` : '';
     return `<div id="members-page">
+      <div class="hg-page-intro"><div><span class="hg-eyebrow">MEMBERS</span><h2>账号与权益</h2><p>先定位用户，再查看详情；危险操作始终单独确认。</p></div><div class="toolbar"><button class="btn sm" data-act="enforce">策略预览</button><button class="btn sm" data-act="metering">实测计量与接管预览</button></div></div>
       ${statsHtml(listing)}
-      ${filterBar(params, groups)}
-      <div class="toolbar" id="members-bulk">
-        <label><input type="checkbox" id="m-pick-page"> 本页全选</label>
+      <div class="toolbar ${ms.selected.size?'':'hidden'}" id="members-bulk" aria-label="已选择用户的批量操作">
         <span class="muted" id="m-sel-count">已选 ${ms.selected.size} 人（跨页勾选不会操作未选用户）</span>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="renew">续期</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="suspend">停用</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="activate">启用</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="reset-traffic">重置用量</button>
         <button class="btn sm" type="button" data-act="clear-selection">取消选择</button>
-        <button class="btn sm" type="button" data-act="enforce">策略预览</button>
-        <button class="btn sm" type="button" data-act="metering">实测计量与接管预览</button>
+
       </div>
       ${err}
       <div class="card" id="members-table-card">
-        <div class="card-head"><div><h3>用户</h3><div class="sub">${esc(listing.total || 0)} 人</div></div></div>
+        <div class="card-head hg-members-heading"><nav class="hg-member-views" aria-label="用户视图"><a href="#/members" class="${!params.get('group_id')&&!params.get('expiring')?'active':''}">全部用户</a><a href="#/members?expiring=soon" class="${params.get('expiring')==='soon'?'active':''}">即将到期</a><a class="${params.get('group_id')==='whitelist'?'active':''}" href="#/members?group_id=whitelist">${whitelistEmblem()}白名单</a></nav><span class="muted">${esc(listing.total || 0)} 人</span></div>
+        ${filterBar(params, groups)}
         <div class="card-body flush" id="members-table-wrap">
           ${(listing.members || []).length
-            ? `<table id="members-table" class="member-table"><thead><tr>${COLS.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+            ? `<table id="members-table" class="member-table"><thead><tr>${COLS.map((c,i) => `<th>${i===0?c:esc(c)}</th>`).join('')}</tr></thead>
                <tbody id="members-tbody">${(listing.members || []).map(rowHtml).join('')}</tbody></table>`
             : '<div class="empty" id="members-empty">没有符合筛选的用户</div>'}
         </div>
-      </div>
       ${pagerHtml(listing)}
+      </div>
       <div id="member-detail" data-live-preserve class="${params.get('id') ? '' : 'hidden'}"></div>
       ${unmanaged.length ? `<div class="card" id="members-unmanaged"><div class="card-head"><div><h3>未纳管 Emby 账号</h3>
         <div class="sub">${esc(listing.unmanaged_total || unmanaged.length)} 个，对照全部已纳管 id</div></div></div>
@@ -312,8 +382,9 @@
     const q = $('#m-q');
     if (q && !q.dataset.bound) {
       q.dataset.bound = '1';
+      q.oninput = () => { clearTimeout(q._searchTimer); q._searchTimer=setTimeout(()=>{ if(q.isConnected && !ms.drawerActive) setParam('q',q.value.trim()); },350); };
       q.onkeydown = (e) => {
-        if (e.key === 'Enter') { e.preventDefault(); setParam('q', q.value.trim()); }
+        if (e.key === 'Enter') { e.preventDefault(); clearTimeout(q._searchTimer); setParam('q', q.value.trim()); }
       };
     }
     [['m-status', 'status'], ['m-group', 'group_id'], ['m-emby', 'emby_status'],
@@ -349,7 +420,10 @@
 
   function patchSelection() {
     const count = $('#m-sel-count');
-    if (count) count.textContent = `已选 ${ms.selected.size} 人（跨页勾选不会操作未选用户）`;
+    if (count) count.textContent = `已选择 ${ms.selected.size} 人 · 仅操作已选用户`;
+    $('#members-bulk')?.classList.toggle('hidden',!ms.selected.size);
+    const pageBox=$('#m-pick-page'),rows=ms.listing?.members || [];
+    if(pageBox){pageBox.checked=rows.length>0&&rows.every(m=>ms.selected.has(m.emby_user_id));pageBox.indeterminate=!pageBox.checked&&rows.some(m=>ms.selected.has(m.emby_user_id));}
     document.querySelectorAll('.m-pick').forEach((box) => {
       box.checked = ms.selected.has(box.dataset.id);
     });
@@ -361,7 +435,8 @@
     root.dataset.bound = '1';
     root.onclick = async (e) => {
       const btn = e.target.closest('[data-act]');
-      if (!btn || btn.disabled) return;
+      if (!btn) { const row=e.target.closest('tr[data-id]'); if(row && !e.target.closest('input,select,button,a,summary,details')) await openDetail(row.dataset.id); return; }
+      if (btn.disabled) return;
       const act = btn.dataset.act;
       const id = btn.dataset.id;
       try {
@@ -404,7 +479,7 @@
       tbody.innerHTML = (listing.members || []).map(rowHtml).join('');
     } else if (wrap) {
       wrap.innerHTML = (listing.members || []).length
-        ? `<table id="members-table" class="member-table"><thead><tr>${COLS.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+        ? `<table id="members-table" class="member-table"><thead><tr>${COLS.map((c,i) => `<th>${i===0?c:esc(c)}</th>`).join('')}</tr></thead>
            <tbody id="members-tbody">${(listing.members || []).map(rowHtml).join('')}</tbody></table>`
         : '<div class="empty" id="members-empty">没有符合筛选的用户</div>';
     }
@@ -440,6 +515,12 @@
       } else {
         $('#view').innerHTML = html;
       }
+      if(ms.drawerActive){
+        for(const el of document.querySelectorAll('#members-page > :not(#member-detail)')){
+          if(!ms.drawerInert.some(([old])=>old===el)) ms.drawerInert.push([el,false]);
+          el.inert=true;
+        }
+      }
       bindFilters();
       bindTable();
       patchSelection();
@@ -466,6 +547,8 @@
   }
 
   function openDetail(id) {
+    clearTimeout($('#m-q')?._searchTimer);
+    if (!canLeaveDetail()) return;
     const params = currentParams();
     params.set('id', id);
     if (!params.get('tab')) params.set('tab', 'overview');
@@ -478,9 +561,13 @@
     if (!host) return;
     const version = ++ms.detailVersion;
     const current = () => version === ms.detailVersion && host.isConnected && host.dataset.uid === id;
-    host.classList.remove('hidden');
+    const opening=!ms.drawerActive;
+    mountDrawer(host);
     host.dataset.uid = id;
-    host.innerHTML = '<div class="card"><div class="card-body">加载详情…</div></div>';
+    ms.detailBaseline.clear();
+    host.innerHTML = '<section class="member-detail-card card" role="dialog" aria-modal="true" aria-label="用户详情"><div class="card-head">加载详情…<button class="btn sm" id="md-close">关闭</button></div></section>';
+    $('#md-close').onclick=closeDetail;
+    if(opening) $('#md-close').focus({preventScroll:true});
     try {
       const d = await api(`/api/members/${encodeURIComponent(id)}?days=30`);
       if (!current()) return;
@@ -489,21 +576,22 @@
       const libs = tab === 'entitlements' ? await api('/api/emby/libraries').catch(() => []) : [];
       if (!current()) return;
       const tabs = TABS.map(([k, label]) =>
-        `<button class="tab ${k === tab ? 'active' : ''}" type="button" data-tab="${k}">${esc(label)}</button>`).join('');
+        `<button class="tab ${k === tab ? 'active' : ''}" type="button" data-tab="${k}" aria-current="${k===tab?'page':'false'}">${esc(label)}</button>`).join('');
       let body = '';
       if (tab === 'overview') {
         const gopts = (ms.groups || []).map((g) =>
           `<option value="${esc(g.id)}" ${g.id === m.group_id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
-        body = `<dl class="member-kv">
+        body = `${isWhitelistGroup(m.group_id)?`<div class="hg-whitelist-banner">${whitelistEmblem()}<div><b>白名单 · 专属成员</b><small>固定分组标识，实际权限以账号权益为准</small></div></div>`:''}<h4 class="hg-section-title">账号与权益</h4><dl class="member-kv">
+          <dt>用户组</dt><dd>${groupBadge(m.group_id,m.group_name)}</dd>
+          <dt>Telegram</dt><dd>${esc(m.tg_username ? '@'+m.tg_username : m.tg_user_id || '未绑定')}</dd>
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')}</dd>
           <dt>Emby</dt><dd>${embySyncCell(m)}</dd>
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
-          <dt>近24小时观看</dt><dd>${watchWindowLabel(d.watch, '24h')}</dd>
-          <dt>近30天观看</dt><dd>${watchWindowLabel(d.watch, '30d')}</dd>
-          <dt>累计观看</dt><dd>${d.watch ? esc(fmtWatchSeconds(d.watch.recorded_seconds)) : '暂无统计'}</dd>
         </dl>
+        <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计已记录</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
+        <h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
           <label>续期 <input id="md-days" type="number" min="1" value="30" style="width:72px"> 天
             <button class="btn sm" type="button" id="md-renew">续期</button></label>
@@ -514,12 +602,15 @@
               <option value="clear">改为不限期</option>
             </select>
             <button class="btn sm" type="button" id="md-group-go">换组</button></label>
+          <details class="hg-account-more"><summary>更多账号操作</summary><div class="toolbar">
           <button class="btn sm" type="button" id="md-retry">重试远端</button>
           <button class="btn sm" type="button" data-member-action="status">${m.state === 'suspended' ? '解除手动停用' : '停用账号'}</button>
           <button class="btn sm" type="button" data-member-action="password">重置密码</button>
           <button class="btn sm" type="button" data-member-action="kick">结束当前播放</button>
           <button class="btn sm" type="button" data-member-action="reset-traffic">重置本月用量</button>
           ${m.tg_user_id ? '<button class="btn sm" type="button" data-member-action="telegram/unbind">解除TG绑定</button>' : ''}
+          <button class="btn sm danger" type="button" data-act="delete" data-id="${esc(id)}" data-name="${esc(m.username)}">仅删除本人…</button>
+          </div></details>
         </div>
         <p class="help">流量与 Bot 使用同一实测账本；观看按实际采样区间累计，不补算暂停或停机时长。</p>`;
       } else if (tab === 'entitlements') {
@@ -560,22 +651,20 @@
             </tr>`).join('')}</tbody></table>`
           : '<div class="empty">无操作记录</div>';
       }
-      host.innerHTML = `<div class="card member-detail-card">
-        <div class="card-head"><div><h3>${esc(m.username)}</h3>
-          <div class="sub">${esc(m.emby_user_id)}</div></div>
-          <button class="btn sm" type="button" id="md-close">关闭</button></div>
-        <div class="tabs" role="tablist">${tabs}</div>
-        <div class="card-body">${body}</div>
-      </div>`;
-      host.querySelectorAll('[data-tab]').forEach((b) => {
-        b.onclick = () => { setParam('tab', b.dataset.tab, { reload: false }); };
-      });
-      const close = $('#md-close');
-      if (close) close.onclick = () => {
-        const p = currentParams(); p.delete('id'); p.delete('tab'); writeHash(p, { navigate: false });
-        ms.detailVersion++; ms.detail = null;
-        host.classList.add('hidden'); host.innerHTML = ''; host.dataset.uid = '';
-      };
+      host.innerHTML = `<section class="card member-detail-card ${isWhitelistGroup(m.group_id)?'is-whitelist':''}" role="dialog" aria-modal="true" aria-labelledby="md-title" tabindex="-1">
+        <div class="card-head"><div class="hg-drawer-identity"><span class="hg-avatar" aria-hidden="true">${isWhitelistGroup(m.group_id)?whitelistEmblem():esc((m.username||'?').slice(0,2).toUpperCase())}</span><div><span class="hg-eyebrow">USER PROFILE</span><h3 id="md-title">${esc(m.username)}</h3><div class="sub">${esc(m.emby_user_id)}</div></div></div>
+          <button class="btn sm" type="button" id="md-close" aria-label="关闭用户详情">${workspaceIcon('close')}</button></div>
+        <nav class="tabs" aria-label="用户详情分区">${tabs}</nav>
+        <div class="card-body hg-drawer-body">${body}</div>
+        <footer class="hg-drawer-footer">${tab==='overview'?'<button class="btn primary" id="md-focus-renew">续期</button><button class="btn" id="md-focus-group">调整用户组</button>':'<span class="muted">修改后需明确保存；关闭不会自动提交</span>'}</footer>
+      </section>`;
+      host.querySelectorAll('[data-tab]').forEach(b=>{b.onclick=()=>setParam('tab',b.dataset.tab,{reload:false});});
+      $('#md-close').onclick=closeDetail;
+      const focusField=id=>{const el=$('#'+id);el?.scrollIntoView({block:'center',behavior:'instant'});el?.focus({preventScroll:true});};
+      if($('#md-focus-renew')) $('#md-focus-renew').onclick=()=>focusField('md-days');
+      if($('#md-focus-group')) $('#md-focus-group').onclick=()=>focusField('md-group');
+      if(!$('#modal-root')) (opening?$('#md-close'):host.querySelector('[data-tab].active'))?.focus({preventScroll:true});
+      rememberDetailForm(host);
       bindMemberActions(host, id, m, tab);
       const renew = $('#md-renew');
       if (renew) renew.onclick = () => runMemberAction(renew, () => memberRenew(id));
@@ -595,7 +684,8 @@
       });
     } catch (e) {
       if (!current()) return;
-      host.innerHTML = `<div class="card"><div class="card-body">详情失败：${esc(e.message)}</div></div>`;
+      host.innerHTML = `<section class="card member-detail-card" role="dialog" aria-modal="true" aria-label="用户详情加载失败"><div class="card-head"><h3>详情加载失败</h3><button id="md-close" class="btn sm">关闭</button></div><div class="card-body">${esc(e.message)}<p><button class="btn" id="md-reload">重试</button></p></div></section>`;
+      $('#md-close').onclick=closeDetail;$('#md-reload').onclick=()=>fillDetail(id,tab);$('#md-close').focus({preventScroll:true});
     }
   }
 
@@ -760,7 +850,7 @@
     });
     const ok = toastResult(r, '已删除');
     if (!ok) (r.emby_failed || []).forEach((f) => toast(`${f.user_id}: ${f.error}`, 1));
-    if (ok) objects.forEach((o) => ms.selected.delete(o.emby_user_id));
+    if (ok) { objects.forEach(o => ms.selected.delete(o.emby_user_id)); if(objects.some(o=>o.emby_user_id===currentParams().get('id'))){ms.detailBaseline.clear();closeDetail();} }
     else (r.removed || []).forEach((uid) => ms.selected.delete(uid));
     await refreshNow();
   }
