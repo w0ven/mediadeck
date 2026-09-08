@@ -638,9 +638,18 @@ PAGES.tgbot = async () => {
         <div class="form-row"><label>启用机器人</label>
           <input id="tg-enabled" type="checkbox" ${tg.enabled ? 'checked' : ''}>
           <span class="muted">关闭后停止收发消息，配置保留</span></div>
-        <div class="form-row"><label>Emby 地址</label>
+        <div class="form-row"><label for="tg-embyurl">Emby 地址</label>
           <input id="tg-embyurl" value="${esc(tg.emby_public_url || '')}" placeholder="https://emby.example.com">
           <span class="muted">随账号一起发给新成员</span></div>
+        <div class="form-row"><label for="tg-logo">首页 Logo</label>
+          <input id="tg-logo" type="url" value="${esc(tg.menu_logo_url || '')}" placeholder="https://example.com/logo.png" autocomplete="off">
+          <button class="btn" id="tg-logo-preview">预览</button>
+          <button class="btn" id="tg-logo-clear">关闭图片</button></div>
+        <div class="help">填写公开 HTTPS 图片直链；图片仅用于 Bot 首页，留空保持纯文字。Telegram 无法加载时自动回退文字，求片等流程仍使用单消息。</div>
+        <div id="tg-logo-preview-box" class="card-body" hidden>
+          <img id="tg-logo-image" alt="Bot 首页 Logo 预览" referrerpolicy="no-referrer" style="max-width:280px;max-height:160px;object-fit:contain;border-radius:12px">
+          <div id="tg-logo-hint" class="muted" aria-live="polite"></div>
+        </div>
         <div class="toolbar">
           <button class="btn" id="tg-test">测试连接</button>
           <button class="btn primary" id="tg-save">保存</button>
@@ -690,6 +699,19 @@ PAGES.tgbot = async () => {
   });
   $('#tg-test').onclick = testTelegramPage;
   $('#tg-sendrank').onclick = sendRankingsNow;
+  $('#tg-logo-preview').onclick = () => {
+    const box = $('#tg-logo-preview-box'), img = $('#tg-logo-image'), hint = $('#tg-logo-hint');
+    try {
+      const url = new URL($('#tg-logo').value.trim());
+      if (url.protocol !== 'https:' || url.username || url.password || url.hash) throw new Error('请填写公开 HTTPS 图片直链');
+      box.hidden = false; hint.textContent = '正在加载预览…'; img.hidden = false;
+      img.onload = () => { hint.textContent = '首页图片预览 · 保存后生效'; };
+      img.onerror = () => { img.hidden = true; hint.textContent = '图片未能加载，请检查直链；Bot 会回退文字菜单。'; };
+      img.src = url.href;
+    } catch (e) { box.hidden = false; img.hidden = true; hint.textContent = '请填写有效的公开 HTTPS 图片直链。'; }
+  };
+  $('#tg-logo-clear').onclick = () => { $('#tg-logo').value = ''; $('#tg-logo-preview-box').hidden = true; $('#tg-logo-image').removeAttribute('src'); };
+  if (tg.menu_logo_url) $('#tg-logo-preview').click();
 };
 
 /* An empty token box means "keep the stored one", never "clear it": the
@@ -706,6 +728,7 @@ function telegramPagePayload() {
     bot_token: typed.trim() || SECRET_KEEP,
     enabled: flag('tg-enabled'),
     emby_public_url: str('tg-embyurl'),
+    menu_logo_url: str('tg-logo'),
     allow_admin_grant: flag('tg-ch-admin'),
     allow_invite: flag('tg-ch-invite'),
     allow_redeem: flag('tg-ch-redeem'),
@@ -1077,18 +1100,18 @@ async function showMemberInvites(id, username) {
 PAGES.tgrequests = async () => {
   $('#view').innerHTML = pageLoading();
   const rows = await api('/api/telegram/requests').catch(() => []);
-  const kindLabel = (k) => (k === 'rebind' ? '换绑' : '认领');
+  const kindLabel = () => 'TG 换绑';
   $('#view').innerHTML = `
     <div class="help">
-      注册不经过这里：聊天本身已经证明了申请人是谁。
-      只有<b>认领旧账号</b>和<b>换绑到新 Telegram</b> 需要确认，因为这两件事申请人无法自证。
+      <b>认领功能已停用</b>，已绑定的用户直接使用 Bot。
+      这里只审核已通过 Emby 密码验证的<b>TG 换绑申请</b>，同一申请只生效一次；也可在绑定群处理。
     </div>
     ${tableCard('待处理申请', `${rows.length} 条`,
-      ['类型', 'Telegram', '申请账号', '提交时间', ''],
+      ['类型', '新 Telegram', '原绑定 / 账号', '提交时间', ''],
       rows.map((r) => `<tr>
         <td><span class="tag ${r.kind === 'rebind' ? 'warn' : 'idle'}">${esc(kindLabel(r.kind))}</span></td>
         <td>${r.tg_username ? '@' + esc(r.tg_username) : esc(r.tg_user_id)}</td>
-        <td>${esc(r.wanted_username)}</td>
+        <td>${esc(r.wanted_username)}<div class="muted">原 TG ${esc(r.old_tg_user_id || '未知')}</div></td>
         <td>${esc(fmtAgeTs(r.created_at))}</td>
         <td class="row-actions">
           <button class="btn sm" onclick="reviewTgRequest(${r.id}, true)">通过</button>
@@ -1096,11 +1119,11 @@ PAGES.tgrequests = async () => {
         </td></tr>`).join(''))}`;
 };
 async function reviewTgRequest(id, approve) {
-  if (!approve && !confirm('拒绝这条申请？申请人会收到通知。')) return;
+  if (!confirm(approve ? '确认将该 Emby 账号从原 TG 换绑至申请人？账号权益和历史不变。' : '拒绝这条申请？申请人会收到通知。')) return;
   try {
-    await api(`/api/telegram/requests/${id}/review`, {
+    const result = await api(`/api/telegram/requests/${id}/review`, {
       method: 'POST', body: JSON.stringify({ approve }) });
-    toast(approve ? '已通过并关联' : '已拒绝');
+    toast(result.approved ? '已通过换绑' : (result.note || '申请未生效'));
     renderPage('tgrequests', true);
   } catch (e) { toast('操作失败: ' + e.message, 1); }
 }

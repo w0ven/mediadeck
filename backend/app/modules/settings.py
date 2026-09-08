@@ -25,6 +25,7 @@ import re
 import secrets
 import threading
 from typing import Any
+from urllib.parse import urlsplit
 
 from app.core.config import NodePool, Settings, StreamNode, demo_nodes
 from app.core.errors import ConfigError, ConflictError
@@ -90,6 +91,8 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # Shown to a new member alongside their credentials; without it they have
     # a username and password and nowhere to use them.
     "emby_public_url": "",
+    # Public artwork URL only; Telegram fetches it. Empty keeps text-only menus.
+    "menu_logo_url": "",
     # NOTE: the daily ranking post and the expiry reminder used to be
     # configured here (rankings_* / notify_expiring*). They are plugins now
     # ("排行推送" / "到期提醒" on the automation page), and their settings live
@@ -577,7 +580,7 @@ class SettingsService:
             cfg["max_users"] = max(0, int(cfg["max_users"]))
         except (TypeError, ValueError):
             cfg["max_users"] = 0
-        for key in ("default_group_id", "require_group", "emby_public_url"):
+        for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url"):
             cfg[key] = str(cfg[key] or "").strip()
         try:
             cfg["group_interaction_chats"] = parse_group_interaction_chats(
@@ -642,6 +645,13 @@ class SettingsService:
         if emby_url:
             emby_url = _require_http_url(emby_url, "Emby 对外地址")
 
+        logo = str(payload.get("menu_logo_url", current["menu_logo_url"]) or "").strip()
+        if logo:
+            parsed = urlsplit(logo)
+            if (len(logo) > 2048 or parsed.scheme != "https" or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.fragment):
+                raise ConfigError("Logo 请填写不含凭据的 HTTPS 图片直链，留空关闭")
+
         if "group_interaction_chats" in payload:
             chats = parse_group_interaction_chats(payload.get("group_interaction_chats"))
         else:
@@ -659,6 +669,7 @@ class SettingsService:
                 "require_group", current["require_group"]) or "").strip(),
             "group_interaction_chats": chats,
             "emby_public_url": emby_url,
+            "menu_logo_url": logo,
         })
         return self.telegram_public()
 

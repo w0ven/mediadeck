@@ -212,6 +212,10 @@ def merge_effective(group: dict[str, Any] | None, overrides: dict[str, Any] | No
         expires_at = ov.get("expires_at_override")
     else:
         expires_at = stored_expires
+    # Billing dimensions belong to the target group. A personal date cannot
+    # enable time billing on a traffic-only or non-billed group.
+    if group and not needs_duration(group.get("billing_mode") or ""):
+        expires_at = None
 
     extra = int(ov.get("extra_traffic_bytes") or 0)
     base_quota = int(group.get("traffic_quota_bytes") or 0)
@@ -538,6 +542,30 @@ class MemberService:
         elif expires_at is not None:
             expires_at = int(expires_at)
 
+        group_changed = bool(existing and group_id != existing.get('group_id'))
+        explicit_term = expiry_policy != 'keep' or payload.get('expires_at', '__keep__') != '__keep__'
+        overrides_before = parse_overrides(existing.get('overrides_json')) if existing else {}
+        overrides_after = dict(overrides_before)
+        if group and not needs_duration(group['billing_mode']):
+            # Changing to whitelist/traffic-only means no time limit, even
+            # when the selected policy is keep. Never reset usage ledgers.
+            if group_changed or explicit_term or not existing:
+                expires_at = None
+                overrides_after.pop('expires_at_override', None)
+        elif group_changed and expiry_policy == 'keep' and not explicit_term:
+            old_group = self._groups.get(existing.get('group_id')) if existing.get('group_id') else None
+            if old_group and not needs_duration(old_group['billing_mode']):
+                # Preserve the actual unlimited term, not an inactive stale date.
+                expires_at = None
+                overrides_after.pop('expires_at_override', None)
+        if explicit_term:
+            # Explicit set/clear/apply_group must replace the effective date,
+            # not just write a lower-priority base field that nobody sees.
+            overrides_after.pop('expires_at_override', None)
+        overrides_json = (existing.get('overrides_json') if existing else '{}')
+        if overrides_after != overrides_before:
+            overrides_json = json.dumps(overrides_after, ensure_ascii=False, sort_keys=True)
+
         p_start = existing["traffic_period_start"] if existing else 0
         if not p_start:
             p_start = period_start(now)
@@ -575,15 +603,17 @@ class MemberService:
             self._db.execute(
                 "UPDATE members SET username=?,group_id=?,roles=?,status=?,"
                 "expires_at=?,traffic_used_bytes=?,traffic_period_start=?,"
-                "note=?,contact=?,updated_at=? WHERE emby_user_id=?",
-                row + (user_id,))
+                "note=?,contact=?,updated_at=?,overrides_json=? WHERE emby_user_id=?",
+                row + (overrides_json, user_id,))
             self.audit(actor, "member.update", user_id, encode_audit_detail(audit_diff(
                 {"group_id": existing.get("group_id"),
                  "roles": existing.get("roles"),
                  "status": existing.get("status"),
-                 "expires_at": existing.get("expires_at")},
+                 "expires_at": existing.get("expires_at"),
+                 "expires_at_override": overrides_before.get('expires_at_override')},
                 {"group_id": group_id, "roles": roles_csv,
-                 "status": status, "expires_at": expires_at},
+                 "status": status, "expires_at": expires_at,
+                 "expires_at_override": overrides_after.get('expires_at_override')},
             )))
         else:
             self._db.execute(
@@ -832,10 +862,15 @@ class MemberService:
         now = int(time.time())
         until = now + max(1, days) * 86400
         rows = self._db.query(
-            "SELECT * FROM members WHERE expires_at IS NOT NULL "
-            "AND expires_at > ? AND expires_at <= ? ORDER BY expires_at ASC",
-            (now, until))
-        return [self._decorate(r) for r in rows]
+            "SELECT * FROM members WHERE (expires_at > ? AND expires_at <= ?) "
+            "OR overrides_json LIKE '%expires_at_override%'", (now, until))
+        # The same effective date drives notices, the UI, renewals and policy.
+        # A base-date-only query both missed personal deadlines and reminded
+        # traffic-only members about dates that no longer limit their account.
+        decorated = [self._decorate(r) for r in rows]
+        due = [m for m in decorated if m.get('expires_at_effective')
+               and now < int(m['expires_at_effective']) <= until]
+        return sorted(due, key=lambda m: int(m['expires_at_effective']))
 
     def inviter_of(self, user_id: str) -> dict[str, Any] | None:
         """The member who vouched for this one, if they still exist."""

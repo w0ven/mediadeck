@@ -14,7 +14,7 @@ from typing import Any
 
 from app.core.errors import ConfigError, ConflictError
 from app.modules.enforcement import MANAGED_KEYS, _normalise, desired_policy, fingerprint
-from app.modules.groups import needs_duration
+from app.modules.groups import needs_duration, needs_traffic
 
 # Never persist secrets into last_remote_error / audit / task tables.
 _SECRET_RE = re.compile(
@@ -272,9 +272,12 @@ def group_preview(members: Any, user_id: str, group_id: str) -> dict[str, Any]:
     warnings: list[str] = []
     if decision_required:
         warnings.append("永久/无到期账号切到计时组，必须明确 keep 或 apply_group")
-    stored = member.get("expires_at")
-    if stored and to_timed and apply_at and int(stored) > apply_at + 60:
+    if current_effective and to_timed and apply_at and int(current_effective) > apply_at + 60:
         warnings.append("切到目标组若套用 duration_days 会缩短现有有效期；默认保留")
+    if not to_timed:
+        warnings.append("目标组不计时：到期改为不限，并清除个人到期覆盖")
+    if not needs_traffic(to_group.get('billing_mode') or ''):
+        warnings.append("目标组不计流量：有效配额不限，历史用量保留")
     return {
         "from_group": {
             "id": from_group.get("id") or member.get("group_id"),
@@ -290,13 +293,15 @@ def group_preview(members: Any, user_id: str, group_id: str) -> dict[str, Any]:
         "current_expires_at": member.get("expires_at"),
         "current_expires_at_effective": current_effective,
         "current_is_permanent": current_is_permanent,
-        "overrides_kept": True,
+        "overrides_kept": to_timed or 'expires_at_override' not in (member.get('overrides') or {}),
+        "non_expiry_overrides_kept": True,
         "decision_required": decision_required,
         "default_policy": "keep",
         "policies": {
             "keep": {
-                "expires_at": member.get("expires_at"),
-                "expires_at_override": "unchanged",
+                "expires_at": current_effective if to_timed else None,
+                "expires_at_override": "unchanged" if to_timed else "cleared",
+                "note": "保留实际有效期" if to_timed else "不计时组改为不限期",
             },
             "apply_group": {
                 "expires_at": apply_at,

@@ -9,17 +9,12 @@ nowhere.
 Registration creates the Emby account directly. There is no code to copy from
 a panel, because the chat itself already proves who is asking: the Telegram id
 is the identity, and it is recorded as the owner at creation time. That leaves
-exactly two cases needing human review, and they both go through the approval
-queue rather than the registration path:
+one reviewed operation: moving an existing account to a different Telegram.
+Old account claiming is retired. Reassignment requires password verification
+in private plus an administrator's approval in the configured group.
 
-- someone whose Emby account predates the bot and wants to claim it
-- someone moving their account to a different Telegram id
-
-Both are attempts to take control of an account the requester cannot otherwise
-prove they own, so an operator decides.
-
-Passwords are generated, never typed. A chat transcript is not a safe place to
-put one, and a password the member chose in a hurry is the one they reuse.
+Registration passwords are generated. Passwords supplied for reassignment
+verification are never echoed, logged or persisted; input messages are removed.
 
 Polling, not webhooks. A webhook needs a public HTTPS route into the panel;
 long polling reaches out instead, so the panel stays reachable only from where
@@ -30,6 +25,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import contextvars
+import hashlib
+import json
 import re
 import secrets
 import string
@@ -41,6 +38,9 @@ import httpx
 
 from app.core.errors import ConfigError
 from app.modules.groups import WHITELIST_GROUP_ID
+from app.modules.rebinding import RebindingService
+from app.modules.bot_rebinding import RebindBotMixin
+from app.modules.bot_views import duration, quota_lines
 from app.modules.settings import parse_group_interaction_chats
 from app.modules.requests import RequestError
 from app.modules.shop import ShopError
@@ -79,7 +79,7 @@ def looks_like_credential(raw: str) -> bool:
 # half-finished signup should not hold a slot or confuse the next /start.
 PENDING_TTL = 600.0
 
-REQUEST_KINDS = ("bind", "rebind")
+REQUEST_KINDS = ("rebind",)
 
 # Status marks for the member's own request list.
 REQUEST_STATUS_ICONS = {
@@ -88,7 +88,7 @@ REQUEST_STATUS_ICONS = {
 
 # Callbacks whose handler sends its own answerCallbackQuery, because it has
 # something to say. Everything else is acked immediately.
-SELF_ANSWERING_CALLBACKS = ("req_claim:", "req_done:", "req_fail:")
+SELF_ANSWERING_CALLBACKS = ("req_claim:", "req_done:", "req_fail:", "tg_rebind_review:")
 
 ADMIN_HELP = """🛠 <b>管理员命令</b>
 
@@ -120,7 +120,7 @@ ADMIN_HELP = """🛠 <b>管理员命令</b>
 
 
 def generate_password(length: int = 12) -> str:
-    """Passwords are issued, not chosen: the member never types one in chat."""
+    """Passwords are issued, not chosen: registration never asks a member to choose one."""
     pool = string.ascii_letters + string.digits
     return "".join(secrets.choice(pool) for _ in range(length))
 
@@ -179,7 +179,7 @@ GROUP_ADMIN_COMMANDS = (
 ADMIN_TARGET_COMMANDS = {
     "kk", "renew", "score", "prouser", "revuser", "rm", "rmemby",
 }
-PRIVATE_ONLY_COMMANDS = {"register", "claim", "resetpw"}
+PRIVATE_ONLY_COMMANDS = {"register", "claim", "rebind", "resetpw"}
 GROUP_BRIEF_TTL = 60.0
 
 _SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
@@ -192,7 +192,7 @@ _ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tg_actor", default="")
 
 
-class TelegramBot:
+class TelegramBot(RebindBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -206,6 +206,7 @@ class TelegramBot:
         self._emby = emby
         self._stats = stats
         self._db = db
+        self._rebinding = RebindingService(db) if db is not None else None
         self._registration = registration
         self._points = points
         self._shop = shop
@@ -227,6 +228,7 @@ class TelegramBot:
         # chat id -> the one panel message this conversation is editing.
         # A request that keeps adding replies is what made 求片 feel messy.
         self._panel: dict[str, int] = {}
+        self._photo_panels: set[tuple[str, int]] = set()
         # Only interactive panels may be cleaned up, never unrelated notices.
         self._menu_panel: dict[str, int] = {}
         self._chat_commands: dict[str, tuple] = {}
@@ -362,6 +364,8 @@ class TelegramBot:
         commands = [
             {"command": "start", "description": "打开菜单"},
             {"command": "me", "description": "我的账号"},
+            {"command": "usage", "description": "用量与观看时长"},
+            {"command": "rebind", "description": "TG 换绑申请"},
             {"command": "rank", "description": "观看排行"},
             {"command": "help", "description": "使用说明"},
             {"command": "rules", "description": "行为准则"},
@@ -478,6 +482,7 @@ class TelegramBot:
         if bot_id != self._active_bot_id:
             self._active_bot_id = bot_id
             self._panel.clear()
+            self._photo_panels.clear()
             self._menu_panel.clear()
             self._pending.clear()
             self._chat_commands.clear()
@@ -654,6 +659,7 @@ class TelegramBot:
                                  (self._menu_key(chat_id), str(message_id)))
 
     async def _retire_menu(self, chat_id: Any, message_id: int) -> None:
+        self._photo_panels.discard((str(chat_id), int(message_id)))
         if await self._call("deleteMessage", {
                 "chat_id": chat_id, "message_id": message_id}) is not True:
             # Telegram may refuse deletion of old messages. At least disarm it.
@@ -732,6 +738,21 @@ class TelegramBot:
 
     async def _edit(self, chat_id: str | int, message_id: int, text: str,
                     keyboard: list[list[dict[str, str]]] | None = None) -> bool:
+        if (str(chat_id), int(message_id)) in self._photo_panels:
+            # The branded home is not a multi-step operation. Entering a
+            # feature starts one text panel, avoiding Telegram's 1024-caption
+            # limit for passwords, rules and request confirmation text.
+            if not await self.send(chat_id, text, keyboard):
+                return False
+            new = self._panel.get(self._pkey(chat_id))
+            if not new or new == message_id:
+                return False
+            waiting = self._pending.get(self._pkey(chat_id))
+            if waiting and waiting[2].get('message_id') == message_id:
+                waiting[2]['message_id'] = new
+            await self._retire_menu(chat_id, message_id)
+            self._photo_panels.discard((str(chat_id), int(message_id)))
+            return True
         payload: dict[str, Any] = {
             "chat_id": chat_id, "message_id": message_id, "text": text,
             "parse_mode": "HTML", "disable_web_page_preview": True,
@@ -751,6 +772,23 @@ class TelegramBot:
         if mid and await self._edit(chat_id, mid, text, keyboard):
             return
         await self.send(chat_id, text, keyboard)
+
+    async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str) -> None:
+        body, keyboard = self._home(tg_id, tg_name)
+        logo = str(self._cfg().get('menu_logo_url') or '')
+        if logo and not _GROUP.get() and len(body) <= 900:
+            old = self._panel.get(self._pkey(chat_id))
+            result = await self._call('sendPhoto', {'chat_id': chat_id, 'photo': logo,
+                'caption': body, 'parse_mode': 'HTML',
+                'reply_markup': {'inline_keyboard': keyboard}})
+            if isinstance(result, dict) and result.get('message_id'):
+                mid = int(result['message_id'])
+                self._photo_panels.add((str(chat_id), mid))
+                self._remember_menu(chat_id, mid, keyboard)
+                if old and old != mid:
+                    await self._retire_menu(chat_id, old)
+                return
+        await self._show(chat_id, body, keyboard)
 
     # -- group membership -----------------------------------------------------
 
@@ -788,12 +826,12 @@ class TelegramBot:
         return None
 
     def guest_menu(self) -> list[list[dict[str, str]]]:
-        """No account yet: register if a channel is open, or claim one that exists."""
+        """No account here: register with a credential or request verified reassignment."""
         rows: list[list[dict[str, str]]] = []
         if self._registration_open():
             rows.append([{"text": "🆕 注册账号", "callback_data": "register"}])
         rows.append([
-            {"text": "🔗 认领已有账号", "callback_data": "claim"},
+            {"text": "🔗 TG 换绑申请", "callback_data": "rebind"},
             {"text": "📜 准则", "callback_data": "rules"},
         ])
         rows.append([{"text": "❓ 使用说明", "callback_data": "help"}])
@@ -817,23 +855,17 @@ class TelegramBot:
             return False
 
     def member_menu(self) -> list[list[dict[str, str]]]:
-        """Top level, embyboss-style: account and line first, extras below."""
-        rows: list[list[dict[str, str]]] = [
+        """A stable two-column home; optional point actions belong in the bag."""
+        return [
             [{"text": "👤 我的账号", "callback_data": "me"},
-             {"text": "🌐 线路", "callback_data": "me_nodes"}],
-            [{"text": "🎒 背包", "callback_data": "bag"},
-             {"text": "🎬 求片", "callback_data": "req_new"}],
-            [{"text": "🏆 排行", "callback_data": "top"},
-             {"text": "📜 准则", "callback_data": "rules"}],
+             {"text": "📊 用量与观看", "callback_data": "usage"}],
+            [{"text": "🌐 播放线路", "callback_data": "me_nodes"},
+             {"text": "🎬 求片中心", "callback_data": "request_center"}],
+            [{"text": "🎒 积分背包", "callback_data": "bag"},
+             {"text": "🏆 排行榜", "callback_data": "rank"}],
+            [{"text": "📜 使用准则", "callback_data": "rules"},
+             {"text": "❓ 使用帮助", "callback_data": "help"}],
         ]
-        points_row = []
-        if self._plugin_on("checkin"):
-            points_row.append({"text": "✅ 签到", "callback_data": "checkin"})
-        if self._plugin_on("points_transfer"):
-            points_row.append({"text": "💸 转账", "callback_data": "transfer"})
-        if points_row:
-            rows.append(points_row)
-        return rows
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
@@ -854,10 +886,14 @@ class TelegramBot:
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
-    @staticmethod
-    def bag_menu() -> list[list[dict[str, str]]]:
-        """What the member owns or can spend."""
-        return [
+    def bag_menu(self) -> list[list[dict[str, str]]]:
+        """What the member owns or can spend; don't advertise disabled plugins."""
+        extra = []
+        if self._plugin_on("checkin"):
+            extra.append({"text": "✅ 每日签到", "callback_data": "checkin"})
+        if self._plugin_on("points_transfer"):
+            extra.append({"text": "💸 积分转账", "callback_data": "transfer"})
+        return ([extra] if extra else []) + [
             [{"text": "🎫 我的邀请码", "callback_data": "invites"},
              {"text": "🎁 兑换商城", "callback_data": "shop"}],
             [{"text": "📜 兑换记录", "callback_data": "orders"}],
@@ -898,7 +934,8 @@ class TelegramBot:
             "❓ <b>使用说明</b>\n\n"
             f"· <b>注册账号</b>：发送{how}，再选一个用户名，密码由系统生成\n"
             "· 也可以直接发送邀请码，或打开朋友给的注册链接\n"
-            "· <b>认领已有账号</b>：老账号关联到这个 Telegram，需管理员确认\n\n"
+            "· <b>TG 换绑</b>：原 TG 更换或遗失时，验证 Emby 密码后申请管理员审核\n"
+            "· 已绑定的用户直接使用，无需认领\n\n"
             "遇到问题请联系管理员。"
         )
 
@@ -910,9 +947,10 @@ class TelegramBot:
         group = str(member.get("group_name") or "").strip()
         if group:
             bits.append(group)
-        bits.append(_fmt_expiry(member.get("expires_at")))
+        bits.append(_fmt_expiry(member.get("expires_at_effective", member.get("expires_at"))))
         lines = [
-            f"🎬 <b>{member.get('username') or '成员'}</b>",
+            "<b>MediaDeck · 我的影库</b>\n",
+            f"{escape(str(member.get('username') or '成员'))}，欢迎回来",
             " · ".join(bits),
         ]
         user_id = str(member.get("emby_user_id") or "")
@@ -939,10 +977,10 @@ class TelegramBot:
                 lines.append(f"没有账号：用{how}即可开通")
             else:
                 lines.append("管理员已授权的用户可以直接注册。")
-            lines.append("已有账号：点「认领已有账号」关联到这个 Telegram")
+            lines.append("已有绑定：请使用原 Telegram；换了 TG 可申请「TG 换绑」。")
         else:
             lines.append("这里是影视库账号服务，<b>当前暂停注册</b>。\n")
-            lines.append("已有账号可以认领；新用户请稍后再来，或联系管理员。")
+            lines.append("已有用户请使用已绑定的 Telegram；更换 TG 可申请换绑。")
         if str(cfg.get("require_group") or "").strip():
             lines.append("\n注册前需要先加入官方群组。")
         return "\n".join(lines)
@@ -1350,41 +1388,28 @@ class TelegramBot:
         lines.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
         return "\n".join(lines)
 
+    def _watch_text(self, member: dict[str, Any]) -> str:
+        if self._stats is None or not hasattr(self._stats, 'watch_summary'):
+            return "观看统计：暂不可用"
+        try:
+            s = self._stats.watch_summary(str(member['emby_user_id']))
+        except Exception:
+            return "观看统计：暂不可用"
+        start = time.strftime('%Y-%m-%d', time.localtime(s['first_at'])) if s.get('first_at') else '尚无记录'
+        return (f"近24小时观看：{duration(s['seconds_24h'])}\n"
+                f"近30天观看：{duration(s['seconds_30d'])}\n"
+                f"累计已记录：{duration(s['recorded_seconds'])}\n"
+                f"统计起点：{start}\n<i>窗口按会话开始时间归属，含当前播放的已采样时长。</i>")
+
     def _usage_text(self, member: dict[str, Any]) -> str:
-        """Quota, cap and activity on one screen, with a bar for traffic."""
-        quota = int(member.get("traffic_quota_bytes") or 0)
-        used = int(member.get("traffic_used_bytes") or 0)
-        percent = member.get("traffic_percent")
-        if percent is None and quota:
-            percent = round(used / quota * 100, 1)
-        lines = ["📊 <b>用量</b>\n"]
-        if quota:
-            lines.append(f"{_bar(percent)}  {float(percent or 0):.0f}%")
-            lines.append(f"{_fmt_bytes(used)} / {_fmt_bytes(quota)}")
-        else:
-            lines.append(f"本周期流量：{_fmt_bytes(used)}")
-            lines.append("未设置流量上限")
-        bw = int(member.get("bandwidth_limit_kbps") or 0)
-        streams = member.get("max_streams")
-        devices = member.get("max_devices")
-        device_count = member.get("device_count")
-        lines.append("")
-        if bw > 0:
-            lines.append(
-                f"带宽上限：{bw / 1000:.0f} Mbps" if bw >= 1000
-                else f"带宽上限：{bw} kbps")
-        else:
-            lines.append("带宽上限：不限")
-        if streams not in (None, ""):
-            lines.append(f"同时播放：{streams}")
-        if devices not in (None, ""):
-            extra = f"（已用 {device_count}）" if device_count not in (None, "") else ""
-            lines.append(f"设备上限：{devices}{extra}")
-        seen = member.get("last_seen_at")
-        lines.append(f"有效期：{_fmt_expiry(member.get('expires_at'))}")
-        lines.append(
-            f"最近活跃：{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}")
-        return "\n".join(lines)
+        lines = ["📊 <b>用量与观看</b>\n", *quota_lines(member), ""]
+        streams, devices = member.get('max_streams'), member.get('max_devices')
+        if streams not in (None, ''):
+            lines.append(f"同时播放：{streams} 路")
+        if devices not in (None, ''):
+            lines.append(f"已登记设备：{member.get('device_count', 0)} / {devices}")
+        lines.extend([f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}", "", self._watch_text(member)])
+        return '\n'.join(lines)
 
     # -- shop -----------------------------------------------------------------
 
@@ -1589,54 +1614,22 @@ class TelegramBot:
 
     def _create_request(self, kind: str, tg_user_id: str, tg_username: str,
                         wanted: str) -> bool:
-        if self._db is None or kind not in REQUEST_KINDS:
-            return False
-        existing = self._db.one(
-            "SELECT 1 AS x FROM tg_requests WHERE tg_user_id=? AND status='pending'",
-            (str(tg_user_id),))
-        if existing:
-            return False
-        self._db.execute(
-            "INSERT INTO tg_requests"
-            "(kind,tg_user_id,tg_username,wanted_username,status,created_at) "
-            "VALUES(?,?,?,?, 'pending', ?)",
-            (kind, str(tg_user_id), tg_username, wanted, int(time.time())))
-        return True
+        # Retired unverified claim/rebind entry point. Only authenticated
+        # Emby IDs may enter RebindingService.create().
+        return False
 
     def pending_requests(self, limit: int = 100) -> list[dict[str, Any]]:
         if self._db is None:
             return []
         return self._db.query(
-            "SELECT * FROM tg_requests WHERE status='pending' "
-            "ORDER BY created_at ASC LIMIT ?", (max(1, min(limit, 500)),))
+            "SELECT * FROM tg_requests WHERE status='pending' AND kind='rebind' "
+            "AND verified_at IS NOT NULL AND expires_at>? ORDER BY created_at ASC LIMIT ?",
+            (int(time.time()), max(1, min(limit, 500))))
 
     def review_request(self, request_id: int, approve: bool,
                        reviewer: str = "operator") -> dict[str, Any]:
-        """Approve or reject. Approving is what actually moves the linkage."""
-        if self._db is None:
-            raise KeyError(request_id)
-        row = self._db.one("SELECT * FROM tg_requests WHERE id=?", (request_id,))
-        if not row or row.get("status") != "pending":
-            raise KeyError(request_id)
-
-        if approve:
-            member = self._members.find_by_username(row["wanted_username"])
-            if not member:
-                self._db.execute(
-                    "UPDATE tg_requests SET status='rejected',reviewed_at=?,"
-                    "reviewed_by=?,note=? WHERE id=?",
-                    (int(time.time()), reviewer, "找不到该账号", request_id))
-                raise ValueError(f"找不到账号: {row['wanted_username']}")
-            self._members.bind_telegram(
-                member["emby_user_id"], row["tg_user_id"],
-                row.get("tg_username") or "", actor=reviewer)
-
-        self._db.execute(
-            "UPDATE tg_requests SET status=?,reviewed_at=?,reviewed_by=? WHERE id=?",
-            ("approved" if approve else "rejected", int(time.time()),
-             reviewer, request_id))
-        return {"id": request_id, "approved": approve,
-                "tg_user_id": row["tg_user_id"]}
+        """Retired: callers must use review_rebind with live presence checks."""
+        raise ValueError("认领已停用，请使用已验证的 TG 换绑审核。")
 
     # -- rankings -------------------------------------------------------------
 
@@ -2042,12 +2035,12 @@ class TelegramBot:
 
     def _user_admin_keyboard(self, user_id: str) -> list[list[dict[str, str]]]:
         return [
-            [{"text": "⏳ +30 天", "callback_data": "admin_renew:30"},
-             {"text": "⏳ 自定义续期", "callback_data": "admin_renew"}],
-            [{"text": "⭐ 移入白名单", "callback_data": "admin_pro"},
-             {"text": "↩ 移回默认组", "callback_data": "admin_rev"}],
-            [{"text": "💰 加减积分", "callback_data": "admin_score"},
-             {"text": "🗑 删除", "callback_data": "admin_rm"}],
+            [{"text": "⏳ 续期", "callback_data": "admin_renew"},
+             {"text": "👥 用户组", "callback_data": "admin_groups"}],
+            [{"text": "💰 调整积分", "callback_data": "admin_score"},
+             {"text": "📊 使用详情", "callback_data": "admin_usage"}],
+            [{"text": "🔗 绑定信息", "callback_data": "admin_binding"},
+             {"text": "🗑 删除账号", "callback_data": "admin_rm"}],
             [{"text": "◀ 返回管理", "callback_data": "admin"}],
         ]
 
@@ -2065,7 +2058,7 @@ class TelegramBot:
             f"👤 <b>{target.get('username') or '-'}</b>\n\n"
             f"状态：{self._status_label(target)}\n"
             f"用户组：{target.get('group_name') or '-'}\n"
-            f"有效期：{_fmt_expiry(target.get('expires_at'))}\n"
+            f"有效期：{_fmt_expiry(target.get('expires_at_effective', target.get('expires_at')))}\n"
             f"积分：{self._balance(user_id)}\n"
             f"注册渠道：{target.get('register_via') or 'legacy'}\n"
             f"邀请人：{inviter.get('username') or '—'}\n"
@@ -2074,7 +2067,8 @@ class TelegramBot:
             f"设备数：{devices}\n"
             f"最近活跃："
             f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}\n"
-            f"求片剩余：{self._remaining_text(left)}"
+            f"求片剩余：{self._remaining_text(left)}\n\n"
+            + self._usage_brief(target) + "\n\n" + self._watch_text(target)
         )
 
     def _hold_admin_user(self, chat_id: Any, target: dict[str, Any],
@@ -2209,7 +2203,7 @@ class TelegramBot:
 
     def _admin_held_target(self, chat_id: Any) -> tuple[dict[str, Any] | None, str]:
         waiting = self._pending.get(self._pkey(chat_id))
-        if not waiting or waiting[0] != "admin_user":
+        if not waiting or waiting[0] != "admin_user" or waiting[1] <= time.time():
             return None, ""
         extra = waiting[2] or {}
         target = self._members.get(str(extra.get("user_id") or ""))
@@ -2278,6 +2272,31 @@ class TelegramBot:
             return
         actor = actor or self._admin_actor(member or {}, "")
         user_id = str(target.get("emby_user_id"))
+        if data == "admin_usage":
+            await self._edit(chat_id, message_id, self._usage_text(target), self._user_admin_keyboard(user_id))
+            return
+        if data == "admin_binding":
+            await self._edit(chat_id, message_id,
+                f"🔗 <b>绑定信息</b>\n\n账号：{escape(str(target.get('username') or '—'))}\n"
+                f"Telegram ID：<code>{escape(str(target.get('tg_user_id') or '未绑定'))}</code>\n"
+                "更换 TG 由新 Telegram 私聊验证 Emby 密码后提交申请，管理员在绑定群审核。",
+                self._user_admin_keyboard(user_id))
+            return
+        if data == "admin_groups":
+            choices = [{'text': str(g['name']), 'callback_data': 'admin_group_pick:'+g['id']}
+                       for g in self._groups.list()] if self._groups else []
+            rows = [choices[i:i+2] for i in range(0, len(choices), 2)]
+            await self._edit(chat_id, message_id, "👥 <b>选择用户组</b>\n\n新组的计费方式生效；仍计时时默认保留期限。确认前会显示日期变化。", rows + [[{'text':'◀ 返回用户','callback_data':'admin_card'}]])
+            return
+        if data.startswith('admin_group_pick:'):
+            await self._preview_group_change(chat_id, target, actor, data.split(':',1)[1])
+            return
+        if data.startswith('admin_group_apply:'):
+            await self._apply_group_change(chat_id, message_id, target, actor, data)
+            return
+        if data == "admin_card":
+            await self._admin_show_user(chat_id, target, actor)
+            return
         if data == "admin_renew" or data.startswith("admin_renew:"):
             _, _, days_raw = data.partition(":")
             if days_raw.lstrip("-").isdigit():
@@ -2301,10 +2320,7 @@ class TelegramBot:
             if self._groups is not None:
                 with contextlib.suppress(Exception):
                     self._groups.ensure_whitelist()
-            self._members.upsert(user_id, str(target.get("username") or ""),
-                                 {"group_id": WHITELIST_GROUP_ID}, actor=actor)
-            fresh = self._members.get(user_id) or target
-            await self._admin_show_user(chat_id, fresh, actor)
+            await self._preview_group_change(chat_id, target, actor, WHITELIST_GROUP_ID)
             return
         if data == "admin_rev":
             default_id = self._groups.default_group_id() if self._groups else None
@@ -2312,10 +2328,7 @@ class TelegramBot:
                 await self._edit(chat_id, message_id, "没有设置默认用户组。",
                                  self._user_admin_keyboard(user_id))
                 return
-            self._members.upsert(user_id, str(target.get("username") or ""),
-                                 {"group_id": default_id}, actor=actor)
-            fresh = self._members.get(user_id) or target
-            await self._admin_show_user(chat_id, fresh, actor)
+            await self._preview_group_change(chat_id, target, actor, default_id)
             return
         if data == "admin_score":
             self._pending[self._pkey(chat_id)] = (
@@ -2365,8 +2378,7 @@ class TelegramBot:
                 and not self._member_for_chat(tg_user_id)):
             await self._start_registration(chat_id, tg_user_id, credential=token)
             return
-        body, keyboard = self._home(tg_user_id, tg_name)
-        await self._show(chat_id, body, keyboard)
+        await self._show_home(chat_id, tg_user_id, tg_name)
 
     async def _group_start(self, chat_id: Any, payload: str = "") -> None:
         link = self._private_link(payload if looks_like_credential(payload) else "")
@@ -2396,23 +2408,12 @@ class TelegramBot:
         return (
             f"👤 <b>{member.get('username') or '-'}</b>\n"
             f"状态：{self._status_label(member)}\n"
-            f"有效期：{_fmt_expiry(member.get('expires_at'))}\n"
+            f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}\n"
             f"{self._usage_brief(member)}"
         )
 
     def _usage_brief(self, member: dict[str, Any]) -> str:
-        quota = int(member.get("traffic_quota_bytes") or 0)
-        used = int(member.get("traffic_used_bytes") or 0)
-        percent = member.get("traffic_percent")
-        if percent is None and quota:
-            percent = round(used / quota * 100, 1)
-        if quota:
-            traffic = f"{_bar(percent)}  {float(percent or 0):.0f}%  {_fmt_bytes(used)} / {_fmt_bytes(quota)}"
-        else:
-            traffic = f"流量：{_fmt_bytes(used)}（未设上限）"
-        bw = int(member.get("bandwidth_limit_kbps") or 0)
-        cap = (f"{bw / 1000:.0f} Mbps" if bw >= 1000 else f"{bw} kbps") if bw > 0 else "不限"
-        return f"流量配额：{traffic}\n带宽上限：{cap}"
+        return '\n'.join(quota_lines(member))
 
     async def _expire_own_card(self, chat_id: Any, message_id: int,
                                delay: float = GROUP_BRIEF_TTL) -> None:
@@ -2448,8 +2449,13 @@ class TelegramBot:
         hours = 720 if int(hours) >= 168 else 24
         day = "● 近 24 小时" if hours <= 24 else "近 24 小时"
         month = "● 近 30 天" if hours > 24 else "近 30 天"
-        return [[{"text": day, "callback_data": "rank:24"},
+        rows = [[{"text": day, "callback_data": "rank:24"},
                  {"text": month, "callback_data": "rank:720"}]]
+        if not _GROUP.get():
+            rows += [[{"text": "💰 积分榜", "callback_data": "points_rank"},
+                      {"text": "🎞 热门影片", "callback_data": "titles_rank"}]]
+            rows += BACK_HOME
+        return rows
 
     @staticmethod
     def _private_chat(message: dict[str, Any]) -> bool:
@@ -2512,6 +2518,15 @@ class TelegramBot:
             keyboard = [[{"text": "打开私聊", "url": link}]] if link else None
             await self._show(chat_id, "请私聊我完成这项操作。", keyboard)
             return
+        if command == "claim":
+            await self._show(chat_id, "认领功能已停用，现有绑定用户直接使用即可。", self.guest_menu())
+            return
+        if command == "rebind":
+            await self._start_rebind(chat_id, tg_user_id)
+            return
+        if command == "cancel":
+            await self._show(chat_id, "已取消，未执行任何变更。", BACK_HOME)
+            return
         if command == "rank":
             hours = 24
             if args and args[0] in ("30", "720"):
@@ -2537,6 +2552,12 @@ class TelegramBot:
             keyboard = (self._with_admin_row(self.member_menu(), member)
                         if member else self.guest_menu())
             await self._show(chat_id, body, keyboard)
+            return
+        if command == "usage":
+            if member:
+                await self._show(chat_id, self._usage_text(member), BACK_HOME if not in_group else None)
+            elif not in_group:
+                await self._show(chat_id, "当前 Telegram 没有绑定账号。", self.guest_menu())
             return
         if command == "me":
             if not member:
@@ -2610,6 +2631,52 @@ class TelegramBot:
             return
         await self._admin_lookup(chat_id, args[0], actor)
 
+    async def _preview_group_change(self, chat_id: Any, target: dict, actor: str, group_id: str) -> None:
+        from app.modules.member_ops import group_preview
+        try:
+            preview = group_preview(self._members, str(target['emby_user_id']), group_id)
+        except (ValueError, KeyError, ConfigError) as exc:
+            await self._show(chat_id, escape(str(exc)), self.admin_menu())
+            return
+        nonce = secrets.token_hex(5)
+        group = self._groups.get(group_id)
+        signature = hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()
+        lines = [f"👥 <b>确认换组 · {escape(str(target.get('username') or '—'))}</b>\n",
+                 f"目标组：{escape(str(group['name']))}",
+                 f"原有效期：{_fmt_expiry(preview['current_expires_at_effective'])}",
+                 f"保留方案：{_fmt_expiry(preview['policies']['keep']['expires_at'])}",
+                 f"按组重算：{_fmt_expiry(preview['policies']['apply_group']['expires_at'])}",
+                 *[escape(w) for w in preview['warnings']],
+                 "历史用量、积分及其他个人权限保留。"]
+        buttons = [{'text':'✅ 确认（保留期限/按组取消计时）','callback_data':f'admin_group_apply:keep:{nonce}'}]
+        if group['billing_mode'] in ('time','both'):
+            buttons.append({'text':'按新组重算期限','callback_data':f'admin_group_apply:apply_group:{nonce}'})
+        await self._show(chat_id, '\n'.join(lines), [[b] for b in buttons]+[[{'text':'取消','callback_data':'admin_card'}]])
+        self._hold_admin_user(chat_id, target, actor)
+        self._pending[self._pkey(chat_id)][2]['group_confirm'] = {
+            'group_id':group_id, 'nonce':nonce, 'signature':signature,
+            'from_group':target.get('group_id'), 'from_expiry':target.get('expires_at_effective')}
+
+    async def _apply_group_change(self, chat_id: Any, message_id: int, target: dict, actor: str, data: str) -> None:
+        extra = self._pending[self._pkey(chat_id)][2]
+        saved = extra.get('group_confirm') or {}
+        parts = data.split(':')
+        if len(parts)!=3 or parts[1] not in ('keep','apply_group') or parts[2]!=saved.get('nonce'):
+            return
+        if extra.get('message_id') is not None and extra['message_id']!=message_id:
+            return
+        group = self._groups.get(saved.get('group_id') or '') if self._groups else None
+        signature = hashlib.sha256(json.dumps(group, sort_keys=True).encode()).hexdigest()
+        if (not group or signature!=saved.get('signature') or target.get('group_id')!=saved.get('from_group')
+                or target.get('expires_at_effective')!=saved.get('from_expiry')):
+            extra.pop('group_confirm',None)
+            await self._show(chat_id, '用户或用户组已变化，请重新预览。', self._user_admin_keyboard(str(target['emby_user_id'])))
+            return
+        extra.pop('group_confirm',None)
+        updated = self._members.upsert(str(target['emby_user_id']), str(target['username']),
+                                      {'group_id':group['id'],'expiry_policy':parts[1]},actor=actor)
+        await self._admin_show_user(chat_id, updated, actor)
+
     async def _move_group(self, chat_id: Any, actor: str, args: list[str],
                           group_id: str, label: str) -> None:
         target = await self._need_target(chat_id, args)
@@ -2623,12 +2690,7 @@ class TelegramBot:
             if not self._groups.get(group_id):
                 await self.send(chat_id, f"用户组 {group_id} 不存在。")
                 return
-        user_id = str(target.get("emby_user_id"))
-        self._members.upsert(user_id, str(target.get("username") or ""),
-                             {"group_id": group_id}, actor=actor)
-        await self.send(
-            chat_id,
-            f"✅ <b>{target.get('username')}</b> 已移入{label}。")
+        await self._preview_group_change(chat_id, target, actor, group_id)
 
     async def _cmd_prouser(self, chat_id: Any, actor: str,
                            args: list[str]) -> None:
@@ -2659,7 +2721,7 @@ class TelegramBot:
         await self.send(
             chat_id,
             f"✅ <b>{target.get('username')}</b> 已续期 {days} 天，"
-            f"现在{_fmt_expiry(updated.get('expires_at'))}。")
+            f"现在{_fmt_expiry(updated.get('expires_at_effective', updated.get('expires_at')))}。")
 
     async def _cmd_renewall(self, chat_id: Any, actor: str,
                             args: list[str]) -> None:
@@ -3053,16 +3115,12 @@ class TelegramBot:
                 member = self._member_for_chat(tg_user_id)
                 await self._admin_handle_text(chat_id, member, kind, extra, text)
                 return
+            if kind == "rebind_verify":
+                await self._submit_rebind(message, chat_id, tg_user_id, tg_username, text)
+                return
             if kind == "claim":
                 self._pending.pop(self._pkey(chat_id), None)
-                created = self._create_request(
-                    extra.get("request_kind", "bind"), tg_user_id,
-                    tg_username, text.strip())
-                await self._show(
-                    chat_id,
-                    "📨 已提交申请，等待管理员确认。" if created
-                    else "你已经有一条待处理的申请了，请耐心等待。",
-                    self.guest_menu())
+                await self._show(chat_id, "认领已停用。已绑定用户直接使用；更换 TG 请申请换绑。", self.guest_menu())
                 return
 
         # Commands are dispatched after the pending-conversation check above,
@@ -3081,8 +3139,7 @@ class TelegramBot:
             await self._start_registration(chat_id, tg_user_id, credential=text)
             return
 
-        body, keyboard = self._home(tg_user_id, tg_name)
-        await self._show(chat_id, body, keyboard)
+        await self._show_home(chat_id, tg_user_id, tg_name)
 
     async def _handle_callback(self, callback: dict[str, Any]) -> None:
         data = str(callback.get("data") or "")
@@ -3138,15 +3195,23 @@ class TelegramBot:
     async def _run_bound_callback(self, data: str, chat_id: Any, message_id: Any,
                                    callback_id: str, tg_user_id: str, tg_name: str,
                                    message: dict[str, Any], in_group: bool) -> None:
+        if data.startswith("tg_rebind_review:"):
+            if in_group:
+                await self._review_rebind_callback(data, chat_id, message_id, tg_user_id, callback_id)
+            else:
+                await self._answer_callback(callback_id, "请在绑定群审核。")
+            return  # independent review cards must never become personal menus
         owner = self._card_owner(chat_id, message_id)
         if in_group and owner and owner != str(tg_user_id):
             return
-        if in_group and data in ("register", "claim", "resetpw", "me_nodes",
-                                 "req_new", "transfer", "shop", "invites"):
+        if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes",
+                                 "req_new", "request_center", "watch_recent", "transfer", "shop", "invites"):
             return
         if in_group and data.startswith("resetpw"):
             return
         self._touch_panel(chat_id, message_id)
+        if message.get('photo'):
+            self._photo_panels.add((str(chat_id), int(message_id)))
 
         # Re-read binding state on every tap: the member could have been
         # unlinked from the panel while this keyboard sat on their screen.
@@ -3160,13 +3225,11 @@ class TelegramBot:
             await self._start_registration(chat_id, tg_user_id)
             return
         if data == "claim":
-            self._pending[self._pkey(chat_id)] = (
-                "claim", time.time() + PENDING_TTL, {"request_kind": "bind"})
-            await self._edit(
-                chat_id, message_id,
-                "🔗 <b>认领已有账号</b>\n\n请发送你在影视库里的<b>用户名</b>。\n\n"
-                "<i>管理员确认后会关联到这个 Telegram。发送 /start 可取消。</i>",
-                BACK_HOME)
+            self._pending.pop(self._pkey(chat_id), None)
+            await self._edit(chat_id, message_id, "认领功能已停用。已绑定用户直接使用；更换 TG 请申请换绑。", self.guest_menu())
+            return
+        if data == "rebind":
+            await self._start_rebind(chat_id, tg_user_id)
             return
         if data == "help":
             await self._edit(
@@ -3180,8 +3243,7 @@ class TelegramBot:
             return
         if data == "home":
             self._pending.pop(self._pkey(chat_id), None)
-            body, keyboard = self._home(tg_user_id, tg_name)
-            await self._edit(chat_id, message_id, body, keyboard)
+            await self._show_home(chat_id, tg_user_id, tg_name)
             return
         if data == "admin_ok":
             waiting = self._pending.get(self._pkey(chat_id))
@@ -3245,8 +3307,9 @@ class TelegramBot:
                 "✅ <b>预授权注册</b>\n\n请发送对方的 Telegram 数字 ID。",
                 [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
             return
-        if data.startswith("admin_renew") or data in (
-                "admin_pro", "admin_rev", "admin_score", "admin_rm"):
+        if data.startswith(("admin_renew", "admin_group_pick:", "admin_group_apply:")) or data in (
+                "admin_pro", "admin_rev", "admin_score", "admin_rm",
+                "admin_usage", "admin_binding", "admin_groups", "admin_card"):
             await self._admin_user_action(chat_id, message_id, member, data)
             return
         if data == "top" or data.startswith("top:"):
@@ -3255,8 +3318,24 @@ class TelegramBot:
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
                     days = 30 if int(tail) >= 30 else 1
-            await self._edit(chat_id, message_id, self._rankings_text(days),
-                             self._rankings_keyboard(days, member))
+            hours = 720 if days >= 30 else 24
+            await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
+                             self._watch_rankings_keyboard(hours))
+            return
+        if data in ('points_rank', 'titles_rank'):
+            if in_group:
+                return
+            lines = ['💰 <b>积分榜</b>\n'] if data == 'points_rank' else ['🎞 <b>近30天热门影片</b>\n']
+            rows = []
+            if data == 'points_rank' and self._points:
+                rows = self._points.top(limit=10)
+                lines += [f"{i}. {escape(str(r.get('username') or '—'))} · {int(r.get('balance') or 0)} 分" for i, r in enumerate(rows, 1)]
+            if data == 'titles_rank' and self._stats:
+                rows = self._stats.top_titles(days=30, limit=10)
+                lines += [f"{i}. {escape(str(r.get('title') or '—'))} · {r.get('plays', 0)} 次" for i, r in enumerate(rows, 1)]
+            if not rows:
+                lines += ['暂无排行数据。']
+            await self._edit(chat_id, message_id, '\n'.join(lines), [[{'text':'◀ 返回观看榜','callback_data':'rank'}]])
             return
         if data == "rank" or data.startswith("rank:"):
             hours = 24
@@ -3288,7 +3367,7 @@ class TelegramBot:
                 f"📋 <b>{member.get('username') or '-'}</b>\n\n"
                 f"状态：{self._status_label(member)}\n"
                 f"用户组：{member.get('group_name') or '默认'}\n"
-                f"有效期：{_fmt_expiry(member.get('expires_at'))}\n"
+                f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}\n"
                 f"备注：{member.get('note') or '—'}",
                 self.info_menu())
             return
@@ -3330,6 +3409,11 @@ class TelegramBot:
         if data == "orders":
             await self._orders_view(chat_id, message_id, member)
             return
+        if data == "request_center":
+            await self._edit(chat_id, message_id, "🎬 <b>求片中心</b>\n\n提交想看的影片，或查看已有求片进度。", [
+                [{"text": "➕ 发起求片", "callback_data": "req_new"},
+                 {"text": "📋 我的求片", "callback_data": "my_requests"}], *BACK_HOME])
+            return
         if data == "req_new":
             await self._request_start(chat_id, message_id, member)
             return
@@ -3350,7 +3434,7 @@ class TelegramBot:
                 _as_request_id(data), done=data.startswith("req_done:"))
             return
         if data == "expiry":
-            expires = member.get("expires_at")
+            expires = member.get("expires_at_effective", member.get("expires_at"))
             when = time.strftime("%Y-%m-%d", time.localtime(expires)) if expires else "永久有效"
             await self._edit(
                 chat_id, message_id,
@@ -3373,8 +3457,15 @@ class TelegramBot:
             await self._edit(chat_id, message_id, text, self.info_menu())
             return
         if data == "usage":
-            await self._edit(chat_id, message_id, self._usage_text(member),
-                             self.info_menu())
+            await self._edit(chat_id, message_id, self._usage_text(member), [
+                [{"text": "🎞 最近观看", "callback_data": "watch_recent"},
+                 {"text": "🔄 更新数据", "callback_data": "usage"}], *BACK_HOME])
+            return
+        if data == "watch_recent":
+            rows = self._stats.recent_watches(str(member['emby_user_id'])) if self._stats and hasattr(self._stats, 'recent_watches') else []
+            lines = ["🎞 <b>最近观看</b>\n"]
+            lines += [f"{escape(str(r.get('series_name') or r.get('item_name') or '未命名'))} · {duration(r['seconds'])}" for r in rows]
+            await self._edit(chat_id, message_id, '\n'.join(lines) if rows else "暂无观看记录。", [[{"text": "◀ 返回用量与观看", "callback_data": "usage"}]])
             return
         if data in ("invites", "invite_new"):
             await self._invites_view(chat_id, message_id, member, mint=data == "invite_new")
@@ -3545,7 +3636,7 @@ class TelegramBot:
                 member,
                 "⏳ <b>有效期提醒</b>\n\n"
                 f"账号 <b>{member.get('username') or '-'}</b> "
-                f"{_fmt_expiry(member.get('expires_at'))}。\n"
+                f"{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}。\n"
                 "需要续期请联系管理员。")
             sent += 1 if ok else 0
         return sent

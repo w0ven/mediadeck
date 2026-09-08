@@ -300,7 +300,7 @@ async def _startup() -> None:
     app.state.metering = MeasuredMeteringService(
         app.state.db,
         tag_to_user=_tag_map,
-        expected_nodes=lambda: [n.name for n in app.state.settings_service.nodes()],
+        expected_nodes=lambda: [n.name for n in app.state.settings_service.nodes() if n.enabled],
     )
     app.state.members.bind_metering(
         app.state.metering,
@@ -326,6 +326,7 @@ async def _startup() -> None:
     app.state.usage = UsageSampler(
         app.state.db, app.state.members, app.state.emby, app.state.enforcement,
         sharing=app.state.sharing)
+    app.state.stats.bind_live_watch(app.state.usage.live_watch)
 
     image_cfg = app.state.settings_service.image_cache_config()
     app.state.images = ImageCache(
@@ -2345,12 +2346,11 @@ async def telegram_verify() -> dict[str, Any]:
 
 @app.get("/api/telegram/requests", dependencies=[Depends(_auth)])
 async def telegram_requests() -> list[dict[str, Any]]:
-    """Claim and rebind requests awaiting a decision.
+    """Verified rebind requests awaiting a decision.
 
-    Registration never appears here: the chat itself proves who is asking, so
-    a brand-new account needs no review. These two do, because both are
-    attempts to take control of an account the requester cannot otherwise
-    prove they own.
+    Registration is credential-gated and does not enter this queue. Old
+    claiming is retired; only password-verified Telegram reassignment awaits
+    the administrator's decision here or on its independent group card.
     """
     return app.state.telegram.pending_requests()
 
@@ -2361,18 +2361,12 @@ async def telegram_request_review(request_id: int,
                                   user: str = Depends(_auth)) -> dict[str, Any]:
     approve = bool(payload.get("approve", False))
     try:
-        result = app.state.telegram.review_request(request_id, approve, reviewer=user)
+        result = await app.state.telegram.review_rebind(request_id, approve, reviewer=user)
     except KeyError:
         raise HTTPException(404, "request not found") from None
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from None
-    # Tell the requester either way: silence reads as the operator ignoring
-    # them, and they open a second request.
-    with contextlib.suppress(Exception):
-        await app.state.telegram.send(
-            result["tg_user_id"],
-            "✅ 申请已通过，账号已关联到这个 Telegram。" if approve
-            else "❌ 申请未通过，如有疑问请联系管理员。")
+    # review_rebind updates independent group cards and notifies once.
     return result
 
 

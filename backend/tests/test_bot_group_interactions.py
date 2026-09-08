@@ -292,8 +292,13 @@ def test_group_renew_and_score_accept_reply_or_args(bot):
     run(bot._handle_message(_msg("/score alice +8")))
     assert bot.points.balance("u1") == 8
     run(bot._handle_message(_msg("/prouser alice")))
+    key = f'g:{GROUP}:0:{ADMIN}'
+    saved = bot._pending[key][2]['group_confirm']
+    run(bot._handle_callback(_cb('admin_group_apply:keep:'+saved['nonce'], mid=bot._panel[key])))
     assert bot.members.get("u1")["group_id"] == "whitelist"
     run(bot._handle_message(_msg("/revuser alice")))
+    saved = bot._pending[key][2]['group_confirm']
+    run(bot._handle_callback(_cb('admin_group_apply:apply_group:'+saved['nonce'], mid=bot._panel[key])))
     assert bot.members.get("u1")["group_id"] == "standard"
 
 

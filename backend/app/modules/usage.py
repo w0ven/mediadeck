@@ -259,6 +259,11 @@ class UsageSampler:
                     "last_seen_at=? WHERE emby_user_id=?",
                     (chunk, int(now), user_id))
 
+    def live_watch(self) -> list[dict[str, Any]]:
+        """Already sampled active-session time; querying does not advance clocks."""
+        return [{k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds')}
+                for state in self._live.values()]
+
     def live_speeds(self) -> dict[str, int]:
         """session id -> bytes/second over the last sample window."""
         return {sid: int(s.get("speed_bps") or 0)

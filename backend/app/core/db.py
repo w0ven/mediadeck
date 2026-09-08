@@ -186,6 +186,13 @@ CREATE TABLE IF NOT EXISTS tg_requests (
     reviewed_by     TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_tgreq_status ON tg_requests(status, created_at);
+CREATE TABLE IF NOT EXISTS tg_rebind_attempts (
+    tg_user_id TEXT PRIMARY KEY, window_at INTEGER NOT NULL, attempts INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tg_rebind_notices (
+    request_id INTEGER NOT NULL, chat_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+    PRIMARY KEY(request_id, chat_id)
+);
 
 -- Plugin run history. Append-heavy, so it lives here rather than in the
 -- settings document, which is rewritten in full on every save.
@@ -276,6 +283,22 @@ CREATE TABLE IF NOT EXISTS play_events (
 CREATE INDEX IF NOT EXISTS idx_play_user ON play_events(emby_user_id);
 CREATE INDEX IF NOT EXISTS idx_play_started ON play_events(started_at);
 CREATE INDEX IF NOT EXISTS idx_play_item ON play_events(item_id);
+
+-- Durable lifetime recorded seconds; pruning detail must not reset this total.
+CREATE TABLE IF NOT EXISTS watch_totals (
+    emby_user_id TEXT PRIMARY KEY, seconds INTEGER NOT NULL DEFAULT 0,
+    first_at INTEGER NOT NULL, last_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watch_legacy_baselines (
+    emby_user_id TEXT PRIMARY KEY, seconds INTEGER NOT NULL,
+    first_at INTEGER NOT NULL, cutoff_at INTEGER NOT NULL, source TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watch_legacy_events (
+    event_id TEXT PRIMARY KEY, emby_user_id TEXT NOT NULL, seconds INTEGER NOT NULL,
+    started_at INTEGER NOT NULL, ended_at INTEGER NOT NULL, source TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_legacy_watch_user_time ON watch_legacy_events(emby_user_id,started_at);
+CREATE INDEX IF NOT EXISTS idx_legacy_watch_time ON watch_legacy_events(started_at);
 
 -- Every enforcement action, so "why was this account disabled" always has an
 -- answer. Billing disputes are unanswerable without this.
@@ -634,6 +657,33 @@ class Database:
                 "ON admin_grants(gift_code) WHERE gift_code IS NOT NULL")
             self._reshape_measured_watermarks()
             self._reshape_meter_policy_ack()
+            for field, ddl in (
+                ("emby_user_id", "TEXT NOT NULL DEFAULT ''"),
+                ("old_tg_user_id", "TEXT NOT NULL DEFAULT ''"),
+                ("verified_at", "INTEGER"), ("expires_at", "INTEGER"),
+            ):
+                self._ensure_column("tg_requests", field, ddl)
+            # Retain the old request history; no legacy claim can approve a binding.
+            self._conn.execute(
+                "UPDATE tg_requests SET status='closed',note='认领功能已停用；请勿重新认领',"
+                "reviewed_at=CAST(strftime('%s','now') AS INTEGER),reviewed_by='migration' "
+                "WHERE status='pending' AND (kind='bind' OR verified_at IS NULL)")
+            if not self._conn.execute("SELECT 1 FROM meta WHERE key='watch_totals_seeded'").fetchone():
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO watch_totals SELECT emby_user_id,SUM(MAX(seconds,0)),"
+                    "MIN(started_at),MAX(ended_at) FROM play_events GROUP BY emby_user_id")
+                self._conn.execute("INSERT INTO meta(key,value) VALUES('watch_totals_seeded','1')")
+            self._conn.execute("""
+                CREATE TRIGGER IF NOT EXISTS watch_event_recorded AFTER INSERT ON play_events
+                BEGIN
+                    INSERT INTO watch_totals(emby_user_id,seconds,first_at,last_at)
+                    VALUES(NEW.emby_user_id,MAX(NEW.seconds,0),NEW.started_at,NEW.ended_at)
+                    ON CONFLICT(emby_user_id) DO UPDATE SET
+                        seconds=watch_totals.seconds+MAX(NEW.seconds,0),
+                        first_at=MIN(watch_totals.first_at,NEW.started_at),
+                        last_at=MAX(watch_totals.last_at,NEW.ended_at);
+                END;
+            """)
             self._conn.commit()
 
     def _retire_legacy_redeem_codes(self) -> None:

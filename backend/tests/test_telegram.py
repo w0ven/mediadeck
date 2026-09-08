@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -252,16 +253,16 @@ def test_guest_and_member_see_different_menus() -> None:
     member_actions = {b.get("callback_data") for row in member_keys for b in row}
     member_actions.discard(None)
 
-    # A guest can only register or claim; member-only views are absent.
+    # Guests register or request verified reassignment; no legacy claiming.
     assert "register" in guest_actions
-    assert "claim" in guest_actions
+    assert "rebind" in guest_actions and "claim" not in guest_actions
     assert "devices" not in guest_actions
 
     # A member is past that step and must not be offered it again.
     assert "register" not in member_actions
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
-    assert {"me", "bag", "top", "me_nodes", "rules"} <= member_actions
+    assert {"me", "bag", "rank", "usage", "me_nodes", "rules"} <= member_actions
     assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
@@ -461,29 +462,29 @@ class _ReqDb:
                     r["status"] = params[0]
 
 
-def test_a_claim_becomes_a_pending_request_not_an_instant_link() -> None:
+def test_retired_claim_does_not_create_a_request_or_link() -> None:
     members, db = _FakeMembers(), _ReqDb()
     bot = _bot(members, db=db)
-    assert bot._create_request("bind", "42", "tguser", "oldaccount") is True
+    assert bot._create_request("bind", "42", "tguser", "oldaccount") is False
     assert members.bound == [], "claiming must not link before review"
-    assert len(bot.pending_requests()) == 1
+    assert len(bot.pending_requests()) == 0
 
 
-def test_a_second_request_from_one_chat_is_refused() -> None:
+def test_repeated_legacy_claim_attempts_are_refused() -> None:
     bot = _bot(db=_ReqDb())
-    assert bot._create_request("bind", "42", "u", "acct") is True
+    assert bot._create_request("bind", "42", "u", "acct") is False
     assert bot._create_request("bind", "42", "u", "other") is False
 
 
-def test_approving_links_the_account() -> None:
+def test_retired_review_entry_cannot_link_an_account() -> None:
     members, db = _FakeMembers(), _ReqDb()
     members.upsert("emby-old", "oldaccount", {})
     bot = _bot(members, db=db)
     bot._create_request("bind", "42", "tguser", "oldaccount")
 
-    result = bot.review_request(1, approve=True, reviewer="admin")
-    assert result["approved"] is True
-    assert members.bound == [("emby-old", "42", "tguser")]
+    with pytest.raises(ValueError, match='认领已停用'):
+        bot.review_request(1, approve=True, reviewer="admin")
+    assert members.bound == []
 
 
 def test_rejecting_links_nothing() -> None:
@@ -492,7 +493,8 @@ def test_rejecting_links_nothing() -> None:
     bot = _bot(members, db=db)
     bot._create_request("bind", "42", "tguser", "oldaccount")
 
-    bot.review_request(1, approve=False, reviewer="admin")
+    with pytest.raises(ValueError, match='认领已停用'):
+        bot.review_request(1, approve=False, reviewer="admin")
     assert members.bound == []
 
 
@@ -511,12 +513,10 @@ def test_a_request_cannot_be_reviewed_twice() -> None:
     members.upsert("emby-old", "acct", {})
     bot = _bot(members, db=db)
     bot._create_request("bind", "42", "u", "acct")
-    bot.review_request(1, approve=True)
-    try:
-        bot.review_request(1, approve=True)
-    except KeyError:
-        return
-    raise AssertionError("a settled request should not be reviewable again")
+    for _ in range(2):
+        with pytest.raises(ValueError, match='认领已停用'):
+            bot.review_request(1, approve=True)
+    assert members.bound == []
 
 
 # -- rankings ---------------------------------------------------------------
@@ -914,14 +914,14 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     bot = _points_bot(enabled={"checkin", "points_transfer"})
     rows = bot.member_menu()
 
-    assert _actions(rows) == {"me", "me_nodes", "bag", "req_new", "top",
-                              "rules", "checkin", "transfer"}
+    assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
+                              "rules", "usage", "help"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "me_status", "me_points", "devices", "usage", "resetpw",
         "my_requests", "home"}
-    assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home"}
+    assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home", "checkin", "transfer"}
 
 
 def test_the_backpack_holds_invites_shop_and_history() -> None:
@@ -1214,7 +1214,7 @@ def test_guest_menu_hides_register_when_every_channel_is_closed() -> None:
                     "allow_redeem": False})
     body, keys = bot._home("1", "Ada")
     assert "register" not in _actions(keys)
-    assert "claim" in _actions(keys)
+    assert "rebind" in _actions(keys) and "claim" not in _actions(keys)
     assert "暂停注册" in body
     assert "没有账号" not in body
 
@@ -1348,10 +1348,10 @@ def test_usage_shows_a_quota_bar_and_caps() -> None:
     }
     bot = _bot(_FakeMembers({"999": member}))
     text = bot._usage_text(member)
-    assert "50%" in text and "█" in text
+    assert "50.0%" in text and "▰" in text
     assert "20 Mbps" in text
     assert "同时播放：2" in text
-    assert "设备上限：3" in text
+    assert "已登记设备：1 / 3" in text
 
 
 def test_rankings_offer_today_and_thirty_days() -> None:
