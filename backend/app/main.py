@@ -2331,6 +2331,9 @@ async def telegram_save(payload: dict[str, Any] = Body(...),  # noqa: B008
     app.state.members.audit(
         user, "settings.telegram", "",
         f"enabled={saved['enabled']} token_set={saved['bot_token_set']}")
+    # Allowlist / identity changes must reinstall command scopes; the poll
+    # loop picks this up on the next pass without a process restart.
+    app.state.telegram.invalidate_commands()
     return {**saved, "status": app.state.telegram.status()}
 
 

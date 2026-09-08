@@ -151,6 +151,31 @@ class StatsService:
             "plays": int(r["plays"] or 0),
         } for r in rows]
 
+    def top_watchers(self, hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
+        """Rolling watch-time ranking from play_events, not calendar days or bytes."""
+        try:
+            hours = int(hours)
+        except (TypeError, ValueError):
+            hours = 24
+        hours = max(1, min(hours, 24 * MAX_DAYS))
+        since = int(time.time()) - hours * 3600
+        rows = self._db.query(
+            "SELECT p.emby_user_id,"
+            " COALESCE(NULLIF(m.username,''), NULLIF(p.username,''), p.emby_user_id) AS username,"
+            " SUM(p.seconds) AS secs, COUNT(*) AS plays"
+            " FROM play_events p LEFT JOIN members m ON m.emby_user_id=p.emby_user_id"
+            " WHERE p.started_at >= ?"
+            " GROUP BY p.emby_user_id"
+            " ORDER BY secs DESC, plays DESC LIMIT ?",
+            (since, max(1, min(int(limit), 50))))
+        return [{
+            "user_id": r["emby_user_id"],
+            "username": r["username"] or str(r["emby_user_id"])[:8],
+            "hours": round(int(r["secs"] or 0) / 3600, 1),
+            "seconds": int(r["secs"] or 0),
+            "plays": int(r["plays"] or 0),
+        } for r in rows]
+
     def top_titles(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
         since = int(time.time()) - days * 86400

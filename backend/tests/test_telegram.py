@@ -107,6 +107,29 @@ def test_settings_bounds_are_enforced() -> None:
                                json=bad).status_code >= 400, bad
 
 
+def test_group_interaction_allowlist_is_independent_and_empty_means_none() -> None:
+    with TestClient(app) as client:
+        cfg = client.get("/api/settings/telegram", auth=ADMIN).json()
+        assert cfg["group_interaction_chats"] == []
+        assert cfg["require_group"] == ""
+        saved = client.post("/api/settings/telegram", auth=ADMIN, json={
+            "bot_token": FAKE_CRED, "enabled": True,
+            "group_interaction_chats": ["-1003939238239", "@Club", "-1003939238239"],
+        }).json()
+        assert saved["group_interaction_chats"] == ["-1003939238239", "@Club"]
+        kept = client.post("/api/settings/telegram", auth=ADMIN,
+                           json={"register_days": 7}).json()
+        assert kept["group_interaction_chats"] == ["-1003939238239", "@Club"]
+        assert kept["register_days"] == 7
+        assert kept["require_group"] == ""
+        cleared = client.post("/api/settings/telegram", auth=ADMIN,
+                              json={"group_interaction_chats": []}).json()
+        assert cleared["group_interaction_chats"] == []
+        bad = client.post("/api/settings/telegram", auth=ADMIN,
+                          json={"group_interaction_chats": ["not a chat"]})
+        assert bad.status_code >= 400
+
+
 def test_scheduling_settings_moved_to_the_plugin_cards() -> None:
     """The ranking post and expiry reminder are plugins now.
 
