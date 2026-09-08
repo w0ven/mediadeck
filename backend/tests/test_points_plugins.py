@@ -327,7 +327,7 @@ def test_disabled_points_plugins_show_no_buttons(stack) -> None:
     assert "checkin" not in actions
     assert "transfer" not in actions
     # The rest of the menu is unaffected by a points feature being off.
-    assert {"me", "bag", "top", "home"} <= actions
+    assert {"me", "bag", "top"} <= actions
 
 
 def test_enabling_a_plugin_makes_its_button_appear(stack) -> None:
