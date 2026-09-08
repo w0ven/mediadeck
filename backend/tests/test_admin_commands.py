@@ -132,12 +132,13 @@ ALL_COMMANDS = [
 def test_a_non_admin_is_refused_every_command(bot, command) -> None:
     """A linked member without the role has no more power than a stranger."""
     reply = _run(bot, command, chat=PLAIN_CHAT, username="alice_tg")
+    assert "管理员命令" not in reply
     if command == "/help":
-        # /help is the one that stays useful: a member gets their own menu
-        # rather than a refusal for a command they may have typed by accident.
-        assert "管理员命令" not in reply
+        assert "使用说明" in reply
     else:
-        assert "无权限" in reply
+        # Ordinary members are pointed at the buttons, not told they lack power.
+        assert "无权限" not in reply
+        assert "下方按钮" in reply or "/start" in reply
 
 
 @pytest.mark.parametrize("command", ALL_COMMANDS)
@@ -150,7 +151,9 @@ def test_admin_is_the_role_not_a_configured_id(bot) -> None:
     """Dropping the role takes the power away immediately."""
     assert "root" in _run(bot, "/kk root")
     bot.members.set_roles("admin1", [], actor="test")
-    assert "无权限" in _run(bot, "/kk root")
+    reply = _run(bot, "/kk root")
+    assert "无权限" not in reply
+    assert "下方按钮" in reply
 
 
 @pytest.mark.parametrize("command", [

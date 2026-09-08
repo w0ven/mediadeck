@@ -238,11 +238,12 @@ def test_guest_and_member_see_different_menus() -> None:
     assert "register" not in member_actions
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
-    assert {"me", "bag", "top"} <= member_actions
+    assert {"me", "bag", "top", "me_nodes", "rules"} <= member_actions
     assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
-    assert {"devices", "usage", "me_points", "me_nodes", "resetpw"} <= info_actions
+    assert {"devices", "usage", "me_points", "resetpw"} <= info_actions
+    assert "me_nodes" not in info_actions
 
     assert "没有账号" in guest_body
     assert "someone" in member_body
@@ -890,12 +891,12 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     bot = _points_bot(enabled={"checkin", "points_transfer"})
     rows = bot.member_menu()
 
-    assert _actions(rows) == {"me", "bag", "checkin", "transfer", "req_new",
-                              "top"}
+    assert _actions(rows) == {"me", "me_nodes", "bag", "req_new", "top",
+                              "rules", "checkin", "transfer"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
-        "me_status", "me_points", "me_nodes", "devices", "usage", "resetpw",
+        "me_status", "me_points", "devices", "usage", "resetpw",
         "my_requests", "home"}
     assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home"}
 
@@ -1277,13 +1278,21 @@ def test_invite_view_shows_a_deeplink_when_the_bot_username_is_known() -> None:
     assert any("https://t.me/deckbot?start=ABCD2345" in t for t in edits)
 
 
-def test_member_home_shows_the_server_address() -> None:
+def test_member_home_does_not_put_the_server_on_the_front() -> None:
     member = {"emby_user_id": "u1", "username": "someone", "status": "active",
               "expires_at": int(time.time()) + 86400, "group_name": "标准"}
     bot = _bot(_FakeMembers({"999": member}))
-    body, _ = bot._home("999", "Friend")
-    assert "https://emby.example" in body
+    body, keys = bot._home("999", "Friend")
+    assert "https://emby.example" not in body
     assert "标准" in body
+    assert "请选择功能" in body
+    assert "me_nodes" in {b.get("callback_data") for row in keys for b in row}
+
+
+def test_the_line_view_shows_the_server_address() -> None:
+    bot = _bot()
+    text = asyncio.run(bot._nodes_text())
+    assert "https://emby.example" in text
 
 
 def test_member_help_is_not_a_permission_error() -> None:
@@ -1293,6 +1302,42 @@ def test_member_help_is_not_a_permission_error() -> None:
     asyncio.run(bot._handle_command(1, "999", "someone", "/help"))
     assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
     assert "使用说明" in bot.sent[-1]  # type: ignore[attr-defined]
+
+
+def test_unknown_member_commands_open_the_menu_instead_of_refusing() -> None:
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400}
+    bot = _bot(_FakeMembers({"999": member}))
+    asyncio.run(bot._handle_command(1, "999", "someone", "/kk alice"))
+    assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
+    assert "下方按钮" in bot.sent[-1]  # type: ignore[attr-defined]
+
+
+def test_usage_shows_a_quota_bar_and_caps() -> None:
+    member = {
+        "emby_user_id": "u1", "username": "someone", "status": "active",
+        "expires_at": int(time.time()) + 86400,
+        "traffic_used_bytes": 5 * 1024 ** 3,
+        "traffic_quota_bytes": 10 * 1024 ** 3,
+        "traffic_percent": 50,
+        "bandwidth_limit_kbps": 20000,
+        "max_streams": 2, "max_devices": 3, "device_count": 1,
+    }
+    bot = _bot(_FakeMembers({"999": member}))
+    text = bot._usage_text(member)
+    assert "50%" in text and "█" in text
+    assert "20 Mbps" in text
+    assert "同时播放：2" in text
+    assert "设备上限：3" in text
+
+
+def test_rankings_offer_today_and_thirty_days() -> None:
+    bot = _bot()
+    keys = bot._rankings_keyboard(1, None)
+    actions = {b.get("callback_data") for row in keys for b in row}
+    assert {"top:1", "top:30", "home"} <= actions
+    assert "今日观看排行" in bot._rankings_text(1)
+    assert "近 30 天观看排行" in bot._rankings_text(30)
 
 
 # -- response latency -------------------------------------------------------

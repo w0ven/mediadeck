@@ -92,7 +92,8 @@ def test_real_admin_commands_are_still_refused_for_members():
     """The permission gate itself must stay intact."""
     bot = _bot(_Members({"999": _member()}))
     asyncio.run(bot._handle_command(1, "999", "someone", "/renewall 30"))
-    assert "无权限" in bot.sent[-1]  # type: ignore[attr-defined]
+    assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
+    assert "下方按钮" in bot.sent[-1]  # type: ignore[attr-defined]
 
 
 def test_help_still_falls_back_to_home_for_members():
