@@ -83,6 +83,10 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     "max_users": 0,
     # Chat id or @name a user must belong to before registering. Empty = open.
     "require_group": "",
+    # Groups the bot may answer in. Independent of require_group: an empty
+    # list is not "every group", it is none. Numeric chat ids preferred;
+    # @public handles are accepted for the same operator convenience.
+    "group_interaction_chats": [],
     # Shown to a new member alongside their credentials; without it they have
     # a username and password and nowhere to use them.
     "emby_public_url": "",
@@ -150,6 +154,55 @@ def _abs_path(value: str, field: str) -> str:
     if not value.startswith("/"):
         raise ConfigError(f"{field} 必须是绝对路径（以 / 开头）")
     return value
+
+
+def parse_group_interaction_chats(value: Any) -> list[str]:
+    """Normalise the group-interaction allowlist.
+
+    Empty means no groups, never every group. A string is split on commas
+    or whitespace so an operator can paste one chat id. Numeric ids are
+    kept as decimal strings; @handles stay as @handles.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        items = [value]
+    elif isinstance(value, str):
+        items = [part for part in re.split(r"[\s,]+", value) if part]
+    elif isinstance(value, (list, tuple)):
+        items = list(value)
+    else:
+        raise ConfigError("群交互白名单必须是聊天 ID 列表")
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item is None or item is False:
+            continue
+        if isinstance(item, bool):
+            raise ConfigError("群交互白名单条目无效")
+        if isinstance(item, (int, float)):
+            if int(item) != item:
+                raise ConfigError("群交互白名单条目必须是整数聊天 ID 或 @群用户名")
+            token = str(int(item))
+        else:
+            token = str(item).strip()
+        if not token:
+            continue
+        if token.startswith("@"):
+            handle = token[1:]
+            if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", handle):
+                raise ConfigError("群交互白名单 @群用户名格式不正确")
+            token = "@" + handle
+        elif re.fullmatch(r"-?\d{1,20}", token):
+            token = str(int(token))
+        else:
+            raise ConfigError("群交互白名单条目必须是整数聊天 ID 或 @群用户名")
+        if token not in seen:
+            seen.add(token)
+            out.append(token)
+        if len(out) > 64:
+            raise ConfigError("群交互白名单最多 64 个群")
+    return out
 
 
 class SettingsService:
@@ -526,6 +579,11 @@ class SettingsService:
             cfg["max_users"] = 0
         for key in ("default_group_id", "require_group", "emby_public_url"):
             cfg[key] = str(cfg[key] or "").strip()
+        try:
+            cfg["group_interaction_chats"] = parse_group_interaction_chats(
+                cfg.get("group_interaction_chats"))
+        except ConfigError:
+            cfg["group_interaction_chats"] = []
         return cfg
 
     def telegram_public(self) -> dict[str, Any]:
@@ -584,6 +642,11 @@ class SettingsService:
         if emby_url:
             emby_url = _require_http_url(emby_url, "Emby 对外地址")
 
+        if "group_interaction_chats" in payload:
+            chats = parse_group_interaction_chats(payload.get("group_interaction_chats"))
+        else:
+            chats = list(current.get("group_interaction_chats") or [])
+
         self._store.set_section("telegram", {
             "enabled": enabled,
             "bot_token": token,
@@ -594,6 +657,7 @@ class SettingsService:
             "max_users": max_users,
             "require_group": str(payload.get(
                 "require_group", current["require_group"]) or "").strip(),
+            "group_interaction_chats": chats,
             "emby_public_url": emby_url,
         })
         return self.telegram_public()
