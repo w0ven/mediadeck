@@ -171,3 +171,47 @@ function installWorkspaceNavigation() {
   matchMedia('(max-width:900px)').addEventListener('change', () => setWorkspaceMenu(false));
 }
 installWorkspaceNavigation();
+
+/* Rates are observations, not guesses from media bitrate. One binary byte unit everywhere. */
+const RATE_STALE_SECONDS = 15;
+function rateMarkup(bps, at, basis, windowSeconds, scope = '') {
+  const stamp = Number(at || 0), age = Date.now()/1000 - stamp;
+  if (bps == null || !Number.isFinite(Number(bps)) || Number(bps) < 0 || !stamp || age < -5 || age > RATE_STALE_SECONDS) {
+    return `<span class="rate-unknown">${stamp ? '采样已过期' : '未实测'}</span>`;
+  }
+  const details = [scope, windowSeconds ? `约 ${Number(windowSeconds).toFixed(0)} 秒平均` : '采样窗口未提供', basis === 'collector' ? '源采样' : '探针读取（源时间未提供）'].filter(Boolean).join(' · ');
+  return `<span class="live-rate" data-rate-at="${stamp}" title="${esc(details)}"><b>${(Number(bps)/1048576).toFixed(2)} MiB/s</b><small>${esc(details)} · <span class="rate-age">${Math.max(0,Math.floor(age))} 秒前</span></small></span>`;
+}
+function egressValid(n) {
+  const stamp = Number(n.egress_sampled_at || n.last_success_ts || n.last_probe_ts || 0);
+  return n.ok !== false && n.egress_status !== 'unavailable' && n.egress_mbps != null && Number.isFinite(Number(n.egress_mbps)) && Number(n.egress_mbps) >= 0 && stamp && Date.now()/1000-stamp <= RATE_STALE_SECONDS;
+}
+function egressCell(n) {
+  if (!egressValid(n)) return '<span class="rate-unknown">出口未实测／采样失效</span>';
+  return rateMarkup(Number(n.egress_mbps)*1000000/8, n.egress_sampled_at || n.last_success_ts || n.last_probe_ts, n.egress_time_basis, n.egress_window_seconds, '整网卡出口');
+}
+function egressSummary(nodes) {
+  const wanted = nodes.filter(n => n.enabled !== false), known = wanted.filter(egressValid);
+  const text = !wanted.length ? '无启用节点' : !known.length ? '暂无有效实测' : rateMarkup(known.reduce((a,n)=>a+Number(n.egress_mbps)*1000000/8,0), Math.min(...known.map(n=>Number(n.egress_sampled_at || n.last_success_ts || n.last_probe_ts))), known.every(n=>n.egress_time_basis==='collector') ? 'collector' : 'probe_received', null);
+  return {text, sub: `启用节点整网卡 · ${known.length}/${wanted.length} 有效${known.length < wanted.length ? ' · 仅已知部分' : ''}；不等于播放之和`};
+}
+function ageLiveRates() {
+  document.querySelectorAll('.live-rate[data-rate-at]').forEach(el => {
+    const age = Math.max(0, Math.floor(Date.now()/1000-Number(el.dataset.rateAt)));
+    if (age > RATE_STALE_SECONDS) { el.textContent = '采样已过期'; el.classList.add('rate-unknown'); }
+    else { const label = el.querySelector('.rate-age'); if (label) label.textContent = `${age} 秒前`; }
+  });
+}
+setInterval(ageLiveRates, 1000);
+// Keep loaded artwork/failure fallback on SSE patches; a changed artwork key gets a new image.
+document.addEventListener('load', e => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('pc-art-image')) return;
+  img.closest('.pc-art').classList.add('loaded');
+  if (img.naturalWidth > img.naturalHeight) img.classList.add('landscape');
+}, true);
+document.addEventListener('error', e => {
+  const img = e.target;
+  if (!(img instanceof HTMLImageElement) || !img.classList.contains('pc-art-image')) return;
+  img.hidden = true; img.closest('.pc-art').classList.add('failed');
+}, true);

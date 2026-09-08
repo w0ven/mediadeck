@@ -4,6 +4,38 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — local live-bandwidth and playback-artwork acceptance fixes
+
+- Confirmed that the playback card fell back to a constant media-bitrate estimate
+  without a node measurement. Removed this fallback: unavailable/expired readings
+  remain unknown, while genuine measured zero and account-wide scope are explicit.
+- Node pool now subscribes to node SSE updates and patches stable cards without
+  losing draft parameters. Egress views use MiB/s consistently, identify whole-NIC
+  traffic, exclude disabled nodes from the enabled-fleet total and identify partial
+  coverage instead of presenting missing/failed measurements as zero or old peaks.
+- Concurrent probes update every three seconds. Source timestamps, collection
+  validity and averaging windows survive the adapter; the oldest contributing
+  sample controls account-rate freshness. Failed/expired known contributors do not
+  produce an apparently complete sum. Dispatch selection and billing logic remain
+  unchanged. Probe history capacity retains approximately three hours.
+- Local loadprobe source adds NIC/socket observation metadata and distinguishes
+  collection failure from a successful zero reading. Existing nodes without this
+  metadata remain compatible, explicitly labelled by probe-read time rather than
+  a fabricated collector timestamp. No remote node update was performed.
+- Episode cards use the series Primary image when present, preserving the actual
+  playback ItemId. Artwork has fixed proportions, contain fallback for landscape
+  stills, explicit error placeholders and stable image DOM across SSE changes.
+  Improved spacing, typography and mobile playback-card layout.
+- Validation: 13 new targeted regressions; full suite 1209 passed, 56 skipped.
+  Real Chromium additionally verifies poster identity, landscape contain, failed
+  images, stable image nodes, rate expiry, unit/scope labels, live node-pool updates
+  and preserved drafts, on desktop/mobile. JavaScript syntax/diff checks and lint
+  on the new backend/collector test scope passed.
+- Local acceptance only: no upstream push, deployment, remote configuration write,
+  service restart, billing change or production test traffic.
+
+---
+
 ## 2026-09-09 — local workspace and durable watch-time rebuild
 
 - Six primary workspaces retain 25 working pages in secondary navigation.

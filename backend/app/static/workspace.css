@@ -100,3 +100,23 @@ input::placeholder,textarea::placeholder { color:#8a9ab0; }
   .config-nav::-webkit-scrollbar{height:3px;} #view{padding-bottom:calc(24px + env(safe-area-inset-bottom));}
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important;transition:none!important;scroll-behavior:auto!important; } }
+
+/* Playback artwork is a real poster, not a stretched episode still. */
+.play-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr));gap:14px;padding:16px; }
+.play-card { gap:18px;padding:18px;background:linear-gradient(135deg,var(--panel-2),var(--panel));border-radius:14px;align-items:flex-start; }
+.play-card .pc-poster { width:120px;flex:0 0 120px;aspect-ratio:2/3;align-self:flex-start; }
+.pc-art { position:relative;width:100%;height:100%;aspect-ratio:2/3;overflow:hidden;border-radius:10px;background:linear-gradient(145deg,#263748,#142330);box-shadow:0 6px 20px #0004; }
+.play-card .pc-poster .pc-art-image { position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:0;object-fit:contain;background:transparent; }
+.play-card .pc-poster .pc-art-image.landscape { object-fit:contain; }
+.pc-art-fallback { position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;color:var(--muted); }
+.pc-art-fallback > span { font-size:28px;opacity:.6; }.pc-art-fallback small {font-size:11px;}.pc-art.loaded .pc-art-fallback { display:none; }
+.pc-live { bottom:8px;font-size:10px;padding:4px 8px;background:#102e2beb;color:#9be6d8;border:1px solid #5e9a8e80;backdrop-filter:blur(5px); }
+.pc-live.paused { background:#282512ed;color:#e1d3a4;border-color:#877d5466; }
+.play-card .pc-bd { align-self:stretch;min-height:180px; }
+.play-card .pc-title { font-size:15px;line-height:1.45;white-space:normal;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical; }
+.play-card .pc-meta {font-size:11px;margin:5px 0 8px;}.play-card .pc-ov {-webkit-line-clamp:2;font-size:12px;margin:0 0 12px;}
+.play-card .pc-user {margin-top:auto;margin-bottom:8px;}.play-card .pc-user b {font-size:12px;}.play-card .pc-user span{font-size:11px;}
+.pc-speed {margin:0 0 12px;}.live-rate {display:inline-block;font-variant-numeric:tabular-nums;line-height:1.4;}
+.live-rate > b {font-weight:600;font-size:14px;white-space:nowrap;}.live-rate > small {display:block;font-size:10px;font-weight:400;color:var(--muted);line-height:1.6;margin-top:4px;letter-spacing:0;}
+.rate-unknown {font-size:12px!important;font-weight:400;color:var(--muted);letter-spacing:0;}.stat .live-rate > b {font-size:23px;}
+@media(max-width:600px) { .play-grid{padding:12px;}.play-card{padding:14px;gap:14px;}.play-card .pc-poster{width:88px;flex-basis:88px;}.play-card .pc-bd{min-height:150px;}.play-card .pc-title{font-size:14px;}.play-card .pc-ov{-webkit-line-clamp:2;font-size:11px;}.stat .live-rate > b{font-size:18px;} }

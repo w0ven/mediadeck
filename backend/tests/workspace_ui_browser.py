@@ -135,6 +135,52 @@ def main():
                     text = page.locator('#view').inner_text()
                     assert '本月实测流量' in text and '暂无实测记录' in text
                     page.screenshot(path=str(artifact_dir/'statistics-desktop.png'),full_page=True)
+                    # Playback quality: correct poster reference, landscape contain, failed image,
+                    # account-wide measured rate and stable artwork under live patches.
+                    poster_svg = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="600"><defs><linearGradient id="g" x2="0" y2="1"><stop stop-color="#172d52"/><stop offset="1" stop-color="#446d75"/></linearGradient></defs><rect width="400" height="600" fill="url(#g)"/><circle cx="285" cy="165" r="70" fill="#efca8c"/><path d="M0 450 130 250 250 470 330 330 400 450V600H0" fill="#102234"/><path d="M0 510 190 380 400 520V600H0" fill="#0a172a"/><text x="35" y="78" font-size="35" font-family="serif" letter-spacing="5" fill="#fff4d6">NIGHTFALL</text><text x="38" y="550" font-size="15" letter-spacing="7" fill="#bad4db">DEMO SERIES</text></svg>'
+                    ctx.route('**/emby/Items/series-art/Images/**', lambda r:r.fulfill(status=200,content_type='image/svg+xml',body=poster_svg))
+                    ctx.route('**/emby/Items/broken-art/Images/**', lambda r:r.fulfill(status=404,body=''))
+                    ctx.route('**/emby/Items/wide-art/Images/**', lambda r:r.fulfill(status=200,content_type='image/svg+xml',body=poster_svg.replace('width="400" height="600"','width="800" height="450"',1)))
+                    route('dashboard','.dashboard-focus')
+                    page.evaluate("live.src?.close(); live.pending.clear();")
+                    demo = {'Id':'poster-demo','UserId':'demo','UserName':'DemoViewer','Client':'Demo Player','Item':'第 03 集','SeriesName':'夜幕之下','ItemId':'episode-art','PosterItemId':'series-art','PosterKind':'series','ItemType':'Episode','Overview':'海报与播放信息分区展示，观看进度和实时实测各有清晰位置。','Paused':False,'ProgressPercent':38,'RunTimeTicks':36000000000,'PositionTicks':13680000000,'SpeedSource':'node','SpeedBps':2*1048576,'SpeedScope':'user','SpeedAccountSessions':2,'SpeedCollectedAt':time.time(),'SpeedTimeBasis':'collector','SpeedWindowSeconds':8}
+                    page.evaluate('(s)=>{PAGE_MODELS.dashboard.sessions=[s];paintDashboard(PAGE_MODELS.dashboard,pageContext("dashboard"));}',demo)
+                    page.locator('.pc-art.loaded').wait_for()
+                    assert '/series-art/' in page.locator('.pc-art-image').get_attribute('src')
+                    assert '2.00 MiB/s' in page.locator('.pc-speed').inner_text()
+                    assert '不可相加' in page.locator('.pc-speed').inner_text()
+                    page.evaluate('window.qualityImage=document.querySelector(".pc-art-image")')
+                    page.evaluate('()=>{PAGE_MODELS.dashboard.sessions[0].ProgressPercent=40;paintDashboard(PAGE_MODELS.dashboard,pageContext("dashboard",true));}')
+                    assert page.evaluate('window.qualityImage===document.querySelector(".pc-art-image")')
+                    page.screenshot(path=str(artifact_dir/'playback-poster-desktop.png'),full_page=True)
+                    page.evaluate('()=>{const s=PAGE_MODELS.dashboard.sessions[0];s.PosterItemId="wide-art";s.PosterAspectRatio=16/9;paintDashboard(PAGE_MODELS.dashboard,pageContext("dashboard",true));}')
+                    page.locator('.pc-art.loaded').wait_for()
+                    assert page.locator('.pc-art-image').evaluate('(el)=>getComputedStyle(el).objectFit')=='contain'
+                    page.evaluate('()=>{PAGE_MODELS.dashboard.sessions[0].PosterItemId="broken-art";paintDashboard(PAGE_MODELS.dashboard,pageContext("dashboard",true));}')
+                    page.locator('.pc-art.failed').wait_for()
+                    expect(page.locator('.pc-art-fallback')).to_be_visible()
+                    page.evaluate('()=>{document.querySelector(".live-rate").dataset.rateAt=(Date.now()/1000-30);ageLiveRates();}')
+                    assert '采样已过期' in page.locator('.pc-speed').inner_text()
+                    page.set_viewport_size({'width':390,'height':844})
+                    demo['SpeedCollectedAt']=time.time()
+                    page.evaluate('(s)=>{PAGE_MODELS.dashboard.sessions=[s];paintDashboard(PAGE_MODELS.dashboard,pageContext("dashboard"));}',demo)
+                    page.locator('.pc-art.loaded').wait_for()
+                    assert page.evaluate('document.documentElement.scrollWidth<=innerWidth+1')
+                    page.screenshot(path=str(artifact_dir/'playback-poster-mobile.png'),full_page=True)
+                    page.set_viewport_size({'width':1440,'height':1000})
+                    route('nodepool','.np-weight')
+                    page.evaluate('live.src?.close();live.pending.clear();')
+                    weight=page.locator('.np-weight').first
+                    weight.fill('321')
+                    page.evaluate('window.qualityWeight=document.querySelector(".np-weight")')
+                    page.evaluate('()=>{const data=PAGE_MODELS.nodepool.nodes.map(n=>({...n,ok:true,egress_status:"fresh",egress_mbps:8.388608,egress_sampled_at:Date.now()/1000,egress_time_basis:"collector",egress_window_seconds:8}));for(const h of LIVE_UPDATERS.get("nodepool"))h("nodes",data,pageContext("nodepool",true));}')
+                    assert page.evaluate('LIVE.nodepool.includes("nodes") && window.qualityWeight===document.querySelector(".np-weight")')
+                    expect(weight).to_have_value('321')
+                    assert '1.00 MiB/s' in page.locator('[data-live-key^="pool:"]').first.inner_text()
+                    page.evaluate('()=>{const data=PAGE_MODELS.nodepool.nodes.map(n=>({...n,ok:false,egress_status:"unavailable",egress_mbps:null}));for(const h of LIVE_UPDATERS.get("nodepool"))h("nodes",data,pageContext("nodepool",true));}')
+                    assert '暂无有效实测' in page.locator('#view').inner_text()
+                    expect(weight).to_have_value('321')
+                    print('PASS: poster selection/contain/fallback/stable SSE/mobile, rate expiry/units/scope, nodepool live update/draft preservation')
                     # Every existing low-frequency page remains reachable under its workspace.
                     ids = page.evaluate('NAV.flatMap(g=>g.items).map(it=>it.id)')
                     for name in ids:
@@ -161,7 +207,7 @@ def main():
                     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 1')
                     page.screenshot(path=str(artifact_dir/'overview-mobile.png'),full_page=True)
                     assert not errors, errors
-                    print(json.dumps({'ok':True,'pages':len(ids),'browser_errors':errors,'screenshots':7,'checked':['six_workspaces','one_playback_surface','scoped_saves','save_failure_keeps_input','cancel_navigation','cancel_refresh','logo_save_close','group_settings','verify_no_implicit_save','review_removed','watch_uncertainty','mobile']},ensure_ascii=False))
+                    print(json.dumps({'ok':True,'pages':len(ids),'browser_errors':errors,'screenshots':9,'checked':['six_workspaces','one_playback_surface','scoped_saves','save_failure_keeps_input','cancel_navigation','cancel_refresh','logo_save_close','group_settings','verify_no_implicit_save','review_removed','watch_uncertainty','mobile']},ensure_ascii=False))
                     browser.close()
         finally:
             server.should_exit=True

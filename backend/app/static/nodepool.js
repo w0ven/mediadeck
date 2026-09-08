@@ -15,7 +15,7 @@ function poolStateTag(n) {
 }
 
 function poolProbeAge(n) {
-  const ts = Number(n.last_probe_ts || 0);
+  const ts = Number(n.last_success_ts || n.last_probe_ts || 0);
   if (!ts) return '<span class="muted">从未成功</span>';
   const age = (Date.now() / 1000) - ts;
   const cls = age > 120 ? 'danger-text' : '';
@@ -27,7 +27,7 @@ function nodePoolCard(n) {
   const share = Math.round(Number(n.share || 0) * 100);
   const id = esc(n.name);
   return `
-  <div class="card">
+  <div class="card" data-live-key="pool:${id}">
     <div class="card-head">
       <div><h3>${esc(n.name)} ${poolStateTag(n)}</h3>
         <div class="sub">${esc(n.base_url || '')}</div></div>
@@ -38,8 +38,7 @@ function nodePoolCard(n) {
     <div class="card-body">
       <div class="stat-grid">
         ${stat('▶', n.active_streams || 0, '活跃流', '探针实时值')}
-        ${stat('⇅', (Number(n.egress_mbps || 0) / 8).toFixed(1), '出口 MB/s',
-    `占用率 ${util}%`)}
+        ${stat('⇅', egressCell(n), '出口带宽', `占用率 ${util}% · 包含非播放流量`)}
         ${stat('◔', poolProbeAge(n), '探针', n.ok ? '最近一次成功' : '当前失败')}
       </div>
       <div class="form-row"><label>参与调度</label>
@@ -62,35 +61,51 @@ function nodePoolCard(n) {
   </div>`;
 }
 
-PAGES.nodepool = async () => {
-  $('#view').innerHTML = pageLoading();
+PAGES.nodepool = async (context = pageContext('nodepool')) => {
+  renderView(pageLoading(), context);
   const [nodes, dispatch] = await Promise.all([
-    api('/api/nodes/pool').catch(() => []),
-    api('/api/settings/dispatch').catch(() => ({ policy: '-', load_threshold: 0 })),
+    api('/api/nodes/pool'), api('/api/settings/dispatch'),
   ]);
+  if (!context.isCurrent()) return;
+  PAGE_MODELS.nodepool = {nodes, dispatch};
+  paintNodePool(PAGE_MODELS.nodepool, context);
+};
+
+function paintNodePool(model, context) {
+  if (!context.isCurrent()) return;
+  const {nodes, dispatch} = model;
   const enabled = nodes.filter((n) => n.enabled);
   const online = nodes.filter((n) => n.available).length;
   const streams = nodes.reduce((a, n) => a + (n.active_streams || 0), 0);
-  const egress = nodes.reduce((a, n) => a + Number(n.egress_mbps || 0), 0);
+  const egress = egressSummary(nodes);
 
-  $('#view').innerHTML = `
+  renderView(`
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${nodes.length}`, '在线节点',
     `${enabled.length} 个参与调度`)}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
-      ${stat('⇅', (egress / 8).toFixed(1), '出口 MB/s', '节点实时出口')}
+      ${stat('⇅', egress.text, '出口带宽', egress.sub)}
       ${stat('⚖', dispatch.policy === 'affinity' ? '文件亲和' : '最低负载', '调度策略',
     `阈值 ${Math.round(Number(dispatch.load_threshold || 0) * 100)}%`)}
     </div>
     ${enabled.length ? '' : card('⚠ 没有节点参与调度', '所有节点都已停用',
     `<div class="card-body"><div class="muted">当前不会有任何播放被分流到节点，全部回退由 Emby 直供。</div></div>`)}
     ${nodes.length ? nodes.map(nodePoolCard).join('')
-    : `<div class="card"><div class="empty">尚未配置任何节点</div></div>`}`;
+    : `<div class="card"><div class="empty">尚未配置任何节点</div></div>`}`, context);
 
   document.querySelectorAll('.np-save').forEach((btn) => {
     btn.onclick = () => saveNodePool(btn.dataset.node);
   });
-};
+}
+registerLiveUpdater('nodepool', ['nodes'], (topic, payload, context) => {
+  const model = PAGE_MODELS.nodepool;
+  if (!model) return;
+  if (topic === 'nodes') {
+    const total = payload.filter(n=>n.enabled).reduce((a,n)=>a+Number(n.capacity || 0),0);
+    model.nodes = payload.map(n=>({...n,share:n.enabled && total ? Number(n.capacity || 0)/total : 0}));
+  }
+  if (topic === 'nodes') paintNodePool(model, context);
+});
 
 async function saveNodePool(name) {
   const pick = (cls) => document.querySelector(`.${cls}[data-node="${CSS.escape(name)}"]`);

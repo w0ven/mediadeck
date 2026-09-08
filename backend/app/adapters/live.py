@@ -443,6 +443,18 @@ class LiveEmby:
                     # a title where the poster should be.
                     "ItemId": item.get("Id"),
                     "ItemType": item.get("Type"),
+                    "PosterItemId": (item.get('SeriesId') if item.get('Type') == 'Episode'
+                                     and item.get('SeriesId') and item.get('SeriesPrimaryImageTag') else
+                                     item.get('ParentPrimaryImageItemId') or item.get('Id')),
+                    "PosterImageTag": (item.get('SeriesPrimaryImageTag') if item.get('Type') == 'Episode'
+                                       and item.get('SeriesId') and item.get('SeriesPrimaryImageTag') else
+                                       item.get('ParentPrimaryImageTag') or (item.get('ImageTags') or {}).get('Primary')),
+                    "PosterKind": ('series' if item.get('Type') == 'Episode'
+                                   and item.get('SeriesId') and item.get('SeriesPrimaryImageTag')
+                                   else 'item'),
+                    "PosterAspectRatio": (None if item.get('Type') == 'Episode'
+                                          and item.get('SeriesId') and item.get('SeriesPrimaryImageTag')
+                                          else item.get('PrimaryImageAspectRatio')),
                     "ProductionYear": item.get("ProductionYear"),
                     "Genres": (item.get("Genres") or [])[:2],
                     "Overview": item.get("Overview") or "",
@@ -565,10 +577,17 @@ class LiveProbe:
                 data = r.json()
                 speeds = data.get("user_speeds")
                 return {
-                    "ok": True,
+                    "ok": bool(data.get('ok', True)),
                     "active_streams": int(data.get("active_streams", 0)),
-                    "egress_mbps": float(data.get("egress_mbps", 0.0)),
+                    "egress_mbps": data.get("egress_mbps"),
+                    "egress_sampled_at": data.get('egress_sampled_at'),
+                    "egress_window_seconds": data.get('egress_window_seconds'),
+                    "egress_ok": data.get('egress_ok', data.get('egress_mbps') is not None),
                     "user_speeds": speeds if isinstance(speeds, dict) else {},
+                    "user_speeds_ok": data.get('user_speeds_ok', isinstance(speeds, dict)),
+                    "user_speeds_source": data.get('user_speeds_source') or 'legacy_socket',
+                    "user_speeds_sampled_at": data.get('user_speeds_sampled_at'),
+                    "user_speeds_window_seconds": data.get('user_speeds_window_seconds'),
                 }
         except (httpx.HTTPError, ValueError, KeyError):
             return {"ok": False, "active_streams": 0, "egress_mbps": 0.0,

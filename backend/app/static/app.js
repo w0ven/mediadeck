@@ -127,9 +127,9 @@ function fmtQuota(n) {
    Posters are addressed through the panel's own cached-image route, never
    Emby directly: a dashboard renders a dozen tiles and auto-refreshes, and
    Emby re-derives every thumbnail it is asked for. */
-function posterUrl(itemId, maxHeight) {
+function posterUrl(itemId, maxHeight, tag) {
   return `/emby/Items/${encodeURIComponent(itemId)}/Images/Primary`
-    + `?maxHeight=${maxHeight || 420}&quality=88`;
+    + `?maxHeight=${maxHeight || 420}&quality=88${tag ? '&tag=' + encodeURIComponent(tag) : ''}`;
 }
 function ticksToClock(ticks) {
   const total = Math.max(0, Math.floor(Number(ticks || 0) / 10000000));
@@ -175,18 +175,22 @@ const playCard = (s) => {
     ...(s.Genres || [])].filter(Boolean).join(' / ');
   return `
   <article class="play-card" data-live-key="session:${esc(s.Id)}">
-    <div class="pc-poster">
-      ${s.ItemId ? `<img src="${esc(posterUrl(s.ItemId, 300))}" alt="" loading="lazy">` : ''}
-      <span class="pc-live">${s.Paused ? '❚❚ 已暂停' : '● 播放中'}</span>
+    <div class="pc-poster" data-live-key="art:${esc(s.PosterItemId || s.ItemId || '')}:${esc(s.PosterImageTag || '')}">
+      <div class="pc-art" data-live-preserve>
+        <div class="pc-art-fallback"><span aria-hidden="true">▶</span><small>暂无海报</small></div>
+        ${s.PosterItemId || s.ItemId ? `<img class="pc-art-image${Number(s.PosterAspectRatio) > 1 ? ' landscape' : ''}" src="${esc(posterUrl(s.PosterItemId || s.ItemId, 420, s.PosterImageTag))}" alt="${esc((s.SeriesName || s.Item || '影片') + '海报')}" width="120" height="180" loading="lazy" decoding="async">` : ''}
+      </div>
+      <span class="pc-live ${s.Paused ? 'paused' : ''}">${s.Paused ? '❚❚ 已暂停' : '● 播放中'}</span>
     </div>
     <div class="pc-bd">
       <div class="pc-title">${esc(s.SeriesName ? `${s.SeriesName} · ${s.Item}` : (s.Item || '-'))}${s.ProductionYear ? `（${esc(s.ProductionYear)}）` : ''}</div>
       <div class="pc-meta">${esc(meta || '—')}</div>
-      <p class="pc-ov">${esc(s.Overview || '暂无简介')}</p>
+      ${s.Overview ? `<p class="pc-ov">${esc(s.Overview)}</p>` : ''}
       <div class="pc-user">
         <div class="avatar">${esc((s.UserName || '?').slice(0, 1).toUpperCase())}</div>
-        <div><b>${esc(s.UserName || '-')}</b><span>${esc(s.Client || '-')} · ${sessionSpeedCell(s)}</span></div>
+        <div><b>${esc(s.UserName || '-')}</b><span>${esc(s.Client || '-')}</span></div>
       </div>
+      <div class="pc-speed">${sessionSpeedCell(s)}</div>
       ${known ? `<div class="bar wide"><i style="width:${Math.min(100, pct)}%"></i></div>
       <div class="pc-time"><span>${esc(ticksToClock(s.PositionTicks))}</span>
         <b>${esc(pct)}%</b><span>${esc(ticksToClock(s.RunTimeTicks))}</span></div>`
@@ -196,14 +200,10 @@ const playCard = (s) => {
 };
 
 function sessionSpeedCell(s) {
-  const paused = s.Paused ? ' · 已暂停' : '';
-  const scope = s.SpeedScope === 'user' ? ' · 账号合计' : '';
-  if (s.SpeedBps == null || !Number.isFinite(Number(s.SpeedBps)) || s.SpeedSource === 'unknown') {
-    return `<span class="muted" title="${esc(s.SpeedReason || '没有新鲜的实际测量')}">未测${paused}</span>`;
-  }
-  const value = (Number(s.SpeedBps) / 1048576).toFixed(1);
-  if (s.SpeedSource === 'node') return `${esc(value)} MiB/s${scope}${paused}`;
-  return `<span title="按码率或已结束请求估算，不是实时实测">≈ ${esc(value)} MiB/s${scope}${paused}</span>`;
+  if (s.SpeedSource !== 'node') return '<span class="rate-unknown" title="没有有效节点实测；不使用媒体码率代替">未实测</span>';
+  const count = Number(s.SpeedAccountSessions || 1);
+  const scope = s.SpeedScope === 'user' ? `账号合计${count > 1 ? ` · ${count} 个会话共享，不可相加` : ''}` : '当前会话';
+  return rateMarkup(s.SpeedBps, s.SpeedCollectedAt, s.SpeedTimeBasis, s.SpeedWindowSeconds, scope);
 }
 function pageError(err) {
   return `<div class="card"><div class="page-error">
@@ -477,7 +477,7 @@ function paintNodes(model, context) {
   state.nodes = ns;
   const online = ns.filter((n) => n.available).length;
   const streams = ns.reduce((a, n) => a + (n.active_streams || 0), 0);
-  const egress = ns.reduce((a, n) => a + (n.egress_mbps || 0), 0);
+  const egress = egressSummary(ns);
   const policyLabel = dispatch.policy === 'affinity' ? '文件亲和' : '最低负载';
   const panelSet = !!(st.integration || {}).panel_public_url;
 
@@ -485,7 +485,7 @@ function paintNodes(model, context) {
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${ns.length}`, '在线节点', '可用于分发')}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
-      ${stat('⇅', (egress / 8).toFixed(1), '出口 MB/s', '节点实时出口')}
+      ${stat('⇅', egress.text, '出口带宽', egress.sub)}
       ${stat('⚖', policyLabel, '调度策略', dispatch.policy === 'affinity'
         ? `占用率阈值 ${Math.round(dispatch.load_threshold * 100)}%` : '按容量占用率择优')}
     </div>
@@ -529,7 +529,7 @@ function nodeCard(n) {
       </tr>`).join('')
     : '';
   return card(`⛁ ${n.name}`,
-    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · ${n.egress_mbps} Mbps`,
+    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · ${egressValid(n) ? (Number(n.egress_mbps)*1000000/8/1048576).toFixed(2) + ' MiB/s 整网卡出口' : '出口采样不可用'}`,
     `<div class="card-body">
       <div class="toolbar" style="margin-bottom:10px">
         ${health}
