@@ -23,6 +23,8 @@ weeks to notice.
 from __future__ import annotations
 
 import contextlib
+import html
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -99,9 +101,21 @@ class PluginContext:
         self.store.set_section("plugin_state", section)
 
 
-def _prune_notices(notices: dict[str, Any], now: float) -> dict[str, Any]:
+def _prune_notices(notices: dict[str, Any], now: float,
+                   ttl: float = NOTICE_TTL) -> dict[str, Any]:
     return {k: v for k, v in notices.items()
-            if isinstance(v, (int, float)) and now - float(v) < NOTICE_TTL}
+            if isinstance(v, (int, float)) and 0 <= now - float(v) < ttl}
+
+
+def _delivery_state(plugin: Plugin, config: dict[str, Any]) -> dict[str, Any]:
+    """Checkpoint only an unfinished daily batch in the existing plugin state.
+
+    Successful manual runs may be tried again. Failed/cancelled runs resume
+    without re-sending to recipients whose delivery was already acknowledged.
+    """
+    key = time.strftime("%Y-%m-%d") + json.dumps(config, sort_keys=True)
+    state = plugin.ctx.state(plugin.spec.id)
+    return state if state.get("batch") == key else {"batch": key, "sent": []}
 
 
 def _telegram_ready(ctx: PluginContext) -> bool:
@@ -154,7 +168,7 @@ class GroupAuditPlugin(Plugin):
         now = time.time()
         notices = _prune_notices(self.ctx.state(self.spec.id), now)
 
-        notified = suspended = 0
+        notified = suspended = errors = 0
         still_out: set[str] = set()
         for member in left:
             uid = str(member.get("emby_user_id") or "")
@@ -168,18 +182,28 @@ class GroupAuditPlugin(Plugin):
             if not first_seen:
                 # First time out: tell them, start the clock. Suspending on the
                 # first observation would punish a reconnect.
-                notices[uid] = now
+                delivered = False
                 with contextlib.suppress(Exception):
-                    if await bot.notify_member(member, self._notice_text(grace)):
-                        notified += 1
-                continue
+                    delivered = await bot.notify_member(member, self._notice_text(grace))
+                if not delivered:
+                    errors += 1
+                    continue
+                notices[uid] = first_seen = now
+                notified += 1
+                # Persist each delivered notice before the next await so a
+                # cancellation cannot erase the grace period already started.
+                self.ctx.set_state(self.spec.id, notices)
+                if grace > 0:
+                    continue
 
             if action == "suspend" and now - first_seen >= grace * 86400:
-                with contextlib.suppress(Exception):
+                try:
                     self.ctx.members.set_status(
                         uid, "suspended", actor="plugin:group_audit")
                     suspended += 1
                     notices.pop(uid, None)
+                except Exception:  # noqa: BLE001 - keep the notice for retry
+                    errors += 1
 
         # Someone who came back stops being on the clock, so returning and
         # leaving again gets the full grace period rather than instant
@@ -190,6 +214,8 @@ class GroupAuditPlugin(Plugin):
         self.ctx.set_state(self.spec.id, notices)
 
         return {
+            "ok": errors == 0,
+            "失败": errors,
             "检查人数": int(report.get("checked") or 0),
             "已退群": len(left),
             "已通知": notified,
@@ -247,7 +273,8 @@ class InactiveCleanupPlugin(Plugin):
         suspend_after = max(0, int(config.get("suspend_after_days") or 0))
         now = time.time()
         cutoff = now - days * 86400
-        notices = _prune_notices(self.ctx.state(self.spec.id), now)
+        notices = _prune_notices(self.ctx.state(self.spec.id), now,
+                                 max(NOTICE_TTL, (suspend_after + 7) * 86400))
 
         idle: list[dict[str, Any]] = []
         for member in members.list(limit=5000):
@@ -261,7 +288,7 @@ class InactiveCleanupPlugin(Plugin):
             if reference and reference <= cutoff:
                 idle.append(member)
 
-        notified = suspended = 0
+        notified = suspended = errors = 0
         idle_ids: set[str] = set()
         for member in idle:
             uid = str(member.get("emby_user_id") or "")
@@ -270,19 +297,27 @@ class InactiveCleanupPlugin(Plugin):
             idle_ids.add(uid)
             first_seen = float(notices.get(uid) or 0)
             if not first_seen:
+                if notify:
+                    delivered = False
+                    if _telegram_ready(self.ctx) and member.get("tg_user_id"):
+                        with contextlib.suppress(Exception):
+                            delivered = await self.ctx.telegram.notify_member(
+                                member, self._notice_text(days, suspend_after))
+                    if not delivered:
+                        errors += 1
+                        continue
+                    notified += 1
                 notices[uid] = now
-                if notify and _telegram_ready(self.ctx) and member.get("tg_user_id"):
-                    with contextlib.suppress(Exception):
-                        if await self.ctx.telegram.notify_member(
-                                member, self._notice_text(days, suspend_after)):
-                            notified += 1
+                self.ctx.set_state(self.spec.id, notices)
                 continue
             if suspend_after and now - first_seen >= suspend_after * 86400:
-                with contextlib.suppress(Exception):
+                try:
                     members.set_status(uid, "suspended",
                                        actor="plugin:inactive_cleanup")
                     suspended += 1
                     notices.pop(uid, None)
+                except Exception:  # noqa: BLE001 - keep the notice for retry
+                    errors += 1
 
         for uid in list(notices):
             if uid not in idle_ids:
@@ -290,6 +325,8 @@ class InactiveCleanupPlugin(Plugin):
         self.ctx.set_state(self.spec.id, notices)
 
         return {
+            "ok": errors == 0,
+            "失败": errors,
             "不活跃人数": len(idle),
             "已通知": notified,
             "已停用": suspended,
@@ -345,26 +382,37 @@ class ViewingReportPlugin(Plugin):
         days = 30 if monthly else 7
         label = "月报" if monthly else "周报"
 
-        sent = skipped = 0
+        sent = skipped = errors = 0
+        delivery = _delivery_state(self, config)
         for member in self.ctx.members.linked_telegram():
             uid = str(member.get("emby_user_id") or "")
-            if not uid:
+            if not uid or uid in delivery["sent"]:
                 continue
-            detail = {}
-            with contextlib.suppress(Exception):
+            try:
                 detail = self.ctx.stats.member_detail(uid, days=days) or {}
-            hours, plays, total_bytes = _summarise(detail)
+                hours, plays, total_bytes = _summarise(detail)
+            except Exception:  # noqa: BLE001 - not the same as no watch records
+                errors += 1
+                continue
             if plays <= 0:
                 # Nothing watched: a report saying "you watched 0 things" is a
                 # notification nobody asked for, so it is not sent.
                 skipped += 1
                 continue
+            ok = False
             with contextlib.suppress(Exception):
-                if await self.ctx.telegram.notify_member(
-                        member, self._text(label, days, hours, plays, total_bytes,
-                                           detail)):
-                    sent += 1
-        return {"周期": label, "已发送": sent, "无记录跳过": skipped}
+                ok = await self.ctx.telegram.notify_member(
+                    member, self._text(label, days, hours, plays, total_bytes, detail))
+            if ok:
+                sent += 1
+                delivery["sent"].append(uid)
+                self.ctx.set_state(self.spec.id, delivery)
+            else:
+                errors += 1
+        if not errors:
+            self.ctx.set_state(self.spec.id, {})
+        return {"ok": errors == 0, "失败": errors,
+                "周期": label, "已发送": sent, "无记录跳过": skipped}
 
     @staticmethod
     def _text(label: str, days: int, hours: float, plays: int,
@@ -376,7 +424,7 @@ class ViewingReportPlugin(Plugin):
         titles = _top_titles(detail)
         if titles:
             lines.append("\n<b>看得最多</b>")
-            lines.extend(f"{i}. {name} · {count} 次"
+            lines.extend(f"{i}. {html.escape(name)} · {count} 次"
                          for i, (name, count) in enumerate(titles, 1))
         return "\n".join(lines)
 
@@ -483,10 +531,26 @@ class ExpiryReminderPlugin(Plugin):
             return {"ok": False, "错误": "成员服务不可用"}
         days = max(1, int(config.get("days_ahead") or 3))
         due = self.ctx.members.expiring_within(days)
-        sent = await self.ctx.telegram.notify_expiring(due)
+        delivery = _delivery_state(self, config)
+        sent = errors = 0
         linked = sum(1 for m in due if m.get("tg_user_id"))
-        return {"即将到期": len(due), "已关联": linked, "已通知": int(sent or 0),
-                "提前天数": days}
+        for member in due:
+            uid = str(member.get("emby_user_id") or member.get("tg_user_id") or "")
+            if not member.get("tg_user_id") or uid in delivery["sent"]:
+                continue
+            ok = False
+            with contextlib.suppress(Exception):
+                ok = bool(await self.ctx.telegram.notify_expiring([member]))
+            if ok:
+                sent += 1
+                delivery["sent"].append(uid)
+                self.ctx.set_state(self.spec.id, delivery)
+            else:
+                errors += 1
+        if not errors:
+            self.ctx.set_state(self.spec.id, {})
+        return {"ok": errors == 0, "失败": errors,
+                "即将到期": len(due), "已关联": linked, "已通知": sent, "提前天数": days}
 
 
 # ---------------------------------------------------------------------------
@@ -543,15 +607,25 @@ class RequestDigestPlugin(Plugin):
             f"本月累计：{int(stats.get('month_total') or 0)} 条\n\n"
             "发送 /req 查看列表。")
 
-        sent = 0
+        sent = errors = 0
+        delivery = _delivery_state(self, config)
         for uploader in self.ctx.requests.uploaders():
             chat_id = str(uploader.get("tg_user_id") or "")
-            if not chat_id:
+            if not chat_id or chat_id in delivery["sent"]:
                 continue
-            if await self.ctx.telegram.send(chat_id, body):
+            ok = False
+            with contextlib.suppress(Exception):
+                ok = await self.ctx.telegram.send(chat_id, body)
+            if ok:
                 sent += 1
-        return {"ok": True, "待接单": pending, "处理中": working,
-                "已通知": sent}
+                delivery["sent"].append(chat_id)
+                self.ctx.set_state(self.spec.id, delivery)
+            else:
+                errors += 1
+        if not errors:
+            self.ctx.set_state(self.spec.id, {})
+        return {"ok": errors == 0, "失败": errors, "待接单": pending,
+                "处理中": working, "已通知": sent}
 
 
 BUILTIN_PLUGINS = (

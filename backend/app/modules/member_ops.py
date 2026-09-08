@@ -18,7 +18,7 @@ from app.modules.groups import needs_duration, needs_traffic
 
 # Never persist secrets into last_remote_error / audit / task tables.
 _SECRET_RE = re.compile(
-    r"(?i)(password|passwd|pwd|secret|token|api[_-]?key)\s*[:=]\s*\S+"
+    r'''(?i)(password|passwd|pwd|secret|token|api[_-]?key)["']?\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s&,}]+)'''
 )
 _ABSENT_RE = re.compile(r"\b(404|not\s*found|no such user|user not found)\b", re.IGNORECASE)
 
@@ -52,6 +52,10 @@ SORTS = {
 
 def redact(text: Any) -> str:
     raw = str(text or "")
+    # URLs can carry bot tokens, API keys, signed links or userinfo, even
+    # without a key=value label. Never retain credential-bearing locations.
+    raw = re.sub(r'https?://[^\s<>]+', '[remote URL]', raw, flags=re.IGNORECASE)
+    raw = re.sub(r'(?i)\bBearer\s+\S+', 'Bearer ***', raw)
     return _SECRET_RE.sub(r"\1=***", raw)[:240]
 
 
@@ -362,14 +366,17 @@ async def delete_emby_one(emby: Any, user_id: str,
 async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
                          actor: str, cascade: bool = False,
                          delete_emby: bool = True,
-                         confirm_ids: Any = None) -> dict[str, Any]:
+                         confirm_ids: Any = None, authorize: Any = None) -> dict[str, Any]:
     preview = members.delete_preview(user_id, cascade=cascade)
     validate_confirm_ids(preview, confirm_ids, cascade=cascade)
     objects = list(preview.get("objects") or [])
     live_ids: set[str] | None = None
     if delete_emby and emby is not None:
         try:
-            live_ids = {str(u.get("Id") or "") for u in await emby.list_users()}
+            users = await emby.list_users()
+            # Empty/partial-unreadable listings are not affirmative evidence
+            # that a failed deletion actually removed the account.
+            live_ids = {str(u['Id']) for u in users if u.get('Id')} or None
         except Exception:  # noqa: BLE001
             live_ids = None
 
@@ -385,6 +392,12 @@ async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
         if not uid:
             continue
         role = str(obj.get("role") or "target")
+        if authorize is not None and not authorize():
+            err = '管理员身份或权限已变化，未执行删除'
+            retained.append(uid)
+            emby_failed.append({'user_id': uid, 'error': err, 'retryable': False})
+            errors.append({'target': uid, 'stage': 'authority', 'error': err, 'retryable': False})
+            continue
         if delete_emby and emby is not None:
             remote = await delete_emby_one(emby, uid, live_ids)
             if remote["status"] == "deleted":

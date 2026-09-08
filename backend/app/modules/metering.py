@@ -39,8 +39,9 @@ def month_key(ts: float | None = None) -> str:
 
 def _as_int(value: Any, default: int = 0) -> int:
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        number = int(value)
+        return number if -(2 ** 63) <= number < 2 ** 63 else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -86,7 +87,11 @@ class MeasuredMeteringService:
             return {"ok": False, "reason": "samples_not_list", "credited": 0}
 
         nft_ok = bool(envelope.get("nft_ok"))
-        observed_at = float(envelope.get("observed_at") or time.time())
+        try:
+            observed_at = float(envelope.get("observed_at") or time.time())
+            month_key(observed_at)
+        except (TypeError, ValueError, OverflowError, OSError):
+            return {"ok": False, "reason": "invalid_observed_at", "credited": 0}
         tag_map = self._tag_to_user()
         credited = 0
         unattributed = 0
@@ -118,8 +123,9 @@ class MeasuredMeteringService:
                 "VALUES(?,?,?,?,?,?,1) "
                 "ON CONFLICT(node,boot_id) DO UPDATE SET "
                 "seq=MAX(measured_node_seq.seq, excluded.seq), "
-                "nft_ok=excluded.nft_ok, "
-                "observed_at=excluded.observed_at, "
+                "nft_ok=CASE WHEN excluded.observed_at>=measured_node_seq.observed_at "
+                "THEN excluded.nft_ok ELSE measured_node_seq.nft_ok END, "
+                "observed_at=MAX(measured_node_seq.observed_at, excluded.observed_at), "
                 "updated_at=excluded.updated_at, acked=1",
                 (node, boot_id, seq, 1 if nft_ok else 0, observed_at,
                  time.time()),
@@ -140,6 +146,8 @@ class MeasuredMeteringService:
     def _credit_sample(self, conn: Any, node: str, sample: dict[str, Any],
                        tag_map: dict[str, str], envelope: dict[str, Any]
                        ) -> tuple[int, int, int]:
+        if not isinstance(sample, dict):
+            return 0, 0, 1
         conn_id = str(sample.get("conn_id") or "").strip()
         generation = _as_int(sample.get("generation"), 0)
         if not conn_id or generation < 1:
@@ -153,8 +161,12 @@ class MeasuredMeteringService:
 
         counter = _as_int(sample.get("counter_bytes"), -1)
         utag = str(sample.get("utag") or "").strip()
-        observed_at = float(sample.get("observed_at") or envelope.get("observed_at")
-                            or time.time())
+        try:
+            observed_at = float(sample.get("observed_at") or envelope.get("observed_at")
+                                or time.time())
+            month_key(observed_at)
+        except (TypeError, ValueError, OverflowError, OSError):
+            return 0, 0, 1
         user_id = tag_map.get(utag, UNKNOWN_USER)
 
         row = conn.execute(
@@ -173,7 +185,7 @@ class MeasuredMeteringService:
             "updated_at) VALUES(?,?,?,?,?,?,?,?) "
             "ON CONFLICT(node,conn_id,generation) DO UPDATE SET "
             "counter_bytes=excluded.counter_bytes, "
-            "observed_at=excluded.observed_at, "
+            "observed_at=MAX(measured_watermarks.observed_at, excluded.observed_at), "
             "utag=excluded.utag, "
             "emby_user_id=CASE WHEN excluded.emby_user_id<>'' "
             "THEN excluded.emby_user_id ELSE measured_watermarks.emby_user_id END, "
@@ -405,7 +417,8 @@ class MeasuredMeteringService:
 
     def _node_coverage(self, now: float, stale_after: float = 120.0) -> list[dict[str, Any]]:
         rows = self._db.query(
-            "SELECT node, boot_id, seq, nft_ok, observed_at FROM measured_node_seq"
+            "SELECT node, boot_id, seq, nft_ok, observed_at FROM measured_node_seq "
+            "ORDER BY observed_at, updated_at"
         )
         by_name = {r["node"]: r for r in rows}
         expected = list(self._expected_nodes() or [])
@@ -426,7 +439,7 @@ class MeasuredMeteringService:
                 })
                 continue
             observed = float(row["observed_at"] or 0)
-            ok = bool(row["nft_ok"]) and (now - observed) <= stale_after
+            ok = bool(row["nft_ok"]) and 0 <= now - observed <= stale_after
             out.append({
                 "name": name,
                 "ok": ok,

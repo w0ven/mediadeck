@@ -101,6 +101,10 @@ input::placeholder,textarea::placeholder { color:#8a9ab0; }
 }
 @media(prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important;transition:none!important;scroll-behavior:auto!important; } }
 
+/* Scrollable data stays reachable inside clipped glass cards on small screens. */
+.table-scroll { max-width:100%; overflow-x:auto; }
+body.modal-open { overflow:hidden; }
+
 /* Playback artwork is a real poster, not a stretched episode still. */
 .play-grid { grid-template-columns:repeat(auto-fit,minmax(min(100%,350px),1fr));gap:14px;padding:16px; }
 .play-card { gap:18px;padding:18px;background:linear-gradient(135deg,var(--panel-2),var(--panel));border-radius:14px;align-items:flex-start; }

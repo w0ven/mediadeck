@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
+import threading
 import time
 from pathlib import Path as FilePath
 from typing import Any
@@ -32,12 +33,7 @@ from app.core.store import SettingsStore
 from app.modules import member_ops
 from app.modules.access import AccessRules
 from app.modules.downloaders import MockDownloader, QbittorrentClient
-from app.modules.edgelog import (
-    MAX_LINES_PER_INGEST,
-    TrafficLedger,
-    aggregate,
-    parse_lines,
-)
+from app.modules.edgelog import MAX_LINES_PER_INGEST, TrafficLedger
 from app.modules.enforcement import EnforcementService
 from app.modules.entries import entry_target, identify_entry
 from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
@@ -153,13 +149,20 @@ def _build_downloaders(cfg: Any) -> list[Any]:
     return out
 
 
+_storage_lock = threading.RLock()
+
+
 def _storage_call(fn: Any, *args: Any, **kwargs: Any) -> Any:
-    try:
-        return fn(*args, **kwargs)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from None
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(409, str(exc)) from None
+    # These file read/modify/write operations used to be serialized by the
+    # event loop. Preserve that property inside the worker, including when
+    # the request is cancelled but its blocking system call is still running.
+    with _storage_lock:
+        try:
+            return fn(*args, **kwargs)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(409, str(exc)) from None
 
 
 @app.exception_handler(ConfigError)
@@ -292,7 +295,11 @@ async def _startup() -> None:
     app.state.members = MemberService(app.state.db, app.state.groups)
     app.state.enforcement = EnforcementService(
         app.state.db, app.state.members, app.state.emby)
-    app.state.stats = StatsService(app.state.db)
+    app.state.stats = StatsService(
+        app.state.db,
+        measured_cutover=lambda: bool(
+            app.state.settings_service.metering_config().get("cutover")),
+    )
     # Bytes measured on the edge. Kept separate from the sampled estimate in
     # usage_daily: conflating a measurement with a guess is what made the old
     # traffic figure unsafe to act on.
@@ -420,7 +427,9 @@ async def _startup() -> None:
         registration=app.state.registration, points=app.state.points,
         shop=app.state.shop, scheduler=app.state.scheduler,
         requests=app.state.requests, tmdb=app.state.tmdb,
-        groups=app.state.groups)
+        groups=app.state.groups,
+        on_password_changed=lambda: app.state.cache.drop_prefix('panelauth:'),
+        on_member_changed=_telegram_member_changed)
     app.state.telegram.start()
 
     # ---- plugins ---------------------------------------------------------
@@ -509,13 +518,33 @@ async def _startup() -> None:
     })
 
 
+@app.on_event("shutdown")
+async def _shutdown() -> None:
+    """Join background writers before releasing their shared database."""
+    tasks = [getattr(app.state, name, None) for name in
+             ("usage_task", "probe_task", "intake_prime_task")]
+    tasks = [task for task in tasks if task is not None]
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+    # Plugins may send Bot messages and both can write audit rows.
+    for name in ("plugins", "telegram"):
+        service = getattr(app.state, name, None)
+        if service is not None:
+            await service.stop()
+    db = getattr(app.state, "db", None)
+    if db is not None:
+        db.close()
+
+
 STATIC_DIR = FilePath(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
 @app.get("/api/whoami", dependencies=[Depends(_auth)])
-async def whoami() -> dict[str, str]:
-    return {"user": settings().mediadeck_admin_user}
+async def whoami(user: str = Depends(_auth)) -> dict[str, str]:
+    return {"user": user}
 
 
 @app.get("/", include_in_schema=False)
@@ -524,7 +553,7 @@ async def root(_: str = Depends(_auth)) -> HTMLResponse:
     # release is visible on the next reload without a forced refresh.
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     try:
-        ver = str(app.state.updater.version().get("commit") or "")
+        ver = str((await asyncio.to_thread(app.state.updater.version)).get("commit") or "")
     except Exception:  # noqa: BLE001 - version stamping must never break the page
         ver = ""
     if ver:
@@ -614,7 +643,12 @@ async def settings_emby_get() -> dict[str, Any]:
 
 @app.put("/api/settings/emby", dependencies=[Depends(_auth)])
 async def settings_emby_save(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    return app.state.settings_service.save_emby(payload)
+    saved = app.state.settings_service.save_emby(payload)
+    # Cached identities, item paths and views belong to the previous server.
+    # Invalidate only after persistence succeeds.
+    app.state.cache.clear()
+    app.state.playback.invalidate()
+    return saved
 
 
 @app.post("/api/settings/emby/test", dependencies=[Depends(_auth)])
@@ -789,7 +823,7 @@ async def stream_redirect(path: str) -> RedirectResponse:
 # ---- pipeline --------------------------------------------------------------
 @app.get("/api/pipeline", dependencies=[Depends(_auth)])
 async def pipeline() -> dict[str, Any]:
-    return app.state.pipeline.snapshot()
+    return await asyncio.to_thread(app.state.pipeline.snapshot)
 
 
 @app.get("/api/intake", dependencies=[Depends(_auth)])
@@ -814,17 +848,17 @@ async def intake_refresh() -> dict[str, Any]:
 # ---- self-update -----------------------------------------------------------
 @app.get("/api/update/version", dependencies=[Depends(_auth)])
 async def update_version() -> dict[str, Any]:
-    return app.state.updater.version()
+    return await asyncio.to_thread(app.state.updater.version)
 
 
 @app.get("/api/update/check", dependencies=[Depends(_auth)])
 async def update_check() -> dict[str, Any]:
-    return app.state.updater.check()
+    return await asyncio.to_thread(app.state.updater.check)
 
 
 @app.post("/api/update/apply", dependencies=[Depends(_auth)])
 async def update_apply(target: str | None = Body(None, embed=True)) -> dict[str, Any]:
-    result = app.state.updater.update(target)
+    result = await asyncio.to_thread(app.state.updater.update, target)
     if not result.get("started"):
         raise HTTPException(409, result.get("error", "update not started"))
     return result
@@ -832,19 +866,19 @@ async def update_apply(target: str | None = Body(None, embed=True)) -> dict[str,
 
 @app.get("/api/mounts", dependencies=[Depends(_auth)])
 async def mounts() -> dict[str, Any]:
-    return app.state.mounts.snapshot()
+    return await asyncio.to_thread(app.state.mounts.snapshot)
 
 
 # ---- storage (rclone remotes + systemd mounts) -----------------------------
 @app.get("/api/storage/remotes", dependencies=[Depends(_auth)])
 async def storage_list_remotes() -> list[dict[str, Any]]:
-    return _storage_call(app.state.storage.list_remotes)
+    return await asyncio.to_thread(_storage_call, app.state.storage.list_remotes)
 
 
 @app.post("/api/storage/remotes", dependencies=[Depends(_auth)])
 async def storage_add_remote(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    return _storage_call(
-        app.state.storage.add_remote,
+    return await asyncio.to_thread(
+        _storage_call, app.state.storage.add_remote,
         payload.get("name") or "",
         payload.get("type") or "",
         payload.get("options") or {},
@@ -853,42 +887,42 @@ async def storage_add_remote(payload: dict[str, Any] = Body(...)) -> dict[str, A
 
 @app.delete("/api/storage/remotes/{name}", dependencies=[Depends(_auth)])
 async def storage_delete_remote(name: str) -> dict[str, bool]:
-    return _storage_call(app.state.storage.delete_remote, name)
+    return await asyncio.to_thread(_storage_call, app.state.storage.delete_remote, name)
 
 
 @app.post("/api/storage/remotes/{name}/test", dependencies=[Depends(_auth)])
 async def storage_test_remote(name: str) -> dict[str, Any]:
-    return _storage_call(app.state.storage.test_remote, name)
+    return await asyncio.to_thread(_storage_call, app.state.storage.test_remote, name)
 
 
 @app.get("/api/storage/mounts", dependencies=[Depends(_auth)])
 async def storage_list_mounts() -> list[dict[str, Any]]:
-    return _storage_call(app.state.storage.list_mounts)
+    return await asyncio.to_thread(_storage_call, app.state.storage.list_mounts)
 
 
 @app.post("/api/storage/mounts", dependencies=[Depends(_auth)])
 async def storage_create_mount(spec: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    return _storage_call(app.state.storage.create_mount, spec)
+    return await asyncio.to_thread(_storage_call, app.state.storage.create_mount, spec)
 
 
 @app.post("/api/storage/mounts/{name}/start", dependencies=[Depends(_auth)])
 async def storage_start_mount(name: str) -> dict[str, Any]:
-    return _storage_call(app.state.storage.start_mount, name)
+    return await asyncio.to_thread(_storage_call, app.state.storage.start_mount, name)
 
 
 @app.post("/api/storage/mounts/{name}/stop", dependencies=[Depends(_auth)])
 async def storage_stop_mount(name: str) -> dict[str, Any]:
-    return _storage_call(app.state.storage.stop_mount, name)
+    return await asyncio.to_thread(_storage_call, app.state.storage.stop_mount, name)
 
 
 @app.delete("/api/storage/mounts/{name}", dependencies=[Depends(_auth)])
 async def storage_delete_mount(name: str) -> dict[str, bool]:
-    return _storage_call(app.state.storage.delete_mount, name)
+    return await asyncio.to_thread(_storage_call, app.state.storage.delete_mount, name)
 
 
 @app.get("/api/tasks", dependencies=[Depends(_auth)])
 async def tasks() -> dict[str, Any]:
-    return app.state.tasks.snapshot()
+    return await asyncio.to_thread(app.state.tasks.snapshot)
 
 
 # ---- import lanes ----------------------------------------------------------
@@ -1158,13 +1192,10 @@ async def edge_report(name: str, request: Request,
         raise HTTPException(413, "batch too large")
 
     ledger: TrafficLedger = app.state.ledger
-    buckets = aggregate(parse_lines(str(x) for x in lines))
-    result = ledger.record(name, buckets, _tag_map())
-
-    path = str(payload.get("path") or "")
-    if path:
-        ledger.set_cursor(name, path, int(payload.get("inode") or 0),
-                          int(payload.get("offset") or 0))
+    try:
+        result = ledger.ingest_batch(name, payload, _tag_map())
+    except (ValueError, TypeError, OverflowError):
+        raise HTTPException(422, "invalid log cursor or batch; refresh cursors") from None
     return {"ok": True, "node": name, "lines": len(lines),
             "events": result["rows"], "bytes": result["bytes"],
             "unknown_bytes": result["unknown_bytes"]}
@@ -1483,6 +1514,7 @@ async def emby_enable_user(user_id: str) -> dict[str, bool]:
 async def emby_set_password(user_id: str, new_password: str = Body(..., embed=True, min_length=6)) -> dict[str, bool]:
     if not await app.state.emby.set_user_password(user_id, new_password):
         raise HTTPException(404, "unknown user")
+    app.state.cache.drop_prefix("panelauth:")
     return {"ok": True}
 
 
@@ -1506,7 +1538,8 @@ async def _reissue_rate_caps(
     reason: str = "",
     enforce: bool | None = None,
     kick: bool = True,
-) -> None:
+    report_failures: bool = False,
+) -> dict[str, Any]:
     """Drop cached signatures and stop playback so a new cap is picked up.
 
     The signed URL carries ``r=`` for up to six hours. Changing the number in
@@ -1529,13 +1562,42 @@ async def _reissue_rate_caps(
             uid = member.get("emby_user_id")
             if uid:
                 uids.add(str(uid))
+    errors = []
     if enforce:
         for uid in uids:
-            with contextlib.suppress(Exception):
-                await app.state.enforcement.enforce_now(uid, reason)
+            try:
+                result = await app.state.enforcement.enforce_now(uid, reason)
+                if result.get('ok') is False or result.get('remote_ok') is False:
+                    errors.append({'target': uid, 'stage': 'enforce', 'error': '远端策略未确认', 'retryable': True})
+            except Exception:  # noqa: BLE001 - preserve committed local edits and report remote uncertainty
+                errors.append({'target': uid, 'stage': 'enforce', 'error': '远端策略未确认', 'retryable': True})
     if kick and uids:
-        with contextlib.suppress(Exception):
-            await app.state.enforcement.terminate_users(uids, reason)
+        try:
+            if report_failures:
+                await app.state.enforcement.terminate_users(uids, reason, strict=True)
+            else:
+                await app.state.enforcement.terminate_users(uids, reason)
+        except Exception:  # noqa: BLE001 - the local change has already committed
+            errors.append({'target': user_id or group_id or '', 'stage': 'terminate',
+                           'error': '旧播放会话终止未确认', 'retryable': True})
+    return member_ops.action_result(
+        local_ok=True, remote_ok=(not errors) if uids and (enforce or kick) else None,
+        errors=errors, error=errors[0]['error'] if errors else '', retryable=bool(errors))
+
+
+async def _telegram_member_changed(user_id: str, previous_bandwidth: int | None) -> dict[str, Any]:
+    """Bot's committed entitlement change uses the same policy/rate rules as Web."""
+    member = app.state.members.get(user_id)
+    if not member:
+        return member_ops.action_result(local_ok=True, remote_ok=False,
+                                        error='本地成员状态已变化', retryable=True)
+    enabled = bool(app.state.settings_service.membership_config().get('enforcement_enabled'))
+    if member.get('bandwidth_limit_kbps') != previous_bandwidth:
+        return await _reissue_rate_caps(user_id=user_id, reason='Telegram 成员限速已更新',
+                                       enforce=enabled, kick=True, report_failures=True)
+    if enabled:
+        return await app.state.enforcement.enforce_now(user_id, 'Telegram 成员权益已更新')
+    return member_ops.action_result(local_ok=True, remote_ok=None)
 
 
 # ---- user groups -----------------------------------------------------------
@@ -1889,6 +1951,7 @@ async def members_change_group(user_id: str, payload: dict[str, Any] = Body(...)
     member = app.state.members.get(user_id)
     if not member:
         raise HTTPException(404, "unknown member")
+    previous_rate = member.get("bandwidth_limit_kbps")
     try:
         member = app.state.members.upsert(
             user_id, member.get("username") or "",
@@ -1901,6 +1964,8 @@ async def members_change_group(user_id: str, payload: dict[str, Any] = Body(...)
     except ConfigError as exc:
         raise HTTPException(400, str(exc)) from None
     _meter_policy_snapshot()
+    if previous_rate != member.get("bandwidth_limit_kbps"):
+        await _reissue_rate_caps(user_id=user_id, reason="用户组限速已更新", enforce=False)
     if app.state.settings_service.membership_config()["enforcement_enabled"]:
         remote = await app.state.enforcement.enforce_now(user_id, "group changed")
         return member_ops.merge_action(member, remote)
@@ -2028,6 +2093,8 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
         raise HTTPException(400, "user_ids 不能为空")
     if len(ids) > 500:
         raise HTTPException(400, "单次最多处理 500 个成员")
+    # A member is one operation, even if a client submitted duplicate rows.
+    ids = list(dict.fromkeys(str(raw) for raw in ids))
 
     allowed = {"renew", "suspend", "activate", "reset-traffic"}
     if action not in allowed:
@@ -2127,6 +2194,7 @@ async def _reset_member_password(user_id: str, payload: dict[str, Any],
         raise HTTPException(422, "密码至少 6 位")
     if not await app.state.emby.set_user_password(user_id, password):
         raise HTTPException(404, "unknown user")
+    app.state.cache.drop_prefix("panelauth:")
     app.state.members.audit(actor, "member.password", user_id, "password changed")
     return {"ok": True, "password": password}
 
@@ -2541,13 +2609,15 @@ async def plugin_save(plugin_id: str, payload: dict[str, Any] = Body(default={})
                       user: str = Depends(_auth)) -> dict[str, Any]:
     registry = _plugin_or_404(plugin_id)
     enabled = payload.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise HTTPException(422, "enabled 必须是布尔值")
     config = payload.get("config")
     if config is not None and not isinstance(config, dict):
         raise HTTPException(400, "config 必须是对象")
     try:
         card = registry.save(
             plugin_id,
-            None if enabled is None else bool(enabled),
+            enabled,
             config)
     except ValueError as exc:
         # Field.coerce raises with the operator-facing reason already in
@@ -2759,7 +2829,10 @@ async def cached_image(item_id: str, image_type: str, request: Request) -> Respo
     if not cfg["enabled"] or image_type not in ALLOWED_IMAGE_TYPES or not origin:
         return RedirectResponse(passthrough, status_code=302)
 
-    key = app.state.images.key(item_id, image_type, query)
+    # Item IDs are unique within a server, not across separately configured
+    # origins. Keep old cache entries for normal expiry, but never reuse them
+    # for a different server's item with the same ID.
+    key = _digest(origin + "\n" + app.state.images.key(item_id, image_type, query))
 
     async def produce() -> tuple[bytes, str, str] | None:
         emby_cfg = app.state.settings_service.emby_config()

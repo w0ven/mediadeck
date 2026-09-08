@@ -3,7 +3,13 @@ these interfaces, and every interface has a mock implementation so the whole
 panel runs with zero credentials (MEDIADECK_MOCK=1)."""
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol, TypedDict
+
+
+class MemberPolicyResult(TypedDict):
+    """Automatic policy outcome; a protected admin is not an applied write."""
+
+    status: Literal["applied", "skipped_admin", "failed"]
 
 
 class EmbyAdapter(Protocol):
@@ -13,6 +19,9 @@ class EmbyAdapter(Protocol):
     async def set_user_disabled(self, user_id: str, disabled: bool) -> bool: ...
     async def set_user_password(self, user_id: str, new_password: str) -> bool: ...
     async def apply_policy(self, user_id: str, policy_patch: dict[str, Any]) -> bool: ...
+    async def apply_member_policy(self, user_id: str, policy_patch: dict[str, Any]) -> MemberPolicyResult:
+        """Re-read current policy and skip administrators before any automatic write."""
+        ...
     async def libraries(self) -> list[dict[str, Any]]: ...
     async def latest_items(self, limit: int = 12) -> list[dict[str, Any]]: ...
     async def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None: ...

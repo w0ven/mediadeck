@@ -3,6 +3,22 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Full-source functionality and interaction audit — local corrective cycle
+- [x] Cover all 69 production source files plus project configuration with explicit
+      ownership and evidence; preserve the approved business rules and Hard Glass UI.
+- [x] Reproduce and locally correct account/Bot, playback/metering, Web interaction,
+      background-integration, persistence and adapter defects.
+- [x] Integrate cross-module fixes and verify: 1562 passed, 56 skipped, 1 strict
+      expected failure; all 25 pages exercised in isolated Chromium.
+- [ ] RELEASE BLOCKER: replace ambiguous v1 playback signatures through an
+      owner-approved coordinated panel/node migration. Existing v1 links and the
+      compatibility window require an explicit decision; this defect is NOT fixed.
+- [ ] Separately authorize production delivery and external-system acceptance.
+- Evidence and remaining limits: `AUDIT-2026-09-09.md`.
+- This phase permits local corrective implementation and temporary test artifacts,
+  not production data changes, restarts, upstream release or deployment. No claim
+  of absolute bug freedom is made; completion requires scoped coverage and evidence.
+
 ## Hard Glass and reserved whitelist — approved local implementation
 - [x] Shared dark hard-glass theme across the existing workspaces and controls.
 - [x] Member list interaction rebuild and viewport-fixed details with safe drafts,

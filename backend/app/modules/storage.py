@@ -8,8 +8,8 @@ from __future__ import annotations
 import configparser
 import os
 import re
-import shlex
 import subprocess
+import tempfile
 from typing import Any
 
 from app.core.errors import ConflictError
@@ -27,7 +27,7 @@ def _validate_name(value: str, label: str = "name") -> str:
 
 
 def _validate_target(target: str, mount_root: str) -> str:
-    if not target or not mount_root:
+    if not target or not mount_root or any(ord(ch) < 32 or ord(ch) == 127 for ch in target):
         raise ValueError("invalid target")
     root = os.path.realpath(mount_root)
     resolved = os.path.realpath(os.path.join(mount_root, target))
@@ -45,6 +45,23 @@ def _redact_options(options: dict[str, Any]) -> dict[str, Any]:
         else:
             redacted[key] = value
     return redacted
+
+
+def _unit_arg(value: str) -> str:
+    """systemd is not a shell: quote words and escape its own expansions."""
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError("invalid mount option")
+    return '"' + value.replace('\\', '\\\\').replace('"', '\\"').replace('%', '%%').replace('$', '$$') + '"'
+
+
+def _remote_options(rtype: str, options: dict[str, Any]) -> None:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", rtype):
+        raise ValueError("invalid remote type")
+    for key, value in options.items():
+        if not re.fullmatch(r"[A-Za-z0-9_]+", str(key)):
+            raise ValueError("invalid remote option name")
+        if any(ch in str(value) for ch in "\r\n\x00"):
+            raise ValueError("invalid remote option value")
 
 
 def _new_parser() -> configparser.ConfigParser:
@@ -105,8 +122,14 @@ class StorageManager:
     def _load_parser(self) -> configparser.ConfigParser:
         parser = _new_parser()
         path = self._settings.rclone_config_path
-        if path and os.path.isfile(path):
-            parser.read(path, encoding="utf-8")
+        if path:
+            try:
+                with open(path, encoding="utf-8") as handle:
+                    parser.read_file(handle)
+            except FileNotFoundError:
+                pass
+            except (OSError, ValueError, configparser.Error):
+                raise RuntimeError("cannot read rclone configuration") from None
         return parser
 
     def _write_parser(self, parser: configparser.ConfigParser) -> None:
@@ -114,10 +137,14 @@ class StorageManager:
         directory = os.path.dirname(path)
         if directory:
             os.makedirs(directory, exist_ok=True)
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            parser.write(handle)
-        os.replace(tmp, path)
+        fd, tmp = tempfile.mkstemp(dir=directory or ".", prefix=".rclone-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                parser.write(handle)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
 
     def _daemon_reload(self) -> None:
         proc = self._run(["systemctl", "daemon-reload"])
@@ -142,6 +169,7 @@ class StorageManager:
             options = {}
         if not isinstance(options, dict):
             raise ValueError("options must be an object")  # noqa: TRY004
+        _remote_options(rtype, options)
         self._require_configured()
         parser = self._load_parser()
         if parser.has_section(name):
@@ -187,9 +215,10 @@ class StorageManager:
                 ],
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return {"ok": False, "message": str(exc)}
-        message = (proc.stdout or proc.stderr or "").strip()
-        return {"ok": proc.returncode == 0, "message": message}
+            return {"ok": False, "message": f"remote test failed: {type(exc).__name__}"}
+        # rclone stderr can contain OAuth responses and signed URLs.
+        return {"ok": proc.returncode == 0,
+                "message": "ok" if proc.returncode == 0 else f"remote test failed (exit {proc.returncode})"}
 
     def list_mounts(self) -> list[dict[str, Any]]:
         unit_dir = self._settings.systemd_unit_dir
@@ -230,16 +259,25 @@ class StorageManager:
         name = _validate_name(str(spec.get("name") or ""))
         remote = _validate_name(str(spec.get("remote") or ""), "remote")
         remote_path = str(spec.get("remote_path") or "")
-        if any(ch in remote_path for ch in "\n\r"):
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in remote_path):
             raise ValueError("invalid remote_path")
         target = _validate_target(str(spec.get("target") or ""), self._settings.mount_root)
+        if not self._load_parser().has_section(remote):
+            raise ValueError("unknown remote")
+        path = self._unit_path(name)
+        if os.path.lexists(path):
+            raise ConflictError("mount already exists")
+        text = self._render_unit(spec, name, remote, remote_path, target)
         os.makedirs(target, exist_ok=True)
         unit_dir = self._settings.systemd_unit_dir
         os.makedirs(unit_dir, exist_ok=True)
-        path = self._unit_path(name)
-        with open(path, "w", encoding="utf-8") as handle:
-            handle.write(self._render_unit(spec, name, remote, remote_path, target))
-        self._daemon_reload()
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write(text)
+        try:
+            self._daemon_reload()
+        except Exception:
+            os.unlink(path)
+            raise
         return _mount_dict(name, remote, target, "inactive", remote_path)
 
     def start_mount(self, name: str) -> dict[str, Any]:
@@ -262,7 +300,9 @@ class StorageManager:
         _validate_name(name)
         self._require_configured()
         unit = self._unit_name(name)
-        self._run(["systemctl", "stop", unit])
+        proc = self._run(["systemctl", "stop", unit])
+        if proc.returncode != 0:
+            raise RuntimeError("mount stop failed; unit retained")
         path = self._unit_path(name)
         if os.path.isfile(path):
             os.remove(path)
@@ -304,8 +344,8 @@ class StorageManager:
         cache_root = self._settings.cache_root
         if cache_root:
             args.extend(["--cache-dir", os.path.join(cache_root, name)])
-        exec_start = " ".join(shlex.quote(part) for part in args)
-        exec_stop = f"/bin/fusermount3 -uz {shlex.quote(target)}"
+        exec_start = " ".join(_unit_arg(part) for part in args)
+        exec_stop = f"/bin/fusermount3 -uz {_unit_arg(target)}"
         return (
             f"# mediadeck_remote={remote}\n"
             f"# mediadeck_remote_path={remote_path}\n"
@@ -367,6 +407,7 @@ class MockStorage:
             options = {}
         if not isinstance(options, dict):
             raise ValueError("options must be an object")  # noqa: TRY004
+        _remote_options(rtype, options)
         stored = dict(options)
         stored.pop("type", None)
         self._remotes[name] = {"type": str(rtype), "options": stored}
@@ -402,9 +443,15 @@ class MockStorage:
         name = _validate_name(str(spec.get("name") or ""))
         remote = _validate_name(str(spec.get("remote") or ""), "remote")
         remote_path = str(spec.get("remote_path") or "")
-        if any(ch in remote_path for ch in "\n\r"):
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in remote_path):
             raise ValueError("invalid remote_path")
         target = _validate_target(str(spec.get("target") or ""), _MOCK_MOUNT_ROOT)
+        if remote not in self._remotes:
+            raise ValueError("unknown remote")
+        if name in self._mounts:
+            raise ConflictError("mount already exists")
+        for value in spec.values():
+            _unit_arg(str(value))
         self._mounts[name] = {
             "remote": remote,
             "remote_path": remote_path,

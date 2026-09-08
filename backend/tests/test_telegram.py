@@ -578,6 +578,33 @@ def test_generated_passwords_differ() -> None:
     assert generate_password() != generate_password()
 
 
+@pytest.fixture
+def transactional_bot(tmp_path):
+    """These lifecycle assertions exercise real admission and SQLite commits."""
+    from app.core.db import Database
+    from app.modules.groups import GroupService
+    from app.modules.members import MemberService
+    from app.modules.points import PointsService
+    from app.modules.registration import RegistrationService
+    from app.modules.shop import ShopService
+
+    db = Database(tmp_path / 'telegram-registration.db')
+    groups = GroupService(db)
+    groups.seed_defaults()
+    members = MemberService(db, groups)
+    bot = _bot(members, _FakeEmby(), db=db)
+    bot._registration = RegistrationService(db, groups, bot._cfg)
+    bot._points = PointsService(db)
+    bot._shop = ShopService(db, members, bot._points)
+    bot.edits = []
+    async def edit(chat, mid, text, keyboard=None):
+        bot.edits.append(text)
+        return True
+    bot._edit = edit
+    yield bot
+    db.close()
+
+
 # -- registration channels in the conversation ------------------------------
 # The ordering contract: resolve() decides, the account is created, and only
 # then is the credential spent. Reversed, a member whose chosen username turns
@@ -687,39 +714,41 @@ def test_a_good_credential_advances_to_the_username_without_spending_it() -> Non
     assert reg.consumed == []
 
 
-def test_the_credential_is_spent_only_after_the_account_exists() -> None:
-    members, emby = _FakeMembers(), _FakeEmby()
-    reg = _FakeRegistration()
-    admission = _Verdict(via="redeem", credential="CARD", days=90,
-                         group_id="vip")
-    bot = _bot(members, emby)
-    bot._registration = reg
+def test_the_credential_is_spent_only_after_the_account_exists(transactional_bot, monkeypatch) -> None:
+    bot = transactional_bot
+    members, emby, reg = bot._members, bot._emby, bot._registration
+    card = reg.generate_redeem('vip', days=90)[0]
+    admission = reg.resolve('42', card['code'])
+    assert admission.allowed and admission.tg_user_id == '42'
+    consume = reg.consume
+    observed = []
+    def checked_consume(verdict, user_id, **kwargs):
+        assert emby.created == ['newmember']
+        assert members.get(user_id) and members.find_by_telegram('42')['emby_user_id'] == user_id
+        observed.append(user_id)
+        return consume(verdict, user_id, **kwargs)
+    monkeypatch.setattr(reg, 'consume', checked_consume)
+    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'newmember', admission=admission))
+    assert observed == ['emby-newmember']
+    assert reg.get_redeem(card['code'])['status'] == 'used'
+    assert reg.get_redeem(card['code'])['used_by'] == 'emby-newmember'
+    member = members.get('emby-newmember')
+    assert member['register_via'] == 'redeem' and member['group_id'] == 'vip'
+    assert member['register_at']
 
-    asyncio.run(bot._finish_registration(1, "42", "tguser", "newmember",
-                                        admission=admission))
 
-    assert emby.created == ["newmember"]
-    assert reg.consumed == [("redeem", "emby-newmember")]
-    payload = members.upserted[0][2]
-    assert payload["register_via"] == "redeem"
-    assert payload["group_id"] == "vip"
-    assert payload["register_at"]
-
-
-def test_a_failed_creation_does_not_spend_the_credential() -> None:
+def test_a_failed_creation_does_not_spend_the_credential(transactional_bot) -> None:
     """The whole point of the ordering: a taken username must cost nothing."""
-    members, emby = _FakeMembers(), _FakeEmby(fail=True)
-    reg = _FakeRegistration()
-    bot = _bot(members, emby)
-    bot._registration = reg
-
-    asyncio.run(bot._finish_registration(
-        1, "42", "tguser", "duplicate",
-        admission=_Verdict(via="redeem", credential="CARD")))
-
-    assert members.upserted == []
-    assert reg.consumed == []
-    assert any("创建失败" in m for m in bot.sent)  # type: ignore[attr-defined]
+    bot = transactional_bot
+    bot._emby.fail = True
+    card = bot._registration.generate_redeem('standard', days=30)[0]
+    admission = bot._registration.resolve('42', card['code'])
+    assert admission.allowed
+    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'duplicate', admission=admission))
+    assert bot._members.list() == []
+    assert bot._registration.get_redeem(card['code'])['status'] == 'unused'
+    assert bot._registration.get_redeem(card['code'])['used_at'] is None
+    assert any('创建失败' in m for m in bot.sent)
 
 
 def test_a_rejected_username_does_not_spend_the_credential() -> None:
@@ -736,20 +765,16 @@ def test_a_rejected_username_does_not_spend_the_credential() -> None:
     assert reg.consumed == []
 
 
-def test_an_invite_records_who_vouched_for_the_new_member() -> None:
-    members, emby = _FakeMembers(), _FakeEmby()
-    reg = _FakeRegistration()
-    bot = _bot(members, emby)
-    bot._registration = reg
-
-    asyncio.run(bot._finish_registration(
-        1, "42", "tguser", "newmember",
-        admission=_Verdict(via="invite", credential="INV",
-                           inviter_id="emby-owner")))
-
-    payload = members.upserted[0][2]
-    assert payload["inviter_id"] == "emby-owner"
-    assert payload["register_via"] == "invite"
+def test_an_invite_records_who_vouched_for_the_new_member(transactional_bot) -> None:
+    bot = transactional_bot
+    bot._members.upsert('emby-owner', 'inviter', {'group_id': 'standard'})
+    invite = bot._registration.issue_invite('emby-owner')
+    admission = bot._registration.resolve('42', invite['code'])
+    assert admission.allowed and admission.inviter_id == 'emby-owner'
+    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'newmember', admission=admission))
+    member = bot._members.find_by_telegram('42')
+    assert member['inviter_id'] == 'emby-owner' and member['register_via'] == 'invite'
+    assert bot._registration.get_invite(invite['code'])['uses_left'] == 0
 
 
 def test_members_see_their_invite_codes_and_remaining_slots() -> None:
@@ -1113,19 +1138,20 @@ def test_the_shop_lists_only_items_that_are_on_sale() -> None:
     assert "500" in text  # the balance, so the price means something
 
 
-def test_buying_asks_before_it_spends() -> None:
-    shop = _FakeShop([_shop_item()])
-    bot = _points_bot(shop=shop)
-
-    asyncio.run(bot._shop_confirm(1, 2, "1"))
-    assert "确定用" in bot.edits[0]  # type: ignore[attr-defined]
-    assert "100" in bot.edits[0]  # type: ignore[attr-defined]
-    # Confirmation only: nothing has been redeemed.
-    assert shop.redeemed == []
-
-    asyncio.run(bot._shop_redeem(1, 2, {"emby_user_id": "u1"}, "1"))
-    assert shop.redeemed == [("u1", 1)]
-    assert "兑换成功" in bot.edits[-1]  # type: ignore[attr-defined]
+def test_buying_asks_before_it_spends(transactional_bot) -> None:
+    bot = transactional_bot
+    bot._members.upsert('u1', 'viewer', {'group_id': 'standard'})
+    bot._members.bind_telegram('u1', '1')
+    bot._points.add('u1', 500, 'admin.adjust')
+    item = bot._shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 100, 'amount': 50})
+    asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
+    assert '确定用' in bot.edits[0] and '100' in bot.edits[0]
+    assert bot._shop.orders('u1') == [] and bot._points.balance('u1') == 500
+    member = bot._members.get('u1')
+    asyncio.run(bot._shop_redeem(1, 2, member, str(item['id'])))
+    assert len(bot._shop.orders('u1')) == 1 and bot._points.balance('u1') == 400
+    assert bot._members.get('u1')['overrides']['extra_traffic_bytes'] == 50 * 1024**3
+    assert '兑换成功' in bot.edits[-1]
 
 
 def test_confirming_a_withdrawn_item_is_refused() -> None:
@@ -1136,12 +1162,16 @@ def test_confirming_a_withdrawn_item_is_refused() -> None:
     assert shop.redeemed == []
 
 
-def test_a_failed_redemption_explains_why() -> None:
-    shop = _FakeShop([_shop_item()], fail="积分不足")
-    bot = _points_bot(shop=shop)
-    asyncio.run(bot._shop_redeem(1, 2, {"emby_user_id": "u1"}, "1"))
-    assert "兑换失败" in bot.edits[-1]  # type: ignore[attr-defined]
-    assert "积分不足" in bot.edits[-1]  # type: ignore[attr-defined]
+def test_a_failed_redemption_explains_why(transactional_bot) -> None:
+    bot = transactional_bot
+    bot._members.upsert('u1', 'viewer', {'group_id': 'standard'})
+    bot._members.bind_telegram('u1', '1')
+    item = bot._shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 100, 'amount': 50})
+    asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
+    asyncio.run(bot._shop_redeem(1, 2, bot._members.get('u1'), str(item['id'])))
+    assert '兑换失败' in bot.edits[-1] and '积分不足' in bot.edits[-1]
+    assert bot._points.balance('u1') == 0 and not bot._shop.orders('u1')
+    assert not bot._members.get('u1')['overrides'].get('extra_traffic_bytes')
 
 
 def test_the_points_view_shows_a_balance_and_where_it_came_from() -> None:

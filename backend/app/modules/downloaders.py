@@ -40,7 +40,10 @@ class QbittorrentClient:
             f"{self._base}/api/v2/torrents/info",
             params={"limit": MAX_TORRENTS})
         response.raise_for_status()
-        return response.json()
+        data = response.json()
+        if not isinstance(data, list):
+            raise TypeError("invalid downloader response: expected list")
+        return data
 
     async def summary(self) -> dict[str, Any]:
         if not self._base:
@@ -90,8 +93,8 @@ class QbittorrentClient:
             except (TypeError, ValueError):
                 progress = 0.0
             try:
-                size = int(item.get("total_size") or 0)
-            except (TypeError, ValueError):
+                size = max(0, int(item.get("total_size") or 0))
+            except (TypeError, ValueError, OverflowError):
                 size = 0
             if progress >= 1.0:
                 completed += 1

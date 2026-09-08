@@ -56,6 +56,7 @@ class RebindBotMixin:
             await self._show(chat_id, "格式应为：用户名 空格 密码。请重新输入，或取消。", back)
             return
         # Neither pending state, logs, requests nor audit retain the password.
+        waiting = self._pending.get(self._pkey(chat_id))
         verified = None
         try:
             verified = await self._emby.authenticate_user(fields[0], fields[1])
@@ -66,8 +67,12 @@ class RebindBotMixin:
         if not verified or not verified.get("Id"):
             await self._show(chat_id, "账号验证未通过或 Emby 暂不可用，请检查后重试。", back)
             return
+        if (not waiting or waiting[0] != 'rebind_verify' or waiting[1] <= time.time()
+                or self._pending.get(self._pkey(chat_id)) is not waiting):
+            await self._show(chat_id, '验证会话已取消或超时，请重新发起。', back)
+            return
         try:
-            extra = (self._pending.get(self._pkey(chat_id)) or ('', 0, {}))[2]
+            extra = waiting[2]
             row = self._rebinding.create(str(verified["Id"]), tg_id, tg_name, handoff=extra.get('handoff', ''))
         except ValueError as exc:
             await self._show(chat_id, escape(str(exc)), back)
@@ -155,7 +160,15 @@ class RebindBotMixin:
 
     async def _publish_rebind(self, row: dict) -> int:
         count = 0
-        for chat in self._cfg().get("group_interaction_chats") or []:
+        for configured_chat in self._group_allowlist():
+            chat = configured_chat
+            if chat.startswith('@'):
+                # Telegram returns a numeric chat ID in the send result; use
+                # that same identity for deduplication on subsequent retries.
+                resolved = await self._call('getChat', {'chat_id': chat})
+                if not isinstance(resolved, dict) or not resolved.get('id'):
+                    continue
+                chat = str(resolved['id'])
             if self._db.one('SELECT 1 FROM tg_rebind_notices WHERE request_id=? AND chat_id=?', (row['id'], str(chat))):
                 count += 1
                 continue
@@ -195,6 +208,10 @@ class RebindBotMixin:
         if not self._rebinding:
             raise ValueError("换绑服务未配置")
         row = self._rebinding.get(request_id)
+        reviewer_before = self._member_for_chat(reviewer_tg) if reviewer_tg is not None else None
+        groups_before = self._group_allowlist()
+        if reviewer_tg is not None and not self.is_admin(reviewer_before):
+            raise ValueError('管理员权限已变化，未执行换绑')
         if row["status"] == "pending" and approve and int(row.get("expires_at") or 0) > time.time():
             if self._emby is None:
                 raise ValueError("无法核验 Emby，请稍后重试")
@@ -204,8 +221,12 @@ class RebindBotMixin:
                 raise ValueError("无法核验 Emby，请稍后重试") from None
             if not users or not any(str(u.get("Id")) == row["emby_user_id"] for u in users):
                 raise ValueError("账号已不存在或 Emby 不可用，未更改绑定")
-        if reviewer_tg is not None and not self.is_admin(self._member_for_chat(reviewer_tg)):
-            raise ValueError("管理员权限已变化，未执行换绑")
+        if reviewer_tg is not None:
+            reviewer_after = self._member_for_chat(reviewer_tg)
+            if (not self.is_admin(reviewer_after)
+                    or reviewer_after['emby_user_id'] != reviewer_before['emby_user_id']
+                    or self._group_allowlist() != groups_before):
+                raise ValueError("管理员身份、权限或审核群已变化，未执行换绑")
         result = self._rebinding.review(request_id, approve, reviewer)
         notices = self._db.query(
             "SELECT chat_id,message_id FROM tg_rebind_notices WHERE request_id=?", (request_id,)

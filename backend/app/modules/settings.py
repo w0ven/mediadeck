@@ -144,12 +144,36 @@ def _entries_revision(entries: list[dict[str, Any]]) -> str:
 
 
 def _require_http_url(value: str, field: str) -> str:
-    value = (value or "").strip().rstrip("/")
+    if not isinstance(value, str):
+        raise ConfigError(f"{field} 必须是 HTTP(S) 地址")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ConfigError(f"{field} 不能包含控制字符")
+    value = value.strip().rstrip("/")
     if not value:
         raise ConfigError(f"{field} 不能为空")
-    if not value.startswith(("http://", "https://")):
-        raise ConfigError(f"{field} 必须以 http:// 或 https:// 开头")
+    try:
+        parsed = urlsplit(value)
+        valid = (parsed.scheme in ("http", "https") and parsed.hostname
+                 and not parsed.username and not parsed.password
+                 and not parsed.fragment and not any(ch.isspace() for ch in value))
+        _ = parsed.port  # validate a supplied port without reflecting the URL
+    except ValueError:
+        valid = False
+    if not valid:
+        raise ConfigError(f"{field} 必须是不含凭据的有效 http:// 或 https:// 地址")
     return value
+
+
+def _bool(value: Any) -> bool:
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in ("1", "true", "on", "yes"):
+            return True
+        if token in ("0", "false", "off", "no", ""):
+            return False
+    elif value is None or isinstance(value, bool) or value in (0, 1):
+        return bool(value)
+    raise ConfigError("开关必须是布尔值")
 
 
 def _abs_path(value: str, field: str) -> str:
@@ -274,18 +298,18 @@ class SettingsService:
         if api_key == SECRET_UNCHANGED or api_key is None:
             api_key = current["api_key"]
         api_key = str(api_key).strip()
-        enabled = bool(payload.get("enabled", current["enabled"]))
+        enabled = _bool(payload.get("enabled", current["enabled"]))
         if enabled and not api_key:
             raise ConfigError("启用 Emby 集成前必须填写 API Key")
         try:
             timeout = float(payload.get("timeout_seconds", current["timeout_seconds"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("超时时间必须是数字") from None
         if not 1 <= timeout <= 120:
             raise ConfigError("超时时间必须在 1–120 秒之间")
         self._store.set_section("emby", {
             "enabled": enabled, "url": url, "api_key": api_key,
-            "verify_ssl": bool(payload.get("verify_ssl", current["verify_ssl"])),
+            "verify_ssl": _bool(payload.get("verify_ssl", current["verify_ssl"])),
             "timeout_seconds": timeout,
         })
         return self.emby_public()
@@ -296,8 +320,13 @@ class SettingsService:
         api_key = payload.get("api_key", SECRET_UNCHANGED)
         if api_key == SECRET_UNCHANGED or api_key is None or api_key == "":
             api_key = current["api_key"]
-        timeout = float(payload.get("timeout_seconds") or current["timeout_seconds"])
-        verify = bool(payload.get("verify_ssl", current["verify_ssl"]))
+        try:
+            timeout = float(payload.get("timeout_seconds", current["timeout_seconds"]))
+        except (TypeError, ValueError, OverflowError):
+            raise ConfigError("超时时间必须是数字") from None
+        if not 1 <= timeout <= 120:
+            raise ConfigError("超时时间必须在 1–120 秒之间")
+        verify = _bool(payload.get("verify_ssl", current["verify_ssl"]))
         return url, str(api_key).strip(), timeout, verify
 
     # -- dispatch policy -----------------------------------------------------
@@ -308,7 +337,7 @@ class SettingsService:
             policy = "affinity"
         try:
             threshold = float(section.get("load_threshold", 0.8))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             threshold = 0.8
         return {"policy": policy, "load_threshold": threshold}
 
@@ -319,7 +348,7 @@ class SettingsService:
             raise ConfigError("调度策略必须是 affinity 或 least-load")
         try:
             threshold = float(payload.get("load_threshold", current["load_threshold"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("负载阈值必须是数字") from None
         if not 0 < threshold <= 100:
             raise ConfigError("负载阈值必须大于 0")
@@ -339,7 +368,7 @@ class SettingsService:
 
     def save_playback(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self.playback_config()
-        enabled = bool(payload.get("enabled", current["enabled"]))
+        enabled = _bool(payload.get("enabled", current["enabled"]))
         if enabled:
             nodes = self.nodes()
             if not nodes:
@@ -348,7 +377,7 @@ class SettingsService:
                 raise ConfigError("启用前请先给节点配置媒体根映射（节点详情 → 媒体根）")
         self._store.set_section("playback", {
             "enabled": enabled,
-            "direct_only": bool(payload.get("direct_only", current["direct_only"])),
+            "direct_only": _bool(payload.get("direct_only", current["direct_only"])),
         })
         return self.playback_config()
 
@@ -435,11 +464,11 @@ class SettingsService:
         cfg["enabled"] = bool(cfg["enabled"])
         try:
             cfg["max_gib"] = max(1, int(cfg["max_gib"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["max_gib"] = IMAGE_CACHE_DEFAULTS["max_gib"]
         try:
             cfg["max_age_days"] = max(1, int(cfg["max_age_days"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["max_age_days"] = IMAGE_CACHE_DEFAULTS["max_age_days"]
         cfg["max_bytes"] = cfg["max_gib"] * 1024 ** 3
         return cfg
@@ -449,14 +478,14 @@ class SettingsService:
         try:
             max_gib = int(payload.get("max_gib", current["max_gib"]))
             max_age = int(payload.get("max_age_days", current["max_age_days"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("缓存容量与保留天数必须是整数") from None
         if not 1 <= max_gib <= 2048:
             raise ConfigError("缓存容量必须在 1–2048 GiB 之间")
         if not 1 <= max_age <= 3650:
             raise ConfigError("缓存保留天数必须在 1–3650 之间")
         self._store.set_section("image_cache", {
-            "enabled": bool(payload.get("enabled", current["enabled"])),
+            "enabled": _bool(payload.get("enabled", current["enabled"])),
             "max_gib": max_gib,
             "max_age_days": max_age,
         })
@@ -472,11 +501,11 @@ class SettingsService:
         cfg["enforcement_enabled"] = bool(cfg["enforcement_enabled"])
         try:
             cfg["sample_interval_seconds"] = max(5, int(cfg["sample_interval_seconds"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["sample_interval_seconds"] = 15
         try:
             cfg["retention_days"] = max(30, int(cfg["retention_days"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["retention_days"] = 400
         return cfg
 
@@ -486,7 +515,7 @@ class SettingsService:
             interval = int(payload.get(
                 "sample_interval_seconds", current["sample_interval_seconds"]))
             retention = int(payload.get("retention_days", current["retention_days"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("采样间隔与保留天数必须是整数") from None
         # Below ~5s the sampler spends more time talking to Emby than measuring;
         # above 60s a user can burn a lot of quota between samples.
@@ -495,7 +524,7 @@ class SettingsService:
         if not 30 <= retention <= 3650:
             raise ConfigError("数据保留天数必须在 30–3650 之间")
         self._store.set_section("membership", {
-            "enforcement_enabled": bool(payload.get(
+            "enforcement_enabled": _bool(payload.get(
                 "enforcement_enabled", current["enforcement_enabled"])),
             "sample_interval_seconds": interval,
             "retention_days": retention,
@@ -512,7 +541,7 @@ class SettingsService:
         cfg["baseline_confirmed"] = bool(cfg["baseline_confirmed"])
         try:
             cfg["report_interval_seconds"] = max(5, int(cfg["report_interval_seconds"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["report_interval_seconds"] = 15
         # Cutover requires an explicit baseline confirmation. A lone True
         # in a hand-edited document must not start blocking accounts.
@@ -526,14 +555,14 @@ class SettingsService:
 
     def save_metering(self, payload: dict[str, Any]) -> dict[str, Any]:
         current = self.metering_config()
-        confirm = bool(payload.get("baseline_confirmed", current["baseline_confirmed"]))
-        want_cutover = bool(payload.get("cutover", current["cutover"]))
+        confirm = _bool(payload.get("baseline_confirmed", current["baseline_confirmed"]))
+        want_cutover = _bool(payload.get("cutover", current["cutover"]))
         if want_cutover and not confirm:
             raise ConfigError("启用实测配额前必须确认计费基线（baseline_confirmed）")
         try:
             interval = int(payload.get(
                 "report_interval_seconds", current["report_interval_seconds"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("上报间隔必须是整数") from None
         if not 5 <= interval <= 120:
             raise ConfigError("上报间隔必须在 5–120 秒之间")
@@ -574,11 +603,11 @@ class SettingsService:
         ):
             try:
                 cfg[key] = max(low, min(high, int(cfg[key])))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 cfg[key] = fallback
         try:
             cfg["max_users"] = max(0, int(cfg["max_users"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             cfg["max_users"] = 0
         for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url"):
             cfg[key] = str(cfg[key] or "").strip()
@@ -612,14 +641,14 @@ class SettingsService:
         token = str(token).strip()
         if token and ":" not in token:
             raise ConfigError("Bot Token 格式不正确，应形如 <数字ID>:<字符串>")
-        enabled = bool(payload.get("enabled", current["enabled"]))
+        enabled = _bool(payload.get("enabled", current["enabled"]))
         if enabled and not token:
             raise ConfigError("启用 Telegram 机器人前必须填写 Bot Token")
 
         try:
             reg_days = int(payload.get("register_days", current["register_days"]))
             max_users = int(payload.get("max_users", current["max_users"]))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("天数与名额必须是整数") from None
 
         # 0 means "never expires", which is a real choice; negative is not.
@@ -634,10 +663,11 @@ class SettingsService:
         # rewritten to False and lost.
         channels = {}
         for channel in ("allow_admin_grant", "allow_invite", "allow_redeem"):
-            stored = self._store.section("telegram").get(
-                channel, TELEGRAM_DEFAULTS[channel])
-            channels[channel] = bool(payload.get(channel, stored))
-        if any(channels.values()) and not enabled:
+            section = self._store.section("telegram")
+            stored = section.get(channel, False if section.get("registration_enabled") is False
+                                 else TELEGRAM_DEFAULTS[channel])
+            channels[channel] = _bool(payload.get(channel, stored))
+        if not enabled and any(channel in payload and channels[channel] for channel in channels):
             raise ConfigError("机器人未启用时无法开放注册通道")
 
         emby_url = str(payload.get("emby_public_url",
@@ -680,7 +710,7 @@ class SettingsService:
         for item in raw:
             try:
                 out.append(StreamNode(**item))
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 continue
         return out
 
@@ -769,7 +799,7 @@ class SettingsService:
         probe_url = _require_http_url(raw_probe, "探针地址")
         try:
             capacity = float(payload.get("capacity", base.get("capacity", 100)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("并发容量必须是数字") from None
         if not 1 <= capacity <= 100000:
             raise ConfigError("并发容量必须在 1–100000 之间")
@@ -786,14 +816,22 @@ class SettingsService:
 
         try:
             ttl = int(payload.get("sign_ttl_seconds", base.get("sign_ttl_seconds", 21600)))
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             raise ConfigError("链接有效期必须是数字") from None
         if not MIN_TTL <= ttl <= MAX_TTL:
             raise ConfigError(f"链接有效期必须在 {MIN_TTL}–{MAX_TTL} 秒之间")
 
+        rclone_conf = payload.get("rclone_conf", SECRET_UNCHANGED)
+        if rclone_conf is None or rclone_conf == SECRET_UNCHANGED:
+            rclone_conf = base.get("rclone_conf", "")
+        mount_ids = payload.get("mount_ids", base.get("mount_ids") or []) or []
+        if not isinstance(mount_ids, list) or any(not isinstance(x, str) for x in mount_ids):
+            raise ConfigError("挂载绑定必须是 ID 列表")
+
         return StreamNode(
             name=name, base_url=base_url, probe_url=probe_url, capacity=capacity,
-            enabled=bool(payload.get("enabled", base.get("enabled", True))),
+            bandwidth_mbps=base.get("bandwidth_mbps", 0),
+            enabled=_bool(payload.get("enabled", base.get("enabled", True))),
             pools=pools,
             sign_secret=secret,
             sign_ttl_seconds=ttl,
@@ -807,13 +845,10 @@ class SettingsService:
             # Drive identity travels with the node: without it the installer
             # would still need `rclone config` run by hand on the target,
             # which is exactly the manual step one-command enrollment removes.
-            rclone_conf=str(payload.get(
-                "rclone_conf", base.get("rclone_conf", "")) or ""),
+            rclone_conf=str(rclone_conf or ""),
             enroll_token=str(base.get("enroll_token", "")),
             report_token=str(base.get("report_token", "")),
-            mount_ids=[str(x) for x in (
-                payload.get("mount_ids", base.get("mount_ids") or []) or [])
-                if str(x).strip()],
+            mount_ids=[x.strip() for x in mount_ids if x.strip()],
             first_seen_at=base.get("first_seen_at"),
             enrolled_host=str(payload.get(
                 "enrolled_host", base.get("enrolled_host", "")) or "")[:120],
@@ -876,7 +911,7 @@ class SettingsService:
         changed: dict[str, Any] = {}
 
         if "enabled" in payload:
-            value = bool(payload["enabled"])
+            value = _bool(payload["enabled"])
             if value != node.enabled:
                 changed["enabled"] = [node.enabled, value]
             node.enabled = value
@@ -889,7 +924,7 @@ class SettingsService:
                 continue
             try:
                 value = float(payload[field])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ConfigError(f"{label}必须是数字") from None
             if not low <= value <= high:
                 raise ConfigError(f"{label}必须在 {low}–{high} 之间")
@@ -904,7 +939,7 @@ class SettingsService:
             # understands would let the two disagree.
             try:
                 value = float(payload["weight"])
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ConfigError("权重必须是数字") from None
             if not 1 <= value <= 100000:
                 raise ConfigError("权重必须在 1–100000 之间")

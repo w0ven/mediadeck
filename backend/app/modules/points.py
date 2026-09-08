@@ -24,6 +24,7 @@ merely unlikely.
 """
 from __future__ import annotations
 
+import contextlib
 import sqlite3
 import time
 from typing import Any
@@ -155,7 +156,8 @@ class PointsService:
                                int(time.time()))
 
     def transfer(self, from_id: str, to_id: str, amount: int,
-                 actor: str = "member", fee: int = 0) -> dict[str, Any]:
+                 actor: str = "member", fee: int = 0, *,
+                 conn: sqlite3.Connection | None = None) -> dict[str, Any]:
         """Move points between two members, atomically.
 
         ``fee`` is destroyed rather than paid to anyone: it exists to make
@@ -178,12 +180,12 @@ class PointsService:
         now = int(time.time())
         # One transaction for both halves: a debit that lands without its
         # credit is the failure this whole method exists to prevent.
-        with self._db.write() as conn:
+        with (contextlib.nullcontext(conn) if conn is not None else self._db.write()) as tx:
             out_balance = self._apply(
-                conn, from_id, -amount, "transfer.out", f"to:{to_id}",
+                tx, from_id, -amount, "transfer.out", f"to:{to_id}",
                 actor, now)
             in_balance = self._apply(
-                conn, to_id, received, "transfer.in", f"from:{from_id}",
+                tx, to_id, received, "transfer.in", f"from:{from_id}",
                 actor, now)
         return {
             "ok": True,

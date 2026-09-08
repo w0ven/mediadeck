@@ -29,12 +29,15 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+import httpx
+
 FIELD_KINDS = ("bool", "int", "str", "select", "text")
 CATEGORIES = ("task", "points", "request")
 
 # A run that has not reported back in this long is treated as hung, so a stuck
 # plugin cannot hold its own lock forever and silently stop scheduling.
 RUN_TIMEOUT = 600
+RETRY_INTERVAL = 60
 
 
 @dataclass
@@ -59,8 +62,10 @@ class Field:
         if self.kind == "int":
             try:
                 value = int(raw)
-            except (TypeError, ValueError):
+            except (TypeError, ValueError, OverflowError):
                 raise ValueError(f"{self.label} 必须是整数") from None
+            if isinstance(raw, float) and raw != value:
+                raise ValueError(f"{self.label} 必须是整数")
             if self.min is not None and value < self.min:
                 raise ValueError(f"{self.label} 不能小于 {self.min}")
             if self.max is not None and value > self.max:
@@ -147,9 +152,11 @@ class PluginRegistry:
         self._db = db
         self._plugins: dict[str, Plugin] = {}
         self._running: set[str] = set()
+        self._active: set[asyncio.Task] = set()
         self._task: asyncio.Task | None = None
         self._last_run: dict[str, float] = {}
         self._last_daily: dict[str, str] = {}
+        self._last_retry: dict[str, float] = {}
 
     # -- registration --------------------------------------------------------
 
@@ -163,6 +170,21 @@ class PluginRegistry:
             if f.kind not in FIELD_KINDS:
                 raise ValueError(f"{spec.id}.{f.key}: unknown field kind {f.kind!r}")
         self._plugins[spec.id] = plugin
+        # Completed runs already have durable history; restore scheduling from
+        # that history rather than treating every process start as a new day.
+        last = self.last_result(spec.id)
+        if last:
+            self._last_run[spec.id] = float(last["started_at"])
+            if last.get("trigger") == "schedule" and not last.get("ok"):
+                self._last_retry[spec.id] = float(last["started_at"])
+        with contextlib.suppress(Exception):
+            daily = self._db.one(
+                "SELECT * FROM plugin_runs WHERE plugin_id=? AND ok=1 "
+                "AND trigger='schedule' ORDER BY started_at DESC, id DESC LIMIT 1",
+                (spec.id,))
+            if daily and daily["ok"] and daily["trigger"] == "schedule":
+                self._last_daily[spec.id] = time.strftime(
+                    "%Y-%m-%d", time.localtime(float(daily["started_at"])))
 
     def get(self, plugin_id: str) -> Plugin | None:
         return self._plugins.get(plugin_id)
@@ -214,12 +236,16 @@ class PluginRegistry:
 
     def _record(self, plugin_id: str, ok: bool, summary: dict[str, Any],
                 started: float, trigger: str) -> None:
+        encoded = json.dumps(summary, ensure_ascii=False, default=str)
+        if len(encoded) > 4000:
+            encoded = json.dumps({"truncated": True, "preview": encoded[:3000]},
+                                 ensure_ascii=False)
         with contextlib.suppress(Exception):
             self._db.execute(
                 "INSERT INTO plugin_runs(plugin_id,ok,summary,started_at,"
                 "duration_ms,trigger) VALUES(?,?,?,?,?,?)",
                 (plugin_id, 1 if ok else 0,
-                 json.dumps(summary, ensure_ascii=False)[:4000],
+                 encoded,
                  int(started), int((time.time() - started) * 1000), trigger))
 
     def last_result(self, plugin_id: str) -> dict[str, Any] | None:
@@ -227,7 +253,7 @@ class PluginRegistry:
         with contextlib.suppress(Exception):
             row = self._db.one(
                 "SELECT * FROM plugin_runs WHERE plugin_id=? "
-                "ORDER BY started_at DESC LIMIT 1", (plugin_id,))
+                "ORDER BY started_at DESC, id DESC LIMIT 1", (plugin_id,))
         if not row:
             return None
         out = dict(row)
@@ -240,7 +266,7 @@ class PluginRegistry:
         with contextlib.suppress(Exception):
             rows = self._db.query(
                 "SELECT * FROM plugin_runs WHERE plugin_id=? "
-                "ORDER BY started_at DESC LIMIT ?",
+                "ORDER BY started_at DESC, id DESC LIMIT ?",
                 (plugin_id, max(1, min(limit, 200))))
         out = []
         for r in rows:
@@ -292,18 +318,30 @@ class PluginRegistry:
         if plugin_id in self._running:
             return {"ok": False, "error": "already running"}
         self._running.add(plugin_id)
+        owner = asyncio.current_task()
+        if owner is not None:
+            self._active.add(owner)
         started = time.time()
         try:
             summary = await asyncio.wait_for(
                 plugin.run(self.config(plugin_id)), timeout=RUN_TIMEOUT)
             summary = dict(summary or {})
             ok = bool(summary.pop("ok", True))
+        except asyncio.CancelledError:
+            self._record(plugin_id, False, {"error": "cancelled"}, started, trigger)
+            raise
         except TimeoutError:
             ok, summary = False, {"error": f"超过 {RUN_TIMEOUT}s 未完成"}
+        except (httpx.HTTPError, OSError) as exc:
+            # Transport exception strings include full URLs, query credentials,
+            # or local paths. Keep the failure type, never that raw payload.
+            ok, summary = False, {"error": type(exc).__name__}
         except Exception as exc:  # noqa: BLE001 - shown on the card, never raised
             ok, summary = False, {"error": f"{type(exc).__name__}: {exc}"[:300]}
         finally:
             self._running.discard(plugin_id)
+            if owner is not None:
+                self._active.discard(owner)
         self._last_run[plugin_id] = started
         self._record(plugin_id, ok, summary, started, trigger)
         return {"ok": ok, **summary}
@@ -327,9 +365,12 @@ class PluginRegistry:
     def _due(self, plugin_id: str, now: float) -> bool:
         plugin = self._plugins[plugin_id]
         spec = plugin.spec
-        if not self.enabled(plugin_id):
+        if not self.enabled(plugin_id) or plugin_id in self._running:
             return False
         if spec.hour is not None:
+            retry = self._last_retry.get(plugin_id)
+            if retry is not None and now - retry < RETRY_INTERVAL:
+                return False
             # Daily job: once per calendar day, at or after the given hour.
             today = time.strftime("%Y-%m-%d", time.localtime(now))
             if self._last_daily.get(plugin_id) == today:
@@ -348,15 +389,22 @@ class PluginRegistry:
     async def tick(self, now: float | None = None) -> list[str]:
         """Run whatever is due. Returns the ids that ran."""
         now = time.time() if now is None else now
-        ran = []
-        for pid in list(self._plugins):
+        async def run_due(pid: str) -> str | None:
+            # Recheck inside each task: overlapping ticks/manual runs may have
+            # claimed the plugin after this tick was constructed.
             if not self._due(pid, now):
-                continue
-            await self.run_now(pid, trigger="schedule")
+                return None
+            result = await self.run_now(pid, trigger="schedule")
             if self._plugins[pid].spec.hour is not None:
-                self._last_daily[pid] = time.strftime("%Y-%m-%d", time.localtime(now))
-            ran.append(pid)
-        return ran
+                if result.get("ok"):
+                    self._last_daily[pid] = time.strftime("%Y-%m-%d", time.localtime(now))
+                    self._last_retry.pop(pid, None)
+                else:
+                    self._last_retry[pid] = now
+            return pid
+
+        results = await asyncio.gather(*(run_due(pid) for pid in list(self._plugins)))
+        return [pid for pid in results if pid is not None]
 
     async def _loop(self) -> None:
         while True:
@@ -370,9 +418,11 @@ class PluginRegistry:
         self._task = asyncio.create_task(self._loop())
 
     async def stop(self) -> None:
-        if not self._task:
-            return
-        self._task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await self._task
+        tasks = set(self._active)
+        if self._task is not None:
+            tasks.add(self._task)
+        tasks.discard(asyncio.current_task())
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         self._task = None

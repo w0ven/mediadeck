@@ -68,6 +68,7 @@
   }
   function closeDetail() {
     if(!canLeaveDetail()) return;
+    clearTimeout($('#m-q')?._searchTimer);
     const params=currentParams();params.delete('id');params.delete('tab');writeHash(params);
     disposeDrawer(true);
   }
@@ -439,6 +440,8 @@
       if (btn.disabled) return;
       const act = btn.dataset.act;
       const id = btn.dataset.id;
+      const busy = ['delete','delete-cascade','retry','bulk','enrol','enforce','metering'].includes(act);
+      if (busy) btn.disabled = true;
       try {
         if (act === 'open') await openDetail(id);
         if (act === 'delete') await confirmDelete(id, btn.dataset.name, false);
@@ -452,6 +455,7 @@
         if (act === 'enrol') await enrol(id, btn.dataset.name);
         if (act === 'invitees') setParam('inviter_id', id);
       } catch (error) { toast('操作失败: ' + error.message, 1); }
+      finally { if (busy) btn.disabled = false; }
     };
     root.onchange = (e) => {
       const box = e.target.closest('.m-pick');
@@ -461,7 +465,7 @@
       patchSelection();
     };
     root.onkeydown = (e) => {
-      if (e.target.closest('button,input,select,textarea,a')) return;
+      if (e.target.closest('button,input,select,textarea,a,summary')) return;
       const tr = e.target.closest('tr[data-id]');
       if (tr && (e.key === 'Enter' || e.key === ' ')) {
         e.preventDefault();
@@ -543,6 +547,7 @@
   }
 
   function refreshNow() {
+    if (state.page !== 'members' || !$('#members-page')) return;
     return loadMembers(membersContext(true));
   }
 
@@ -667,19 +672,19 @@
       rememberDetailForm(host);
       bindMemberActions(host, id, m, tab);
       const renew = $('#md-renew');
-      if (renew) renew.onclick = () => runMemberAction(renew, () => memberRenew(id));
+      if (renew) renew.onclick = () => runMemberAction(renew, current => memberRenew(id, current));
       const groupGo = $('#md-group-go');
-      if (groupGo) groupGo.onclick = () => runMemberAction(groupGo, () => memberGroup(id));
+      if (groupGo) groupGo.onclick = () => runMemberAction(groupGo, current => memberGroup(id, current));
       const retry = $('#md-retry');
       if (retry) retry.onclick = () => runMemberAction(retry, () => retryRemote(id));
       host.querySelectorAll('[data-dev]').forEach((b) => {
-        b.onclick = () => runMemberAction(b, async () => {
+        b.onclick = () => runMemberAction(b, async current => {
           const blocked = b.dataset.block === '1';
           if (!confirm(`${blocked ? '封锁' : '解封'}这个设备？`)) return;
           const path = blocked ? 'block' : 'unblock';
           const r = await api(`/api/members/${encodeURIComponent(id)}/devices/${encodeURIComponent(b.dataset.dev)}/${path}`, { method: 'POST' });
           assertRemoteResult(r);
-          fillDetail(id, 'devices');
+          await refreshActionDetail(id, 'devices', current);
         });
       });
     } catch (e) {
@@ -699,8 +704,31 @@
   async function runMemberAction(button, action) {
     if (button?.disabled) return;
     if (button) button.disabled = true;
-    try { await action(); } catch (error) { toast('操作失败: ' + error.message, 1); }
+    const version = ms.detailVersion;
+    const host = button?.closest('#member-detail');
+    const current = () => !host || (host.isConnected && ms.drawerActive && ms.detailVersion === version);
+    try { await action(current); } catch (error) { toast('操作失败: ' + error.message, 1); }
     finally { if (button?.isConnected) button.disabled = false; }
+  }
+
+  function detailSubmission(inputs) {
+    return [...inputs].map(el => [el, el.type === 'checkbox' ? el.checked : el.value]);
+  }
+  async function refreshActionDetail(id, tab, current, submitted = []) {
+    if (!current()) return;
+    submitted.forEach(([el, value]) => ms.detailBaseline.set(el, value));
+    const key = el => el.id || el.className + ':' + el.value;
+    const drafts = new Map([...ms.detailBaseline].filter(([el, value]) =>
+      el.isConnected && (el.type === 'checkbox' ? el.checked : el.value) !== value)
+      .map(([el]) => [key(el), el.type === 'checkbox' ? el.checked : el.value]));
+    const expectedVersion = ms.detailVersion + 1;
+    await fillDetail(id, tab);
+    // fillDetail has its own stale-request check. Only restore into this exact result.
+    if (ms.detailVersion !== expectedVersion || ms.detail?.member?.emby_user_id !== id || currentParams().get('tab') !== tab) return;
+    for (const el of ms.detailBaseline.keys()) {
+      if (!drafts.has(key(el))) continue;
+      if (el.type === 'checkbox') el.checked = drafts.get(key(el)); else el.value = drafts.get(key(el));
+    }
   }
 
   function edgeHistory(edge) {
@@ -728,7 +756,7 @@
   function bindMemberActions(host, id, member, tab) {
     const endpoint = `/api/members/${encodeURIComponent(id)}`;
     host.querySelectorAll('[data-member-action]').forEach((button) => {
-      button.onclick = () => runMemberAction(button, async () => {
+      button.onclick = () => runMemberAction(button, async current => {
         const action = button.dataset.memberAction;
         let body = {};
         if (action === 'password') {
@@ -746,73 +774,82 @@
         const result = assertRemoteResult(await api(endpoint + '/' + action, {
           method:'POST', body:JSON.stringify(body),
         }));
+        if (!current()) return;
         if (action === 'password' && result.password) {
           openModal('新密码（仅本次展示）', `<div class="card-body"><label>新密码 <input type="text" readonly autocomplete="off" value="${esc(result.password)}"></label><p>请妥善保存，关闭后不再显示。</p></div>`);
         } else toast(action === 'kick' ? `已结束 ${result.stopped || 0} 路播放` : '操作已完成');
         await refreshNow();
-        await fillDetail(id, tab);
+        await refreshActionDetail(id, tab, current);
       });
     });
     host.querySelectorAll('[data-forget-device]').forEach((button) => {
-      button.onclick = () => runMemberAction(button, async () => {
+      button.onclick = () => runMemberAction(button, async current => {
         if (!confirm('移除这个设备的面板记录？不会删除其它设备。')) return;
         assertRemoteResult(await api(endpoint + '/devices/' + encodeURIComponent(button.dataset.forgetDevice), {method:'DELETE'}));
-        await fillDetail(id, 'devices');
+        await refreshActionDetail(id, 'devices', current);
       });
     });
     const roles = $('#md-roles-save');
-    if (roles) roles.onclick = () => runMemberAction(roles, async () => {
+    if (roles) roles.onclick = () => runMemberAction(roles, async current => {
+      const submitted = detailSubmission(host.querySelectorAll('.md-role'));
       const selected = [...host.querySelectorAll('.md-role:checked')].map((input) => input.value);
       if (!confirm(`确认修改角色为 ${selected.join('、') || '普通成员'}？管理员角色允许登录管理面板。`)) return;
       assertRemoteResult(await api(endpoint + '/roles', {method:'POST',body:JSON.stringify({roles:selected})}));
-      toast('角色已保存'); await refreshNow(); await fillDetail(id, 'entitlements');
+      toast('角色已保存'); await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
     });
     const save = $('#ov-save');
-    if (save) save.onclick = () => runMemberAction(save, async () => {
+    if (save) save.onclick = () => runMemberAction(save, async current => {
       if (![...host.querySelectorAll('#md-overrides input')].every((input) => input.reportValidity())) return;
+      const submitted = detailSubmission(host.querySelectorAll('#md-overrides input,#md-overrides select'));
       const overrides = collectOverridesFromForm(member.overrides || {});
       if (!confirm('保存个人权限覆盖？限速变化可能结束当前播放以重新生效。')) return;
       const result = await api(endpoint + '/overrides', {method:'PUT',body:JSON.stringify(overrides)});
-      if (!toastResult(result, '权限覆盖已保存')) return;
-      await refreshNow(); await fillDetail(id, 'entitlements');
+      assertRemoteResult(result); toast('权限覆盖已保存');
+      await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
     });
     const clear = $('#ov-clear');
-    if (clear) clear.onclick = () => runMemberAction(clear, async () => {
+    if (clear) clear.onclick = () => runMemberAction(clear, async current => {
       if (!confirm('清除全部个人覆盖并继承用户组？')) return;
+      const submitted = detailSubmission(host.querySelectorAll('#md-overrides input,#md-overrides select'));
       const result = await api(endpoint + '/overrides', {method:'PUT',body:'{}'});
-      if (!toastResult(result, '个人覆盖已清除')) return;
-      await refreshNow(); await fillDetail(id, 'entitlements');
+      assertRemoteResult(result); toast('个人覆盖已清除');
+      await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
     });
     const points = $('#md-points-save');
-    if (points) points.onclick = () => runMemberAction(points, async () => {
+    if (points) points.onclick = () => runMemberAction(points, async current => {
+      const submitted = detailSubmission(host.querySelectorAll('#md-points-delta,#md-points-reason'));
       const delta = Number($('#md-points-delta').value);
       const reason = $('#md-points-reason').value.trim();
       if (!Number.isInteger(delta) || delta === 0 || !reason) throw new Error('请填写非零整数积分及调整原因');
       if (!confirm(`确认调整积分 ${delta > 0 ? '+' : ''}${delta}？原因：${reason}`)) return;
       assertRemoteResult(await api(`/api/points/${encodeURIComponent(id)}/adjust`, {method:'POST',body:JSON.stringify({delta,reason})}));
-      toast('积分已调整'); await fillDetail(id, 'invites');
+      toast('积分已调整'); await refreshActionDetail(id, 'invites', current, submitted);
     });
   }
 
-  async function memberRenew(id) {
+  async function memberRenew(id, current) {
+    const submitted = detailSubmission(document.querySelectorAll('#md-days'));
     const days = Number(($('#md-days') || {}).value || 30);
     if (!days) return toast('请填写续期天数', 1);
     const preview = await api(`/api/members/${encodeURIComponent(id)}/renew-preview?days=${days}`);
+    if (!current()) return;
     if (!preview.allowed) return toast((preview.warnings || ['不可续期'])[0], 1);
     if (!confirm(`将从 ${fmtExpiry(preview.current_expires_at_effective)} 续到 ${fmtExpiry(preview.new_expires_at)}。${preview.writes_override ? '写入个人覆盖层。' : ''}`)) return;
     const r = await api(`/api/members/${encodeURIComponent(id)}/renew`, {
       method: 'POST', body: JSON.stringify({ days }),
     });
-    toastResult(r, '已续期');
+    if (!toastResult(r, '已续期')) return;
     await refreshNow();
-    fillDetail(id, currentParams().get('tab') || 'overview');
+    await refreshActionDetail(id, 'overview', current, submitted);
   }
 
-  async function memberGroup(id) {
+  async function memberGroup(id, current) {
+    const submitted = detailSubmission(document.querySelectorAll('#md-group,#md-policy'));
     const gid = ($('#md-group') || {}).value;
     const policy = ($('#md-policy') || {}).value || 'keep';
     if (!gid) return;
     const preview = await api(`/api/members/${encodeURIComponent(id)}/group-preview?group_id=${encodeURIComponent(gid)}`);
+    if (!current()) return;
     const selected = (preview.policies || {})[policy] || {};
     const lines = [
       `用户组：${(preview.from_group || {}).name || '未分组'} → ${(preview.to_group || {}).name || gid}`,
@@ -825,9 +862,9 @@
     const r = await api(`/api/members/${encodeURIComponent(id)}/group`, {
       method: 'POST', body: JSON.stringify({ group_id: gid, expiry_policy: policy }),
     });
-    toastResult(r, '已换组');
+    if (!toastResult(r, '已换组')) return;
     await refreshNow();
-    fillDetail(id, currentParams().get('tab') || 'overview');
+    await refreshActionDetail(id, 'overview', current, submitted);
   }
 
   async function retryRemote(id) {
@@ -837,7 +874,9 @@
   }
 
   async function confirmDelete(id, name, cascade = false) {
+    const context = membersContext(false);
     const preview = await api(`/api/members/${encodeURIComponent(id)}/delete-preview?cascade=${cascade}`);
+    if (!context.isCurrent()) return;
     const objects = preview.objects || [];
     if (!objects.length || (cascade && objects.length < 2)) return toast('没有可确认的删除对象，请刷新后重试', 1);
     const names = objects.map((o) => o.username || o.emby_user_id).join('、');
@@ -883,12 +922,14 @@
     const r = await api(`/api/members/${encodeURIComponent(id)}`, {
       method: 'PUT', body: JSON.stringify({ username: name, group_id: gid }),
     });
-    toastResult(r, '已纳入');
+    assertRemoteResult(r); toast('已纳入');
     await refreshNow();
   }
 
   async function showMetering() {
+    const context = membersContext(false);
     const status = await api('/api/metering');
+    if (!context.isCurrent()) return;
     const config = status.config || {};
     const totals = status.totals || {};
     const nodes = (totals.coverage || {}).nodes || [];
@@ -917,7 +958,7 @@
     $('#meter-next').onclick = () => { page++; draw(); };
     draw();
     const button = $('#meter-cutover');
-    button.onclick = () => runMemberAction(button, async () => {
+    button.onclick = () => runMemberAction(button, async current => {
       const enable = !config.cutover;
       if (enable && !$('#meter-baseline').checked) throw new Error('请先明确确认计量基线与配额余额');
       if (!confirm(enable
@@ -930,7 +971,9 @@
   }
 
   async function showEnforcement() {
+    const context = pageContext();
     const r = await api('/api/enforcement/preview');
+    if (!context.isCurrent()) return;
     openModal('策略预览', `
       <div class="help">预览不会写入。管理员与未纳管账号会被跳过。</div>
       ${tableCard('将变更', `${(r.changes || []).length} 个`, ['用户', '状态', '字段'],

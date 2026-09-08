@@ -37,6 +37,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import math
 import os
 import time
 from pathlib import Path
@@ -114,9 +115,14 @@ class ImageCache:
             return None
         try:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            if not isinstance(meta, dict):
+                return None
+            stored_at = float(meta.get("stored_at") or 0)
+            if not math.isfinite(stored_at):
+                return None
+        except (OSError, ValueError, TypeError):
             return None
-        if time.time() - float(meta.get("stored_at") or 0) > self._max_age:
+        if time.time() - stored_at > self._max_age:
             self._discard(key)
             return None
         try:
@@ -236,11 +242,19 @@ class ImageCache:
             if not future.done():
                 future.set_result(result)
             return result
-        except Exception as exc:  # noqa: BLE001
+        except asyncio.CancelledError:
+            # The owning request disconnected. Release coalesced requests and
+            # allow an immediate retry; cancellation is not a negative image.
+            if not future.done():
+                future.set_result(None)
+            raise
+        except Exception:  # noqa: BLE001
             self._errors += 1
             self.mark_negative(key)
             if not future.done():
-                future.set_exception(exc)
+                # All callers use the same fail-open result. An exception on
+                # an unobserved Future otherwise leaks into the event-loop log.
+                future.set_result(None)
             return None
         finally:
             async with self._lock:

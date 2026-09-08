@@ -29,6 +29,7 @@ Response:
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import subprocess
@@ -256,6 +257,8 @@ class SpeedLog:
                 self.sample_ok = True
                 for peer, (_ip, acked) in seen.items():
                     samples = self._conns.setdefault(peer, [])
+                    if samples and (now - samples[-1][0] > 15 or acked < samples[-1][1]):
+                        samples.clear()  # outage/counter reset is unknown, not zero
                     samples.append((now, acked))
                     cutoff = now - self.RATE_WINDOW
                     while len(samples) > 2 and samples[1][0] < cutoff:
@@ -438,25 +441,33 @@ class SpeedLog:
         cutoff = now - self.WINDOW
         out: dict[str, float] = {}
         live_tags: set[str] = set()
+        unknown_tags: set[str] = set()
 
         with self._lock:
             # --- live sockets (authoritative) --------------------------------
             attributed_ips: set[str] = set()
             for peer, samples in self._conns.items():
-                if len(samples) < 2 or now - samples[-1][0] > 15:
-                    continue
-                peer_ip = peer.rsplit(":", 1)[0]
+                peer_ip, peer_port = peer.rsplit(":", 1)
+                peer_ip = peer_ip.strip("[]")
                 # Exact socket match first: it stays correct when one address
                 # carries several members. Fall back to the address-level map
                 # only for sockets that have not logged a request yet, and
                 # that fallback still refuses ambiguous addresses.
-                exact = self._sock_owners.get(peer)
+                exact = self._sock_owners.get(f"{peer_ip}:{peer_port}")
+                # Completed logs have millisecond precision; a rounded stamp
+                # may be a fraction of a millisecond ahead of this clock read.
+                if exact and not -0.001 <= now - exact[1] <= self.OWNER_TTL:
+                    exact = None
                 utag = exact[0] if exact else self._owner_of(peer_ip, now)
                 if not utag:
                     continue
+                if len(samples) < 2 or not 0 <= now - samples[-1][0] <= 15:
+                    unknown_tags.add(utag)
+                    continue
                 span = samples[-1][0] - samples[0][0]
                 delta = samples[-1][1] - samples[0][1]
-                if span <= 0:
+                if not 0 < span <= self.RATE_WINDOW + 2 or delta < 0:
+                    unknown_tags.add(utag)
                     continue
                 # An attributed socket that moved nothing is a real
                 # measurement of ZERO, and it is the normal state of a
@@ -477,7 +488,7 @@ class SpeedLog:
             for utag, ts in list(self._tag_last_live.items()):
                 if now - ts > self.LINGER:
                     del self._tag_last_live[utag]
-                elif utag not in out:
+                elif utag not in out and utag not in unknown_tags:
                     out[utag] = 0.0
                     live_tags.add(utag)
 
@@ -495,7 +506,8 @@ class SpeedLog:
                 fallback[utag] = fallback.get(utag, 0.0) + \
                     (sent / duration) * (overlap / self.WINDOW)
 
-        live = {k: int(v) for k, v in out.items() if v >= 1 or k in live_tags}
+        live = {k: int(v) for k, v in out.items()
+                if k not in unknown_tags and (v >= 1 or k in live_tags)}
         completed = {k: int(v) for k, v in fallback.items() if v >= 1}
         return live, completed
 
@@ -614,6 +626,12 @@ def main() -> None:
             # request. Loopback-only in practice (nginx runs on the same box)
             # and carries no secrets: a hashed tag and a socket address.
             if self.path.startswith("/announce"):
+                # This credential-free hook is for nginx on this host only.
+                # Forwarded headers are not evidence of a local connection.
+                if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                    self.send_response(403)
+                    self.end_headers()
+                    return
                 from urllib.parse import parse_qs, urlsplit
                 q = parse_qs(urlsplit(self.path).query)
                 speedlog.learn(q.get("a", [""])[0], q.get("p", [""])[0],

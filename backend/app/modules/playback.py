@@ -269,8 +269,9 @@ class PlaybackRouter:
         except Exception:  # noqa: BLE001 - fail open, never break playback
             return None
         path = None
-        if media_source_id and media_source_id in sources:
-            path = sources[media_source_id]
+        if media_source_id:
+            # An explicit edition/source must never silently select another file.
+            path = sources.get(media_source_id)
         elif sources:
             path = next(iter(sources.values()))
         # Cache negatives too, so a bad item id cannot hammer Emby.

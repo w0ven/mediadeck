@@ -261,6 +261,8 @@ function bindIntakeRefresh() {
   const btn = $('#intake-refresh');
   if (!btn) return;
   btn.onclick = async () => {
+    if (btn.disabled) return;
+    const context = pageContext('intake');
     btn.disabled = true;
     btn.textContent = '采集中…';
     try {
@@ -269,6 +271,7 @@ function bindIntakeRefresh() {
       /* Clear the pushed copy first: rendering would otherwise show the stale
          snapshot the stream last delivered and look like the button did
          nothing. */
+      if (!context.isCurrent()) return;
       if (live.data) delete live.data.intake;
       await renderPage('intake');
     } catch (e) {

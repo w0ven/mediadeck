@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.core.errors import ConfigError
+
 SCHEMA_VERSION = 1
 
 DEFAULTS: dict[str, Any] = {
@@ -63,10 +65,14 @@ class SettingsStore:
     def _load(self) -> None:
         try:
             raw = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, ValueError):
+        except FileNotFoundError:
             return
+        except (OSError, ValueError):
+            # An existing unreadable/corrupt file is not a first run. Refuse
+            # bootstrap rather than silently overwriting operator settings.
+            raise ConfigError("设置文件无法读取或已损坏；请检查权限或从备份恢复") from None
         if not isinstance(raw, dict):
-            return
+            raise ConfigError("设置文件必须为 JSON 对象；请检查文件或从备份恢复")
         merged = _clone(DEFAULTS)
         for key, value in raw.items():
             if isinstance(merged.get(key), dict) and isinstance(value, dict):
@@ -79,8 +85,9 @@ class SettingsStore:
 
     def save(self) -> None:
         with self._lock:
-            self._data["updated_at"] = time.time()
-            payload = json.dumps(self._data, indent=2, ensure_ascii=False, sort_keys=True)
+            snapshot = _clone(self._data)
+            snapshot["updated_at"] = time.time()
+            payload = json.dumps(snapshot, indent=2, ensure_ascii=False, sort_keys=True)
             self._path.parent.mkdir(parents=True, exist_ok=True)
             fd, tmp = tempfile.mkstemp(
                 dir=str(self._path.parent), prefix=".settings-", suffix=".tmp"
@@ -90,6 +97,7 @@ class SettingsStore:
                     handle.write(payload)
                 os.chmod(tmp, 0o600)
                 os.replace(tmp, self._path)
+                self._data = snapshot
                 self._loaded_from_disk = True
             except BaseException:
                 Path(tmp).unlink(missing_ok=True)
@@ -102,9 +110,16 @@ class SettingsStore:
 
     def set(self, key: str, value: Any, *, persist: bool = True) -> None:
         with self._lock:
-            self._data[key] = _clone(value)
+            previous = self._data
+            self._data = {**previous, key: _clone(value)}
             if persist:
-                self.save()
+                try:
+                    self.save()
+                except BaseException:
+                    # Readers share this lock, so a failed commit is never
+                    # observable as a successfully changed runtime setting.
+                    self._data = previous
+                    raise
 
     def section(self, name: str) -> dict[str, Any]:
         value = self.get(name, {})

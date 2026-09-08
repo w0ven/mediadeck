@@ -201,6 +201,12 @@ class Scheduler:
     async def _refresh_node(self, st: NodeState) -> None:
         try:
             data = await self._probe.load(st.node.probe_url)
+            if not isinstance(data, dict):
+                raise TypeError("invalid probe payload")
+            if data.get('ok'):
+                active = nonnegative(data.get('active_streams', 0))
+                if active is None:
+                    raise ValueError("invalid stream count")
         except Exception:  # noqa: BLE001 - isolate failed probes, never leak URLs
             data = {'ok': False, 'error': 'probe_failed'}
         if self._states.get(st.node.name) is not st:
@@ -210,7 +216,7 @@ class Scheduler:
             st.ok = True
             st.last_success_ts = st.last_probe_ts
             st.consecutive_failures = 0
-            st.active_streams = int(data.get('active_streams', 0))
+            st.active_streams = int(active)
             rate = nonnegative(data.get('egress_mbps'))
             st.egress_ok = rate is not None and bool(data.get('egress_ok', True))
             if rate is not None:
@@ -218,15 +224,16 @@ class Scheduler:
             st.egress_at, st.egress_time_basis = sample_time(data.get('egress_sampled_at'), st.last_probe_ts)
             st.egress_window_seconds = nonnegative(data.get('egress_window_seconds'))
             speeds = data.get('user_speeds')
-            if isinstance(speeds, dict):
-                st.user_speeds = {str(k): int(n) for k, v in speeds.items()
-                                  if (n := nonnegative(v)) is not None}
-            else:
-                st.user_speeds = {}
+            valid_speeds = (isinstance(speeds, dict)
+                            and all(nonnegative(v) is not None for v in speeds.values()))
             st.user_speeds_at, st.user_speeds_time_basis = sample_time(data.get('user_speeds_sampled_at'), st.last_probe_ts)
             st.user_speeds_source = str(data.get('user_speeds_source') or 'legacy_socket')
             st.user_speeds_window_seconds = nonnegative(data.get('user_speeds_window_seconds'))
-            st.user_speeds_ok = isinstance(speeds, dict) and bool(data.get('user_speeds_ok', True)) and st.user_speeds_source in ('socket','legacy_socket')
+            st.user_speeds_ok = valid_speeds and bool(data.get('user_speeds_ok', True)) and st.user_speeds_source in ('socket','legacy_socket')
+            if st.user_speeds_ok:
+                st.user_speeds = {str(k): int(float(v)) for k, v in speeds.items()}
+            # Failed/missing samples retain the last tag set, not its rates:
+            # otherwise another node's partial reading appears account-wide.
             st.probe_error = None
         else:
             st.ok = False

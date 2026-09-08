@@ -177,7 +177,7 @@ class Settings(BaseSettings):
         except json.JSONDecodeError:
             return []
         out = []
-        for item in raw:
+        for item in raw if isinstance(raw, list) else []:
             try:
                 out.append(StreamNode(**item))
             except (TypeError, ValueError):

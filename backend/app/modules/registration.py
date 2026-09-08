@@ -143,7 +143,7 @@ class RegistrationService:
     # -- invite codes ---------------------------------------------------------
 
     def issue_invite(self, owner_user_id: str, uses: int = 1,
-                     ttl_days: int = 0) -> dict[str, Any]:
+                     ttl_days: int = 0, *, conn: Any = None) -> dict[str, Any]:
         """Mint a code owned by a member. ttl_days 0 means it never expires."""
         # `int(x or default)` would turn an explicit 0 into the default, which
         # is how "generate zero codes" quietly becomes one.
@@ -155,10 +155,11 @@ class RegistrationService:
             raise ConfigError("有效期必须在 0–3650 天之间")
         now = int(time.time())
         expires = now + ttl_days * 86400 if ttl_days else None
+        execute = conn.execute if conn is not None else self._db.execute
         for _ in range(20):
             candidate = generate_code(INVITE_LENGTH)
             try:
-                self._db.execute(
+                execute(
                     "INSERT INTO invite_codes"
                     "(code,owner_user_id,uses_left,expires_at,created_at,revoked)"
                     " VALUES(?,?,?,?,?,0)",
@@ -218,16 +219,14 @@ class RegistrationService:
 
     def adjust_quota(self, user_id: str, delta: int) -> int:
         """Grant or claw back invite slots. Never goes below zero."""
-        row = self._db.one(
-            "SELECT invite_quota FROM members WHERE emby_user_id=?",
-            (str(user_id),))
-        if row is None:
-            raise KeyError(user_id)
-        after = max(0, int(row.get("invite_quota") or 0) + int(delta))
-        self._db.execute(
-            "UPDATE members SET invite_quota=?,updated_at=? WHERE emby_user_id=?",
-            (after, int(time.time()), str(user_id)))
-        return after
+        with self._db.write() as conn:
+            changed = conn.execute(
+                'UPDATE members SET invite_quota=MAX(0,COALESCE(invite_quota,0)+?),updated_at=? WHERE emby_user_id=?',
+                (int(delta), int(time.time()), str(user_id))).rowcount
+            if not changed:
+                raise KeyError(user_id)
+            return int(conn.execute('SELECT invite_quota FROM members WHERE emby_user_id=?',
+                                    (str(user_id),)).fetchone()[0])
 
     def spend_quota_for_invite(self, owner_user_id: str,
                                ttl_days: int = 0) -> dict[str, Any]:
@@ -236,15 +235,13 @@ class RegistrationService:
         The slot is debited first: if minting somehow failed after the code was
         already handed out, the member would get an unlimited supply.
         """
-        remaining = self.invite_quota(owner_user_id)
-        if remaining <= 0:
-            raise ConfigError("你没有可用的邀请名额。")
-        self.adjust_quota(owner_user_id, -1)
-        try:
-            return self.issue_invite(owner_user_id, uses=1, ttl_days=ttl_days)
-        except Exception:
-            self.adjust_quota(owner_user_id, 1)
-            raise
+        with self._db.write() as conn:
+            changed = conn.execute(
+                'UPDATE members SET invite_quota=invite_quota-1,updated_at=? WHERE emby_user_id=? AND invite_quota>0',
+                (int(time.time()), str(owner_user_id))).rowcount
+            if not changed:
+                raise ConfigError('你没有可用的邀请名额。')
+            return self.issue_invite(owner_user_id, uses=1, ttl_days=ttl_days, conn=conn)
 
     # -- redeem codes ---------------------------------------------------------
 
@@ -512,7 +509,7 @@ class RegistrationService:
             return "当前暂停注册，请联系管理员。"
         return f"请发送{'或'.join(open_doors)}。"
 
-    def consume(self, admission: Admission, new_user_id: str) -> bool:
+    def consume(self, admission: Admission, new_user_id: str, *, conn: Any = None) -> bool:
         """Spend the credential. Called only after the account really exists.
 
         Returns whether anything was spent, so a caller can tell a no-op from a
@@ -520,6 +517,8 @@ class RegistrationService:
         """
         if not admission or not admission.allowed:
             return False
+        def execute(sql: str, params: tuple) -> int:
+            return conn.execute(sql, params).rowcount if conn is not None else self._db.execute(sql, params)
         now = int(time.time())
         user_id = str(new_user_id or "")
 
@@ -529,19 +528,20 @@ class RegistrationService:
             if admission.credential:
                 sql += " AND gift_code=?"
                 params += (admission.credential,)
-            changed = self._db.execute(sql, params)
+            changed = execute(sql, params)
             return bool(changed)
 
         if admission.via == "invite":
             # Guarded in SQL, not by a read-then-write: two chats redeeming the
             # last use of the same code at once must not both succeed.
-            changed = self._db.execute(
+            changed = execute(
                 "UPDATE invite_codes SET uses_left=uses_left-1 WHERE code=?"
-                " AND uses_left > 0 AND revoked=0", (admission.credential,))
+                " AND uses_left > 0 AND revoked=0 AND (expires_at IS NULL OR expires_at>?)",
+                (admission.credential, now))
             return bool(changed)
 
         if admission.via == "redeem":
-            changed = self._db.execute(
+            changed = execute(
                 "UPDATE redeem_codes SET status='used',used_by=?,used_at=?"
                 " WHERE code=? AND status='unused'",
                 (user_id, now, admission.credential))

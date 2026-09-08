@@ -22,9 +22,19 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.core.db import Database
-from app.modules.groups import needs_duration, needs_traffic
+from app.modules.members import MemberService, merge_effective, parse_overrides
 
 MAX_DAYS = 366
+
+# Sampled sessions intentionally do not populate watch_totals. Imports must
+# respect both old completed records and the earliest new sampled/checkpoint
+# history, without requiring an old-format event to exist first.
+WATCH_START_SQL = """SELECT MIN(t) AS t FROM (
+    SELECT MIN(first_at) AS t FROM watch_totals
+    UNION ALL SELECT MIN(first_at) FROM watch_sample_totals
+    UNION ALL SELECT MIN(started_at) FROM play_events
+    UNION ALL SELECT MIN(json_extract(state_json,'$.started_at')) FROM watch_checkpoints
+)"""
 
 
 def _day_list(days: int, end: datetime | None = None) -> list[str]:
@@ -40,9 +50,10 @@ def legacy_watch_fingerprint(rows: list[dict[str, Any]]) -> str:
 
 
 class StatsService:
-    def __init__(self, db: Database) -> None:
+    def __init__(self, db: Database, measured_cutover: Any = None) -> None:
         self._db = db
         self._live_watch = list
+        self._measured_cutover = measured_cutover
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
@@ -126,7 +137,7 @@ class StatsService:
         source fingerprint makes retrying the same export harmless; another
         source cannot silently add the same history again.
         """
-        first = self._db.one("SELECT MIN(first_at) AS t FROM watch_totals") or {}
+        first = self._db.one(WATCH_START_SQL) or {}
         boundary = first.get("t")
         if boundary is None or not source or len(rows) > 200000:
             raise ValueError("缺少 Deck 统计起点或可信旧历史来源")
@@ -175,31 +186,35 @@ class StatsService:
         members = self._db.query("SELECT * FROM members")
         groups = {g["id"]: g for g in self._db.query("SELECT * FROM groups")}
 
+        measured = self.measured_month()
+        cutover = bool(self._measured_cutover() if callable(self._measured_cutover)
+                       else self._measured_cutover)
         active = expired = exhausted = suspended = 0
         expiring_7d = []
         for m in members:
             group = groups.get(m.get("group_id") or "")
-            mode = group["billing_mode"] if group else "none"
-            status = m.get("status") or "active"
-            if status in ("suspended", "pending"):
+            m["effective"] = merge_effective(group, parse_overrides(m.get("overrides_json")), m)
+            if cutover:
+                m["quota_source"] = "measured"
+                m["measured_used_bytes"] = measured["by_user"].get(m["emby_user_id"])
+            state, _reason = MemberService.effective_state(m, group, now)
+            if state in ("suspended", "pending"):
                 suspended += 1
-            elif group and needs_duration(mode) and \
-                    m.get("expires_at") and now >= m["expires_at"]:
+            elif state == "expired":
                 expired += 1
-            elif group and needs_traffic(mode) and \
-                    group["traffic_quota_bytes"] and \
-                    m.get("traffic_used_bytes", 0) >= group["traffic_quota_bytes"]:
+            elif state == "exhausted":
                 exhausted += 1
             else:
                 active += 1
 
-            if group and m.get("expires_at") and 0 < m["expires_at"] - now <= 7 * 86400:
+            expiry = m["effective"].get("expires_at")
+            if group and expiry and 0 < expiry - now <= 7 * 86400:
                 expiring_7d.append({
                     "user_id": m["emby_user_id"],
                     "username": m.get("username"),
                     "group": group["name"],
-                    "expires_at": m["expires_at"],
-                    "days_left": max(0, int((m["expires_at"] - now) // 86400)),
+                    "expires_at": expiry,
+                    "days_left": max(0, int((expiry - now) // 86400)),
                 })
 
         totals = self._db.one(
@@ -214,7 +229,6 @@ class StatsService:
 
         window = self.watch_window(since, now)
         today_watch = self.watch_window(datetime.now(UTC).replace(hour=0,minute=0,second=0,microsecond=0).timestamp(), now)
-        measured = self.measured_month()
         plays = int(totals.get("plays") or 0)
         transcodes = int(totals.get("trans") or 0)
         return {

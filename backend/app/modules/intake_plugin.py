@@ -19,6 +19,8 @@ the next tick rebuilds it from the source of truth.
 """
 from __future__ import annotations
 
+import asyncio
+import copy
 import time
 from typing import Any
 
@@ -46,7 +48,7 @@ class IntakeStore:
         self._last_error: str = ""
 
     def put(self, snapshot: dict[str, Any]) -> None:
-        self._snapshot = snapshot
+        self._snapshot = copy.deepcopy(snapshot)
         self._taken_at = time.time()
         self._last_error = ""
 
@@ -70,7 +72,7 @@ class IntakeStore:
             "available": True,
             "snapshot_age_seconds": round(age, 1),
             "stale": age > STALE_AFTER,
-            "data": self._snapshot,
+            "data": copy.deepcopy(self._snapshot),
         }
         if self._last_error:
             out["error"] = self._last_error
@@ -136,9 +138,14 @@ class IntakePipelinePlugin(Plugin):
         downloaders = list(getattr(self.ctx, "intake_downloaders", None) or [])
         try:
             snapshot = await collector.snapshot(downloaders)
+        except asyncio.CancelledError:
+            store.fail("collection cancelled")
+            raise
         except Exception as exc:  # noqa: BLE001 - reported on the card
-            store.fail(f"{type(exc).__name__}: {exc}")
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+            # Filesystem/HTTP exceptions can contain credentials or full URLs.
+            error = f"collection failed: {type(exc).__name__}"
+            store.fail(error)
+            return {"ok": False, "error": error}
         store.put(snapshot)
         health = snapshot.get("health") or {}
         return {
