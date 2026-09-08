@@ -53,6 +53,24 @@ HTTP_TIMEOUT = POLL_TIMEOUT + 10
 # A username has to survive being an Emby login and a path component.
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,19}$")
 
+# Invite codes are 8 characters, redeem cards 12. A guest who pastes one
+# should not have to find the register button first.
+CREDENTIAL_LENGTHS = {8, 12}
+
+BACK_HOME: list[list[dict[str, str]]] = [
+    [{"text": "◀ 返回", "callback_data": "home"}],
+]
+
+
+def looks_like_credential(raw: str) -> bool:
+    """True when the text is the shape of an invite code or a card.
+
+    This is a shape check, not a validity check: a mistyped code still looks
+    like a code, and the registration service is what says so.
+    """
+    compact = "".join(ch for ch in str(raw or "").strip().upper() if ch.isalnum())
+    return len(compact) in CREDENTIAL_LENGTHS
+
 # Registration conversation state is intentionally short-lived: an abandoned
 # half-finished signup should not hold a slot or confuse the next /start.
 PENDING_TTL = 600.0
@@ -161,6 +179,8 @@ class TelegramBot:
         self._started_at = 0.0
         # chat id -> what the bot is waiting for, with a deadline
         self._pending: dict[str, tuple[str, float, dict[str, Any]]] = {}
+        self._bot_username = ""
+        self._commands_installed = False
 
     def bind_plugins(self, registry: Any) -> None:
         """Late-bind the plugin registry.
@@ -220,8 +240,40 @@ class TelegramBot:
         me = await self._call("getMe", timeout=15)
         if not me:
             return {"ok": False, "error": self._last_error or "无法连接 Telegram"}
-        return {"ok": True, "username": me.get("username", ""),
+        self._bot_username = str(me.get("username") or "")
+        await self._install_commands()
+        return {"ok": True, "username": self._bot_username,
                 "name": me.get("first_name", ""), "id": me.get("id")}
+
+    async def _install_commands(self) -> None:
+        """Put /start and /help on Telegram's command menu, once."""
+        if self._commands_installed or not self._token():
+            return
+        result = await self._call("setMyCommands", {
+            "commands": [
+                {"command": "start", "description": "打开账号服务"},
+                {"command": "help", "description": "使用说明"},
+            ],
+        }, timeout=15)
+        if result is not None:
+            self._commands_installed = True
+
+    async def _ensure_identity(self) -> None:
+        if self._bot_username and self._commands_installed:
+            return
+        me = await self._call("getMe", timeout=15)
+        if not me:
+            return
+        self._bot_username = str(me.get("username") or "")
+        await self._install_commands()
+
+    def _start_link(self, code: str) -> str:
+        """t.me deep link that lands a guest on this code. Empty if unknown."""
+        user = self._bot_username
+        compact = "".join(ch for ch in str(code or "").strip() if ch.isalnum())
+        if not user or not compact:
+            return ""
+        return f"https://t.me/{user}?start={compact}"
 
     async def send(self, chat_id: str | int, text: str,
                    keyboard: list[list[dict[str, str]]] | None = None) -> bool:
@@ -309,14 +361,28 @@ class TelegramBot:
 
     # -- menus ----------------------------------------------------------------
 
-    @staticmethod
-    def guest_menu() -> list[list[dict[str, str]]]:
-        """No account yet: register, or claim one that already exists."""
-        return [
-            [{"text": "🆕 注册账号", "callback_data": "register"}],
-            [{"text": "🔗 认领已有账号", "callback_data": "claim"},
-             {"text": "❓ 使用说明", "callback_data": "help"}],
-        ]
+    def _group_join_button(self) -> dict[str, str] | None:
+        """A t.me button when the required group has a public handle."""
+        chat = str(self._cfg().get("require_group") or "").strip()
+        if chat.startswith("@"):
+            return {"text": "📣 加入官方群", "url": f"https://t.me/{chat[1:]}"}
+        if chat.startswith("https://t.me/"):
+            return {"text": "📣 加入官方群", "url": chat}
+        return None
+
+    def guest_menu(self) -> list[list[dict[str, str]]]:
+        """No account yet: register if a channel is open, or claim one that exists."""
+        rows: list[list[dict[str, str]]] = []
+        if self._registration_open():
+            rows.append([{"text": "🆕 注册账号", "callback_data": "register"}])
+        rows.append([
+            {"text": "🔗 认领已有账号", "callback_data": "claim"},
+            {"text": "❓ 使用说明", "callback_data": "help"},
+        ])
+        join = self._group_join_button()
+        if join:
+            rows.append([join])
+        return rows
 
     def _plugin_on(self, plugin_id: str) -> bool:
         """Is this points feature switched on right now?
@@ -352,7 +418,6 @@ class TelegramBot:
             rows.append(points_row)
         rows.append([{"text": "🎬 求片", "callback_data": "req_new"},
                      {"text": "🏆 排行", "callback_data": "top"}])
-        rows.append([{"text": "🔄 刷新", "callback_data": "home"}])
         return rows
 
     @staticmethod
@@ -390,24 +455,76 @@ class TelegramBot:
             "pending": "🕓 待开通",
         }.get(str(member.get("status") or ""), str(member.get("status") or "未知"))
 
+    def _help_text(self, member: dict[str, Any] | None) -> str:
+        if member:
+            return (
+                "❓ <b>使用说明</b>\n\n"
+                "· <b>我的信息</b>：状态、有效期、设备、线路和密码\n"
+                "· <b>背包</b>：邀请码、积分兑换\n"
+                "· <b>求片</b>：发送影片链接即可提交\n"
+                "· 发送 /start 随时回到首页\n\n"
+                "遇到问题请联系管理员。"
+            )
+        cfg = self._cfg()
+        channels = []
+        if cfg.get("allow_invite", True):
+            channels.append("邀请码")
+        if cfg.get("allow_redeem", True):
+            channels.append("卡密")
+        how = "或".join(channels) if channels else "管理员授权"
+        return (
+            "❓ <b>使用说明</b>\n\n"
+            f"· <b>注册账号</b>：发送{how}，再选一个用户名，密码由系统生成\n"
+            "· 也可以直接发送邀请码，或打开朋友给的注册链接\n"
+            "· <b>认领已有账号</b>：老账号关联到这个 Telegram，需管理员确认\n\n"
+            "遇到问题请联系管理员。"
+        )
+
     def _home(self, tg_user_id: str, tg_name: str) -> tuple[str, list[list[dict[str, str]]]]:
         member = self._member_for_chat(tg_user_id)
         if not member:
-            state = "开放注册中" if self._registration_open() else "当前暂停注册"
-            body = (
-                f"👋 你好，{tg_name}\n\n"
-                f"这里是影视库的账号服务。<b>{state}</b>\n\n"
-                "· 没有账号 → 点「注册账号」，需要邀请码或卡密\n"
-                "· 已有账号但没关联 → 点「认领已有账号」，需要管理员确认"
-            )
-            return body, self.guest_menu()
-        body = (
-            f"🎬 <b>{member.get('username') or '成员'}</b>\n"
-            f"状态：{self._status_label(member)}\n"
-            f"有效期：{_fmt_expiry(member.get('expires_at'))}\n\n"
-            "选择要查看的内容："
-        )
-        return body, self.member_menu()
+            return self._guest_home(tg_name), self.guest_menu()
+        bits = [self._status_label(member)]
+        group = str(member.get("group_name") or "").strip()
+        if group:
+            bits.append(group)
+        bits.append(_fmt_expiry(member.get("expires_at")))
+        lines = [
+            f"🎬 <b>{member.get('username') or '成员'}</b>",
+            " · ".join(bits),
+        ]
+        user_id = str(member.get("emby_user_id") or "")
+        balance = self._balance(user_id)
+        if balance or self._plugin_on("checkin") or self._plugin_on("points_transfer"):
+            lines.append(f"积分 <b>{balance}</b>")
+        server = str(self._cfg().get("emby_public_url") or "").strip()
+        if server:
+            lines.append(f"服务器：{server}")
+        return "\n".join(lines), self.member_menu()
+
+    def _guest_home(self, tg_name: str) -> str:
+        cfg = self._cfg()
+        open_ = self._registration_open()
+        channels = []
+        if cfg.get("allow_invite", True):
+            channels.append("邀请码")
+        if cfg.get("allow_redeem", True):
+            channels.append("卡密")
+        lines = [f"👋 你好，{tg_name}\n"]
+        if open_:
+            lines.append("这里是影视库账号服务，<b>开放注册中</b>。\n")
+            if channels:
+                how = "或".join(channels)
+                lines.append(f"没有账号：用{how}即可开通")
+            else:
+                lines.append("管理员已授权的用户可以直接注册。")
+            lines.append("已有账号：点「认领已有账号」关联到这个 Telegram")
+        else:
+            lines.append("这里是影视库账号服务，<b>当前暂停注册</b>。\n")
+            lines.append("已有账号可以认领；新用户请稍后再来，或联系管理员。")
+        if str(cfg.get("require_group") or "").strip():
+            lines.append("\n注册前需要先加入官方群组。")
+        return "\n".join(lines)
 
     # -- registration ---------------------------------------------------------
 
@@ -458,11 +575,27 @@ class TelegramBot:
         "· 只能用字母、数字和下划线\n\n"
         "<i>密码由系统生成，不需要你输入。10 分钟内有效。</i>")
 
-    async def _start_registration(self, chat_id: Any, tg_user_id: str) -> None:
+    def _credential_prompt(self) -> str:
+        cfg = self._cfg()
+        kinds = []
+        if cfg.get("allow_invite", True):
+            kinds.append("邀请码（8 位，老用户生成）")
+        if cfg.get("allow_redeem", True):
+            kinds.append("卡密（12 位，管理员发放）")
+        detail = "\n".join(f"· {item}" for item in kinds) or "· 请发送管理员给你的凭证"
+        return (
+            "🎟 <b>注册账号</b>\n\n请发送你的凭证：\n\n"
+            f"{detail}\n\n"
+            "<i>大小写不敏感，10 分钟内有效。发送 /start 可取消。</i>"
+        )
+
+    async def _start_registration(self, chat_id: Any, tg_user_id: str,
+                                   credential: str | None = None) -> None:
         """Pre-authorised users skip straight to the username.
 
         Asking someone the operator already named for a code they were never
-        given is a dead end they cannot get out of.
+        given is a dead end they cannot get out of. A code already in hand —
+        pasted, or carried in /start — skips the prompt the other way.
         """
         if self._member_for_chat(tg_user_id):
             await self.send(chat_id, "你已经有账号了。", self.member_menu())
@@ -478,24 +611,23 @@ class TelegramBot:
             self._pending[str(chat_id)] = (
                 "username", time.time() + PENDING_TTL,
                 {"admission": admission})
-            await self.send(chat_id, self._USERNAME_PROMPT)
+            await self.send(chat_id, self._USERNAME_PROMPT, BACK_HOME)
             return
 
         if self._registration is None:
             # No registration service wired (older deployments / tests): fall
             # back to the plain username step rather than blocking everyone.
             self._pending[str(chat_id)] = ("username", time.time() + PENDING_TTL, {})
-            await self.send(chat_id, self._USERNAME_PROMPT)
+            await self.send(chat_id, self._USERNAME_PROMPT, BACK_HOME)
+            return
+
+        if credential:
+            await self._submit_credential(chat_id, tg_user_id, credential)
             return
 
         self._pending[str(chat_id)] = (
             "credential", time.time() + PENDING_TTL, {})
-        await self.send(
-            chat_id,
-            "🎟 <b>注册账号</b>\n\n请发送你的<b>邀请码</b>或<b>卡密</b>：\n\n"
-            "· 邀请码由老用户生成，8 位\n"
-            "· 卡密由管理员发放，12 位\n\n"
-            "<i>大小写不敏感，10 分钟内有效。</i>")
+        await self.send(chat_id, self._credential_prompt(), BACK_HOME)
 
     def _resolve(self, tg_user_id: str, credential: str | None) -> Any:
         """Ask the registration service for a verdict, tolerating its absence."""
@@ -526,11 +658,12 @@ class TelegramBot:
             await self.send(
                 chat_id,
                 f"❌ {admission.reason}\n\n请重新发送邀请码或卡密，或点下面的按钮返回。",
-                [[{"text": "↩️ 返回", "callback_data": "home"}]])
+                BACK_HOME)
             return
         self._pending[str(chat_id)] = (
             "username", time.time() + PENDING_TTL, {"admission": admission})
-        await self.send(chat_id, f"✅ {admission.reason}\n\n" + self._USERNAME_PROMPT)
+        await self.send(chat_id, f"✅ {admission.reason}\n\n" + self._USERNAME_PROMPT,
+                        BACK_HOME)
 
     async def _finish_registration(self, chat_id: Any, tg_user_id: str,
                                    tg_username: str, username: str,
@@ -539,7 +672,7 @@ class TelegramBot:
         if not USERNAME_RE.match(username):
             await self.send(chat_id,
                             "❌ 用户名不符合要求：3–20 字符、字母开头、只含字母数字下划线。\n"
-                            "请重新发送一个。")
+                            "请重新发送一个。", BACK_HOME)
             return
 
         # Re-check at the moment of creation, not only when the conversation
@@ -613,6 +746,8 @@ class TelegramBot:
             lines.append(f"服务器：{server}")
         if days > 0:
             lines.append(f"有效期：{days} 天")
+        else:
+            lines.append("有效期：永久")
         lines.append("\n<i>请立刻保存密码，这条消息不会再发第二次。</i>")
         await self.send(chat_id, "\n".join(lines), self.member_menu())
 
@@ -657,9 +792,15 @@ class TelegramBot:
                 else:
                     tail = f"剩 {left} 次 · {_fmt_expiry(row.get('expires_at'))}"
                 lines.append(f"<code>{row.get('code', '')}</code> · {tail}")
+                link = self._start_link(str(row.get("code") or ""))
+                if link and left > 0 and not row.get("revoked"):
+                    lines.append(f"    {link}")
         else:
             lines.append("\n你还没有生成过邀请码。")
-        lines.append("\n<i>把邀请码发给朋友，他们注册时填写即可。</i>")
+        if self._bot_username:
+            lines.append("\n<i>把链接发给朋友，点开即可注册。</i>")
+        else:
+            lines.append("\n<i>把邀请码发给朋友，他们注册时填写即可。</i>")
 
         keyboard: list[list[dict[str, str]]] = []
         if quota > 0:
@@ -1421,8 +1562,26 @@ class TelegramBot:
         label = tg_username or member.get("username") or "admin"
         return f"tg:{label}"
 
+    async def _open_start(self, chat_id: Any, tg_user_id: str, tg_name: str,
+                           payload: str = "") -> None:
+        """Home screen, or skip into registration when /start carries a code."""
+        self._pending.pop(str(chat_id), None)
+        token = str(payload or "").strip()
+        if (token and looks_like_credential(token)
+                and not self._member_for_chat(tg_user_id)):
+            await self._start_registration(chat_id, tg_user_id, credential=token)
+            return
+        body, keyboard = self._home(tg_user_id, tg_name)
+        await self.send(chat_id, body, keyboard)
+
+    @staticmethod
+    def _private_chat(message: dict[str, Any]) -> bool:
+        kind = str((message.get("chat") or {}).get("type") or "private")
+        return kind == "private"
+
     async def _handle_command(self, chat_id: Any, tg_user_id: str,
-                              tg_username: str, text: str) -> None:
+                              tg_username: str, text: str,
+                              display_name: str = "") -> None:
         """Dispatch an admin '/' command.
 
         Every command re-checks the role: a member could have been demoted
@@ -1433,16 +1592,23 @@ class TelegramBot:
         command = parts[0].lower().lstrip("/")
         command = command.split("@", 1)[0]
         args = parts[1:]
+        display = (display_name or tg_username or "朋友").strip() or "朋友"
 
         member = self._member_for_chat(tg_user_id)
         # /start is how anybody opens the bot -- it is the very first message
         # every ordinary member ever sends. Routing it through the admin gate
         # answered that message with "no permission", and admins fared no
         # better: with no _cmd_start they were told the command was unknown.
-        # It always means "show me my home screen", for every role.
-        if command == "start" or (command == "help" and not self.is_admin(member)):
-            body, keyboard = self._home(tg_user_id, tg_username or "朋友")
-            await self.send(chat_id, body, keyboard)
+        # A payload on /start is an invite or a card; /start itself cancels
+        # whatever conversation was in flight.
+        if command == "start":
+            payload = args[0] if args else ""
+            await self._open_start(chat_id, tg_user_id, display, payload)
+            return
+        if command == "help" and not self.is_admin(member):
+            await self.send(
+                chat_id, self._help_text(member),
+                self.member_menu() if member else self.guest_menu())
             return
         if not self.is_admin(member):
             await self.send(chat_id, "⛔ 无权限。")
@@ -1835,6 +2001,10 @@ class TelegramBot:
         text = str(message.get("text") or "").strip()
         if not chat_id or not tg_user_id:
             return
+        # Group chats are for broadcasts, not self-service. Answering a random
+        # message there would leak someone's home screen to everyone else.
+        if not self._private_chat(message):
+            return
 
         self._sweep_pending()
         waiting = self._pending.get(str(chat_id))
@@ -1889,7 +2059,12 @@ class TelegramBot:
         # typed a command instead of the answer they were asked for meant the
         # command, not a title called "/help".
         if text.startswith("/"):
-            await self._handle_command(chat_id, tg_user_id, tg_username, text)
+            await self._handle_command(
+                chat_id, tg_user_id, tg_username, text, display_name=tg_name)
+            return
+
+        if looks_like_credential(text) and not self._member_for_chat(tg_user_id):
+            await self._start_registration(chat_id, tg_user_id, credential=text)
             return
 
         body, keyboard = self._home(tg_user_id, tg_name)
@@ -1913,6 +2088,10 @@ class TelegramBot:
             if callback_id and data.startswith(SELF_ANSWERING_CALLBACKS):
                 await self._answer_callback(callback_id)
             return
+        if not self._private_chat(message):
+            if data.startswith(SELF_ANSWERING_CALLBACKS):
+                await self._answer_callback(callback_id)
+            return
 
         # Re-read binding state on every tap: the member could have been
         # unlinked from the panel while this keyboard sat on their screen.
@@ -1927,16 +2106,12 @@ class TelegramBot:
             await self._edit(
                 chat_id, message_id,
                 "🔗 <b>认领已有账号</b>\n\n请发送你在影视库里的<b>用户名</b>。\n\n"
-                "<i>管理员确认后会关联到这个 Telegram。</i>")
+                "<i>管理员确认后会关联到这个 Telegram。发送 /start 可取消。</i>",
+                BACK_HOME)
             return
         if data == "help":
             await self._edit(
-                chat_id, message_id,
-                "❓ <b>使用说明</b>\n\n"
-                "· <b>注册账号</b>：直接创建，密码由系统生成\n"
-                "· <b>认领已有账号</b>：老账号关联到这个 Telegram，需管理员确认\n"
-                "· 关联后可查有效期、设备、用量和排行，到期前会主动提醒\n\n"
-                "遇到问题请联系管理员。",
+                chat_id, message_id, self._help_text(member),
                 self.member_menu() if member else self.guest_menu())
             return
         if data == "home":
@@ -2068,7 +2243,7 @@ class TelegramBot:
                     flag = "🚫 " if d.get("blocked") else ""
                     rows.append(f"{flag}{d.get('device_name') or d.get('device_id')} · {when}")
                 text = "📺 <b>我的设备</b>\n\n" + "\n".join(rows)
-            await self._edit(chat_id, message_id, text, self.member_menu())
+            await self._edit(chat_id, message_id, text, self.info_menu())
             return
         if data == "usage":
             used = member.get("traffic_used_bytes") or 0
@@ -2077,7 +2252,7 @@ class TelegramBot:
                 chat_id, message_id,
                 f"📊 <b>观看统计</b>\n\n本周期用量：{_fmt_bytes(used)}\n"
                 f"最近活跃：{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}",
-                self.member_menu())
+                self.info_menu())
             return
         if data in ("invites", "invite_new"):
             await self._invites_view(chat_id, message_id, member, mint=data == "invite_new")
@@ -2085,7 +2260,7 @@ class TelegramBot:
         if data == "resetpw":
             if self._emby is None:
                 await self._edit(chat_id, message_id, "后台未连接 Emby，暂时无法重置。",
-                                 self.member_menu())
+                                 self.info_menu())
                 return
             password = generate_password()
             ok = False
@@ -2097,7 +2272,7 @@ class TelegramBot:
                 (f"🔑 <b>新密码</b>\n\n<code>{password}</code>\n\n"
                  "<i>请立刻保存，这条消息不会再发第二次。</i>") if ok
                 else "❌ 重置失败，请稍后再试或联系管理员。",
-                self.member_menu())
+                self.info_menu())
             return
 
     # -- polling loop ---------------------------------------------------------
@@ -2132,6 +2307,7 @@ class TelegramBot:
                 await asyncio.sleep(5)
                 continue
             try:
+                await self._ensure_identity()
                 await self._poll_once()
                 backoff = 1.0
             except asyncio.CancelledError:

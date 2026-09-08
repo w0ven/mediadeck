@@ -19,7 +19,9 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.modules.settings import mask_secret
-from app.modules.telegram import USERNAME_RE, TelegramBot, generate_password
+from app.modules.telegram import (
+    USERNAME_RE, TelegramBot, generate_password, looks_like_credential,
+)
 
 # Shaped like a real credential so format validation is exercised. Assembled
 # from parts so nothing in this file can be mistaken for a live one.
@@ -216,8 +218,10 @@ def test_guest_and_member_see_different_menus() -> None:
     guest_body, guest_keys = bot._home("111", "Stranger")
     member_body, member_keys = bot._home("999", "Friend")
 
-    guest_actions = {b["callback_data"] for row in guest_keys for b in row}
-    member_actions = {b["callback_data"] for row in member_keys for b in row}
+    guest_actions = {b.get("callback_data") for row in guest_keys for b in row}
+    guest_actions.discard(None)
+    member_actions = {b.get("callback_data") for row in member_keys for b in row}
+    member_actions.discard(None)
 
     # A guest can only register or claim; member-only views are absent.
     assert "register" in guest_actions
@@ -228,7 +232,8 @@ def test_guest_and_member_see_different_menus() -> None:
     assert "register" not in member_actions
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
-    assert {"me", "bag", "top", "home"} <= member_actions
+    assert {"me", "bag", "top"} <= member_actions
+    assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
     assert {"devices", "usage", "me_points", "me_nodes", "resetpw"} <= info_actions
 
@@ -870,7 +875,7 @@ def _points_bot(members=None, *, enabled=None, plugins=None, points=None,
 
 
 def _actions(keyboard) -> set:
-    return {b["callback_data"] for row in keyboard for b in row}
+    return {b["callback_data"] for row in keyboard for b in row if "callback_data" in b}
 
 
 def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
@@ -879,7 +884,7 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "bag", "checkin", "transfer", "req_new",
-                              "top", "home"}
+                              "top"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
@@ -1134,3 +1139,150 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
 def test_the_ranking_gains_a_points_section() -> None:
     bot = _points_bot(points=_FakePoints())
     assert "积分排行" in bot._rankings_text(1)
+
+
+# -- onboarding: deep links, pasted codes, quieter menus ---------------------
+
+def _tg_message(text, *, tg_id=42, chat_id=1, username="ada", first="Ada",
+                chat_type="private"):
+    return {
+        "chat": {"id": chat_id, "type": chat_type},
+        "from": {"id": tg_id, "username": username, "first_name": first},
+        "text": text,
+    }
+
+
+class _CodeReg:
+    """Allows one specific code; a missing credential is just 'not yet'."""
+
+    def __init__(self, code="GOODCODE") -> None:
+        self.code = code
+        self.resolved: list[tuple] = []
+        self.consumed: list = []
+
+    def resolve(self, tg_user_id, credential=None):
+        self.resolved.append((str(tg_user_id), credential))
+        if str(credential or "").upper() == self.code:
+            return _Verdict(credential=self.code)
+        return _Verdict(allowed=False, reason="没有可用的凭证")
+
+    def consume(self, admission, new_user_id):
+        self.consumed.append(new_user_id)
+
+
+def test_credential_shape_is_eight_or_twelve_letters() -> None:
+    assert looks_like_credential("GOODCODE")
+    assert looks_like_credential("abcd-efgh-ijkl")
+    assert not looks_like_credential("alice")
+    assert not looks_like_credential("/start")
+    assert not looks_like_credential("")
+
+
+def test_guest_menu_hides_register_when_every_channel_is_closed() -> None:
+    bot = _bot(cfg={"allow_admin_grant": False, "allow_invite": False,
+                    "allow_redeem": False})
+    body, keys = bot._home("1", "Ada")
+    assert "register" not in _actions(keys)
+    assert "claim" in _actions(keys)
+    assert "暂停注册" in body
+    assert "没有账号" not in body
+
+
+def test_guest_menu_offers_a_join_button_for_a_public_group() -> None:
+    bot = _bot(cfg={"require_group": "@cineclub"})
+    _, keys = bot._home("1", "Ada")
+    urls = [b.get("url") for row in keys for b in row]
+    assert "https://t.me/cineclub" in urls
+    assert "register" in _actions(keys)
+
+
+def test_a_start_payload_checks_the_code_instead_of_asking_for_one() -> None:
+    bot = _bot(_FakeMembers(), _FakeEmby())
+    bot._registration = _CodeReg()
+    asyncio.run(bot._handle_command(1, "42", "ada", "/start GOODCODE"))
+    assert bot._pending["1"][0] == "username"
+    assert any("用户名" in m for m in bot.sent)  # type: ignore[attr-defined]
+    assert bot._registration.resolved[-1] == ("42", "GOODCODE")
+
+
+def test_start_with_botname_suffix_still_carries_the_payload() -> None:
+    bot = _bot(_FakeMembers(), _FakeEmby())
+    bot._registration = _CodeReg()
+    asyncio.run(bot._handle_command(1, "42", "ada", "/start@deckbot GOODCODE"))
+    assert bot._pending["1"][0] == "username"
+
+
+def test_a_linked_member_does_not_reenter_registration_via_start_payload() -> None:
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400}
+    bot = _bot(_FakeMembers({"42": member}), _FakeEmby())
+    bot._registration = _CodeReg()
+    asyncio.run(bot._handle_command(1, "42", "someone", "/start GOODCODE"))
+    assert "1" not in bot._pending
+    assert any("someone" in m for m in bot.sent)  # type: ignore[attr-defined]
+    assert bot._registration.resolved == []
+
+
+def test_pasting_a_code_is_enough_without_tapping_register() -> None:
+    bot = _bot(_FakeMembers(), _FakeEmby())
+    bot._registration = _CodeReg()
+    asyncio.run(bot._handle_message(_tg_message("GOODCODE")))
+    assert bot._pending["1"][0] == "username"
+    assert any("用户名" in m for m in bot.sent)  # type: ignore[attr-defined]
+
+
+def test_an_ordinary_hello_still_opens_the_guest_home() -> None:
+    bot = _bot()
+    asyncio.run(bot._handle_message(_tg_message("你好")))
+    assert any("账号服务" in m for m in bot.sent)  # type: ignore[attr-defined]
+    assert "1" not in bot._pending
+
+
+def test_start_cancels_an_in_flight_registration() -> None:
+    bot = _bot()
+    bot._pending["1"] = ("credential", time.time() + 600, {})
+    asyncio.run(bot._handle_command(1, "42", "ada", "/start"))
+    assert "1" not in bot._pending
+
+
+def test_group_messages_are_ignored() -> None:
+    bot = _bot()
+    asyncio.run(bot._handle_message(_tg_message("hi", chat_type="supergroup")))
+    assert bot.sent == []  # type: ignore[attr-defined]
+
+
+def test_invite_view_shows_a_deeplink_when_the_bot_username_is_known() -> None:
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400}
+    reg = _FakeRegistration()
+    reg.quota = 1
+    reg.minted = ["ABCD2345"]
+    bot = _bot(_FakeMembers({"999": member}))
+    bot._registration = reg
+    bot._bot_username = "deckbot"
+    edits: list[str] = []
+
+    async def fake_edit(chat, mid, text, keyboard=None):
+        edits.append(text)
+
+    bot._edit = fake_edit  # type: ignore[assignment]
+    asyncio.run(bot._invites_view(1, 2, member))
+    assert any("https://t.me/deckbot?start=ABCD2345" in t for t in edits)
+
+
+def test_member_home_shows_the_server_address() -> None:
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400, "group_name": "标准"}
+    bot = _bot(_FakeMembers({"999": member}))
+    body, _ = bot._home("999", "Friend")
+    assert "https://emby.example" in body
+    assert "标准" in body
+
+
+def test_member_help_is_not_a_permission_error() -> None:
+    member = {"emby_user_id": "u1", "username": "someone", "status": "active",
+              "expires_at": int(time.time()) + 86400}
+    bot = _bot(_FakeMembers({"999": member}))
+    asyncio.run(bot._handle_command(1, "999", "someone", "/help"))
+    assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
+    assert "使用说明" in bot.sent[-1]  # type: ignore[attr-defined]
