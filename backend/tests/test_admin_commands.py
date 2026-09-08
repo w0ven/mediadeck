@@ -538,3 +538,31 @@ def test_deleting_through_the_bot_is_audited(bot) -> None:
     actions = {r["action"] for r in bot.members.audit_log(limit=50)}
     assert "member.delete" in actions
     assert "member.delete_emby" in actions
+
+
+def _actions(keyboard) -> set:
+    if not keyboard:
+        return set()
+    return {b.get("callback_data") for row in keyboard for b in row}
+
+
+def test_admin_home_is_on_the_member_menu(bot) -> None:
+    _run(bot, "/start")
+    assert "admin" in _actions(bot.sent[-1][2])
+    _run(bot, "/start", chat=PLAIN_CHAT, username="alice_tg")
+    assert "admin" not in _actions(bot.sent[-1][2])
+
+
+def test_looking_up_a_user_from_the_menu_can_renew_in_place(bot) -> None:
+    now = int(time.time())
+    bot.members.upsert("u1", "alice", {"expires_at": now + 86400}, actor="test")
+    before = bot.members.get("u1")["expires_at"] or now
+    _tap(bot, "admin")
+    _tap(bot, "admin_find")
+    _run(bot, "alice")
+    card = bot.edits[-1][1]
+    assert "alice" in card and "状态" in card
+    _tap(bot, "admin_renew:30")
+    after = bot.members.get("u1")["expires_at"]
+    assert after >= before + 29 * 86400
+    assert "alice" in bot.edits[-1][1]
