@@ -147,6 +147,28 @@ def _fmt_bytes(n: int | None) -> str:
     return f"{size:.1f} TB"
 
 
+def _bar(percent: float | None, width: int = 10) -> str:
+    if percent is None:
+        return "░" * width
+    pct = max(0.0, min(100.0, float(percent)))
+    filled = int(round(pct / 100.0 * width))
+    filled = max(0, min(width, filled))
+    return "█" * filled + "░" * (width - filled)
+
+
+RULES_TEXT = """📜 <b>行为准则</b>
+
+· 账号仅供本人使用，禁止分享、转卖或公开线路
+· 禁止用下载工具、多开设备把带宽打满
+· 求片请给准确的 TMDB 链接，不要重复提交
+· 流量或设备超出套餐后会被限速或暂停播放
+· 遵守当地法律法规，片源仅限个人观影
+
+发送 /start 回到菜单。"""
+
+MEMBER_COMMANDS = {"start", "help", "me", "rules"}
+
+
 class TelegramBot:
     """Long-polling bot bound to the panel's member records."""
 
@@ -287,13 +309,15 @@ class TelegramBot:
                 "name": me.get("first_name", ""), "id": me.get("id")}
 
     async def _install_commands(self) -> None:
-        """Put /start and /help on Telegram's command menu, once."""
+        """Put the member commands on Telegram's / menu, once per process."""
         if self._commands_installed or not self._token():
             return
         result = await self._call("setMyCommands", {
             "commands": [
-                {"command": "start", "description": "打开账号服务"},
+                {"command": "start", "description": "打开菜单"},
+                {"command": "me", "description": "我的账号"},
                 {"command": "help", "description": "使用说明"},
+                {"command": "rules", "description": "行为准则"},
             ],
         }, timeout=15)
         if result is not None:
@@ -446,8 +470,9 @@ class TelegramBot:
             rows.append([{"text": "🆕 注册账号", "callback_data": "register"}])
         rows.append([
             {"text": "🔗 认领已有账号", "callback_data": "claim"},
-            {"text": "❓ 使用说明", "callback_data": "help"},
+            {"text": "📜 准则", "callback_data": "rules"},
         ])
+        rows.append([{"text": "❓ 使用说明", "callback_data": "help"}])
         join = self._group_join_button()
         if join:
             rows.append([join])
@@ -468,15 +493,14 @@ class TelegramBot:
             return False
 
     def member_menu(self) -> list[list[dict[str, str]]]:
-        """Top level: identity, backpack, and whatever points features are on.
-
-        Two entry points rather than ten buttons. The old flat menu grew a row
-        every time something was added, and a member looking for their expiry
-        date had to read past invite codes to find it.
-        """
+        """Top level, embyboss-style: account and line first, extras below."""
         rows: list[list[dict[str, str]]] = [
-            [{"text": "👤 我的信息", "callback_data": "me"},
-             {"text": "🎒 背包", "callback_data": "bag"}],
+            [{"text": "👤 我的账号", "callback_data": "me"},
+             {"text": "🌐 线路", "callback_data": "me_nodes"}],
+            [{"text": "🎒 背包", "callback_data": "bag"},
+             {"text": "🎬 求片", "callback_data": "req_new"}],
+            [{"text": "🏆 排行", "callback_data": "top"},
+             {"text": "📜 准则", "callback_data": "rules"}],
         ]
         points_row = []
         if self._plugin_on("checkin"):
@@ -485,8 +509,6 @@ class TelegramBot:
             points_row.append({"text": "💸 转账", "callback_data": "transfer"})
         if points_row:
             rows.append(points_row)
-        rows.append([{"text": "🎬 求片", "callback_data": "req_new"},
-                     {"text": "🏆 排行", "callback_data": "top"}])
         return rows
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
@@ -497,15 +519,14 @@ class TelegramBot:
 
     @staticmethod
     def info_menu() -> list[list[dict[str, str]]]:
-        """Everything about this one account, one level down."""
+        """Account details. Line/server lives on the home row, not here."""
         return [
             [{"text": "📋 账号状态", "callback_data": "me_status"},
+             {"text": "📊 用量", "callback_data": "usage"}],
+            [{"text": "📺 设备", "callback_data": "devices"},
              {"text": "💰 积分", "callback_data": "me_points"}],
-            [{"text": "📡 线路", "callback_data": "me_nodes"},
-             {"text": "📺 设备", "callback_data": "devices"}],
-            [{"text": "📊 观看统计", "callback_data": "usage"},
-             {"text": "📋 我的求片", "callback_data": "my_requests"}],
-            [{"text": "🔑 重置密码", "callback_data": "resetpw"}],
+            [{"text": "📋 我的求片", "callback_data": "my_requests"},
+             {"text": "🔑 重置密码", "callback_data": "resetpw"}],
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
@@ -534,10 +555,12 @@ class TelegramBot:
         if member:
             return (
                 "❓ <b>使用说明</b>\n\n"
-                "· <b>我的信息</b>：状态、有效期、设备、线路和密码\n"
+                "· <b>我的账号</b>：状态、用量、设备、密码\n"
+                "· <b>线路</b>：服务器地址和当前节点水位\n"
                 "· <b>背包</b>：邀请码、积分兑换\n"
-                "· <b>求片</b>：发送影片链接即可提交\n"
-                "· 发送 /start 随时回到首页\n\n"
+                "· <b>求片</b>：发送 TMDB 链接即可提交\n"
+                "· <b>准则</b>：账号使用约定\n"
+                "· 发送 /start 随时回到菜单\n\n"
                 "遇到问题请联系管理员。"
             )
         cfg = self._cfg()
@@ -572,9 +595,8 @@ class TelegramBot:
         balance = self._balance(user_id)
         if balance or self._plugin_on("checkin") or self._plugin_on("points_transfer"):
             lines.append(f"积分 <b>{balance}</b>")
-        server = str(self._cfg().get("emby_public_url") or "").strip()
-        if server:
-            lines.append(f"服务器：{server}")
+        lines.append("")
+        lines.append("请选择功能")
         return "\n".join(lines), self._with_admin_row(self.member_menu(), member)
 
     def _guest_home(self, tg_name: str) -> str:
@@ -964,14 +986,21 @@ class TelegramBot:
         capacity of a node is an operator concept, and '3 streams' means
         nothing without it.
         """
+        server = str(self._cfg().get("emby_public_url") or "").strip()
         if self._scheduler is None:
-            return "📡 <b>线路</b>\n\n暂无线路信息。"
+            if server:
+                return f"🌐 <b>线路</b>\n\n服务器：{server}\n\n暂无节点水位。"
+            return "🌐 <b>线路</b>\n\n暂无线路信息。"
         nodes: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
             nodes = self._scheduler.snapshot()
         if not nodes:
-            return "📡 <b>线路</b>\n\n暂无线路信息。"
-        lines = ["📡 <b>线路</b>\n"]
+            if server:
+                return f"🌐 <b>线路</b>\n\n服务器：{server}\n\n暂无节点水位。"
+            return "🌐 <b>线路</b>\n\n暂无线路信息。"
+        lines = ["🌐 <b>线路</b>\n"]
+        if server:
+            lines.append(f"服务器：{server}\n")
         for node in nodes:
             percent = round(float(node.get("utilisation") or 0) * 100)
             if not node.get("enabled", True) or node.get("manually_disabled"):
@@ -986,6 +1015,42 @@ class TelegramBot:
                 mark = f"🟢 {percent}%"
             lines.append(f"{node.get('name') or '-'} · {mark}")
         lines.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
+        return "\n".join(lines)
+
+    def _usage_text(self, member: dict[str, Any]) -> str:
+        """Quota, cap and activity on one screen, with a bar for traffic."""
+        quota = int(member.get("traffic_quota_bytes") or 0)
+        used = int(member.get("traffic_used_bytes") or 0)
+        percent = member.get("traffic_percent")
+        if percent is None and quota:
+            percent = round(used / quota * 100, 1)
+        lines = ["📊 <b>用量</b>\n"]
+        if quota:
+            lines.append(f"{_bar(percent)}  {float(percent or 0):.0f}%")
+            lines.append(f"{_fmt_bytes(used)} / {_fmt_bytes(quota)}")
+        else:
+            lines.append(f"本周期流量：{_fmt_bytes(used)}")
+            lines.append("未设置流量上限")
+        bw = int(member.get("bandwidth_limit_kbps") or 0)
+        streams = member.get("max_streams")
+        devices = member.get("max_devices")
+        device_count = member.get("device_count")
+        lines.append("")
+        if bw > 0:
+            lines.append(
+                f"带宽上限：{bw / 1000:.0f} Mbps" if bw >= 1000
+                else f"带宽上限：{bw} kbps")
+        else:
+            lines.append("带宽上限：不限")
+        if streams not in (None, ""):
+            lines.append(f"同时播放：{streams}")
+        if devices not in (None, ""):
+            extra = f"（已用 {device_count}）" if device_count not in (None, "") else ""
+            lines.append(f"设备上限：{devices}{extra}")
+        seen = member.get("last_seen_at")
+        lines.append(f"有效期：{_fmt_expiry(member.get('expires_at'))}")
+        lines.append(
+            f"最近活跃：{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}")
         return "\n".join(lines)
 
     # -- shop -----------------------------------------------------------------
@@ -1242,9 +1307,19 @@ class TelegramBot:
 
     # -- rankings -------------------------------------------------------------
 
+    def _rankings_keyboard(self, days: int, member: dict[str, Any] | None
+                            ) -> list[list[dict[str, str]]]:
+        today = "● 今日" if days <= 1 else "今日"
+        month = "● 近 30 天" if days > 1 else "近 30 天"
+        return [
+            [{"text": today, "callback_data": "top:1"},
+             {"text": month, "callback_data": "top:30"}],
+            [{"text": "◀ 返回", "callback_data": "home"}],
+        ]
+
     def _rankings_text(self, days: int = 1) -> str:
-        window = "今日" if days <= 1 else f"近 {days} 天"
-        lines = [f"🏆 <b>{window}排行</b>\n"]
+        window = "今日" if days <= 1 else "近 30 天"
+        lines = [f"🏆 <b>{window}观看排行</b>\n"]
         # Watch rankings and the points ranking come from different services,
         # so one being unavailable must not hide the other: a panel with no
         # playback stats still has a points economy worth showing.
@@ -1254,9 +1329,10 @@ class TelegramBot:
                 if users:
                     lines.append("<b>观看时长</b>")
                     for i, u in enumerate(users, 1):
+                        hours = u.get("hours") or 0
+                        plays = u.get("plays") or 0
                         lines.append(
-                            f"{i}. {u['username']} · {u['hours']} 小时 · "
-                            f"{u['plays']} 次")
+                            f"{i}. {u['username']} · {hours} 小时 · {plays} 次")
                     lines.append("")
             with contextlib.suppress(Exception):
                 titles = self._stats.top_titles(days=days, limit=5)
@@ -1896,13 +1972,34 @@ class TelegramBot:
             payload = args[0] if args else ""
             await self._open_start(chat_id, tg_user_id, display, payload)
             return
-        if command == "help" and not self.is_admin(member):
-            await self.send(
-                chat_id, self._help_text(member),
-                self.member_menu() if member else self.guest_menu())
+        if command == "help" and self.is_admin(member):
+            await self._show(chat_id, ADMIN_HELP)
+            return
+        if command in ("help", "rules"):
+            body = RULES_TEXT if command == "rules" else self._help_text(member)
+            keyboard = (self._with_admin_row(self.member_menu(), member)
+                        if member else self.guest_menu())
+            await self._show(chat_id, body, keyboard)
+            return
+        if command == "me":
+            if not member:
+                await self._show(chat_id, "这个 Telegram 还没有账号。",
+                                 self.guest_menu())
+                return
+            await self._show(
+                chat_id,
+                f"👤 <b>{member.get('username') or '-'}</b>\n\n"
+                f"状态：{self._status_label(member)}\n"
+                f"积分：<b>{self._balance(str(member.get('emby_user_id')))}</b>\n\n"
+                "选择要查看的内容：",
+                self.info_menu())
             return
         if not self.is_admin(member):
-            await self.send(chat_id, "⛔ 无权限。")
+            await self._show(
+                chat_id,
+                "请使用下方按钮，或发送 /start。",
+                self._with_admin_row(self.member_menu(), member)
+                if member else self.guest_menu())
             return
 
         actor = self._admin_actor(member, tg_username)
@@ -2409,6 +2506,11 @@ class TelegramBot:
                 chat_id, message_id, self._help_text(member),
                 self._with_admin_row(self.member_menu(), member) if member else self.guest_menu())
             return
+        if data == "rules":
+            await self._edit(
+                chat_id, message_id, RULES_TEXT,
+                self._with_admin_row(self.member_menu(), member) if member else self.guest_menu())
+            return
         if data == "home":
             self._pending.pop(str(chat_id), None)
             body, keyboard = self._home(tg_user_id, tg_name)
@@ -2469,11 +2571,14 @@ class TelegramBot:
                 "admin_pro", "admin_rev", "admin_score", "admin_rm"):
             await self._admin_user_action(chat_id, message_id, member, data)
             return
-        if data == "top":
-            # Rankings are about the library, not one account, so they stay
-            # available to anyone who found the bot.
-            await self._edit(chat_id, message_id, self._rankings_text(1),
-                             self._with_admin_row(self.member_menu(), member) if member else self.guest_menu())
+        if data == "top" or data.startswith("top:"):
+            days = 1
+            if data.startswith("top:"):
+                tail = data.split(":", 1)[1]
+                if tail.isdigit():
+                    days = 30 if int(tail) >= 30 else 1
+            await self._edit(chat_id, message_id, self._rankings_text(days),
+                             self._rankings_keyboard(days, member))
             return
 
         if not member:
@@ -2581,13 +2686,8 @@ class TelegramBot:
             await self._edit(chat_id, message_id, text, self.info_menu())
             return
         if data == "usage":
-            used = member.get("traffic_used_bytes") or 0
-            seen = member.get("last_seen_at")
-            await self._edit(
-                chat_id, message_id,
-                f"📊 <b>观看统计</b>\n\n本周期用量：{_fmt_bytes(used)}\n"
-                f"最近活跃：{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}",
-                self.info_menu())
+            await self._edit(chat_id, message_id, self._usage_text(member),
+                             self.info_menu())
             return
         if data in ("invites", "invite_new"):
             await self._invites_view(chat_id, message_id, member, mint=data == "invite_new")

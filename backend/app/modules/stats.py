@@ -141,7 +141,7 @@ class StatsService:
             " SUM(u.bytes) AS bytes, SUM(u.seconds) AS secs, SUM(u.plays) AS plays"
             " FROM usage_daily u LEFT JOIN members m ON m.emby_user_id=u.emby_user_id"
             " WHERE u.day >= ? GROUP BY u.emby_user_id"
-            " ORDER BY bytes DESC LIMIT ?", (since, max(1, min(limit, 200))))
+            " ORDER BY secs DESC, bytes DESC LIMIT ?", (since, max(1, min(limit, 200))))
         return [{
             "user_id": r["emby_user_id"],
             "username": r["username"] or r["emby_user_id"][:8],
