@@ -334,7 +334,10 @@ CREATE TABLE IF NOT EXISTS admin_grants (
     tg_user_id  TEXT NOT NULL UNIQUE,
     granted_by  TEXT NOT NULL DEFAULT '',
     created_at  INTEGER NOT NULL,
-    used_at     INTEGER
+    used_at     INTEGER,
+    gift_code   TEXT,
+    gift_group_id TEXT,
+    gift_days   INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS redeem_log (
@@ -623,6 +626,12 @@ class Database:
             self._ensure_column(
                 "members", "last_remote_error", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("members", "last_remote_at", "INTEGER")
+            self._ensure_column("admin_grants", "gift_code", "TEXT")
+            self._ensure_column("admin_grants", "gift_group_id", "TEXT")
+            self._ensure_column("admin_grants", "gift_days", "INTEGER")
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_gift_code "
+                "ON admin_grants(gift_code) WHERE gift_code IS NOT NULL")
             self._reshape_measured_watermarks()
             self._reshape_meter_policy_ack()
             self._conn.commit()

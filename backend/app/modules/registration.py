@@ -355,13 +355,55 @@ class RegistrationService:
             # Re-granting a spent authorisation re-arms it rather than adding a
             # second row: UNIQUE(tg_user_id) is what keeps "granted" countable.
             self._db.execute(
-                "UPDATE admin_grants SET used_at=NULL,granted_by=?,created_at=?"
-                " WHERE tg_user_id=?", (str(granted_by)[:60], now, tg_user_id))
+                "UPDATE admin_grants SET used_at=NULL,granted_by=?,created_at=?,"
+                "gift_code=NULL,gift_group_id=NULL,gift_days=NULL WHERE tg_user_id=?", (str(granted_by)[:60], now, tg_user_id))
         else:
             self._db.execute(
                 "INSERT INTO admin_grants(tg_user_id,granted_by,created_at,used_at)"
                 " VALUES(?,?,?,NULL)", (tg_user_id, str(granted_by)[:60], now))
         return self.get_grant(tg_user_id) or {}
+
+    def gift_terms(self, tg_user_id: str) -> tuple[str, int]:
+        grant = self.get_grant(tg_user_id)
+        if grant and grant.get("gift_code") and not grant.get("used_at"):
+            return str(grant.get("gift_group_id") or ""), int(grant.get("gift_days") or 0)
+        return self._default_group(), self._default_days()
+
+    def issue_gift(self, tg_user_id: str, granted_by: str) -> dict[str, Any]:
+        """One recipient-bound registration qualification, not an Emby account.
+
+        Repeated gifting of an unused qualification returns the same link.
+        The link never grants anybody other than this Telegram id admission.
+        """
+        target = str(tg_user_id).strip()
+        if not target.isdigit() or int(target) <= 0:
+            raise ConfigError("请提供有效的 Telegram 用户数字 ID")
+        if not self.channel_enabled("admin_grant"):
+            raise ConfigError("管理员授权注册通道已关闭")
+        group, days = self.gift_terms(target)
+        if not group or (self._groups is not None and not self._groups.get(group)):
+            raise ConfigError("默认用户组不存在，请先在面板设置")
+        now = int(time.time())
+        for _ in range(20):
+            try:
+                with self._db.write() as conn:
+                    if conn.execute("SELECT 1 FROM members WHERE tg_user_id=?", (target,)).fetchone():
+                        raise ConfigError("对方已有账号，请使用用户管理")
+                    row = conn.execute("SELECT * FROM admin_grants WHERE tg_user_id=?", (target,)).fetchone()
+                    if row and row["gift_code"] and not row["used_at"]:
+                        return dict(row)
+                    code = "GIFT" + generate_code(12)
+                    conn.execute(
+                        "INSERT INTO admin_grants(tg_user_id,granted_by,created_at,used_at,"
+                        "gift_code,gift_group_id,gift_days) VALUES(?,?,?,NULL,?,?,?) "
+                        "ON CONFLICT(tg_user_id) DO UPDATE SET granted_by=excluded.granted_by,"
+                        "created_at=excluded.created_at,used_at=NULL,gift_code=excluded.gift_code,"
+                        "gift_group_id=excluded.gift_group_id,gift_days=excluded.gift_days",
+                        (target, str(granted_by)[:60], now, code, group, days))
+                return self.get_grant(target) or {}
+            except sqlite3.IntegrityError:
+                continue
+        raise ConfigError("生成赠送资格失败，请重试")
 
     def get_grant(self, tg_user_id: str) -> dict[str, Any] | None:
         return self._db.one(
@@ -397,13 +439,30 @@ class RegistrationService:
         tg_user_id = str(tg_user_id or "").strip()
         cred = normalise(credential)
 
+        # Explicit gift links must be checked before any other qualification:
+        # an authorised user opening somebody else's link must not spend it.
+        if cred.startswith("GIFT") and len(cred) == 16:
+            gift = self._db.one("SELECT * FROM admin_grants WHERE gift_code=?", (cred,))
+            if not self.channel_enabled("admin_grant"):
+                return Admission(reason="管理员授权注册通道已关闭", tg_user_id=tg_user_id)
+            if not gift or gift.get("used_at"):
+                return Admission(reason="赠送资格已使用或已失效", tg_user_id=tg_user_id)
+            if str(gift["tg_user_id"]) != tg_user_id:
+                return Admission(reason="这份赠送资格不属于你的 Telegram 账号", tg_user_id=tg_user_id)
+
         if self.channel_enabled("admin_grant"):
             grant = self.get_grant(tg_user_id)
             if grant and not grant.get("used_at"):
+                gifted = bool(grant.get("gift_code"))
+                group = str(grant.get("gift_group_id") or "") if gifted else self._default_group()
+                if gifted and self._groups is not None and not self._groups.get(group):
+                    return Admission(reason="赠送的用户组已不存在，请联系管理员", tg_user_id=tg_user_id)
                 return Admission(
                     allowed=True, via="admin", tg_user_id=tg_user_id,
-                    group_id=self._default_group(), days=self._default_days(),
-                    reason="管理员已预先授权")
+                    group_id=group,
+                    days=int(grant.get("gift_days") or 0) if gifted else self._default_days(),
+                    credential=str(grant.get("gift_code") or ""),
+                    reason="已获得管理员赠送的注册资格" if gifted else "管理员已预先授权")
 
         if not cred:
             return Admission(
@@ -465,9 +524,12 @@ class RegistrationService:
         user_id = str(new_user_id or "")
 
         if admission.via == "admin":
-            changed = self._db.execute(
-                "UPDATE admin_grants SET used_at=? WHERE tg_user_id=?"
-                " AND used_at IS NULL", (now, admission.tg_user_id))
+            sql = "UPDATE admin_grants SET used_at=? WHERE tg_user_id=? AND used_at IS NULL"
+            params: tuple = (now, admission.tg_user_id)
+            if admission.credential:
+                sql += " AND gift_code=?"
+                params += (admission.credential,)
+            changed = self._db.execute(sql, params)
             return bool(changed)
 
         if admission.via == "invite":

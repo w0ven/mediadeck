@@ -311,7 +311,9 @@ def test_rm_deletes_the_member_the_inviter_and_the_emby_accounts(bot) -> None:
                                        "inviter_id": "u1"}, actor="test")
     _run(bot, "/rm carol")
 
-    result = _tap(bot, "rm_cascade")
+    button = next(b["callback_data"] for row in bot.sent[-1][2] for b in row
+                  if b["callback_data"].startswith("rm_cascade:"))
+    result = _tap(bot, button)
 
     assert "已删除" in result
     assert bot.members.get("u2") is None
@@ -336,7 +338,9 @@ def test_rm_self_leaves_the_inviter(bot) -> None:
     bot.members.upsert("u2", "carol", {"group_id": "standard",
                                        "inviter_id": "u1"}, actor="test")
     _run(bot, "/rm carol")
-    result = _tap(bot, "rm_self")
+    button = next(b["callback_data"] for row in bot.sent[-1][2] for b in row
+                  if b["callback_data"].startswith("rm_self:"))
+    result = _tap(bot, button)
     assert "仅本人" in result
     assert bot.members.get("u2") is None
     assert bot.members.get("u1") is not None
@@ -537,7 +541,9 @@ def test_commands_are_written_to_the_audit_trail_naming_the_admin(
 
 def test_deleting_through_the_bot_is_audited(bot) -> None:
     _run(bot, "/rm alice")
-    _tap(bot, "admin_ok")
+    button = next(b["callback_data"] for row in bot.sent[-1][2] for b in row
+                  if b["callback_data"].startswith("rm_self:"))
+    _tap(bot, button)
     actions = {r["action"] for r in bot.members.audit_log(limit=50)}
     assert "member.delete" in actions
     assert "member.delete_emby" in actions
