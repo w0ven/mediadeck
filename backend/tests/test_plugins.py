@@ -1052,12 +1052,13 @@ def test_only_one_telegram_form_owns_the_credential_field() -> None:
     assert ops_js.count("id=\"tg-token\"") == 1
 
 
-def test_the_bot_is_switched_on_after_a_successful_test() -> None:
-    """Owner hit 测试连接, saw 连接成功, and assumed the bot was running."""
-    ops_js = (_STATIC / "ops.js").read_text(encoding="utf-8")
-    verify = ops_js.split("async function testTelegramPage", 1)[1].split("\n}", 1)[0]
-    assert "enabled: true" in verify
-    assert "已自动启用机器人" in verify
+def test_bot_connection_test_is_explicit_and_does_not_save_other_sections() -> None:
+    """Testing saved credentials must not implicitly save drafts or enable the bot."""
+    workspace = (_STATIC / 'workspace.js').read_text(encoding='utf-8')
+    verify = workspace.split("$('#tg-test').onclick = async () => {", 1)[1].split('\n  };', 1)[0]
+    assert '/api/settings/telegram/verify' in verify
+    assert 'enabled: true' not in verify and 'telegramPagePayload' not in verify
+    assert '启用状态未改变' in verify
 
 
 def test_the_migrated_scheduling_fields_are_gone_from_the_bot_page() -> None:

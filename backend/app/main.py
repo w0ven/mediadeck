@@ -1775,6 +1775,7 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
         "requests": app.state.requests.for_user(user_id, limit=10),
         "request_remaining": app.state.requests.remaining(user_id),
         "usage": usage,
+        "watch": stats.get('watch'),
         "plays": plays,
         "series": series,
         "recent_plays": plays,
@@ -2346,28 +2347,15 @@ async def telegram_verify() -> dict[str, Any]:
 
 @app.get("/api/telegram/requests", dependencies=[Depends(_auth)])
 async def telegram_requests() -> list[dict[str, Any]]:
-    """Verified rebind requests awaiting a decision.
-
-    Registration is credential-gated and does not enter this queue. Old
-    claiming is retired; only password-verified Telegram reassignment awaits
-    the administrator's decision here or on its independent group card.
-    """
-    return app.state.telegram.pending_requests()
+    """Retired Web queue; review takes place only in the authorized group."""
+    raise HTTPException(410, 'Web 关联审批已移除，请在绑定群审核 TG 换绑')
 
 
 @app.post("/api/telegram/requests/{request_id}/review", dependencies=[Depends(_auth)])
 async def telegram_request_review(request_id: int,
                                   payload: dict[str, Any] = Body(default={}),  # noqa: B008
                                   user: str = Depends(_auth)) -> dict[str, Any]:
-    approve = bool(payload.get("approve", False))
-    try:
-        result = await app.state.telegram.review_rebind(request_id, approve, reviewer=user)
-    except KeyError:
-        raise HTTPException(404, "request not found") from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-    # review_rebind updates independent group cards and notifies once.
-    return result
+    raise HTTPException(410, 'Web 关联审批已移除，请在绑定群审核 TG 换绑')
 
 
 @app.post("/api/telegram/group-audit", dependencies=[Depends(_auth)])

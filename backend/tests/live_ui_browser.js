@@ -74,20 +74,20 @@
 
     input.blur(); go('dashboard'); await tick();
     const dashboardSource = sources.at(-1);
-    const play = document.querySelector('.play-row');
-    const poster = document.querySelector('.play-row img');
+    const play = document.querySelector('.play-card');
+    const poster = document.querySelector('.play-card img');
     const dashboardRequests = requests.length;
     dashboardSource.emit('sessions', [{Id:'s1',UserId:'u1',UserName:'User 1',Client:'Client',
       SpeedBps:2000,SpeedMBps:0.2,SpeedSource:'node',ItemId:'m1',ProgressPercent:20},
       {Id:'s2',UserId:'u2',UserName:'User 2',Client:'Client',SpeedBps:0,SpeedMBps:0,SpeedSource:'node'}]);
     await tick();
-    assert(document.querySelector('.play-row') === play, 'stable playback row was replaced');
-    assert(document.querySelector('.play-row img') === poster, 'unchanged poster reloaded');
-    assert(document.querySelectorAll('.play-row').length === 2, 'new playback row not added');
+    assert(document.querySelector('.play-card') === play, 'stable playback row was replaced');
+    assert(document.querySelector('.play-card img') === poster, 'unchanged poster reloaded');
+    assert(document.querySelectorAll('.play-card').length === 2, 'new playback row not added');
     assert(requests.length === dashboardRequests, 'dashboard event refetched library/overview');
     dashboardSource.emit('sessions', [{Id:'s2',UserId:'u2',UserName:'User 2',Client:'Client',SpeedBps:0,SpeedMBps:0,SpeedSource:'node'}]);
     await tick();
-    assert(document.querySelectorAll('.play-row').length === 1 && document.querySelector('.play-row').textContent.includes('User 2'), 'removed playback row remains');
+    assert(document.querySelectorAll('.play-card').length === 1 && document.querySelector('.play-card').textContent.includes('User 2'), 'removed playback row remains');
 
     for (const page of ['pipeline','tasks','mounts','intake']) {
       go(page); await tick();

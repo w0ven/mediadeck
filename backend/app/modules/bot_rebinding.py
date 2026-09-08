@@ -15,11 +15,13 @@ class RebindBotMixin:
             await self._show(chat_id, "换绑服务暂不可用，请联系管理员。", back)
             return
         if self._member_for_chat(tg_id):
-            await self._show(
-                chat_id,
-                "这个 Telegram 已绑定账号，无需认领或换绑。请用新的 Telegram 发起申请。",
-                back,
-            )
+            self._pending[self._pkey(chat_id)] = ('rebind_target', time.time() + 300, {})
+            await self._show(chat_id,
+                '🔗 <b>更换 Telegram</b>\n\n请输入新 Telegram 的数字 ID，生成仅供该账号使用的确认链接。\n新 TG 打开链接并验证 Emby 密码后，交绑定群管理员审核；审核前不改变当前绑定。\n\n<i>原 TG 已失效或不能发言？直接用新 TG 打开机器人选择「TG 换绑」，无需旧号确认。</i>', back)
+            return
+        pending = self._db.one("SELECT * FROM tg_requests WHERE kind='rebind' AND status='pending' AND tg_user_id=? AND expires_at>?", (tg_id, int(time.time())))
+        if pending:
+            await self._show(chat_id, '📨 换绑申请已提交，请等待群管理员审核。', self._rebind_pending_menu(pending['id']))
             return
         if not self._cfg().get("group_interaction_chats"):
             await self._show(chat_id, "尚未配置审核群，请联系管理员。", back)
@@ -65,7 +67,8 @@ class RebindBotMixin:
             await self._show(chat_id, "账号验证未通过或 Emby 暂不可用，请检查后重试。", back)
             return
         try:
-            row = self._rebinding.create(str(verified["Id"]), tg_id, tg_name)
+            extra = (self._pending.get(self._pkey(chat_id)) or ('', 0, {}))[2]
+            row = self._rebinding.create(str(verified["Id"]), tg_id, tg_name, handoff=extra.get('handoff', ''))
         except ValueError as exc:
             await self._show(chat_id, escape(str(exc)), back)
             return
@@ -77,11 +80,60 @@ class RebindBotMixin:
             + (
                 "已发送到绑定群，请等待管理员审核。"
                 if delivered
-                else "申请已保存，群通知暂未送达；管理员仍可在面板审核。"
+                else "申请已保存，群通知暂未送达；请点击下方重试，仍失败时联系群管理员。"
             )
             + "\n审核前原绑定保持不变；24 小时内有效。",
-            self.guest_menu(),
+            self._rebind_pending_menu(row['id']),
         )
+
+    @staticmethod
+    def _rebind_pending_menu(request_id: int) -> list:
+        return [[{'text': '重试群通知', 'callback_data': f'rebind_retry:{request_id}'}],
+                [{'text': '返回首页', 'callback_data': 'home'}]]
+
+    async def _pick_rebind_target(self, chat_id: Any, tg_id: str, text: str) -> None:
+        back = [[{'text': '取消并返回', 'callback_data': 'home'}]]
+        try:
+            if not self._private_link():
+                raise ValueError('Bot 地址暂不可用，请稍后重试。')
+            if not self._rebinding.allow_attempt(tg_id):
+                raise ValueError('操作频繁，请 15 分钟后再试。')
+            token = self._rebinding.handoff(tg_id, text.strip())
+        except ValueError as exc:
+            await self._show(chat_id, escape(str(exc)), back)
+            return
+        self._pending.pop(self._pkey(chat_id), None)
+        link = self._private_link('rebind_' + token)
+        await self._show(chat_id, '🔗 <b>新 Telegram 确认</b>\n\n请将下方链接交给目标新 TG，30 分钟内打开并验证 Emby 密码。之后在群中审核；此时原绑定尚未变化。\n\n' + escape(link),
+                         [[{'text': '新 TG 打开确认', 'url': link}], *back])
+
+    async def _open_rebind_handoff(self, chat_id: Any, tg_id: str, token: str) -> None:
+        try:
+            if not self._rebinding or self._member_for_chat(tg_id):
+                raise ValueError('当前 Telegram 已绑定账号，或换绑服务不可用。')
+            self._rebinding.open_handoff(token, tg_id)
+            await self._start_rebind(chat_id, tg_id)
+            key = self._pkey(chat_id)
+            pending = self._pending.get(key)
+            if pending and pending[0] == 'rebind_verify':
+                self._pending[key] = (pending[0], pending[1], {'handoff': token})
+        except ValueError as exc:
+            await self._show(chat_id, escape(str(exc)), [[{'text': '返回', 'callback_data': 'home'}]])
+
+    async def _retry_rebind_notice(self, chat_id: Any, tg_id: str, request_id: str) -> None:
+        try:
+            row = self._rebinding.get(int(request_id))
+            if row['tg_user_id'] != tg_id or row['status'] != 'pending' or row['expires_at'] <= time.time():
+                raise ValueError('该申请不能由当前账号重发，或已处理/过期。')
+            cooldown = getattr(self, '_rebind_retry_at', {})
+            if time.time() - cooldown.get(tg_id, 0) < 30:
+                raise ValueError('请 30 秒后再试，避免重复发送。')
+            cooldown[tg_id] = time.time()
+            self._rebind_retry_at = cooldown
+            delivered = await self._publish_rebind(row)
+            await self._show(chat_id, '已送达审核群，请等待管理员处理。' if delivered else '暂未送达审核群，请稍后重试或联系管理员。', self._rebind_pending_menu(row['id']))
+        except (ValueError, TypeError) as exc:
+            await self._show(chat_id, escape(str(exc)), [[{'text': '返回', 'callback_data': 'home'}]])
 
     @staticmethod
     def _rebind_card(row: dict) -> str:
@@ -104,6 +156,9 @@ class RebindBotMixin:
     async def _publish_rebind(self, row: dict) -> int:
         count = 0
         for chat in self._cfg().get("group_interaction_chats") or []:
+            if self._db.one('SELECT 1 FROM tg_rebind_notices WHERE request_id=? AND chat_id=?', (row['id'], str(chat))):
+                count += 1
+                continue
             payload = {
                 "chat_id": chat,
                 "text": self._rebind_card(row),

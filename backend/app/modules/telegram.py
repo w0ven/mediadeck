@@ -37,12 +37,12 @@ from typing import Any
 import httpx
 
 from app.core.errors import ConfigError
-from app.modules.groups import WHITELIST_GROUP_ID
-from app.modules.rebinding import RebindingService
 from app.modules.bot_rebinding import RebindBotMixin
 from app.modules.bot_views import duration, quota_lines
-from app.modules.settings import parse_group_interaction_chats
+from app.modules.groups import WHITELIST_GROUP_ID
+from app.modules.rebinding import RebindingService
 from app.modules.requests import RequestError
+from app.modules.settings import parse_group_interaction_chats
 from app.modules.shop import ShopError
 from app.modules.tmdb import parse_link, poster_url
 
@@ -863,8 +863,9 @@ class TelegramBot(RebindBotMixin):
              {"text": "🎬 求片中心", "callback_data": "request_center"}],
             [{"text": "🎒 积分背包", "callback_data": "bag"},
              {"text": "🏆 排行榜", "callback_data": "rank"}],
-            [{"text": "📜 使用准则", "callback_data": "rules"},
-             {"text": "❓ 使用帮助", "callback_data": "help"}],
+            [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
+             {"text": "📜 使用准则", "callback_data": "rules"}],
+            [{"text": "❓ 使用帮助", "callback_data": "help"}],
         ]
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
@@ -883,6 +884,7 @@ class TelegramBot(RebindBotMixin):
              {"text": "💰 积分", "callback_data": "me_points"}],
             [{"text": "📋 我的求片", "callback_data": "my_requests"},
              {"text": "🔑 重置密码", "callback_data": "resetpw"}],
+            [{"text": "🔗 TG 换绑", "callback_data": "rebind"}],
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
@@ -916,6 +918,7 @@ class TelegramBot(RebindBotMixin):
             return (
                 "❓ <b>使用说明</b>\n\n"
                 "· <b>我的账号</b>：状态、用量、设备、密码\n"
+                "· <b>TG 换绑</b>：更换 TG、原号失效或无法发言时使用，账号权益保留\n"
                 "· <b>线路</b>：服务器地址和当前节点水位\n"
                 "· <b>背包</b>：邀请码、积分兑换\n"
                 "· <b>求片</b>：发送 TMDB 链接即可提交\n"
@@ -1396,10 +1399,15 @@ class TelegramBot(RebindBotMixin):
         except Exception:
             return "观看统计：暂不可用"
         start = time.strftime('%Y-%m-%d', time.localtime(s['first_at'])) if s.get('first_at') else '尚无记录'
-        return (f"近24小时观看：{duration(s['seconds_24h'])}\n"
-                f"近30天观看：{duration(s['seconds_30d'])}\n"
+        def window(key: str, incomplete: str) -> str:
+            value = duration(s[key])
+            if s.get(incomplete):
+                return f'已确认 {value}，另有跨界历史无法拆分' if s[key] else '有跨界历史，时长无法完整还原'
+            return value
+        return (f"近24小时观看：{window('seconds_24h', 'incomplete_24h')}\n"
+                f"近30天观看：{window('seconds_30d', 'incomplete_30d')}\n"
                 f"累计已记录：{duration(s['recorded_seconds'])}\n"
-                f"统计起点：{start}\n<i>窗口按会话开始时间归属，含当前播放的已采样时长。</i>")
+                f"统计起点：{start}\n<i>按实际采样区间统计，暂停和停机时间不补算。</i>")
 
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = ["📊 <b>用量与观看</b>\n", *quota_lines(member), ""]
@@ -2442,7 +2450,8 @@ class TelegramBot(RebindBotMixin):
             return "\n".join(lines)
         for i, row in enumerate(rows, 1):
             lines.append(
-                f"{i}. {row.get('username') or '-'} · {row.get('hours') or 0} 小时")
+                f"{i}. {escape(str(row.get('username') or '-'))} · {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}"
+                + ('（已确认，部分跨界历史无法拆分）' if row.get('incomplete') else ''))
         return "\n".join(lines)
 
     def _watch_rankings_keyboard(self, hours: int) -> list[list[dict[str, str]]]:
@@ -2511,7 +2520,12 @@ class TelegramBot(RebindBotMixin):
         # whatever conversation was in flight.
         if command == "start":
             payload = args[0] if args else ""
-            await self._open_start(chat_id, tg_user_id, display, payload)
+            if not in_group and payload.startswith("rebind_"):
+                await self._open_rebind_handoff(chat_id, tg_user_id, payload[7:])
+            elif not in_group and payload == "rebind":
+                await self._start_rebind(chat_id, tg_user_id)
+            else:
+                await self._open_start(chat_id, tg_user_id, display, payload)
             return
         if command in PRIVATE_ONLY_COMMANDS and in_group:
             link = self._private_link()
@@ -3115,6 +3129,9 @@ class TelegramBot(RebindBotMixin):
                 member = self._member_for_chat(tg_user_id)
                 await self._admin_handle_text(chat_id, member, kind, extra, text)
                 return
+            if kind == "rebind_target":
+                await self._pick_rebind_target(chat_id, tg_user_id, text)
+                return
             if kind == "rebind_verify":
                 await self._submit_rebind(message, chat_id, tg_user_id, tg_username, text)
                 return
@@ -3227,6 +3244,9 @@ class TelegramBot(RebindBotMixin):
         if data == "claim":
             self._pending.pop(self._pkey(chat_id), None)
             await self._edit(chat_id, message_id, "认领功能已停用。已绑定用户直接使用；更换 TG 请申请换绑。", self.guest_menu())
+            return
+        if data.startswith("rebind_retry:") and not in_group:
+            await self._retry_rebind_notice(chat_id, tg_user_id, data.split(":", 1)[1])
             return
         if data == "rebind":
             await self._start_rebind(chat_id, tg_user_id)

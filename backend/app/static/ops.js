@@ -425,17 +425,15 @@ async function deleteGroup(id, count) {
 PAGES.stats = async () => {
   const days = state.statsDays || 30;
   $('#view').innerHTML = pageLoading();
-  const [overview, prev, daily, users, titles, clients, nodes, methods] = await Promise.all([
+  const [overview, daily, users, titles, clients, methods] = await Promise.all([
     api(`/api/stats/overview?days=${days}`),
-    api(`/api/stats/overview?days=${days * 2}`).catch(() => null),
     api(`/api/stats/daily?days=${days}`),
     api(`/api/stats/top-users?days=${days}`),
     api(`/api/stats/top-titles?days=${days}`),
     api(`/api/stats/clients?days=${days}`),
-    api(`/api/stats/nodes?days=${days}`),
     api(`/api/stats/play-methods?days=${days}`).catch(() => ({ total: 0, methods: [] })),
   ]);
-  const trafficNow = (overview.traffic || {}).window_bytes || 0;
+  const trafficNow = (overview.traffic || {}).month_bytes;
   const hoursNow = (overview.traffic || {}).window_hours || 0;
   const playsNow = (overview.playback || {}).window_plays || 0;
   const activeNow = (overview.members || {}).active || 0;
@@ -445,30 +443,24 @@ PAGES.stats = async () => {
       ${[7, 30, 90].map((n) => `<button class="btn ${n === days ? 'primary' : ''}" onclick="statsRange(${n})">${n} 天</button>`).join('')}
     </div>
     <div class="stat-grid">
-      ${stat('⇅', fmtBytes(trafficNow), '总流量', deltaText(trafficNow, earlier(prev, overview, 'traffic', 'window_bytes')))}
-      ${stat('▶', hoursNow + ' 小时', '总观看时长', deltaText(hoursNow, earlier(prev, overview, 'traffic', 'window_hours')))}
+      ${stat('⇅', actualBytes(trafficNow), '本月实测流量', `${(overview.traffic || {}).period || ''} · UTC 自然月 · 不随观看窗口切换`)}
+      ${stat('▶', hoursNow + ' 小时', '已记录观看时长', overview.traffic.window_incomplete ? '已确认部分；跨界旧记录无法拆分' : `近 ${days} 天 · 实际采样`)}
       ${stat('☺', activeNow, '活跃用户', '当前正常成员')}
-      ${stat('▣', playsNow, '播放次数', deltaText(playsNow, earlier(prev, overview, 'playback', 'window_plays')))}
+      ${stat('▣', playsNow, '播放次数', `近 ${days} 天已结束会话`)}
     </div>
-    ${card('每日趋势', '流量与观看时长', `<div class="chart-wrap">${trendChart(daily)}<div class="chart-tip" id="chart-tip"></div></div>
-      <div class="chart-legend"><span><i class="swatch" style="background:#3b6ef5"></i>流量</span>
-        <span><i class="swatch" style="background:#12b76a"></i>观看时长</span></div>`)}
+    ${card('每日观看', 'UTC 自然日；跨界旧记录只展示已确认部分，不估算拆分', `<div class="chart-wrap">${trendChart(daily)}<div class="chart-tip" id="chart-tip"></div></div>
+      <div class="chart-legend"><span><i class="swatch" style="background:#12b76a"></i>观看时长</span></div>`)}
     ${card('转码占比', '直通越多，CPU 越省', playMethodPanel(methods, overview))}
     <div class="grid-2">
       ${tableCard('热门内容', `${titles.length} 条`, ['内容', '播放', '分钟'],
         titles.map((t) => `<tr><td>${esc(t.title || '(未命名)')}</td><td>${esc(t.plays)}</td>
           <td>${esc(Math.round((t.hours || 0) * 60))}</td></tr>`).join(''))}
-      ${tableCard('用户排行 · 流量', '按消耗流量', ['用户', '流量', '时长'],
-        users.map((u) => `<tr><td>${esc(u.username)}</td><td>${fmtBytes(u.bytes)}</td>
-          <td>${esc(u.hours)} 小时</td></tr>`).join(''))}
+      ${tableCard('用户观看排行', `近 ${days} 天观看 · 流量为本月实测`, ['用户', '已记录观看', '本月流量'],
+        usersByHours.map(u => `<tr><td>${esc(u.username)}</td><td>${esc(fmtWatchSeconds(u.seconds))}${u.incomplete ? ' · 部分历史无法拆分' : ''}</td><td>${actualBytes(u.bytes)}</td></tr>`).join(''))}
     </div>
     <div class="grid-2">
-      ${tableCard('用户排行 · 时长', '按观看时长', ['用户', '时长', '流量'],
-        usersByHours.map((u) => `<tr><td>${esc(u.username)}</td><td>${esc(u.hours)} 小时</td>
-          <td>${fmtBytes(u.bytes)}</td></tr>`).join(''))}
       ${card('客户端分布', '', barList((clients || []).map((c) => ({ label: c.client, pct: c.percent, extra: c.plays + ' 次' }))))}
-    </div>
-    ${card('节点分布', '', barList((nodes || []).map((n) => ({ label: n.node, pct: n.percent, extra: fmtBytes(n.bytes) }))))}`;
+    </div>`;
   bindChartHover(daily);
 };
 function statsRange(days) { state.statsDays = days; renderPage('stats'); }
@@ -524,8 +516,8 @@ function trendChart(daily) {
     return `<polygon fill="${color}" fill-opacity="0.12" points="${area}"/>
       <polyline fill="none" stroke="${color}" stroke-width="2" points="${pts}"/>`;
   };
-  const hits = daily.map((d, i) => `<circle class="chart-hit" data-i="${i}" cx="${x(i).toFixed(1)}" cy="${yB(d.bytes || 0).toFixed(1)}" r="8" fill="transparent"/>`).join('');
-  return `<svg viewBox="0 0 ${w} ${h}" class="chart-svg" id="trend-svg">${line('bytes', yB, '#3b6ef5')}${line('hours', yH, '#12b76a')}${hits}</svg>`;
+  const hits = daily.map((d, i) => `<circle class="chart-hit" data-i="${i}" cx="${x(i).toFixed(1)}" cy="${yH(d.hours || 0).toFixed(1)}" r="8" fill="transparent"/>`).join('');
+  return `<svg viewBox="0 0 ${w} ${h}" class="chart-svg" id="trend-svg">${line('hours', yH, '#12b76a')}${hits}</svg>`;
 }
 function bindChartHover(daily) {
   const svg = $('#trend-svg'); const tip = $('#chart-tip');
@@ -537,7 +529,7 @@ function bindChartHover(daily) {
       tip.style.display = 'block';
       tip.style.left = (ev.offsetX + 12) + 'px';
       tip.style.top = (ev.offsetY + 8) + 'px';
-      tip.textContent = `${d.day} · ${fmtBytes(d.bytes)} · ${d.hours} 小时`;
+      tip.textContent = `${d.day} · ${d.hours} 小时${d.incomplete ? ' · 部分跨界历史无法拆分' : ''}`;
     });
     el.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
   });
@@ -613,10 +605,11 @@ function auditRows(rows) {
    own settings, its own approval queue and its own audit, and scattering those
    across "settings" and "members" made each of them hard to find. */
 
-PAGES.tgbot = async () => {
+PAGES.tgbot = async (context = pageContext('tgbot')) => {
   $('#view').innerHTML = pageLoading();
   const tg = await api('/api/settings/telegram').catch(() => null);
   if (!tg) { $('#view').innerHTML = pageError('无法读取 Telegram 配置'); return; }
+  if (!context.isCurrent()) return;
   const st = tg.status || {};
   const running = st.running && tg.enabled;
   $('#view').innerHTML = `
@@ -694,10 +687,6 @@ PAGES.tgbot = async () => {
           <span id="tg-rankresult" class="muted"></span>
         </div>
       </div>`)}`;
-  ['tg-save', 'tg-save2'].forEach((id) => {
-    if ($('#' + id)) $('#' + id).onclick = saveTelegramPage;
-  });
-  $('#tg-test').onclick = testTelegramPage;
   $('#tg-sendrank').onclick = sendRankingsNow;
   $('#tg-logo-preview').onclick = () => {
     const box = $('#tg-logo-preview-box'), img = $('#tg-logo-image'), hint = $('#tg-logo-hint');
@@ -710,7 +699,8 @@ PAGES.tgbot = async () => {
       img.src = url.href;
     } catch (e) { box.hidden = false; img.hidden = true; hint.textContent = '请填写有效的公开 HTTPS 图片直链。'; }
   };
-  $('#tg-logo-clear').onclick = () => { $('#tg-logo').value = ''; $('#tg-logo-preview-box').hidden = true; $('#tg-logo-image').removeAttribute('src'); };
+  $('#tg-logo-clear').onclick = () => { $('#tg-logo').value = ''; $('#tg-logo-preview-box').hidden = true; $('#tg-logo-image').removeAttribute('src'); updateDirtyBadges(); };
+  initTelegramSettings(tg);
   if (tg.menu_logo_url) $('#tg-logo-preview').click();
 };
 
@@ -737,43 +727,6 @@ function telegramPagePayload() {
     default_group_id: str('tg-group'),
     require_group: str('tg-reqgroup'),
   };
-}
-async function saveTelegramPage() {
-  try {
-    await api('/api/settings/telegram', {
-      method: 'POST', body: JSON.stringify(telegramPagePayload()) });
-    toast('已保存');
-    renderPage('tgbot', true);
-  } catch (e) { toast('保存失败: ' + e.message, 1); }
-}
-async function testTelegramPage() {
-  const el = $('#tg-result');
-  el.textContent = '正在测试…';
-  try {
-    // Save first: verification asks Telegram who the bot is, which needs the
-    // credential already stored rather than sent along for inspection.
-    const payload = telegramPagePayload();
-    await api('/api/settings/telegram', {
-      method: 'POST', body: JSON.stringify(payload) });
-    const r = await api('/api/settings/telegram/verify', { method: 'POST' });
-    if (!r.ok) {
-      el.innerHTML = `<span class="tag bad">连接失败</span> ${esc(r.error || '')}`;
-      return;
-    }
-    el.innerHTML = `<span class="tag ok">连接成功</span> @${esc(r.username || '')}`;
-    // A successful test with the switch still off is the trap: the operator
-    // reads "连接成功" as "the bot is running" and walks away, while nothing
-    // is polling. Verification proves the credential works, so switch it on
-    // and say so rather than leaving a working bot stopped.
-    if (!payload.enabled) {
-      await api('/api/settings/telegram', {
-        method: 'POST', body: JSON.stringify({ ...payload, enabled: true }) });
-      toast('已自动启用机器人');
-      renderPage('tgbot', true);
-    }
-  } catch (e) {
-    el.innerHTML = `<span class="tag bad">连接失败</span> ${esc(e.message)}`;
-  }
 }
 async function sendRankingsNow() {
   const el = $('#tg-rankresult');
@@ -1095,37 +1048,6 @@ async function showMemberInvites(id, username) {
       ${kids.length ? `<div class="help" style="margin-top:12px">已邀请 ${kids.length} 人：${
   kids.map((k) => esc(k.username)).join('、')}</div>` : ''}`;
   } catch (e) { box.innerHTML = `<div class="help">加载失败：${esc(e.message)}</div>`; }
-}
-
-PAGES.tgrequests = async () => {
-  $('#view').innerHTML = pageLoading();
-  const rows = await api('/api/telegram/requests').catch(() => []);
-  const kindLabel = () => 'TG 换绑';
-  $('#view').innerHTML = `
-    <div class="help">
-      <b>认领功能已停用</b>，已绑定的用户直接使用 Bot。
-      这里只审核已通过 Emby 密码验证的<b>TG 换绑申请</b>，同一申请只生效一次；也可在绑定群处理。
-    </div>
-    ${tableCard('待处理申请', `${rows.length} 条`,
-      ['类型', '新 Telegram', '原绑定 / 账号', '提交时间', ''],
-      rows.map((r) => `<tr>
-        <td><span class="tag ${r.kind === 'rebind' ? 'warn' : 'idle'}">${esc(kindLabel(r.kind))}</span></td>
-        <td>${r.tg_username ? '@' + esc(r.tg_username) : esc(r.tg_user_id)}</td>
-        <td>${esc(r.wanted_username)}<div class="muted">原 TG ${esc(r.old_tg_user_id || '未知')}</div></td>
-        <td>${esc(fmtAgeTs(r.created_at))}</td>
-        <td class="row-actions">
-          <button class="btn sm" onclick="reviewTgRequest(${r.id}, true)">通过</button>
-          <button class="btn sm danger" onclick="reviewTgRequest(${r.id}, false)">拒绝</button>
-        </td></tr>`).join(''))}`;
-};
-async function reviewTgRequest(id, approve) {
-  if (!confirm(approve ? '确认将该 Emby 账号从原 TG 换绑至申请人？账号权益和历史不变。' : '拒绝这条申请？申请人会收到通知。')) return;
-  try {
-    const result = await api(`/api/telegram/requests/${id}/review`, {
-      method: 'POST', body: JSON.stringify({ approve }) });
-    toast(result.approved ? '已通过换绑' : (result.note || '申请未生效'));
-    renderPage('tgrequests', true);
-  } catch (e) { toast('操作失败: ' + e.message, 1); }
 }
 
 PAGES.tggroup = async () => {

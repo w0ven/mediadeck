@@ -15,9 +15,9 @@ after a few months of playback history.
 """
 from __future__ import annotations
 
-import time
 import hashlib
 import json
+import time
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -42,36 +42,78 @@ def legacy_watch_fingerprint(rows: list[dict[str, Any]]) -> str:
 class StatsService:
     def __init__(self, db: Database) -> None:
         self._db = db
-        self._live_watch = lambda: []
+        self._live_watch = list
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
 
+    def watch_windows(self, since: float, until: float, user_id: str | None = None) -> dict[str, dict]:
+        """Three grouped queries, independent of member count. Old pauses are not inferred."""
+        where = ' AND emby_user_id=?' if user_id is not None else ''
+        args = (user_id,) if user_id is not None else ()
+        values: dict[str, dict] = {}
+
+        def add(uid: str, seconds: float = 0, uncertain: int = 0) -> None:
+            row = values.setdefault(uid, {'seconds': 0.0, 'uncertain_records': 0})
+            row['seconds'] += seconds
+            row['uncertain_records'] += uncertain
+
+        for table in ('play_events', 'watch_legacy_events'):
+            sampled = ' AND sampled=0' if table == 'play_events' else ''
+            rows = self._db.query(
+                'SELECT emby_user_id, SUM(CASE WHEN started_at>=? AND ended_at<=? '
+                'THEN seconds ELSE 0 END) AS seconds, '
+                'SUM(CASE WHEN started_at<? OR ended_at>? THEN 1 ELSE 0 END) AS uncertain '
+                'FROM ' + table + ' WHERE ended_at>? AND started_at<? AND seconds>0' +
+                sampled + where + ' GROUP BY emby_user_id',
+                (since, until, since, until, since, until, *args))
+            for row in rows:
+                add(row['emby_user_id'], float(row['seconds'] or 0), int(row['uncertain'] or 0))
+        for row in self._db.query(
+                'SELECT emby_user_id,SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
+                'FROM watch_samples WHERE ended_at>? AND started_at<?' + where +
+                ' GROUP BY emby_user_id', (until, since, since, until, *args)):
+            add(row['emby_user_id'], float(row['seconds'] or 0))
+        for live in self._live_watch() or []:
+            uid = live.get('user_id')
+            if live.get('sampled') or (user_id is not None and uid != user_id):
+                continue
+            seconds = float(live.get('seconds') or 0)
+            start = float(live.get('started_at') or until)
+            end = float(live.get('last_ts') or until)
+            if seconds and end > since and start < until:
+                if start >= since and end <= until:
+                    add(uid, seconds)
+                else:
+                    add(uid, uncertain=1)
+        for row in values.values():
+            row['incomplete'] = bool(row['uncertain_records'])
+        return values
+
+    def watch_window(self, since: float, until: float, user_id: str | None = None) -> dict[str, Any]:
+        rows = self.watch_windows(since, until, user_id).values()
+        seconds = sum(r['seconds'] for r in rows)
+        uncertain = sum(r['uncertain_records'] for r in rows)
+        return {'seconds': int(seconds), 'incomplete': bool(uncertain),
+                'uncertain_records': uncertain}
+
     def watch_summary(self, user_id: str, now: float | None = None) -> dict[str, Any]:
         now = time.time() if now is None else now
-        row = self._db.one(
-            "SELECT SUM(CASE WHEN started_at>=? THEN seconds ELSE 0 END) AS day,"
-            "SUM(seconds) AS month FROM ("
-            "SELECT seconds,started_at FROM play_events WHERE emby_user_id=? AND started_at>=? "
-            "UNION ALL SELECT seconds,started_at FROM watch_legacy_events WHERE emby_user_id=? AND started_at>=?)",
-            (int(now)-86400, user_id, int(now)-30*86400, user_id, int(now)-30*86400)) or {}
-        total = self._db.one("SELECT seconds,first_at FROM watch_totals WHERE emby_user_id=?", (user_id,)) or {}
-        legacy = self._db.one("SELECT seconds,first_at,cutoff_at FROM watch_legacy_baselines WHERE emby_user_id=?", (user_id,)) or {}
-        day, month = int(row.get("day") or 0), int(row.get("month") or 0)
-        recorded = int(total.get("seconds") or 0) + int(legacy.get("seconds") or 0)
-        starts = [int(r["first_at"]) for r in (total, legacy) if r.get("first_at") is not None]
+        total = self._db.one('SELECT seconds,first_at FROM watch_totals WHERE emby_user_id=?', (user_id,)) or {}
+        legacy = self._db.one('SELECT seconds,first_at FROM watch_legacy_baselines WHERE emby_user_id=?', (user_id,)) or {}
+        sampled = self._db.one('SELECT seconds,first_at FROM watch_sample_totals WHERE emby_user_id=?', (user_id,)) or {}
+        recorded = sum(float(r.get('seconds') or 0) for r in (total, legacy, sampled))
+        starts = [r['first_at'] for r in (total, legacy, sampled) if r.get('first_at') is not None]
         for live in self._live_watch() or []:
-            if live.get("user_id") != user_id:
-                continue
-            seconds, start = int(live.get("seconds") or 0), int(live.get("started_at") or now)
-            recorded += seconds
-            starts.append(start)
-            day += seconds if start >= now-86400 else 0
-            month += seconds if start >= now-30*86400 else 0
-        return {"seconds_24h": day, "seconds_30d": month, "recorded_seconds": recorded,
-                "first_at": min(starts) if starts else None,
-                "legacy_seconds": int(legacy.get("seconds") or 0),
-                "window_basis": "session_start", "source": "sampled_playing_seconds"}
+            if live.get('user_id') == user_id and not live.get('sampled'):
+                recorded += float(live.get('seconds') or 0)
+                starts.append(live.get('started_at') or now)
+        day, month = self.watch_window(now-86400, now, user_id), self.watch_window(now-30*86400, now, user_id)
+        return {'seconds_24h': day['seconds'], 'seconds_30d': month['seconds'],
+                'incomplete_24h': day['incomplete'], 'incomplete_30d': month['incomplete'],
+                'recorded_seconds': int(recorded), 'first_at': min(starts) if starts else None,
+                'legacy_seconds': int(legacy.get('seconds') or 0),
+                'window_basis': 'sample_intervals', 'source': 'sampled_playing_seconds'}
 
     def recent_watches(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._db.query("SELECT item_name,series_name,seconds,started_at FROM play_events "
@@ -170,6 +212,9 @@ class StatsService:
             " COALESCE(SUM(plays),0) AS plays FROM usage_daily WHERE day = ?",
             (today,)) or {}
 
+        window = self.watch_window(since, now)
+        today_watch = self.watch_window(datetime.now(UTC).replace(hour=0,minute=0,second=0,microsecond=0).timestamp(), now)
+        measured = self.measured_month()
         plays = int(totals.get("plays") or 0)
         transcodes = int(totals.get("trans") or 0)
         return {
@@ -182,10 +227,14 @@ class StatsService:
                 "suspended": suspended,
             },
             "traffic": {
-                "window_bytes": int(totals.get("bytes") or 0),
-                "today_bytes": int(today_row.get("bytes") or 0),
-                "window_hours": round(int(totals.get("secs") or 0) / 3600, 1),
-                "today_hours": round(int(today_row.get("secs") or 0) / 3600, 1),
+                "window_bytes": None,
+                "today_bytes": None,
+                "month_bytes": sum(measured['by_user'].values()) if measured['by_user'] else None,
+                "period": measured['period'],
+                "window_hours": round(window['seconds']/3600, 1),
+                "today_hours": round(today_watch['seconds']/3600, 1),
+                "window_incomplete": window['incomplete'],
+                "today_incomplete": today_watch['incomplete'],
             },
             "playback": {
                 "window_plays": plays,
@@ -211,33 +260,28 @@ class StatsService:
                 " SUM(plays) AS plays, COUNT(DISTINCT emby_user_id) AS users"
                 " FROM usage_daily WHERE day >= ? GROUP BY day", (wanted[0],))
         }
-        return [{
-            "day": d,
-            "bytes": int((rows.get(d) or {}).get("bytes") or 0),
-            "hours": round(int((rows.get(d) or {}).get("secs") or 0) / 3600, 2),
-            "plays": int((rows.get(d) or {}).get("plays") or 0),
-            "users": int((rows.get(d) or {}).get("users") or 0),
-        } for d in wanted]
+        series = []
+        for d in wanted:
+            start = datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()
+            watch = self.watch_window(start, min(start+86400,time.time()))
+            series.append({'day':d,'bytes':None,'hours':round(watch['seconds']/3600,2),
+                           'incomplete':watch['incomplete'],'plays':int((rows.get(d) or {}).get('plays') or 0),
+                           'users':int((rows.get(d) or {}).get('users') or 0)})
+        return series
 
     # -- leaderboards --------------------------------------------------------
+    def measured_month(self) -> dict[str, Any]:
+        month = datetime.now(UTC).strftime('%Y-%m')
+        rows = self._db.query("SELECT u.emby_user_id,MAX(0,SUM(u.bytes)-COALESCE(c.credit_bytes,0)) AS bytes FROM measured_usage_monthly u LEFT JOIN measured_credits c ON c.emby_user_id=u.emby_user_id AND c.month=u.month WHERE u.month=? AND u.emby_user_id<>'' GROUP BY u.emby_user_id", (month,))
+        return {'period': month, 'by_user': {r['emby_user_id']: int(r['bytes']) for r in rows}}
+
     def top_users(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
-        days = max(1, min(days, MAX_DAYS))
-        since = _day_list(days)[0]
-        rows = self._db.query(
-            "SELECT u.emby_user_id, COALESCE(m.username,'') AS username,"
-            " COALESCE(m.group_id,'') AS group_id,"
-            " SUM(u.bytes) AS bytes, SUM(u.seconds) AS secs, SUM(u.plays) AS plays"
-            " FROM usage_daily u LEFT JOIN members m ON m.emby_user_id=u.emby_user_id"
-            " WHERE u.day >= ? GROUP BY u.emby_user_id"
-            " ORDER BY secs DESC, bytes DESC LIMIT ?", (since, max(1, min(limit, 200))))
-        return [{
-            "user_id": r["emby_user_id"],
-            "username": r["username"] or r["emby_user_id"][:8],
-            "group_id": r["group_id"],
-            "bytes": int(r["bytes"] or 0),
-            "hours": round(int(r["secs"] or 0) / 3600, 1),
-            "plays": int(r["plays"] or 0),
-        } for r in rows]
+        values = self.measured_month()
+        rows = self.top_watchers(hours=max(1,min(days,MAX_DAYS))*24, limit=200)
+        for row in rows:
+            row['bytes'] = values['by_user'].get(row['user_id'])
+            row['traffic_period'] = values['period']
+        return rows[:max(1,min(limit,200))]
 
     def top_watchers(self, hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
         """Rolling watch-time ranking from play_events, not calendar days or bytes."""
@@ -246,28 +290,27 @@ class StatsService:
         except (TypeError, ValueError):
             hours = 24
         hours = max(1, min(hours, 24 * MAX_DAYS))
-        since = int(time.time()) - hours * 3600
-        rows = self._db.query(
-            "SELECT p.emby_user_id,m.username,SUM(p.seconds) AS secs,COUNT(*) AS plays "
-            "FROM (SELECT emby_user_id,seconds FROM play_events WHERE started_at>=? "
-            "UNION ALL SELECT emby_user_id,seconds FROM watch_legacy_events WHERE started_at>=?) p "
-            "JOIN members m ON m.emby_user_id=p.emby_user_id GROUP BY p.emby_user_id",
-            (since,since))
-        by_user = {r['emby_user_id']:r for r in rows}
-        for live in self._live_watch() or []:
-            uid = str(live.get('user_id') or '')
-            if int(live.get('started_at') or 0) < since:
+        now = time.time()
+        since = now - hours * 3600
+        windows = self.watch_windows(since, now)
+        counts = {r['emby_user_id']: int(r['n']) for r in self._db.query(
+            'SELECT emby_user_id,COUNT(*) AS n FROM ('
+            'SELECT emby_user_id FROM play_events WHERE started_at>=? AND started_at<? '
+            'UNION ALL SELECT emby_user_id FROM watch_legacy_events '
+            'WHERE started_at>=? AND started_at<?) GROUP BY emby_user_id',
+            (since, now, since, now))}
+        rows = []
+        for member in self._db.query('SELECT emby_user_id,username,group_id FROM members'):
+            uid = member['emby_user_id']
+            window = windows.get(uid)
+            if not window or (not window['seconds'] and not window['incomplete']):
                 continue
-            if uid not in by_user:
-                member = self._db.one('SELECT username FROM members WHERE emby_user_id=?',(uid,))
-                if not member:
-                    continue
-                by_user[uid] = {'emby_user_id':uid,'username':member['username'],'secs':0,'plays':0}
-            by_user[uid]['secs'] += int(live.get('seconds') or 0)
-        ordered = sorted(by_user.values(),key=lambda r:(-int(r['secs']),-int(r['plays']),r['emby_user_id']))[:max(1,min(int(limit),50))]
-        return [{'user_id':r['emby_user_id'],'username':r['username'] or r['emby_user_id'][:8],
-                 'hours':round(int(r['secs'] or 0)/3600,1),'seconds':int(r['secs'] or 0),
-                 'plays':int(r['plays'] or 0)} for r in ordered]
+            rows.append({'user_id': uid, 'username': member['username'] or uid[:8],
+                         'group_id': member['group_id'],
+                         'hours': round(window['seconds']/3600, 1),
+                         'seconds': int(window['seconds']), 'incomplete': window['incomplete'],
+                         'plays': counts.get(uid, 0)})
+        return sorted(rows, key=lambda r: (-r['seconds'], -r['plays'], r['user_id']))[:max(1,min(int(limit),200))]
 
     def top_titles(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
@@ -352,18 +395,10 @@ class StatsService:
         }
 
     def hours_this_month(self) -> dict[str, float]:
-        """Watch hours per member since the 1st, as one query.
-
-        The member list renders hundreds of rows; asking per row is how that
-        page starts taking seconds. Callers get a plain dict and decide what a
-        missing member means (zero, not unknown).
-        """
-        since = datetime.now(UTC).replace(day=1).strftime("%Y-%m-%d")
-        rows = self._db.query(
-            "SELECT emby_user_id, SUM(seconds) AS secs FROM usage_daily"
-            " WHERE day >= ? GROUP BY emby_user_id", (since,))
-        return {str(r["emby_user_id"]): round(int(r["secs"] or 0) / 3600, 1)
-                for r in rows}
+        now = time.time()
+        since = datetime.now(UTC).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp()
+        return {uid: round(row['seconds']/3600, 1)
+                for uid, row in self.watch_windows(since, now).items()}
 
     def member_detail(self, user_id: str, days: int = 30) -> dict[str, Any]:
         days = max(1, min(days, MAX_DAYS))
@@ -381,6 +416,7 @@ class StatsService:
                 "hours": round(int((series.get(d) or {}).get("seconds") or 0) / 3600, 2),
                 "plays": int((series.get(d) or {}).get("plays") or 0),
             } for d in _day_list(days)],
+            "watch": self.watch_summary(user_id),
             "recent_plays": self._db.query(
                 "SELECT item_name, series_name, client, play_method, node, seconds,"
                 " bytes, started_at FROM play_events WHERE emby_user_id=?"
@@ -401,10 +437,11 @@ class StatsService:
         cutoff_ts = int(time.time()) - max(30, keep_days) * 86400
         cutoff_day = datetime.fromtimestamp(cutoff_ts, UTC).strftime("%Y-%m-%d")
         events = self._db.execute(
-            "DELETE FROM play_events WHERE started_at < ?", (cutoff_ts,))
+            "DELETE FROM play_events WHERE ended_at < ?", (cutoff_ts,))
         usage = self._db.execute(
             "DELETE FROM usage_daily WHERE day < ?", (cutoff_day,))
-        self._db.execute('DELETE FROM watch_legacy_events WHERE started_at < ?', (cutoff_ts,))
+        self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
+        self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
         audit = self._db.execute(
             "DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
         return {"play_events": events, "usage_daily": usage, "audit_log": audit}

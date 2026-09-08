@@ -194,6 +194,12 @@ CREATE TABLE IF NOT EXISTS tg_rebind_notices (
     PRIMARY KEY(request_id, chat_id)
 );
 
+CREATE TABLE IF NOT EXISTS tg_rebind_handoffs (
+    token_hash TEXT PRIMARY KEY, emby_user_id TEXT NOT NULL,
+    old_tg_user_id TEXT NOT NULL, new_tg_user_id TEXT NOT NULL,
+    expires_at INTEGER NOT NULL
+);
+
 -- Plugin run history. Append-heavy, so it lives here rather than in the
 -- settings document, which is rewritten in full on every save.
 CREATE TABLE IF NOT EXISTS plugin_runs (
@@ -302,6 +308,21 @@ CREATE INDEX IF NOT EXISTS idx_legacy_watch_time ON watch_legacy_events(started_
 
 -- Every enforcement action, so "why was this account disabled" always has an
 -- answer. Billing disputes are unanswerable without this.
+-- Exact sampled windows and their durable totals. Event history remains separate.
+CREATE TABLE IF NOT EXISTS watch_samples (
+    session_key TEXT NOT NULL, emby_user_id TEXT NOT NULL,
+    started_at REAL NOT NULL, ended_at REAL NOT NULL, seconds REAL NOT NULL,
+    PRIMARY KEY(session_key, ended_at)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_samples_user_time ON watch_samples(emby_user_id, ended_at);
+CREATE TABLE IF NOT EXISTS watch_sample_totals (
+    emby_user_id TEXT PRIMARY KEY, seconds REAL NOT NULL,
+    first_at REAL NOT NULL, last_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS watch_checkpoints (
+    session_id TEXT PRIMARY KEY, state_json TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          INTEGER NOT NULL,
@@ -673,8 +694,11 @@ class Database:
                     "INSERT OR IGNORE INTO watch_totals SELECT emby_user_id,SUM(MAX(seconds,0)),"
                     "MIN(started_at),MAX(ended_at) FROM play_events GROUP BY emby_user_id")
                 self._conn.execute("INSERT INTO meta(key,value) VALUES('watch_totals_seeded','1')")
+            self._ensure_column('play_events', 'sampled', 'INTEGER NOT NULL DEFAULT 0')
+            self._conn.execute('DROP TRIGGER IF EXISTS watch_event_recorded')
             self._conn.execute("""
-                CREATE TRIGGER IF NOT EXISTS watch_event_recorded AFTER INSERT ON play_events
+                CREATE TRIGGER watch_event_recorded AFTER INSERT ON play_events
+                WHEN NEW.sampled=0
                 BEGIN
                     INSERT INTO watch_totals(emby_user_id,seconds,first_at,last_at)
                     VALUES(NEW.emby_user_id,MAX(NEW.seconds,0),NEW.started_at,NEW.ended_at)

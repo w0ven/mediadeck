@@ -177,7 +177,7 @@ def test_group_rank_is_rolling_watch_time_not_calendar_today(bot):
     run(bot._handle_message(_msg("/rank", user=ALICE, username="alice_tg")))
     body = last_text(bot)
     assert "近 24 小时" in body
-    assert "alice" in body and "2.0 小时" in body
+    assert "alice" in body and "2小时0分" in body
     assert "root" not in body
     assert "今日" not in body
     mid = bot._panel[f"g:{GROUP}:0:{ALICE}"]

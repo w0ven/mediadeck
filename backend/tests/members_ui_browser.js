@@ -301,8 +301,8 @@
     assert(!/可正常播放|已启用/.test(carolText), 'missing Emby shown as playable');
     assert(carolText.includes('正常') || carolText.includes('权益'), 'carol entitlement missing');
     assert(carolRow.querySelector('[data-act="retry"]'), 'retry button missing for retryable carol');
-    assert(visibleText(document.querySelector('tr[data-id="u-bob"]')).includes('实测配额 未测'), 'missing measured quota fell back to legacy estimate or zero');
-    assert(carolText.includes('实测配额 0 B'), 'known measured zero was not distinguished from missing');
+    assert(visibleText(document.querySelector('tr[data-id="u-bob"]')).includes('本月流量 未测'), 'missing measured quota fell back to legacy estimate or zero');
+    assert(carolText.includes('本月流量 0 B'), 'known measured zero was not distinguished from missing');
 
     const aliceRow = document.querySelector('tr[data-id="u-alice"]');
     assert(aliceRow && /Emby 在线/.test(visibleText(aliceRow)), 'alice emby present not shown');

@@ -519,10 +519,10 @@ def test_overview_counts_by_group_state(stack) -> None:
 
 
 def test_daily_series_is_zero_filled(stack) -> None:
-    """A gap must render as zero, not as a missing point that fakes continuity."""
+    """Watch gaps are zero-filled; unavailable daily measured bytes stay unknown."""
     series = StatsService(stack["db"]).daily_series(7)
     assert len(series) == 7
-    assert all(p["bytes"] == 0 for p in series)
+    assert all(p['hours'] == 0 and p['bytes'] is None for p in series)
     assert series[0]["day"] < series[-1]["day"]
 
 

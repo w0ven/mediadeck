@@ -4,6 +4,44 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — local workspace and durable watch-time rebuild
+
+- Six primary workspaces retain 25 working pages in secondary navigation.
+  Dashboard contains key status, actionable follow-up and one live playback
+  surface; recent arrivals live in the library rather than competing on home.
+- System/Bot settings use category navigation, scoped saves, expandable advanced
+  fields, validation, inline failures and unsaved-change guards. A save does not
+  reload or discard other drafts; preview/export inputs are not dirty settings.
+  Testing saved Bot credentials no longer implicitly saves or enables the Bot.
+- Member and account menus expose Telegram reassignment. The old account may
+  create a target-bound, hashed, 30-minute handoff; the new account verifies its
+  Emby password before group review. Direct verification from a new Telegram
+  remains available without access to the old Telegram. Failed group notices
+  can be retried without duplicate cards. Web review is retired with HTTP 410.
+- Sampled watch intervals, per-user totals and resumable checkpoints persist in
+  SQLite. Checkpoints and samples commit together; restart gaps, pause transitions
+  and oversized unobserved gaps are not backfilled. Finishing or pruning history
+  does not count sampled time twice or reduce recorded cumulative totals.
+- Rolling windows clip sampled intervals. Old whole-session records spanning a
+  window boundary are explicitly incomplete, never prorated into invented time.
+  Web member details, Bot usage and rankings share these statistics. Grouped
+  queries keep leaderboard work independent of member count.
+- Operational traffic display uses the measured monthly ledger and credits;
+  unavailable daily traffic remains null. Independent direct-link logs and
+  bitrate estimates no longer appear as member watch/usage totals.
+- Validation: full suite 1196 passed, 56 skipped. Real local-mock Chromium covers
+  all 25 pages, independent saves, failure retention, cancelled navigation and
+  refresh, logo/group settings, retired review links, incomplete watch history,
+  desktop/mobile layouts and mobile backdrop/Escape dismissal. Existing live,
+  member and entry browser safety checks remain intact; final 8 relevant checks
+  passed after mobile dismissal changes. JavaScript syntax and diff checks pass.
+- Ruff 0.16.6 reports 39 existing findings (40 in the same HEAD baseline files),
+  with no new findings. The repository is not claimed globally lint-clean.
+- Delivery is local only: no upstream push, deployment, production configuration,
+  Telegram messages, legacy import or production data modification this round.
+
+---
+
 ## 2026-09-08 — local user-management rebuild integrated
 
 - Integrated membership lifecycle/UI, non-destructive live DOM updates, node

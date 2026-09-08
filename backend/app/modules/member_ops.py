@@ -44,6 +44,7 @@ SORTS = {
     "emby": lambda m: m.get("emby_status") or "",
     "sync": lambda m: m.get("sync_status") or "",
     "used": lambda m: int(m.get("traffic_used_bytes") or 0),
+    "traffic": lambda m: int(m.get('measured_used_bytes') if m.get('measured_used_bytes') is not None else -1),
     "edge30": lambda m: int((m.get("edge") or {}).get("bytes_30d") or 0),
     "last_seen": activity_timestamp,
 }

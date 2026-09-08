@@ -17,6 +17,7 @@ CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser")
 def test_entry_management_browser(tmp_path):
     tests = Path(__file__).parent
     shutil.copyfile(tests.parent / "app/static/app.js", tmp_path / "app.js")
+    shutil.copyfile(tests.parent / "app/static/workspace.js", tmp_path / "workspace.js")
     shutil.copyfile(tests / "entry_ui_browser.js", tmp_path / "test.js")
     page = tmp_path / "test.html"
     page.write_text("""<!doctype html><meta charset="utf-8">
@@ -26,7 +27,8 @@ def test_entry_management_browser(tmp_path):
 <option value="edge-b">edge-b</option></select>
 <select id="ee-server"><option value="nginx">nginx</option></select>
 <pre id="report">pending</pre>
-<script src="app.js"></script><script src="test.js"></script>
+<input id="nav-search"><div id="nav-results"></div><button id="nav-toggle"></button>
+<script src="workspace.js"></script><script src="app.js"></script><script src="test.js"></script>
 """)
     result = subprocess.run([
         CHROMIUM, "--headless", "--no-sandbox", "--disable-gpu",
