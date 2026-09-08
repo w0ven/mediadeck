@@ -942,6 +942,16 @@ class TelegramBot(RebindBotMixin):
             "遇到问题请联系管理员。"
         )
 
+    @staticmethod
+    def _whitelist_decoration(member: dict[str, Any]) -> str:
+        # Identity is the reserved group ID, never its editable display name or role.
+        return "💠 <b>白名单 · 专属成员</b>\n<code>✦ ━━━ ◈ ━━━ ✦</code>\n" if member.get("group_id") == WHITELIST_GROUP_ID else ""
+
+    @staticmethod
+    def _group_label(member: dict[str, Any]) -> str:
+        name = escape(str(member.get('group_name') or '默认'))
+        return f"💠 {name} · 固定分组" if member.get('group_id') == WHITELIST_GROUP_ID else name
+
     def _home(self, tg_user_id: str, tg_name: str) -> tuple[str, list[list[dict[str, str]]]]:
         member = self._member_for_chat(tg_user_id)
         if not member:
@@ -949,10 +959,10 @@ class TelegramBot(RebindBotMixin):
         bits = [self._status_label(member)]
         group = str(member.get("group_name") or "").strip()
         if group:
-            bits.append(group)
+            bits.append(self._group_label(member))
         bits.append(_fmt_expiry(member.get("expires_at_effective", member.get("expires_at"))))
         lines = [
-            "<b>MediaDeck · 我的影库</b>\n",
+            self._whitelist_decoration(member) + "<b>MediaDeck · 我的影库</b>\n",
             f"{escape(str(member.get('username') or '成员'))}，欢迎回来",
             " · ".join(bits),
         ]
@@ -1410,7 +1420,7 @@ class TelegramBot(RebindBotMixin):
                 f"统计起点：{start}\n<i>按实际采样区间统计，暂停和停机时间不补算。</i>")
 
     def _usage_text(self, member: dict[str, Any]) -> str:
-        lines = ["📊 <b>用量与观看</b>\n", *quota_lines(member), ""]
+        lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member), ""]
         streams, devices = member.get('max_streams'), member.get('max_devices')
         if streams not in (None, ''):
             lines.append(f"同时播放：{streams} 路")
@@ -2063,9 +2073,10 @@ class TelegramBot(RebindBotMixin):
         left = (self._requests.remaining(user_id)
                 if self._requests_ready() else None)
         return (
-            f"👤 <b>{target.get('username') or '-'}</b>\n\n"
+            self._whitelist_decoration(target)
+            + f"👤 <b>{escape(str(target.get('username') or '-'))}</b>\n\n"
             f"状态：{self._status_label(target)}\n"
-            f"用户组：{target.get('group_name') or '-'}\n"
+            f"用户组：{self._group_label(target)}\n"
             f"有效期：{_fmt_expiry(target.get('expires_at_effective', target.get('expires_at')))}\n"
             f"积分：{self._balance(user_id)}\n"
             f"注册渠道：{target.get('register_via') or 'legacy'}\n"
@@ -2586,7 +2597,8 @@ class TelegramBot(RebindBotMixin):
                 return
             await self._show(
                 chat_id,
-                f"👤 <b>{member.get('username') or '-'}</b>\n\n"
+                self._whitelist_decoration(member)
+                + f"👤 <b>{escape(str(member.get('username') or '-'))}</b>\n\n"
                 f"状态：{self._status_label(member)}\n"
                 f"积分：<b>{self._balance(str(member.get('emby_user_id')))}</b>\n\n"
                 "选择要查看的内容：",
@@ -3384,9 +3396,10 @@ class TelegramBot(RebindBotMixin):
         if data == "me_status":
             await self._edit(
                 chat_id, message_id,
-                f"📋 <b>{member.get('username') or '-'}</b>\n\n"
+                self._whitelist_decoration(member)
+                + f"📋 <b>{escape(str(member.get('username') or '-'))}</b>\n\n"
                 f"状态：{self._status_label(member)}\n"
-                f"用户组：{member.get('group_name') or '默认'}\n"
+                f"用户组：{self._group_label(member)}\n"
                 f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}\n"
                 f"备注：{member.get('note') or '—'}",
                 self.info_menu())

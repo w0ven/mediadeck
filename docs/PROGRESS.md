@@ -4,6 +4,39 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — approved Hard Glass UI and fixed whitelist identity (local)
+
+- Implemented the operator-approved dark Hard Glass direction as a shared theme:
+  crisp silver-blue edges, restrained translucent surfaces, line navigation icons,
+  consistent buttons/forms/tables and responsive layouts. Existing 25 pages and
+  their business capabilities remain reachable; theme assets are version-stamped.
+- Rebuilt member interaction around contextual bulk actions, immediate debounced
+  search, compact primary filters and expandable advanced filters. Kept all query,
+  paging, selection, accounting/enforcement previews and deletion scopes intact.
+- Member details are now a viewport-fixed right drawer (full screen on phones),
+  not content appended below the table. Independent scrolling, background inertness,
+  focus trapping, Escape/close and list-position restoration are verified. Unsaved
+  changes warn on close, tab/navigation and refresh; SSE preserves draft fields,
+  selection, scrolling and the opened detail panel. Nested business dialogs retain
+  their own layer and controls. Common actions and dangerous actions are separated.
+- Reused the sole reserved `whitelist` ID and blocked supported UI/API deletion.
+  Existing display names, group limits, membership assignments and role checks are
+  unchanged. Legacy missing groups still seed idempotently. Other groups named
+  like a whitelist do not receive the special identity.
+- Added a faceted silver/lavender shield badge to whitelist rows, details and a
+  pinned system-group card. Telegram home, account/status, usage and admin lookup
+  cards have matching diamond decoration. Decoration grants no administrator role.
+- Validation: full suite 1215 passed, 56 skipped. Real local-mock Chromium verifies
+  all 25 pages, reserved-ID distinction, desktop/mobile drawer coordinates, dirty
+  close/tab cancellation, SSE editor/inert preservation, scroll restoration,
+  immediate search focus and cancelled destructive actions. The prior complete
+  workspace/bandwidth/artwork browser acceptance also passed unchanged.
+- New targeted code checks and JavaScript syntax/diff checks pass. Existing global
+  lint findings are not claimed resolved. No production writes, release, push or
+  deployment were performed in this local implementation phase.
+
+---
+
 ## 2026-09-09 — local live-bandwidth and playback-artwork acceptance fixes
 
 - Confirmed that the playback card fell back to a constant media-bitrate estimate

@@ -175,6 +175,7 @@ class GroupService:
         rows = self._db.query(
             "SELECT * FROM groups ORDER BY is_default DESC, name COLLATE NOCASE")
         for row in rows:
+            row["is_builtin"] = row["id"] == WHITELIST_GROUP_ID
             row["member_count"] = self._db.one(
                 "SELECT COUNT(*) AS n FROM members WHERE group_id=?",
                 (row["id"],))["n"]
@@ -237,6 +238,8 @@ class GroupService:
         return self.get(group_id)  # type: ignore[return-value]
 
     def delete(self, group_id: str) -> bool:
+        if group_id == WHITELIST_GROUP_ID:
+            raise ConfigError("白名单是固定系统分组，不能删除；可调整该组限制或迁移成员")
         used = self._db.one(
             "SELECT COUNT(*) AS n FROM members WHERE group_id=?", (group_id,))["n"]
         if used:

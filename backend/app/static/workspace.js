@@ -172,6 +172,19 @@ function installWorkspaceNavigation() {
 }
 installWorkspaceNavigation();
 
+/* Shared identity marks: only the reserved ID receives whitelist decoration. */
+function isWhitelistGroup(id) { return id === 'whitelist'; }
+function whitelistEmblem() {
+  return '<svg class="whitelist-emblem" viewBox="0 0 32 36" fill="none" aria-hidden="true"><path class="wl-shell" d="M16 1.5 29 7v12.5L16 34.5 3 19.5V7Z"/><path class="wl-facet" d="m16 5 9 4.2V18L16 29 7 18V9.2Z"/><path class="wl-crystal" d="m16 9 6 7-6 9-6-9Z"/><path class="wl-spark" d="M16 9v16m-6-9h12M4 5v5M1.5 7.5h5M28 26v5m-2.5-2.5h5"/></svg>';
+}
+function groupBadge(id, name) {
+  return isWhitelistGroup(id) ? `<span class="whitelist-badge">${whitelistEmblem()}<span>${esc(name || '白名单')}</span><small>专属</small></span>` : `<span class="hg-group-badge">${esc(name || '未分组')}</span>`;
+}
+function workspaceIcon(name) {
+  const paths={dashboard:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',members:'<circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m2 3a5 5 0 0 1 3 4v2"/>',library:'<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 3v18M17 3v18M3 8h4m-4 8h4M17 8h4m-4 8h4"/>',tgbot:'<rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4M1 12v4m22-4v4M8 12v2m8-2v2m-7 3h6"/>',nodes:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5m-5 11h5"/>',settings:'<path d="M4 7h16M4 17h16M8 4v6m8 4v6"/>',more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',close:'<path d="m6 6 12 12M6 18 18 6"/>',filter:'<path d="M4 5h16l-6 7v7l-4-2v-5L4 5"/>'};
+  return `<svg class="hg-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.settings}</svg>`;
+}
+
 /* Rates are observations, not guesses from media bitrate. One binary byte unit everywhere. */
 const RATE_STALE_SECONDS = 15;
 function rateMarkup(bps, at, basis, windowSeconds, scope = '') {

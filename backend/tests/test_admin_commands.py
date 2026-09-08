@@ -229,7 +229,7 @@ def test_prouser_moves_the_account_into_the_whitelist(bot) -> None:
 def test_prouser_recreates_a_missing_whitelist_group(bot) -> None:
     """The command names a specific group, so it must not depend on the
     operator never having tidied their group list."""
-    bot.groups.delete("whitelist")
+    bot.db.execute("DELETE FROM groups WHERE id='whitelist'")  # legacy missing group
     _run(bot, "/prouser alice")
     _confirm_group(bot)
     assert bot.members.get("u1")["group_id"] == "whitelist"

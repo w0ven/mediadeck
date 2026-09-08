@@ -304,11 +304,12 @@ PAGES.groups = async () => {
       ${stat('▣', groups.length, '用户组', '计费与限制模板')}
       ${stat('☺', groups.reduce((a, g) => a + (g.member_count || 0), 0), '覆盖用户', '已分组的成员')}
     </div>
-    ${card('新建用户组', '组决定计费方式和默认限制；成员可在详情里逐项覆盖', `<div class="card-body">${groupForm('new', {})}
-      <div class="toolbar"><button class="btn primary" id="group-create">创建</button></div></div>`)}
+    ${groups.filter(g=>isWhitelistGroup(g.id)).map(g=>`<section class="hg-whitelist-group">${whitelistEmblem()}<div><span class="hg-eyebrow">WHITELIST · 固定系统分组</span><h3>${esc(g.name)}</h3><p>${esc(g.description || '')}</p><p>${esc(billingLabel(g.billing_mode))} · ${esc(groupLimitsText(g))} · ${esc(g.member_count || 0)} 位成员</p></div><div class="toolbar"><a class="btn" href="#/members?group_id=whitelist">查看成员</a><button class="btn" onclick="editGroup('${q(g.id)}')">调整设置</button></div></section>`).join('')}
+    <details class="hg-group-new"><summary>＋ 新建用户组</summary>${card('新建用户组', '组决定计费方式和默认限制；成员可在详情里逐项覆盖', `<div class="card-body">${groupForm('new', {})}
+      <div class="toolbar"><button class="btn primary" id="group-create">创建</button></div></div>`)}</details>
     ${tableCard('用户组', `${groups.length} 个`, ['名称', '计费', '默认额度', '限制', '用户', ''],
-      groups.map((g) => `<tr>
-        <td>${esc(g.name)}${g.is_default ? ' <span class="tag idle">默认</span>' : ''}<div class="s muted">${esc(g.description)}</div></td>
+      groups.filter(g=>!isWhitelistGroup(g.id)).map((g) => `<tr>
+        <td>${groupBadge(g.id,g.name)}${g.is_default ? ' <span class="tag idle">默认</span>' : ''}<div class="s muted">${esc(g.description)}</div></td>
         <td>${esc(billingLabel(g.billing_mode))}</td>
         <td>${esc(groupQuotaText(g))}</td>
         <td>${esc(groupLimitsText(g))}</td>
@@ -413,6 +414,7 @@ function editGroup(id) {
 }
 async function deleteGroup(id, count) {
   id = uq(id);
+  if (isWhitelistGroup(id)) return toast('白名单是固定系统分组，不能删除', 1);
   if (count) return toast(`仍有 ${count} 个用户在该组，请先迁移`, 1);
   if (!confirm(`删除用户组 ${id}？`)) return;
   try {

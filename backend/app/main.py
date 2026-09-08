@@ -529,7 +529,7 @@ async def root(_: str = Depends(_auth)) -> HTMLResponse:
         ver = ""
     if ver:
         for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js",
-                      "members.js"):
+                      "members.js", "workspace.js", "workspace.css", "hardglass.css"):
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     return HTMLResponse(html)
 

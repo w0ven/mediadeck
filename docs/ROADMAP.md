@@ -3,6 +3,16 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Hard Glass and reserved whitelist — approved local implementation
+- [x] Shared dark hard-glass theme across the existing workspaces and controls.
+- [x] Member list interaction rebuild and viewport-fixed details with safe drafts,
+      accessible focus, mobile layout and non-destructive live updates.
+- [x] Fixed whitelist group identity and silver/lavender Web badge plus Telegram
+      decoration; preserve group configuration and keep administrator roles separate.
+- [x] Full regressions and actual local browser acceptance including earlier flows.
+- [ ] Separately authorized publication and deployment; production is not modified
+      by this implementation phase.
+
 ## Workspace and watch-time follow-up — local delivery
 - [x] Six primary workspaces with retained secondary pages, a single live-playback
       surface and category-based independently saved configuration.

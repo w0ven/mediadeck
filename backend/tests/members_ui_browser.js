@@ -462,7 +462,8 @@
     box.checked = true;
     box.dispatchEvent(new Event('change', { bubbles: true }));
     box.blur();
-    search.focus(); search.setSelectionRange(2, 5);
+    const drawerEditor=document.getElementById('md-days');
+    drawerEditor.focus();
     const wrap = document.getElementById('members-table-wrap');
     const scrollStyle = document.createElement('style');
     scrollStyle.textContent = '#members-table-wrap {max-height:180px;overflow:auto}';
@@ -472,7 +473,7 @@
     const detail = document.getElementById('member-detail');
     const heading = detail.querySelector('h3');
     const selectedBefore = document.getElementById('m-sel-count').textContent;
-    assert(/已选 1 人/.test(selectedBefore), 'selection count: ' + selectedBefore);
+    assert(/已选择 1 人/.test(selectedBefore), 'selection count: ' + selectedBefore);
 
     const beforeReq = requests.length;
     const source = sources.filter((s) => /topics=members/.test(s.url)).at(-1);
@@ -484,11 +485,12 @@
     assert(document.getElementById('members-page'), 'live update removed members page');
     assert(document.getElementById('m-q') === search, 'live update replaced search input');
     assert(search.value === 'draft-keep', 'live update wiped search draft');
-    assert(document.activeElement === search && search.selectionStart === 2 && search.selectionEnd === 5, 'live update lost editing focus/caret');
+    assert(document.activeElement === drawerEditor && drawerEditor.isConnected, 'live update lost drawer editor focus');
+    assert(document.getElementById('members-table-card').inert, 'live update unlocked background while drawer is open');
     assert(document.getElementById('member-detail') === detail, 'live update replaced detail node');
     assert(detail.contains(heading) && heading.textContent === 'alice', 'live update closed/rebuilt detail');
     assert(box.isConnected && box.checked, 'live update lost checkbox');
-    assert(/已选 1 人/.test(document.getElementById('m-sel-count').textContent), 'live update lost selection count');
+    assert(/已选择 1 人/.test(document.getElementById('m-sel-count').textContent), 'live update lost selection count');
     assert(scrollBefore > 0 && document.getElementById('members-table-wrap').scrollTop === scrollBefore,
       'live update changed table scroll ' + document.getElementById('members-table-wrap').scrollTop);
     const memberGets = requests.slice(beforeReq).filter((r) => r.path.startsWith('/api/members?')).length;
@@ -497,7 +499,8 @@
       r.path.startsWith('/api/nodes') || r.path.startsWith('/api/pipeline') || r.path.startsWith('/api/sessions'));
     assert(unrelated.length === 0, 'live update fetched unrelated APIs');
 
-    search.blur();
+    drawerEditor.blur();
+    document.getElementById('md-close').click();
     document.querySelector('[data-act="metering"]').click();
     await waitFor(() => document.getElementById('meter-cutover'), 'metering preview missing');
     document.getElementById('meter-cutover').click(); await tick();

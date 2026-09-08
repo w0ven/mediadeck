@@ -87,7 +87,8 @@ def test_ensuring_the_whitelist_twice_creates_one_group(groups) -> None:
 
 def test_a_deleted_whitelist_group_is_recreated(groups) -> None:
     """/prouser names this group, so it has to be there."""
-    groups.delete(WHITELIST_GROUP_ID)
+    # Simulate an older/corrupted database; supported UI/API deletion is now blocked.
+    groups._db.execute('DELETE FROM groups WHERE id=?', (WHITELIST_GROUP_ID,))
     assert groups.get(WHITELIST_GROUP_ID) is None
 
     assert groups.ensure_whitelist() == 1
@@ -111,7 +112,7 @@ def test_the_whitelist_is_added_to_a_database_that_predates_it(tmp_path) -> None
     db = Database(tmp_path / "upgraded.db")
     service = GroupService(db)
     service.seed_defaults()
-    service.delete(WHITELIST_GROUP_ID)
+    db.execute('DELETE FROM groups WHERE id=?', (WHITELIST_GROUP_ID,))
 
     # Simulates the next boot of the upgraded panel.
     assert GroupService(db).seed_defaults() == 1
