@@ -68,7 +68,7 @@ from app.modules.provisioning import (
 )
 from app.modules.registration import RegistrationService
 from app.modules.requests import RequestError, RequestService, parse_status
-from app.modules.scheduler import Scheduler
+from app.modules.scheduler import PROBE_INTERVAL, Scheduler
 from app.modules.settings import SettingsService
 from app.modules.sharing import SharingDetector
 from app.modules.shop import ShopError, ShopService
@@ -403,7 +403,7 @@ async def _startup() -> None:
                 await app.state.scheduler.refresh()
             # Wakes early when nodes change, so a node added in the UI shows
             # its real health at once rather than after up to 15 seconds.
-            await app.state.scheduler.wait_for_change(15)
+            await app.state.scheduler.wait_for_change(PROBE_INTERVAL)
 
     app.state.probe_task = asyncio.create_task(probe_loop())
 
@@ -731,7 +731,12 @@ async def node_pool_overview() -> list[dict[str, Any]]:
             "ok": state.get("ok", False),
             "available": state.get("available", False),
             "active_streams": state.get("active_streams", 0),
-            "egress_mbps": state.get("egress_mbps", 0.0),
+            "egress_mbps": state.get("egress_mbps"),
+            "egress_status": state.get('egress_status', 'unavailable'),
+            "egress_sampled_at": state.get('egress_sampled_at'),
+            "egress_time_basis": state.get('egress_time_basis'),
+            "egress_window_seconds": state.get('egress_window_seconds'),
+            "last_success_ts": state.get('last_success_ts'),
             "utilisation": state.get("utilisation", 0.0),
             "last_probe_ts": state.get("last_probe_ts", 0),
             "manually_disabled": state.get("manually_disabled", False),
@@ -1404,17 +1409,14 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
     REST path decorated the payload, speeds appeared on manual refresh and
     vanished on every live push, which reads as "the number is frozen".
 
-    Speed prefers what the *node* measured on the wire (nginx speed log,
-    keyed by anonymised user tag). Sessions served by the Emby origin have no
-    node measurement and fall back to the usage sampler's estimate, flagged
-    so the UI can mark it approximate.
+    Only node-measured TCP payload is a live rate. Missing attribution or
+    origin traffic remains unknown; media bitrate is not a network measurement.
     """
     # Short TTL: sessions must still feel live, but a 30s auto-refresh plus
     # page switches should not hammer Emby.
     sessions = await app.state.cache.resolve(
         "emby:sessions", app.state.emby.active_sessions, ttl=5
     )
-    est = app.state.usage.live_speeds()
     speed_view = app.state.scheduler.user_speed_view()
     out = []
     for session in sessions:
@@ -1437,19 +1439,16 @@ async def _sessions_with_speed() -> list[dict[str, Any]]:
             s["SpeedCollectedAt"] = sample.get("collected_at")
             s["SpeedCoverage"] = sample.get("coverage")
         else:
-            sid = str(s.get("Id") or "")
-            if sid in est:
-                s["SpeedScope"] = "session"
-                s["SpeedBps"] = int(est[sid])
-                s["SpeedSource"] = "estimate"
-                s["SpeedReason"] = "origin_or_unattributed"
-            else:
-                s["SpeedScope"] = "user"
-                s["SpeedBps"] = None
-                s["SpeedSource"] = "unknown"
-                s["SpeedReason"] = "no_sample"
-            s["SpeedCollectedAt"] = None
-            s["SpeedCoverage"] = "none"
+            s['SpeedScope'] = 'user'
+            s['SpeedBps'] = None
+            s['SpeedSource'] = 'unknown'
+            s['SpeedReason'] = 'no_measured_sample'
+            s['SpeedCollectedAt'] = None
+            s['SpeedCoverage'] = 'none'
+        s['SpeedTimeBasis'] = sample.get('time_basis') if sample else None
+        s['SpeedWindowSeconds'] = sample.get('window_seconds') if sample else None
+        s['SpeedNodes'] = sample.get('nodes', []) if sample else []
+        s['SpeedAccountSessions'] = sum(1 for other in sessions if other.get('UserId') == s.get('UserId'))
         s["SpeedMBps"] = (
             round(s["SpeedBps"] / 1048576, 1) if s["SpeedBps"] is not None else None)
         out.append(s)
@@ -1775,6 +1774,7 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
         "requests": app.state.requests.for_user(user_id, limit=10),
         "request_remaining": app.state.requests.remaining(user_id),
         "usage": usage,
+        "watch": stats.get('watch'),
         "plays": plays,
         "series": series,
         "recent_plays": plays,
@@ -2346,28 +2346,15 @@ async def telegram_verify() -> dict[str, Any]:
 
 @app.get("/api/telegram/requests", dependencies=[Depends(_auth)])
 async def telegram_requests() -> list[dict[str, Any]]:
-    """Verified rebind requests awaiting a decision.
-
-    Registration is credential-gated and does not enter this queue. Old
-    claiming is retired; only password-verified Telegram reassignment awaits
-    the administrator's decision here or on its independent group card.
-    """
-    return app.state.telegram.pending_requests()
+    """Retired Web queue; review takes place only in the authorized group."""
+    raise HTTPException(410, 'Web 关联审批已移除，请在绑定群审核 TG 换绑')
 
 
 @app.post("/api/telegram/requests/{request_id}/review", dependencies=[Depends(_auth)])
 async def telegram_request_review(request_id: int,
                                   payload: dict[str, Any] = Body(default={}),  # noqa: B008
                                   user: str = Depends(_auth)) -> dict[str, Any]:
-    approve = bool(payload.get("approve", False))
-    try:
-        result = await app.state.telegram.review_rebind(request_id, approve, reviewer=user)
-    except KeyError:
-        raise HTTPException(404, "request not found") from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-    # review_rebind updates independent group cards and notifies once.
-    return result
+    raise HTTPException(410, 'Web 关联审批已移除，请在绑定群审核 TG 换绑')
 
 
 @app.post("/api/telegram/group-audit", dependencies=[Depends(_auth)])

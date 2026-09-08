@@ -915,12 +915,12 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
-                              "rules", "usage", "help"}
+                              "rules", "usage", "help", "rebind"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "me_status", "me_points", "devices", "usage", "resetpw",
-        "my_requests", "home"}
+        "my_requests", "home", "rebind"}
     assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home", "checkin", "transfer"}
 
 

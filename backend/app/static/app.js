@@ -13,45 +13,40 @@ const $ = (s) => document.querySelector(s);
    Everything about *who may watch* is now in one place, everything about
    *what there is to watch* in another. */
 const NAV = [
-  { group: '概览', items: [
+  { group: '总览', icon: '▦', items: [
     { id: 'dashboard', icon: '▦', label: '仪表盘', sub: '集中查看系统运行、播放使用和待处理事项' },
     { id: 'stats', icon: '📈', label: '运营统计', sub: '流量、时长与热门内容' },
   ]},
-  { group: '成员', items: [
+  { group: '用户', icon: '☺', items: [
     { id: 'members', icon: '☺', label: '用户管理', sub: '账号、套餐、邀请关系与积分' },
     { id: 'groups', icon: '▣', label: '套餐与用户组', sub: '时长、流量、并发与求片次数' },
     { id: 'invites', icon: '🎫', label: '邀请与授权', sub: '预授权名单、邀请名额与邀请树' },
     { id: 'redeem', icon: '🎟', label: '卡密管理', sub: '生成、发放与作废注册卡密' },
-    { id: 'tgrequests', icon: '⇋', label: '关联审批', sub: '认领旧账号与换绑申请' },
   ]},
-  { group: '内容', items: [
+  { group: '内容', icon: '▤', items: [
     { id: 'library', icon: '▤', label: '媒体库', sub: '媒体库分布与条目统计' },
     { id: 'requests', icon: '🎬', label: '求片', sub: '成员求片、上片员接单与处理结果' },
     { id: 'imports', icon: '⇪', label: '网盘上片', sub: '网盘链接与云盘目录导入' },
+    { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看完扫描、刷新、通知、上传与拉取' },
   ]},
-  { group: '互动', items: [
+  { group: '机器人', icon: '✈', items: [
     { id: 'tgbot', icon: '✈', label: '机器人', sub: '注册通道、名额与运行状态' },
     { id: 'shop', icon: '🎁', label: '兑换商城', sub: '积分商品、限购与兑换记录' },
     { id: 'tggroup', icon: '⚑', label: '群组核查', sub: '已关联成员的群成员状态' },
-  ]},
-  { group: '自动化', items: [
     { id: 'automation', icon: '⚡', label: '任务中心', sub: '任务与玩法插件的开关、配置与运行结果' },
-    { id: 'tasks', icon: '⏱', label: '调度中心', sub: '主机定时任务运行状态与失败追踪' },
   ]},
-  { group: '资源', items: [
-    { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看完扫描、刷新、通知、上传与拉取' },
+  { group: '运行维护', icon: '⛁', items: [
     { id: 'nodes', icon: '⛁', label: '节点管理', sub: '推流节点负载与调度' },
     { id: 'nodepool', icon: '⚖', label: '节点池', sub: '启停、权重、带宽与实时负载' },
     { id: 'pipeline', icon: '⇄', label: '管线状态', sub: '整理、上传队列与配额' },
     { id: 'storage', icon: '☁', label: '存储管理', sub: '云盘账号与挂载点' },
     { id: 'mounts', icon: '⛃', label: '挂载管理', sub: '存储挂载健康与缓存占用' },
-  ]},
-  { group: '安全', items: [
+    { id: 'tasks', icon: '⏱', label: '调度中心', sub: '主机定时任务运行状态与失败追踪' },
     { id: 'access', icon: '🛡', label: '访问拦截', sub: '客户端与网段规则，以及被拒记录' },
     { id: 'sharing', icon: '👥', label: '共享检测', sub: '同时多地播放的账号，只记录不处理' },
     { id: 'audit', icon: '☰', label: '审计日志', sub: '操作记录与变更追踪' },
   ]},
-  { group: '系统', items: [
+  { group: '设置', icon: '⚙', items: [
     { id: 'settings', icon: '⚙', label: '系统设置', sub: '对接 Emby、TMDB、调度策略与节点配置' },
     { id: 'update', icon: '⟳', label: '版本更新', sub: '检查并应用新版本' },
   ]},
@@ -132,9 +127,9 @@ function fmtQuota(n) {
    Posters are addressed through the panel's own cached-image route, never
    Emby directly: a dashboard renders a dozen tiles and auto-refreshes, and
    Emby re-derives every thumbnail it is asked for. */
-function posterUrl(itemId, maxHeight) {
+function posterUrl(itemId, maxHeight, tag) {
   return `/emby/Items/${encodeURIComponent(itemId)}/Images/Primary`
-    + `?maxHeight=${maxHeight || 420}&quality=88`;
+    + `?maxHeight=${maxHeight || 420}&quality=88${tag ? '&tag=' + encodeURIComponent(tag) : ''}`;
 }
 function ticksToClock(ticks) {
   const total = Math.max(0, Math.floor(Number(ticks || 0) / 10000000));
@@ -180,18 +175,22 @@ const playCard = (s) => {
     ...(s.Genres || [])].filter(Boolean).join(' / ');
   return `
   <article class="play-card" data-live-key="session:${esc(s.Id)}">
-    <div class="pc-poster">
-      ${s.ItemId ? `<img src="${esc(posterUrl(s.ItemId, 300))}" alt="" loading="lazy">` : ''}
-      <span class="pc-live">${s.Paused ? '❚❚ 已暂停' : '● 播放中'}</span>
+    <div class="pc-poster" data-live-key="art:${esc(s.PosterItemId || s.ItemId || '')}:${esc(s.PosterImageTag || '')}">
+      <div class="pc-art" data-live-preserve>
+        <div class="pc-art-fallback"><span aria-hidden="true">▶</span><small>暂无海报</small></div>
+        ${s.PosterItemId || s.ItemId ? `<img class="pc-art-image${Number(s.PosterAspectRatio) > 1 ? ' landscape' : ''}" src="${esc(posterUrl(s.PosterItemId || s.ItemId, 420, s.PosterImageTag))}" alt="${esc((s.SeriesName || s.Item || '影片') + '海报')}" width="120" height="180" loading="lazy" decoding="async">` : ''}
+      </div>
+      <span class="pc-live ${s.Paused ? 'paused' : ''}">${s.Paused ? '❚❚ 已暂停' : '● 播放中'}</span>
     </div>
     <div class="pc-bd">
       <div class="pc-title">${esc(s.SeriesName ? `${s.SeriesName} · ${s.Item}` : (s.Item || '-'))}${s.ProductionYear ? `（${esc(s.ProductionYear)}）` : ''}</div>
       <div class="pc-meta">${esc(meta || '—')}</div>
-      <p class="pc-ov">${esc(s.Overview || '暂无简介')}</p>
+      ${s.Overview ? `<p class="pc-ov">${esc(s.Overview)}</p>` : ''}
       <div class="pc-user">
         <div class="avatar">${esc((s.UserName || '?').slice(0, 1).toUpperCase())}</div>
-        <div><b>${esc(s.UserName || '-')}</b><span>${esc(s.Client || '-')} · ${sessionSpeedCell(s)}</span></div>
+        <div><b>${esc(s.UserName || '-')}</b><span>${esc(s.Client || '-')}</span></div>
       </div>
+      <div class="pc-speed">${sessionSpeedCell(s)}</div>
       ${known ? `<div class="bar wide"><i style="width:${Math.min(100, pct)}%"></i></div>
       <div class="pc-time"><span>${esc(ticksToClock(s.PositionTicks))}</span>
         <b>${esc(pct)}%</b><span>${esc(ticksToClock(s.RunTimeTicks))}</span></div>`
@@ -201,14 +200,10 @@ const playCard = (s) => {
 };
 
 function sessionSpeedCell(s) {
-  const paused = s.Paused ? ' · 已暂停' : '';
-  const scope = s.SpeedScope === 'user' ? ' · 账号合计' : '';
-  if (s.SpeedBps == null || !Number.isFinite(Number(s.SpeedBps)) || s.SpeedSource === 'unknown') {
-    return `<span class="muted" title="${esc(s.SpeedReason || '没有新鲜的实际测量')}">未测${paused}</span>`;
-  }
-  const value = (Number(s.SpeedBps) / 1048576).toFixed(1);
-  if (s.SpeedSource === 'node') return `${esc(value)} MiB/s${scope}${paused}`;
-  return `<span title="按码率或已结束请求估算，不是实时实测">≈ ${esc(value)} MiB/s${scope}${paused}</span>`;
+  if (s.SpeedSource !== 'node') return '<span class="rate-unknown" title="没有有效节点实测；不使用媒体码率代替">未实测</span>';
+  const count = Number(s.SpeedAccountSessions || 1);
+  const scope = s.SpeedScope === 'user' ? `账号合计${count > 1 ? ` · ${count} 个会话共享，不可相加` : ''}` : '当前会话';
+  return rateMarkup(s.SpeedBps, s.SpeedCollectedAt, s.SpeedTimeBasis, s.SpeedWindowSeconds, scope);
 }
 function pageError(err) {
   return `<div class="card"><div class="page-error">
@@ -277,15 +272,17 @@ function openModal(title, bodyHtml, opts) {
 
 /* ---------------- shell ---------------- */
 function buildNav() {
-  $('#nav').innerHTML = NAV.map((g) => `
-    <div class="nav-group">${esc(g.group)}</div>
-    ${g.items.map((it) => `<div class="nav-item" data-page="${it.id}">
-        <span class="ic">${it.icon}</span><span>${esc(it.label)}</span></div>`).join('')}
-  `).join('');
-  $('#nav').addEventListener('click', (e) => {
-    const el = e.target.closest('.nav-item');
-    if (el) go(el.dataset.page);
+  $('#nav').innerHTML = NAV.map(g => `<a class="nav-item" href="#/${g.items[0].id}" data-page="${g.items[0].id}"><span class="ic" aria-hidden="true">${g.icon}</span><span>${esc(g.group)}</span></a>`).join('');
+}
+function updateWorkspaceNav(page) {
+  const group = NAV.find(g => g.items.some(it => it.id === page)) || NAV[0];
+  document.querySelectorAll('#nav .nav-item').forEach(n => {
+    const active = n.dataset.page === group.items[0].id;
+    n.classList.toggle('active', active);
+    if (active) n.setAttribute('aria-current','page'); else n.removeAttribute('aria-current');
   });
+  $('#subnav').innerHTML = group.items.map(it => `<a href="#/${it.id}" ${it.id === page ? 'class="active" aria-current="page"' : ''}>${esc(it.label)}</a>`).join('');
+  setWorkspaceMenu(false);
 }
 function navMeta(id) {
   for (const g of NAV) for (const it of g.items) if (it.id === id) return it;
@@ -296,14 +293,24 @@ function routeFromHash() {
 }
 function go(route) {
   route = String(route || 'dashboard').replace(/^#\/?/, '');
+  if (route.split('?')[0] === 'tgrequests') {
+    route = 'tgbot?section=groups';
+    toast('Web 关联审核已移除；TG 换绑在绑定群中审核');
+  }
   const page = route.split('?')[0] || 'dashboard';
+  if (page === state.page && state.pageReady && ['settings','tgbot'].includes(page) && document.querySelector('.config-workspace')) {
+    state.route = route;
+    setWorkspaceMenu(false);
+    activateConfigSection(new URLSearchParams(route.split('?')[1]).get('section'));
+    return;
+  }
+  if (!configCanLeave()) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
   state.page = page;
   state.route = route;
   state.pageReady = false;
   stopEnrollPoll();
   const meta = navMeta(page);
-  document.querySelectorAll('.nav-item').forEach((n) =>
-    n.classList.toggle('active', n.dataset.page === page));
+  updateWorkspaceNav(page);
   $('#page-title').textContent = meta.label;
   $('#page-sub').textContent = meta.sub;
   if (location.hash !== '#/' + route) location.hash = '#/' + route;
@@ -317,6 +324,7 @@ window.addEventListener('hashchange', () => {
 });
 async function renderPage(page, manual, liveUpdate) {
   if (liveUpdate) { scheduleLiveFlush(); return; }
+  if (manual && !configCanLeave()) return;
   const fn = PAGES[page];
   if (!fn) { $('#view').innerHTML = '<div class="empty">页面不存在</div>'; return; }
   state.renderVersion = (state.renderVersion || 0) + 1;
@@ -344,22 +352,20 @@ PAGES.dashboard = async (context = pageContext('dashboard')) => {
   // request leaves the previous page's content on screen, which reads as a
   // click that did nothing.
   renderView(pageLoading(), context);
-  const [sessions, pipe, nodes, libs, overview, latest] = await Promise.all([
+  const [sessions, pipe, nodes, overview] = await Promise.all([
     api('/api/emby/sessions').catch(() => []),
     api('/api/pipeline').catch(() => ({ available: false })),
     api('/api/nodes').catch(() => []),
-    api('/api/emby/libraries').catch(() => []),
     api('/api/stats/overview?days=30').catch(() => null),
-    api('/api/emby/latest?limit=12').catch(() => []),
   ]);
   if (!context.isCurrent()) return;
-  PAGE_MODELS.dashboard = {sessions, pipe, nodes, libs, overview, latest};
+  PAGE_MODELS.dashboard = {sessions, pipe, nodes, overview};
   paintDashboard(PAGE_MODELS.dashboard, context);
 };
 
 function paintDashboard(model, context) {
   if (!context.isCurrent()) return;
-  const {sessions, pipe, nodes, libs, overview, latest} = model;
+  const {sessions, pipe, nodes, overview} = model;
   const online = nodes.filter((n) => n.available).length;
   const d = pipe.available ? pipe.data : {};
   const queues = d.queues || [];
@@ -378,55 +384,25 @@ function paintDashboard(model, context) {
       ${stat('⇄', queued, '管线待处理', pipe.available ? '整理与上传队列' : '快照不可用')}
       ${stat('⚠', alerts.length + limited + expiring.length + exhaustedN, '待处理事项', limited ? `${limited} 个上传身份受限` : '系统关键状态')}
     </div>
-    <div class="grid-2">
-      ${card('最新入库', latest.length ? `最近 ${latest.length} 部` : '暂无数据',
-        latest.length
-          ? `<div class="poster-grid">${latest.map(posterTile).join('')}</div>`
-          : '<div class="empty">暂无最近入库</div>')}
-      ${card('正在播放', sessions.length ? `${sessions.length} 个会话` : '暂无活跃会话',
-        sessions.length
-          ? `<div class="card-body flush">${sessions.map(playRow).join('')}</div>`
-          : '<div class="empty">当前没有播放会话</div>')}
-    </div>
-    ${sessions.length ? card('播放详情', '海报 · 观众 · 进度',
-      `<div class="play-grid">${sessions.map(playCard).join('')}</div>`) : ''}
-    <div class="grid-2">
-      ${tableCard('当前播放', '实时会话 · 节点实测速率', ['用户', '客户端', '方式', '实时速度'],
-        sessions.map((s) => `<tr data-live-key="session:${esc(s.Id)}"><td>${esc(s.UserName)}</td><td>${esc(s.Client)}</td>
-          <td>${esc(s.PlayMethod)}${s.Paused ? ' · 已暂停' : ''}</td>
-          <td>${sessionSpeedCell(s)}</td></tr>`).join(''))}
-      ${tableCard('管线队列', pipe.available ? `快照 ${Math.round(pipe.snapshot_age_seconds)}s 前` : '快照不可用',
-        ['队列', '条目', '体积', '最老'],
-        queues.map((q) => `<tr data-live-key="queue:${esc(q.name)}"><td>${esc(q.name)}</td><td>${q.items}</td>
-          <td>${fmtBytes(q.bytes)}</td><td>${fmtAge(q.oldest_age_seconds)}</td></tr>`).join(''))}
-    </div>
-    <div class="grid-2">
-      ${tableCard('上传身份配额', '限额状态', ['身份', '状态', '受限起始'],
-        (d.quota || []).map((q) => `<tr data-live-key="quota:${esc(q.identity)}"><td>${esc(q.identity)}</td>
-          <td><span class="tag ${q.state === 'ok' ? 'ok' : 'bad'}">${esc(q.state)}</span></td>
-          <td>${esc(q.limited_since || '-')}</td></tr>`).join(''))}
-      ${card('待处理事项', '系统关键状态',
-        alerts.length
-          ? `<div class="card-body flush">${alerts.map((a) =>
-              `<div class="list-row"><div><div class="t">${esc(a.message)}</div>
-               <div class="s">${esc(a.level)}</div></div>
-               <span class="tag ${a.level === 'warn' ? 'warn' : 'idle'}">${esc(a.level)}</span></div>`).join('')}</div>`
-          : `<div class="empty">当前没有待处理事项</div>`)}
-    </div>
-    <div class="grid-2">
-      ${tableCard('即将到期', '7 天内 · 点用户名进入用户管理', ['用户', '用户组', '剩余'],
-        expiring.map((m) => `<tr><td><a href="#/members">${esc(m.username)}</a></td>
-          <td>${esc(m.group || '-')}</td><td class="${m.days_left <= 1 ? 'danger-text' : ''}">${esc(m.days_left)} 天</td></tr>`).join(''))}
-      ${card('超额 / 过期', '需要处理的账号',
-        (mem.exhausted || mem.expired)
-          ? `<div class="card-body"><a href="#/members">超额 ${esc(mem.exhausted || 0)} · 过期 ${esc(mem.expired || 0)} · 停用 ${esc(mem.suspended || 0)}</a></div>`
-          : `<div class="empty">没有超额或过期账号</div>`)}
+    <div class="dashboard-shortcuts"><a class="btn" href="#/members">管理用户</a><a class="btn" href="#/requests">处理求片</a><a class="btn" href="#/pipeline">查看管线</a></div>
+    <div class="dashboard-focus">
+      ${card('正在播放', sessions.length ? `${sessions.length} 个会话 · 节点实测速率` : '暂无活跃会话',
+        sessions.length ? `<div class="play-grid">${sessions.map(playCard).join('')}</div>` : '<div class="empty">当前没有播放会话</div>')}
+      ${card('待处理事项', '账号与系统异常优先', `<div class="card-body">
+        ${alerts.map(a => `<p><span class="tag warn">${esc(a.level)}</span> ${esc(a.message)}</p>`).join('')}
+        ${limited ? `<p><a href="#/pipeline">${limited} 个上传身份受限 →</a></p>` : ''}
+        ${queued ? `<p><a href="#/pipeline">管线队列 ${queued} 项 →</a></p>` : ''}
+        ${expiring.length ? `<p><a href="#/members?expiring=soon">7 天内到期 ${expiring.length} 人 →</a></p>` : ''}
+        ${mem.exhausted || mem.expired ? `<p><a href="#/members">超额 ${esc(mem.exhausted || 0)} · 过期 ${esc(mem.expired || 0)} →</a></p>` : ''}
+        ${!alerts.length && !limited && !queued && !expiring.length && !mem.exhausted && !mem.expired ? '<p class="muted">当前没有待处理事项</p>' : ''}
+        <a href="#/nodes">节点状态</a> · <a href="#/audit">审计日志</a>
+      </div>`)}
     </div>`, context);
 }
 
 PAGES.library = async () => {
   $('#view').innerHTML = pageLoading();
-  const libs = await api('/api/emby/libraries').catch(() => []);
+  const [libs, latest] = await Promise.all([api('/api/emby/libraries').catch(() => []), api('/api/emby/latest?limit=12').catch(() => [])]);
   const total = libs.reduce((a, l) => a + (l.items || 0), 0);
   const kinds = new Set(libs.map((l) => l.type)).size;
   $('#view').innerHTML = `
@@ -435,6 +411,7 @@ PAGES.library = async () => {
       ${stat('≡', total.toLocaleString(), '媒体条目', '电影与剧集合计')}
       ${stat('⛁', kinds, '库类型', '按内容类型划分')}
     </div>
+    ${card('最新入库', '最近 12 部', latest.length ? `<div class="poster-grid">${latest.map(posterTile).join('')}</div>` : '<div class="empty">暂无最近入库</div>')}
     ${tableCard('媒体库', `${libs.length} 个库`, ['名称', '类型', '条目数', '存储位置'],
       libs.map((l) => `<tr><td>${esc(l.name)}</td>
         <td><span class="tag idle">${esc(l.type)}</span></td>
@@ -500,7 +477,7 @@ function paintNodes(model, context) {
   state.nodes = ns;
   const online = ns.filter((n) => n.available).length;
   const streams = ns.reduce((a, n) => a + (n.active_streams || 0), 0);
-  const egress = ns.reduce((a, n) => a + (n.egress_mbps || 0), 0);
+  const egress = egressSummary(ns);
   const policyLabel = dispatch.policy === 'affinity' ? '文件亲和' : '最低负载';
   const panelSet = !!(st.integration || {}).panel_public_url;
 
@@ -508,7 +485,7 @@ function paintNodes(model, context) {
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${ns.length}`, '在线节点', '可用于分发')}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
-      ${stat('⇅', (egress / 8).toFixed(1), '出口 MB/s', '节点实时出口')}
+      ${stat('⇅', egress.text, '出口带宽', egress.sub)}
       ${stat('⚖', policyLabel, '调度策略', dispatch.policy === 'affinity'
         ? `占用率阈值 ${Math.round(dispatch.load_threshold * 100)}%` : '按容量占用率择优')}
     </div>
@@ -552,7 +529,7 @@ function nodeCard(n) {
       </tr>`).join('')
     : '';
   return card(`⛁ ${n.name}`,
-    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · ${n.egress_mbps} Mbps`,
+    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · ${egressValid(n) ? (Number(n.egress_mbps)*1000000/8/1048576).toFixed(2) + ' MiB/s 整网卡出口' : '出口采样不可用'}`,
     `<div class="card-body">
       <div class="toolbar" style="margin-bottom:10px">
         ${health}
@@ -882,12 +859,13 @@ function paintTasks(t, context) {
       : `<div class="empty">无告警</div>`)}`, context);
 }
 
-PAGES.settings = async () => {
+PAGES.settings = async (context = pageContext('settings')) => {
   $('#view').innerHTML = pageLoading();
   const s = await api('/api/settings').catch(() => null);
   if (!s) { $('#view').innerHTML = `<div class="card"><div class="empty">设置加载失败</div></div>`; return; }
   const e = s.emby, d = s.dispatch, p = s.playback, ig = s.integration;
   const tg = await api('/api/settings/telegram').catch(() => ({}));
+  if (!context.isCurrent()) return;
   const connected = e.enabled && e.api_key_set;
   const mapped = (s.nodes || []).filter((n) => (n.pools || []).length).length;
   $('#view').innerHTML = `
@@ -1089,6 +1067,7 @@ PAGES.settings = async () => {
   $('#ic-save').onclick = saveImageCache;
   $('#ic-sweep').onclick = sweepImageCache;
   $('#ic-clear').onclick = clearImageCache;
+  initSystemSettings();
   refreshImageCacheStats();
 };
 async function saveIntegration() {
@@ -1135,7 +1114,7 @@ async function entryList() {
   return s;
 }
 async function writeEntries(entries, revision) {
-  await api('/api/settings/integration', { method: 'PUT',
+  return api('/api/settings/integration', { method: 'PUT',
     body: JSON.stringify({ external_entries: entries, external_entries_revision: revision }) });
 }
 async function changeEntries(change, success) {
@@ -1147,9 +1126,14 @@ async function changeEntries(change, success) {
   buttons.forEach((button) => { button.disabled = true; });
   try {
     const s = await entryList();
-    await writeEntries(change(s.external_entries || []), s.external_entries_revision);
+    const fresh = await writeEntries(change(s.external_entries || []), s.external_entries_revision);
     toast(success);
-    await renderPage('settings');
+    if ($('#ee-list')) {
+      $('#ee-list').innerHTML = entryRows(fresh.external_entries || []);
+      $('#ee-list').dataset.revision = fresh.external_entries_revision;
+      for (const id of ['ee-id','ee-origin','ee-stream','ee-node']) { const el = $('#'+id); el.value = ''; configBaselines.set(el, ''); }
+      updateDirtyBadges();
+    }
   } catch (e) {
     toast('保存失败: ' + e.message, 1);
   } finally {
@@ -1556,7 +1540,7 @@ function isEditing() {
   return !!document.activeElement && /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement.tagName);
 }
 
-registerLiveUpdater('dashboard', ['nodes','sessions','pipeline','overview','latest'], (topic, payload, context) => {
+registerLiveUpdater('dashboard', ['nodes','sessions','pipeline','overview'], (topic, payload, context) => {
   const model = PAGE_MODELS.dashboard;
   if (!model) return;
   const key = {nodes:'nodes',sessions:'sessions',pipeline:'pipe',overview:'overview',latest:'latest'}[topic];

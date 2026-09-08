@@ -54,7 +54,7 @@ def default_iface() -> str:
     return "eth0"
 
 
-def tx_bytes(iface: str) -> int:
+def tx_bytes(iface: str) -> int | None:
     try:
         with open("/proc/net/dev", encoding="utf-8") as fh:
             for line in fh:
@@ -62,7 +62,7 @@ def tx_bytes(iface: str) -> int:
                     return int(line.split()[9])
     except (OSError, IndexError, ValueError):
         pass
-    return 0
+    return None
 
 
 def established_count(ports: set[int]) -> int:
@@ -82,7 +82,7 @@ def established_count(ports: set[int]) -> int:
     return count
 
 
-def conn_bytes(ports: set[int]) -> dict[str, tuple[str, int]]:
+def conn_bytes(ports: set[int]) -> dict[str, tuple[str, int]] | None:
     """Established sockets -> {peer: (peer_ip, bytes_acked)} on service ports.
 
     ``bytes_acked`` is the kernel's count of payload the peer has actually
@@ -96,9 +96,9 @@ def conn_bytes(ports: set[int]) -> dict[str, tuple[str, int]]:
             ["ss", "-tinH", "state", "established"],
             capture_output=True, text=True, timeout=8, check=False)
     except (OSError, subprocess.SubprocessError):
-        return out
+        return None
     if proc.returncode != 0:
-        return out
+        return None
 
     key: str | None = None
     for line in proc.stdout.splitlines():
@@ -195,6 +195,8 @@ class SpeedLog:
         self._conns: dict[str, list[tuple[float, int]]] = {}
         # utag -> last time we saw an attributed live socket for them
         self._tag_last_live: dict[str, float] = {}
+        self.sampled_at = 0.0
+        self.sample_ok = False
         if path:
             self._seed_owners()
             threading.Thread(target=self._tail, daemon=True).start()
@@ -242,9 +244,16 @@ class SpeedLog:
 
     def _sample_conns(self) -> None:
         while True:
-            now = time.time()
             seen = conn_bytes(self.ports)
+            now = time.time()
+            if seen is None:
+                with self._lock:
+                    self.sample_ok = False
+                time.sleep(1.0)
+                continue
             with self._lock:
+                self.sampled_at = now
+                self.sample_ok = True
                 for peer, (_ip, acked) in seen.items():
                     samples = self._conns.setdefault(peer, [])
                     samples.append((now, acked))
@@ -434,7 +443,7 @@ class SpeedLog:
             # --- live sockets (authoritative) --------------------------------
             attributed_ips: set[str] = set()
             for peer, samples in self._conns.items():
-                if len(samples) < 2:
+                if len(samples) < 2 or now - samples[-1][0] > 15:
                     continue
                 peer_ip = peer.rsplit(":", 1)[0]
                 # Exact socket match first: it stays correct when one address
@@ -510,19 +519,29 @@ class Sampler:
         self.ports = ports
         self.speedlog = speedlog
         self.egress_mbps = 0.0
+        self.egress_sampled_at = 0.0
+        self.egress_window_seconds = 0.0
+        self.egress_ok = False
         self.active = 0
         self._lock = threading.Lock()
         threading.Thread(target=self._loop, daemon=True).start()
 
     def _loop(self) -> None:
         # (monotonic_ts, tx_bytes) samples covering the trailing window.
-        history: list[tuple[float, int]] = [(time.monotonic(), tx_bytes(self.iface))]
+        initial = tx_bytes(self.iface)
+        history: list[tuple[float, int]] = [(time.monotonic(), initial)] if initial is not None else []
         counter = 0
         active = established_count(self.ports)
         while True:
             time.sleep(self.INTERVAL)
             now_ts = time.monotonic()
-            history.append((now_ts, tx_bytes(self.iface)))
+            current_tx = tx_bytes(self.iface)
+            if current_tx is None:
+                with self._lock:
+                    self.egress_ok = False
+                history = []
+                continue
+            history.append((now_ts, current_tx))
             cutoff = now_ts - self.WINDOW
             # Keep one sample older than the cutoff so the window stays full.
             while len(history) > 2 and history[1][0] < cutoff:
@@ -548,15 +567,24 @@ class Sampler:
 
             with self._lock:
                 self.egress_mbps = round(max(0.0, mbps), 1)
+                self.egress_ok = span > 0 and delta >= 0
+                self.egress_sampled_at = time.time()
+                self.egress_window_seconds = span
                 self.active = active
 
     def snapshot(self) -> dict:
         live, completed = self.speedlog.speeds_split()
         with self._lock:
             return {"ok": True, "active_streams": self.active,
-                    "egress_mbps": self.egress_mbps,
+                    "egress_mbps": self.egress_mbps if self.egress_ok else None,
+                    "egress_ok": self.egress_ok and time.time() - self.egress_sampled_at <= 15,
+                    "egress_sampled_at": self.egress_sampled_at,
+                    "egress_window_seconds": self.egress_window_seconds,
                     "user_speeds": live,
                     "user_speeds_source": "socket",
+                    "user_speeds_ok": self.speedlog.sample_ok and time.time() - self.speedlog.sampled_at <= 15,
+                    "user_speeds_sampled_at": self.speedlog.sampled_at,
+                    "user_speeds_window_seconds": self.speedlog.RATE_WINDOW,
                     "user_speeds_fallback": completed}
 
 

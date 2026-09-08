@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import secrets
 import time
 from typing import Any
 
@@ -29,9 +31,43 @@ class RebindingService:
             )
         return True
 
-    def create(self, user_id: str, tg_id: str, tg_name: str) -> dict[str, Any]:
+    def handoff(self, old_tg: str, new_tg: str) -> str:
+        if not new_tg.isascii() or not new_tg.isdigit() or not 0 < int(new_tg) < 2**63 or str(int(new_tg)) == old_tg:
+            raise ValueError('请输入不同于当前账号的新 Telegram 数字 ID。')
+        new_tg = str(int(new_tg))
+        now = int(time.time())
+        token = secrets.token_urlsafe(24)
+        with self.db.write() as conn:
+            member = conn.execute('SELECT emby_user_id FROM members WHERE tg_user_id=? AND emby_missing_since IS NULL', (old_tg,)).fetchone()
+            if not member or conn.execute('SELECT 1 FROM members WHERE tg_user_id=?', (new_tg,)).fetchone():
+                raise ValueError('原账号不可用，或新 Telegram 已绑定其他账号。')
+            conn.execute('UPDATE tg_rebind_handoffs SET expires_at=? WHERE emby_user_id=?', (now, member[0]))
+            conn.execute('INSERT INTO tg_rebind_handoffs VALUES(?,?,?,?,?)', (hashlib.sha256(token.encode()).hexdigest(), member[0], old_tg, new_tg, now + 1800))
+        return token
+
+    @staticmethod
+    def _handoff(conn: Any, token: str, tg_id: str, now: int) -> dict:
+        row = conn.execute('SELECT * FROM tg_rebind_handoffs WHERE token_hash=?', (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+        if not row or row['expires_at'] <= now or row['new_tg_user_id'] != tg_id:
+            raise ValueError('换绑链接无效、已过期，或不是发给当前 Telegram 的。')
+        r = dict(row)
+        member = conn.execute('SELECT tg_user_id FROM members WHERE emby_user_id=?', (r['emby_user_id'],)).fetchone()
+        if not member or member[0] != r['old_tg_user_id']:
+            raise ValueError('原绑定已变化，请重新发起换绑。')
+        return r
+
+    def open_handoff(self, token: str, tg_id: str) -> dict:
+        with self.db.write() as conn:
+            return self._handoff(conn, token, tg_id, int(time.time()))
+
+    def create(self, user_id: str, tg_id: str, tg_name: str, *, handoff: str = '') -> dict[str, Any]:
         now = int(time.time())
         with self.db.write() as conn:
+            if handoff:
+                intent = self._handoff(conn, handoff, tg_id, now)
+                if intent['emby_user_id'] != user_id:
+                    raise ValueError('验证的账号与换绑链接不一致。')
+                conn.execute('UPDATE tg_rebind_handoffs SET expires_at=? WHERE token_hash=?', (now, intent['token_hash']))
             # Verification proves an existing Emby ID, never a typed username.
             target = conn.execute(
                 "SELECT username,tg_user_id,emby_missing_since FROM members WHERE emby_user_id=?",

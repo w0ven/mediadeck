@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import math
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -32,6 +33,29 @@ from typing import Any
 from app.core.config import StreamNode
 
 POLICIES = ("affinity", "least-load")
+PROBE_INTERVAL = 3.0
+METRIC_STALE_AFTER = 15.0
+
+
+def sample_time(value: Any, received: float) -> tuple[float, str]:
+    if value is None:
+        return received, 'probe_received'
+    try:
+        stamp = float(value)
+        if math.isfinite(stamp) and 0 < stamp <= received + 5:
+            return stamp, 'collector'
+    except (ValueError, TypeError):
+        pass
+    return 0.0, 'invalid'
+
+
+def nonnegative(value: Any) -> float | None:
+    try:
+        number = float(value)
+        return number if math.isfinite(number) and number >= 0 else None
+    except (ValueError, TypeError):
+        return None
+
 
 
 @dataclass
@@ -49,6 +73,14 @@ class NodeState:
     user_speeds_at: float = 0.0
     user_speeds_ok: bool = False
     probe_error: str | None = None
+    last_success_ts: float = 0.0
+    egress_ok: bool = False
+    egress_at: float = 0.0
+    egress_time_basis: str = 'probe_received'
+    egress_window_seconds: float | None = None
+    user_speeds_time_basis: str = 'probe_received'
+    user_speeds_window_seconds: float | None = None
+    user_speeds_source: str = 'legacy_socket'
 
     def __post_init__(self) -> None:
         if self.user_speeds is None:
@@ -90,7 +122,7 @@ class NodeState:
 
 
 class Scheduler:
-    HISTORY_MAX = 720      # probe snapshots kept per node (~3h at 15s interval)
+    HISTORY_MAX = 3600     # probe snapshots kept per node (~3h at 3s interval)
     DISPATCH_MAX = 1000    # recent dispatch decisions kept
     # How much busier the affinity-preferred node may be before a request goes
     # to the quietest peer instead. Affinity hashes a path to a fixed node, so
@@ -163,32 +195,54 @@ class Scheduler:
 
     # -- probing -------------------------------------------------------------
     async def refresh(self) -> None:
-        for st in self._states.values():
+        # A slow/unreachable peer must not delay every other node's live data.
+        await asyncio.gather(*(self._refresh_node(st) for st in list(self._states.values())))
+
+    async def _refresh_node(self, st: NodeState) -> None:
+        try:
             data = await self._probe.load(st.node.probe_url)
-            st.last_probe_ts = time.time()
-            if data.get("ok"):
-                st.ok = True
-                st.consecutive_failures = 0
-                st.active_streams = int(data.get("active_streams", 0))
-                st.egress_mbps = float(data.get("egress_mbps", 0.0))
-                speeds = data.get("user_speeds")
-                st.user_speeds = ({str(k): int(v) for k, v in speeds.items()}
-                                  if isinstance(speeds, dict) else {})
-                st.user_speeds_at = st.last_probe_ts
-                st.user_speeds_ok = True
-                st.probe_error = None
+        except Exception:  # noqa: BLE001 - isolate failed probes, never leak URLs
+            data = {'ok': False, 'error': 'probe_failed'}
+        if self._states.get(st.node.name) is not st:
+            return
+        st.last_probe_ts = time.time()
+        if data.get('ok'):
+            st.ok = True
+            st.last_success_ts = st.last_probe_ts
+            st.consecutive_failures = 0
+            st.active_streams = int(data.get('active_streams', 0))
+            rate = nonnegative(data.get('egress_mbps'))
+            st.egress_ok = rate is not None and bool(data.get('egress_ok', True))
+            if rate is not None:
+                st.egress_mbps = rate
+            st.egress_at, st.egress_time_basis = sample_time(data.get('egress_sampled_at'), st.last_probe_ts)
+            st.egress_window_seconds = nonnegative(data.get('egress_window_seconds'))
+            speeds = data.get('user_speeds')
+            if isinstance(speeds, dict):
+                st.user_speeds = {str(k): int(n) for k, v in speeds.items()
+                                  if (n := nonnegative(v)) is not None}
             else:
-                st.ok = False
-                st.consecutive_failures += 1
-                st.user_speeds_ok = False
-                st.probe_error = str(data.get("error") or "probe_failed")
-                # Keep last speeds with a stale timestamp; do not pretend 0.
-            self._history[st.node.name].append({
-                "ts": st.last_probe_ts,
-                "ok": st.ok,
-                "active_streams": st.active_streams if st.ok else None,
-                "egress_mbps": st.egress_mbps if st.ok else None,
-            })
+                st.user_speeds = {}
+            st.user_speeds_at, st.user_speeds_time_basis = sample_time(data.get('user_speeds_sampled_at'), st.last_probe_ts)
+            st.user_speeds_source = str(data.get('user_speeds_source') or 'legacy_socket')
+            st.user_speeds_window_seconds = nonnegative(data.get('user_speeds_window_seconds'))
+            st.user_speeds_ok = isinstance(speeds, dict) and bool(data.get('user_speeds_ok', True)) and st.user_speeds_source in ('socket','legacy_socket')
+            st.probe_error = None
+        else:
+            st.ok = False
+            st.consecutive_failures += 1
+            st.user_speeds_ok = False
+            st.egress_ok = False
+            st.probe_error = str(data.get('error') or 'probe_failed')
+        self._history[st.node.name].append({
+            'ts': st.last_probe_ts, 'ok': st.ok,
+            'active_streams': st.active_streams if st.ok else None,
+            'egress_mbps': st.egress_mbps if self._egress_fresh(st) else None,
+        })
+
+    @staticmethod
+    def _egress_fresh(st: NodeState) -> bool:
+        return st.ok and st.egress_ok and 0 <= time.time() - st.egress_at <= METRIC_STALE_AFTER
 
     # -- selection -----------------------------------------------------------
     @staticmethod
@@ -266,36 +320,34 @@ class Scheduler:
         return {tag: int(v["bps"]) for tag, v in view.items()
                 if v.get("bps") is not None}
 
-    def user_speed_view(self, *, stale_after: float = 45.0) -> dict[str, dict[str, Any]]:
-        """Per-tag rate with collection time and coverage. Missing is not zero.
-
-        NIC ``egress_mbps`` on the node snapshot is the whole interface and
-        is a different series; it is not added into these user rates.
-        """
+    def user_speed_view(self, *, stale_after: float = METRIC_STALE_AFTER) -> dict[str, dict[str, Any]]:
+        """Per-account TCP payload rate. Never substitute NIC traffic or media bitrate."""
         now = time.time()
         out: dict[str, dict[str, Any]] = {}
         for st in self._states.values():
-            fresh = bool(st.user_speeds_ok) and (now - (st.user_speeds_at or 0)) <= stale_after
-            collected = st.user_speeds_at or None
-            if not fresh:
-                continue
+            fresh = bool(st.user_speeds_ok) and 0 <= now - st.user_speeds_at <= stale_after
             for tag, bps in (st.user_speeds or {}).items():
                 if not tag:
                     continue
-                cur = out.get(tag)
-                if cur is None:
-                    out[tag] = {
-                        "bps": int(bps),
-                        "collected_at": collected,
-                        "coverage": "direct",
-                        "source": "node",
-                        "nodes": [st.node.name],
-                    }
-                else:
-                    cur["bps"] = int(cur["bps"]) + int(bps)
-                    cur["nodes"].append(st.node.name)
-                    if collected and (cur["collected_at"] or 0) < collected:
-                        cur["collected_at"] = collected
+                cur = out.setdefault(tag, {'bps': 0, 'collected_at': None, 'coverage': 'direct',
+                                          'source': 'node', 'nodes': [], 'unavailable_nodes': [],
+                                          'time_basis': 'collector', 'window_seconds': None})
+                if not fresh:
+                    cur['unavailable_nodes'].append(st.node.name)
+                    continue
+                cur['bps'] += int(bps)
+                cur['nodes'].append(st.node.name)
+                cur['collected_at'] = min(cur['collected_at'] or st.user_speeds_at, st.user_speeds_at)
+                if st.user_speeds_time_basis != 'collector':
+                    cur['time_basis'] = st.user_speeds_time_basis
+                if st.user_speeds_window_seconds is not None:
+                    cur['window_seconds'] = max(cur['window_seconds'] or 0, st.user_speeds_window_seconds)
+        for value in out.values():
+            if value['unavailable_nodes']:
+                value['bps'] = None
+                value['coverage'] = 'partial' if value['nodes'] else 'none'
+                value['source'] = 'unknown'
+                value['reason'] = 'stale_or_failed_node_sample'
         return out
 
     def history(self, name: str, limit: int = 240) -> list[dict[str, Any]]:
@@ -326,7 +378,12 @@ class Scheduler:
                 "available": s.available(),
                 "manually_disabled": s.manually_disabled,
                 "active_streams": s.active_streams,
-                "egress_mbps": s.egress_mbps,
+                "egress_mbps": s.egress_mbps if self._egress_fresh(s) else None,
+                "egress_sampled_at": s.egress_at or None,
+                "egress_time_basis": s.egress_time_basis,
+                "egress_window_seconds": s.egress_window_seconds,
+                "egress_status": 'fresh' if self._egress_fresh(s) else 'unavailable',
+                "last_success_ts": s.last_success_ts,
                 "utilisation": round(s.utilisation(), 3),
                 "last_probe_ts": s.last_probe_ts,
             }

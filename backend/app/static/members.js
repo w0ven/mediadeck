@@ -161,15 +161,14 @@
     const sample = m.metering || {};
     const used = measuredMode ? m.measured_used_bytes : m.traffic_used_bytes;
     const quota = m.traffic_quota_bytes ? measuredBytes(m.traffic_quota_bytes) : '不限';
-    const label = measuredMode ? '实测配额' : '旧估算配额';
+    const label = measuredMode ? '本月流量' : '估算配额（未切换实测）';
     const coverage = sample.coverage || {};
     const usageLabel = sample.measurement_status === 'no_usage_records'
       ? '本月尚无实测记录' : measuredBytes(used);
     const missingNodes = (coverage.nodes || []).filter(n => !n.ok).map(n => n.name).join('、');
     return `<div class="s"><b>${label}</b> ${esc(usageLabel)} / ${esc(quota)}
       ${!measuredMode && m.metering ? `<div class="muted">实测监测 ${esc(measuredBytes(sample.measured_used_bytes))}（未用于限额）</div>` : ''}
-      ${coverage.degraded ? `<div class="tag warn">采集不完整${missingNodes ? '：' + esc(missingNodes) : ''} · 待恢复核实</div>` : ''}
-      <div class="muted">直链日志30天 ${esc(fmtBytes((m.edge || {}).bytes_30d || 0))}（独立统计）</div></div>`;
+      ${coverage.degraded ? `<div class="tag warn">采集不完整${missingNodes ? '：' + esc(missingNodes) : ''} · 待恢复核实</div>` : ''}</div>`;
   }
 
   function accountCell(m) {
@@ -256,7 +255,7 @@
         ${['in_sync', 'drift', 'failed', 'never_applied', 'emby_missing'].map((s) =>
           `<option value="${s}" ${params.get('sync_status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
-      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['edge30','直链30天用量'],['last_seen','最近活跃']], 'username')}
+      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最近活跃']], 'username')}
       ${pick('m-order','order','顺序',[['asc','升序'],['desc','降序']], 'asc')}
       <details><summary>更多筛选</summary><div class="toolbar">
         ${pick('m-tg','tg','TG绑定',[['','全部'],['bound','已绑定'],['unbound','未绑定']])}
@@ -501,9 +500,9 @@
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
-          <dt>直链 7/30/累计</dt><dd>${esc(fmtBytes((d.edge && d.edge.bytes_7d) || (m.edge || {}).bytes_7d || 0))}
-            · ${esc(fmtBytes((d.edge && d.edge.bytes_30d) || (m.edge || {}).bytes_30d || 0))}
-            · ${esc(fmtBytes((d.edge && d.edge.bytes_total) || (m.edge || {}).bytes_total || 0))}</dd>
+          <dt>近24小时观看</dt><dd>${watchWindowLabel(d.watch, '24h')}</dd>
+          <dt>近30天观看</dt><dd>${watchWindowLabel(d.watch, '30d')}</dd>
+          <dt>累计观看</dt><dd>${d.watch ? esc(fmtWatchSeconds(d.watch.recorded_seconds)) : '暂无统计'}</dd>
         </dl>
         <div class="toolbar" id="md-actions">
           <label>续期 <input id="md-days" type="number" min="1" value="30" style="width:72px"> 天
@@ -522,8 +521,7 @@
           <button class="btn sm" type="button" data-member-action="reset-traffic">重置本月用量</button>
           ${m.tg_user_id ? '<button class="btn sm" type="button" data-member-action="telegram/unbind">解除TG绑定</button>' : ''}
         </div>
-        <h4>近30天统计</h4><p>播放 ${esc((d.usage || {}).plays || 0)} 次 · ${esc((d.usage || {}).hours || 0)} 小时 · 会话估算 ${fmtBytes((d.usage || {}).bytes || 0)}</p>
-        ${edgeHistory(d.edge)}`;
+        <p class="help">流量与 Bot 使用同一实测账本；观看按实际采样区间累计，不补算暂停或停机时长。</p>`;
       } else if (tab === 'entitlements') {
         body = `<p class="help">组 ${esc(m.group_name)}；个人权限覆盖优先，但不能开启用户组未启用的计费维度。不计时组不限期，不计流量组不限流量。修改后点击保存才生效。</p>
           <div class="toolbar" id="md-roles">

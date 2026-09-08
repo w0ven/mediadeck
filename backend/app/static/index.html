@@ -4,35 +4,44 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>mediadeck</title>
+<meta name="theme-color" content="#0c111b">
 <link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/workspace.css">
 </head>
 <body>
+<a class="skip-link" href="#view">跳到页面内容</a>
 <div id="layout">
   <aside id="sidebar">
     <div class="brand"><span class="brand-name">mediadeck</span></div>
-    <nav id="nav"></nav>
+    <nav id="nav" aria-label="主导航"></nav>
+    <div class="side-note">日常操作在前<br>高级工具按需展开</div>
     <div class="side-foot">
       <div class="avatar" id="who-initial">K</div>
       <div class="who" id="who">—</div>
     </div>
   </aside>
+  <button id="nav-backdrop" type="button" aria-label="收起导航" hidden></button>
 
   <div id="content">
     <header id="topbar">
+      <button class="btn" id="nav-toggle" type="button" aria-label="展开导航" aria-controls="sidebar" aria-expanded="false">☰</button>
       <div>
         <h1 id="page-title">仪表盘</h1>
         <p id="page-sub">集中查看系统运行、播放使用和待处理事项</p>
       </div>
       <div class="top-actions">
+        <div class="nav-search-box"><input id="nav-search" type="search" aria-label="搜索页面" placeholder="搜索功能…  Ctrl K" autocomplete="off"><div id="nav-results" hidden></div></div>
         <span class="ver" id="version">—</span>
         <button class="btn" onclick="renderPage(state.page, true)">刷新</button>
       </div>
     </header>
+    <nav id="subnav" aria-label="当前工作区"></nav>
     <div id="meta-line"><span id="last-updated">最近更新: —</span><span class="tag idle" id="live-state">连接中</span></div>
-    <main id="view"></main>
+    <main id="view" tabindex="-1"></main>
   </div>
 </div>
-<div id="toast"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<script src="/static/workspace.js"></script>
 <script src="/static/app.js"></script>
 <script src="/static/intake.js"></script>
 <script src="/static/nodepool.js"></script>

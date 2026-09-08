@@ -33,7 +33,9 @@ readers, because writes go through the shared SQLite connection lock.
 from __future__ import annotations
 
 import contextlib
+import json
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -96,9 +98,14 @@ class UsageSampler:
         # playing from where, so sharing detection rides along rather than
         # polling Emby a second time for the same answer.
         self._sharing = sharing
-        # session id -> tracking state, held in memory only: losing it on
-        # restart costs at most one sample interval of accuracy.
+        # Restore sampled time, but never charge the interval while this process was down.
         self._live: dict[str, dict[str, Any]] = {}
+        for row in db.query('SELECT session_id,state_json FROM watch_checkpoints'):
+            value = json.loads(row['state_json'])
+            value['last_ts'] = None
+            value['was_playing'] = False
+            value['speed_bps'] = 0
+            self._live[row['session_id']] = value
         self._last_tick = 0.0
         self._last_error: str | None = None
         self._ticks = 0
@@ -153,7 +160,10 @@ class UsageSampler:
                     "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
                     "remote_ip": session.get("RemoteEndPoint") or "",
                     "started_at": int(now),
+                    "watch_key": uuid.uuid4().hex,
+                    "sampled": True,
                     "last_ts": now,
+                    "was_playing": playing,
                     "seconds": 0.0,
                     "bytes": 0,
                     "transcoded": bool(session.get("TranscodingInfo")),
@@ -162,23 +172,32 @@ class UsageSampler:
 
             # A session that switched title is two plays, not one.
             current_item = str(item.get("Id") or "")
-            if current_item and current_item != state["item_id"]:
+            if user_id != state['user_id'] or current_item != state['item_id']:
                 self._finish(sid, state, now)
                 self._live[sid] = {
                     **state,
+                    "user_id": user_id,
+                    "username": session.get('UserName') or '',
+                    "transcoded": bool(session.get('TranscodingInfo')),
+                    "speed_bps": 0,
                     "item_id": current_item,
                     "item_name": item.get("Name") or "",
                     "item_type": item.get("Type") or "",
                     "series_name": item.get("SeriesName") or "",
                     "started_at": int(now),
+                    "watch_key": uuid.uuid4().hex,
+                    "sampled": True,
                     "last_ts": now,
+                    "was_playing": playing,
                     "seconds": 0.0,
                     "bytes": 0,
                 }
                 continue
 
-            delta = now - float(state["last_ts"])
+            delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
+            was_playing = state.get('was_playing', False)
             state["last_ts"] = now
+            state['was_playing'] = playing
             if not playing:
                 state["speed_bps"] = 0
                 continue
@@ -186,12 +205,17 @@ class UsageSampler:
                 continue
             # Clamp: a long gap means the sampler was down, not that the user
             # watched continuously through it.
+            watch_delta = delta if was_playing and delta <= MAX_BILLABLE_GAP_SECONDS else 0
             delta = min(delta, MAX_BILLABLE_GAP_SECONDS)
 
             rate = session_bitrate(session)
             chunk = int(rate / 8 * delta)
-            state["seconds"] = float(state["seconds"]) + delta
-            state["bytes"] = int(state["bytes"]) + chunk
+            # Sample and resumable state commit together: a crash cannot leave
+            # totals newer than the corresponding session history.
+            updated = {**state, 'seconds': float(state['seconds']) + watch_delta,
+                       'bytes': int(state['bytes']) + chunk}
+            self._record_watch(sid, updated, now - watch_delta, now)
+            state.update(updated)
             # Bytes/second over the last sampled window: what the dashboard
             # shows as the session's live bandwidth.
             state["speed_bps"] = int(chunk / delta) if delta else 0
@@ -205,7 +229,8 @@ class UsageSampler:
 
         # Sessions that vanished have ended.
         for sid in [s for s in self._live if s not in seen]:
-            self._finish(sid, self._live.pop(sid), now)
+            self._finish(sid, self._live[sid], now)
+            self._live.pop(sid)
 
         if billed_users:
             self._commit(billed_users, now)
@@ -224,6 +249,10 @@ class UsageSampler:
                         finding, str((member or {}).get("username") or ""))
                 sharing_found = len(findings)
 
+        with self._db.write() as conn:
+            for sid, checkpoint in self._live.items():
+                if checkpoint.get('item_id'):
+                    conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json', (sid, json.dumps(checkpoint)))
         self._last_tick = now
         result = {
             "ok": True,
@@ -243,6 +272,23 @@ class UsageSampler:
         return result
 
     # -- persistence ---------------------------------------------------------
+    def _record_watch(self, sid: str, state: dict, start: float, end: float) -> None:
+        with self._db.write() as conn:
+            key = state.setdefault('watch_key', uuid.uuid4().hex)
+            if end > start:
+                added = conn.execute(
+                    'INSERT OR IGNORE INTO watch_samples VALUES(?,?,?,?,?)',
+                    (key, state['user_id'], start, end, end-start)).rowcount
+                if added:
+                    conn.execute(
+                        'INSERT INTO watch_sample_totals VALUES(?,?,?,?) '
+                        'ON CONFLICT(emby_user_id) DO UPDATE SET seconds=seconds+excluded.seconds,'
+                        'first_at=MIN(first_at,excluded.first_at),last_at=MAX(last_at,excluded.last_at)',
+                        (state['user_id'], end-start, start, end))
+            conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) '
+                         'ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
+                         (sid, json.dumps(state)))
+
     def _commit(self, per_user: dict[str, int], now: float) -> None:
         day = day_key(now)
         with self._db.write() as conn:
@@ -261,7 +307,7 @@ class UsageSampler:
 
     def live_watch(self) -> list[dict[str, Any]]:
         """Already sampled active-session time; querying does not advance clocks."""
-        return [{k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds')}
+        return [{k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled')}
                 for state in self._live.values()]
 
     def live_speeds(self) -> dict[str, int]:
@@ -272,20 +318,22 @@ class UsageSampler:
     def _finish(self, sid: str, state: dict[str, Any], now: float) -> None:
         seconds = int(state.get("seconds") or 0)
         if seconds < MIN_PLAY_SECONDS:
+            self._db.execute('DELETE FROM watch_checkpoints WHERE session_id=?', (sid,))
             return
         with self._db.write() as conn:
+            conn.execute('DELETE FROM watch_checkpoints WHERE session_id=?', (sid,))
             conn.execute(
                 "INSERT INTO play_events (emby_user_id,username,item_id,item_name,"
                 "item_type,series_name,device_id,client,play_method,node,remote_ip,"
-                "bytes,seconds,started_at,ended_at) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "bytes,seconds,started_at,ended_at,sampled) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (state["user_id"], state.get("username", ""), state.get("item_id", ""),
                  state.get("item_name", ""), state.get("item_type", ""),
                  state.get("series_name", ""), state.get("device_id", ""),
                  state.get("client", ""), state.get("play_method", ""),
                  state.get("node", ""), state.get("remote_ip", ""),
                  int(state.get("bytes") or 0), seconds,
-                 int(state.get("started_at") or now), int(now)))
+                 int(state.get("started_at") or now), int(now), int(bool(state.get('sampled')))))
             conn.execute(
                 "INSERT INTO usage_daily (day,emby_user_id,bytes,seconds,plays,transcodes)"
                 " VALUES (?,?,0,?,1,?) ON CONFLICT(day,emby_user_id) DO UPDATE SET "

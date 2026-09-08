@@ -3,6 +3,19 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Workspace and watch-time follow-up — local delivery
+- [x] Six primary workspaces with retained secondary pages, a single live-playback
+      surface and category-based independently saved configuration.
+- [x] Member-initiated Telegram handoffs plus new-account rescue verification;
+      group-only review and retryable notification delivery; retire Web review.
+- [x] Durable sampled watch intervals/checkpoints/totals, clipped rolling windows
+      and explicit uncertainty for old sessions that cannot be split precisely.
+- [x] Use measured monthly traffic in operational views and remove mixed direct-log
+      or bitrate-derived figures from member usage presentation.
+- [x] Isolated local API/Chromium acceptance and existing regression coverage.
+- [ ] Separately authorized upstream release and deployment. No live state change
+      is included in this local implementation phase.
+
 ## User-management rebuild — live UI foundation (local development)
 - [x] Replace SSE-triggered full-page loaders with cached-model DOM patches.
 - [x] Keep editor/selection/scroll state and guard route/reconnect races.

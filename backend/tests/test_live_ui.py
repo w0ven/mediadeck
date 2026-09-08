@@ -17,7 +17,7 @@ CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser")
 @pytest.mark.skipif(not CHROMIUM, reason="Chromium is needed for the browser regression")
 def test_live_updates_browser(tmp_path):
     tests = Path(__file__).parent
-    for name in ("app.js", "intake.js"):
+    for name in ("workspace.js", "app.js", "intake.js"):
         shutil.copyfile(tests.parent / "app/static" / name, tmp_path / name)
     shutil.copyfile(tests / "live_ui_browser.js", tmp_path / "test.js")
     page = tmp_path / "test.html"
@@ -25,7 +25,8 @@ def test_live_updates_browser(tmp_path):
 <div id="nav"></div><div id="page-title"></div><div id="page-sub"></div>
 <div id="last-updated"></div><div id="live-state"></div><div id="toast"></div>
 <main id="view"></main><pre id="report">pending</pre>
-<script src="app.js"></script><script src="intake.js"></script><script src="test.js"></script>
+<div id="subnav"></div><input id="nav-search"><div id="nav-results"></div><button id="nav-toggle"></button>
+<script src="workspace.js"></script><script src="app.js"></script><script src="intake.js"></script><script src="test.js"></script>
 ''')
     result = subprocess.run([
         CHROMIUM, "--headless", "--no-sandbox", "--disable-gpu",
