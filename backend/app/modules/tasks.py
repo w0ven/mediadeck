@@ -30,16 +30,24 @@ class TasksReader:
         self._path = Path(snapshot_path) if snapshot_path else None
 
     def snapshot(self) -> dict[str, Any]:
-        if self._path is None or not self._path.is_file():
+        if self._path is None:
             return {"available": False, "reason": "snapshot not configured or missing"}
         try:
+            if not self._path.is_file():
+                return {"available": False, "reason": "snapshot not configured or missing"}
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            age = round(max(0, time.time() - self._path.stat().st_mtime), 1)
+            if not isinstance(data, dict):
+                return {"available": False, "reason": "invalid snapshot: expected object"}
+            if any(key in data and (not isinstance(data[key], list)
+                                    or any(not isinstance(row, dict) for row in data[key]))
+                   for key in ("tasks", "alerts")):
+                return {"available": False, "reason": "invalid snapshot collection"}
+        except (OSError, ValueError) as exc:
             return {
                 "available": False,
                 "reason": f"unreadable snapshot: {type(exc).__name__}",
             }
-        age = round(time.time() - self._path.stat().st_mtime, 1)
         return {
             "available": True,
             "snapshot_age_seconds": age,

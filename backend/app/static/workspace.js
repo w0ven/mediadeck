@@ -151,14 +151,30 @@ function initTelegramSettings(tg) {
     finally { button.disabled = false; }
   };
 }
+let workspaceInert = null;
 function setWorkspaceMenu(open, restoreFocus = false) {
+  const wasOpen = document.body.classList.contains('nav-open');
+  open = !!open && matchMedia('(max-width:900px)').matches;
   document.body.classList.toggle('nav-open', open);
+  const content = document.getElementById('content');
+  if (open && !wasOpen) { workspaceInert = content.inert; content.inert = true; }
+  if (!open && wasOpen) { content.inert = workspaceInert; workspaceInert = null; }
   document.getElementById('nav-toggle')?.setAttribute('aria-expanded', String(open));
   const backdrop = document.getElementById('nav-backdrop');
   if (backdrop) backdrop.hidden = !open;
-  if (restoreFocus) document.getElementById('nav-toggle')?.focus();
+  if (open && !wasOpen) document.querySelector('#nav a')?.focus();
+  if (!open && (restoreFocus || (wasOpen && document.activeElement?.closest('#sidebar')))) document.getElementById('nav-toggle')?.focus();
 }
 function installWorkspaceNavigation() {
+  document.querySelector('.skip-link')?.addEventListener('click', e => {
+    e.preventDefault(); document.getElementById('view').focus();
+  });
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Tab' || !document.body.classList.contains('nav-open')) return;
+    const links = [...document.querySelectorAll('#nav a')];
+    if (e.shiftKey && document.activeElement === links[0]) { e.preventDefault(); links.at(-1)?.focus(); }
+    else if (!e.shiftKey && document.activeElement === links.at(-1)) { e.preventDefault(); links[0]?.focus(); }
+  });
   const search = document.getElementById('nav-search'), results = document.getElementById('nav-results');
   search.addEventListener('input', () => {
     const query = search.value.trim().toLowerCase(); results.hidden = !query;
@@ -197,7 +213,7 @@ function rateMarkup(bps, at, basis, windowSeconds, scope = '') {
 }
 function egressValid(n) {
   const stamp = Number(n.egress_sampled_at || n.last_success_ts || n.last_probe_ts || 0);
-  return n.ok !== false && n.egress_status !== 'unavailable' && n.egress_mbps != null && Number.isFinite(Number(n.egress_mbps)) && Number(n.egress_mbps) >= 0 && stamp && Date.now()/1000-stamp <= RATE_STALE_SECONDS;
+  return n.ok !== false && n.egress_status !== 'unavailable' && n.egress_mbps != null && Number.isFinite(Number(n.egress_mbps)) && Number(n.egress_mbps) >= 0 && stamp && Date.now()/1000-stamp >= -5 && Date.now()/1000-stamp <= RATE_STALE_SECONDS;
 }
 function egressCell(n) {
   if (!egressValid(n)) return '<span class="rate-unknown">出口未实测／采样失效</span>';

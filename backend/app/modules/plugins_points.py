@@ -81,6 +81,12 @@ class CheckinPlugin(Plugin):
         if not user_id:
             return {"ok": False, "reason": "账号不存在"}
 
+        with db.write() as conn:
+            return self._checkin(conn, points, user_id, now)
+
+    def _checkin(self, conn: Any, points: Any, user_id: str,
+                 now: float | None) -> dict[str, Any]:
+        db = self.ctx.db
         config = self._config()
         now = time.time() if now is None else now
         day = _today(now)
@@ -109,10 +115,10 @@ class CheckinPlugin(Plugin):
         # The row goes in first: its primary key is what makes a double tap
         # impossible, so writing it before paying means the second tap is
         # refused by the database rather than by a check that already passed.
-        db.execute(
+        conn.execute(
             "INSERT INTO checkins(emby_user_id,day,streak,points,created_at) "
             "VALUES(?,?,?,?,?)", (user_id, day, streak, award, int(now)))
-        balance = points.add(user_id, award, "checkin", ref=day, actor="checkin")
+        balance = points._apply(conn, user_id, award, 'checkin', day, 'checkin', int(now))
         return {"ok": True, "points": award, "base": base, "bonus": bonus,
                 "streak": streak, "balance": balance}
 
@@ -229,11 +235,13 @@ class PointsTransferPlugin(Plugin):
         points = getattr(self.ctx, "points", None)
         if points is None:
             raise ValueError("积分服务不可用")
-        ok, reason = self.can_transfer(from_id, amount)
-        if not ok:
-            raise ValueError(reason)
-        return points.transfer(from_id, to_id, int(amount), actor="member",
-                               fee=self.fee_for(int(amount)))
+        # The cap check and both ledger entries share a transaction/lock.
+        with points._db.write() as conn:
+            ok, reason = self.can_transfer(from_id, amount)
+            if not ok:
+                raise ValueError(reason)
+            return points.transfer(from_id, to_id, int(amount), actor="member",
+                                   fee=self.fee_for(int(amount)), conn=conn)
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
         db = self.ctx.db

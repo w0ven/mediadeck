@@ -41,16 +41,16 @@ function nodePoolCard(n) {
         ${stat('⇅', egressCell(n), '出口带宽', `占用率 ${util}% · 包含非播放流量`)}
         ${stat('◔', poolProbeAge(n), '探针', n.ok ? '最近一次成功' : '当前失败')}
       </div>
-      <div class="form-row"><label>参与调度</label>
-        <input type="checkbox" class="np-enabled" data-node="${id}"
+      <div class="form-row"><label for="np-enabled-${id}">参与调度</label>
+        <input type="checkbox" id="np-enabled-${id}" class="np-enabled" data-node="${id}"
           ${n.enabled ? 'checked' : ''}>
         <span class="muted">取消勾选后调度不再选中该节点</span></div>
-      <div class="form-row"><label>权重</label>
-        <input type="number" class="np-weight" data-node="${id}" min="1" max="100000"
+      <div class="form-row"><label for="np-weight-${id}">权重</label>
+        <input type="number" id="np-weight-${id}" class="np-weight" data-node="${id}" min="1" max="100000"
           value="${esc(n.capacity)}" style="width:110px">
         <span class="muted">相对份额，同时作为并发容量上限</span></div>
-      <div class="form-row"><label>带宽上限</label>
-        <input type="number" class="np-bandwidth" data-node="${id}" min="0" max="1000000"
+      <div class="form-row"><label for="np-bandwidth-${id}">带宽上限</label>
+        <input type="number" id="np-bandwidth-${id}" class="np-bandwidth" data-node="${id}" min="0" max="1000000"
           value="${esc(n.bandwidth_mbps)}" style="width:110px">
         <span class="muted">Mbps，0 表示未知（只按路数判断负载）</span></div>
       <div class="toolbar">
@@ -111,6 +111,9 @@ async function saveNodePool(name) {
   const pick = (cls) => document.querySelector(`.${cls}[data-node="${CSS.escape(name)}"]`);
   const result = pick('np-result');
   const btn = pick('np-save');
+  if (btn.disabled) return;
+  const invalid = [pick('np-weight'), pick('np-bandwidth')].find(input => !input.checkValidity());
+  if (invalid) { invalid.reportValidity(); return; }
   const payload = {
     enabled: pick('np-enabled').checked,
     weight: Number(pick('np-weight').value),
@@ -124,13 +127,12 @@ async function saveNodePool(name) {
     });
     const changed = Object.keys(saved.changed || {});
     toast(changed.length ? `已保存并生效：${changed.join(', ')}` : '没有变化');
-    await renderPage('nodepool');
+    if (result?.isConnected) result.textContent = '已保存；其他输入仍保留。';
   } catch (e) {
     toast('保存失败: ' + e.message, 1);
     if (result) {
       result.textContent = e.message;
       result.className = 'np-result danger-text';
     }
-    btn.disabled = false;
-  }
+  } finally { btn.disabled = false; }
 }

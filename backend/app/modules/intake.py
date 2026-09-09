@@ -37,7 +37,10 @@ snapshot costs the same on a healthy system and a badly backed-up one.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import math
+import os
 import re
 import time
 from collections.abc import Callable, Iterable
@@ -62,6 +65,7 @@ MAX_LOG_TAIL_BYTES = 512_000  # how much of the media-server log tail is read
 MAX_PROBE_LINES = 300        # probe lines aggregated (per the owner's spec)
 MAX_NOTIFY_TAIL_BYTES = 64_000
 MAX_LANE_FILES = 20_000      # files walked when sizing upload lanes
+MAX_STATE_BYTES = 4 * 1024 * 1024
 TOP_N = 5                    # rows in every "top offenders" list
 
 
@@ -85,14 +89,15 @@ DEFAULT_THRESHOLDS: dict[str, float] = {
 def _int(value: Any, default: int = 0) -> int:
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
 def _float(value: Any, default: float = 0.0) -> float:
     try:
-        return float(value)
-    except (TypeError, ValueError):
+        result = float(value)
+        return result if math.isfinite(result) else default
+    except (TypeError, ValueError, OverflowError):
         return default
 
 
@@ -206,7 +211,8 @@ class FsReader:
     def read_json(self, path: str | Path) -> Any:
         try:
             with open(path, encoding="utf-8") as handle:
-                return json.load(handle)
+                text = handle.read(MAX_STATE_BYTES + 1)
+                return json.loads(text) if len(text) <= MAX_STATE_BYTES else None
         except (OSError, ValueError):
             return None
 
@@ -229,8 +235,8 @@ class FsReader:
                 size = handle.tell()
                 handle.seek(max(0, size - max_bytes))
                 if size > max_bytes:
-                    handle.readline()
-                return handle.read().decode("utf-8", errors="replace")
+                    handle.readline(max_bytes)
+                return handle.read(max_bytes).decode("utf-8", errors="replace")
         except OSError:
             return None
 
@@ -259,28 +265,31 @@ class FsReader:
         count = 0
         total = 0
         stack = [base]
+        seen_dirs: set[tuple[int, int]] = set()
         seen = 0
         while stack:
             current = stack.pop()
             try:
-                entries = list(current.iterdir())
+                stat = current.stat()
+                identity = (stat.st_dev, stat.st_ino)
+                if identity in seen_dirs:
+                    continue  # avoid symlink cycles without discarding linked files
+                seen_dirs.add(identity)
+                with os.scandir(current) as entries:
+                    for entry in entries:
+                        seen += 1
+                        if seen > limit:
+                            return None  # a partial walk cannot assert an exact total
+                        if entry.is_dir():
+                            stack.append(Path(entry.path))
+                            continue
+                        size = entry.stat().st_size
+                        if size <= 0:
+                            continue
+                        count += 1
+                        total += size
             except OSError:
-                continue
-            for entry in entries:
-                seen += 1
-                if seen > limit:
-                    return count, total
-                try:
-                    if entry.is_dir():
-                        stack.append(entry)
-                        continue
-                    size = entry.stat().st_size
-                except OSError:
-                    continue
-                if size <= 0:
-                    continue
-                count += 1
-                total += size
+                return None
         return count, total
 
 
@@ -427,24 +436,21 @@ class IntakeCollector:
 
         try:
             tasks = await self.emby.scheduled_tasks()
+            out["scan"] = self._scan_state(tasks)
         except Exception as exc:  # noqa: BLE001 - degraded, never fatal
             out["scan"] = unavailable(f"无法读取任务: {type(exc).__name__}")
-        else:
-            out["scan"] = self._scan_state(tasks)
 
         try:
             latest = await self.emby.latest_created(limit=1)
+            out["latest"] = self._latest_state(latest)
         except Exception as exc:  # noqa: BLE001
             out["latest"] = unavailable(f"无法读取最新入库: {type(exc).__name__}")
-        else:
-            out["latest"] = self._latest_state(latest)
 
         try:
             log_text = await self.emby.server_log_tail(MAX_LOG_TAIL_BYTES)
+            out["probe"] = parse_probe_hotspots(log_text or "")
         except Exception as exc:  # noqa: BLE001
             out["probe"] = unavailable(f"无法读取日志: {type(exc).__name__}")
-        else:
-            out["probe"] = parse_probe_hotspots(log_text or "")
         return out
 
     def _scan_state(self, tasks: Any) -> dict[str, Any]:
@@ -532,7 +538,8 @@ class IntakeCollector:
         broken = 0
         for path in files[:MAX_QUEUE_PARSE]:
             data = self.fs.read_json(path)
-            if not isinstance(data, dict):
+            if (not isinstance(data, dict)
+                    or not isinstance(data.get("paths") or [], list)):
                 broken += 1
                 continue
             parsed += 1
@@ -595,22 +602,26 @@ class IntakeCollector:
         if lane_entries is None:
             lanes_section: Any = unavailable("上传通道目录不存在")
         else:
+            complete = True
             for entry in sorted(lane_entries, key=lambda p: p.name):
                 try:
                     if not entry.is_dir():
                         continue
                 except OSError:
+                    complete = False
                     continue
                 walked = self.fs.walk_files(str(entry))
                 if walked is None:
+                    complete = False
                     continue
                 count, total = walked
                 lanes.append({"name": entry.name, "items": count, "bytes": total})
             lanes_section = {
-                "available": True,
+                "available": complete,
                 "lanes": lanes,
-                "items": sum(x["items"] for x in lanes),
-                "bytes": sum(x["bytes"] for x in lanes),
+                "items": sum(x["items"] for x in lanes) if complete else None,
+                "bytes": sum(x["bytes"] for x in lanes) if complete else None,
+                **({} if complete else {"reason": "部分通道不可读或超过扫描上限"}),
             }
 
         def buffer_of(path: str, label: str) -> dict[str, Any]:
@@ -807,13 +818,20 @@ class IntakeCollector:
     # -- full snapshot -----------------------------------------------------
     async def snapshot(self, downloaders: Iterable[Any] = ()) -> dict[str, Any]:
         started = self.now()
+        def local_sections() -> dict[str, Any]:
+            out = {}
+            for name, collect in (("refresh", self.collect_refresh), ("notify", self.collect_notify),
+                                  ("upload", self.collect_upload), ("cloud", self.collect_cloud)):
+                try:
+                    out[name] = collect()
+                except Exception as exc:  # noqa: BLE001 - isolate broken local state
+                    out[name] = unavailable(f"采集失败: {type(exc).__name__}")
+            return out
+
         data: dict[str, Any] = {
             "generated_at": started,
             "emby": await self.collect_emby(),
-            "refresh": self.collect_refresh(),
-            "notify": self.collect_notify(),
-            "upload": self.collect_upload(),
-            "cloud": self.collect_cloud(),
+            **await asyncio.to_thread(local_sections),
             "downloader": await self.collect_downloader(downloaders),
             "thresholds": dict(self.thresholds),
         }

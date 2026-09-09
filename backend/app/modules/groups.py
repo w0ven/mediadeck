@@ -194,55 +194,58 @@ class GroupService:
     # -- write ---------------------------------------------------------------
     def create(self, payload: dict[str, Any],
                now: int | None = None) -> dict[str, Any]:
-        group = self._validate(payload)
-        if self.get(group["id"]):
-            raise ConfigError("组 ID 已存在")
-        now = now or int(time.time())
-        if group["is_default"]:
-            self._db.execute("UPDATE groups SET is_default=0")
-        self._db.execute(
-            "INSERT INTO groups (id,name,description,billing_mode,duration_days,"
-            "traffic_quota_bytes,bandwidth_limit_kbps,max_streams,max_devices,"
-            "allow_download,allow_transcode,is_default,request_quota,"
-            "created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (group["id"], group["name"], group["description"],
-             group["billing_mode"], group["duration_days"],
-             group["traffic_quota_bytes"], group["bandwidth_limit_kbps"],
-             group["max_streams"], group["max_devices"],
-             group["allow_download"], group["allow_transcode"],
-             group["is_default"], group["request_quota"], now, now))
-        return self.get(group["id"])  # type: ignore[return-value]
+        with self._db.write() as conn:
+            group = self._validate(payload)
+            if self.get(group["id"]):
+                raise ConfigError("组 ID 已存在")
+            now = now or int(time.time())
+            if group["is_default"]:
+                conn.execute("UPDATE groups SET is_default=0")
+            conn.execute(
+                "INSERT INTO groups (id,name,description,billing_mode,duration_days,"
+                "traffic_quota_bytes,bandwidth_limit_kbps,max_streams,max_devices,"
+                "allow_download,allow_transcode,is_default,request_quota,"
+                "created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (group["id"], group["name"], group["description"],
+                 group["billing_mode"], group["duration_days"],
+                 group["traffic_quota_bytes"], group["bandwidth_limit_kbps"],
+                 group["max_streams"], group["max_devices"],
+                 group["allow_download"], group["allow_transcode"],
+                 group["is_default"], group["request_quota"], now, now))
+            return self.get(group["id"])  # type: ignore[return-value]
 
     def update(self, group_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        existing = self.get(group_id)
-        if not existing:
-            raise ConfigError("组不存在")
-        payload = dict(payload)
-        payload["id"] = group_id
-        group = self._validate(payload, existing)
-        if group["is_default"]:
-            self._db.execute("UPDATE groups SET is_default=0 WHERE id != ?",
-                             (group_id,))
-        self._db.execute(
-            "UPDATE groups SET name=?,description=?,billing_mode=?,"
-            "duration_days=?,traffic_quota_bytes=?,bandwidth_limit_kbps=?,"
-            "max_streams=?,max_devices=?,allow_download=?,allow_transcode=?,"
-            "is_default=?,request_quota=?,updated_at=? WHERE id=?",
-            (group["name"], group["description"], group["billing_mode"],
-             group["duration_days"], group["traffic_quota_bytes"],
-             group["bandwidth_limit_kbps"], group["max_streams"],
-             group["max_devices"], group["allow_download"],
-             group["allow_transcode"], group["is_default"],
-             group["request_quota"], int(time.time()), group_id))
-        return self.get(group_id)  # type: ignore[return-value]
+        with self._db.write() as conn:
+            existing = self.get(group_id)
+            if not existing:
+                raise ConfigError("组不存在")
+            payload = dict(payload)
+            payload["id"] = group_id
+            group = self._validate(payload, existing)
+            if group["is_default"]:
+                conn.execute("UPDATE groups SET is_default=0 WHERE id != ?",
+                                 (group_id,))
+            conn.execute(
+                "UPDATE groups SET name=?,description=?,billing_mode=?,"
+                "duration_days=?,traffic_quota_bytes=?,bandwidth_limit_kbps=?,"
+                "max_streams=?,max_devices=?,allow_download=?,allow_transcode=?,"
+                "is_default=?,request_quota=?,updated_at=? WHERE id=?",
+                (group["name"], group["description"], group["billing_mode"],
+                 group["duration_days"], group["traffic_quota_bytes"],
+                 group["bandwidth_limit_kbps"], group["max_streams"],
+                 group["max_devices"], group["allow_download"],
+                 group["allow_transcode"], group["is_default"],
+                 group["request_quota"], int(time.time()), group_id))
+            return self.get(group_id)  # type: ignore[return-value]
 
     def delete(self, group_id: str) -> bool:
-        if group_id == WHITELIST_GROUP_ID:
-            raise ConfigError("白名单是固定系统分组，不能删除；可调整该组限制或迁移成员")
-        used = self._db.one(
-            "SELECT COUNT(*) AS n FROM members WHERE group_id=?", (group_id,))["n"]
-        if used:
-            raise ConfigError(f"仍有 {used} 个用户在该组，先迁移再删除")
-        self._db.execute("DELETE FROM groups WHERE id=?", (group_id,))
-        return True
+        with self._db.write() as conn:
+            if group_id == WHITELIST_GROUP_ID:
+                raise ConfigError("白名单是固定系统分组，不能删除；可调整该组限制或迁移成员")
+            used = self._db.one(
+                "SELECT COUNT(*) AS n FROM members WHERE group_id=?", (group_id,))["n"]
+            if used:
+                raise ConfigError(f"仍有 {used} 个用户在该组，先迁移再删除")
+            conn.execute("DELETE FROM groups WHERE id=?", (group_id,))
+            return True

@@ -3,6 +3,26 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Full-source functionality and interaction audit — local corrective cycle
+- [x] Cover all 69 production source files plus project configuration with explicit
+      ownership and evidence; preserve the approved business rules and Hard Glass UI.
+- [x] Reproduce and locally correct account/Bot, playback/metering, Web interaction,
+      background-integration, persistence and adapter defects.
+- [x] Integrate cross-module fixes and verify: 1562 passed, 56 skipped, 1 strict
+      expected failure; all 25 pages exercised in isolated Chromium.
+- [x] Replace ambiguous v1 playback signatures with v2 HMAC-SHA256 and an
+      independent probe verification gate; original security XFAIL now passes.
+      Owner approved rejecting old links without a v1 grace period.
+- [x] Final v0.30.0 candidate: 1606 passed, 56 skipped, no XFAIL; real nginx
+      file/transparent-proxy/Range/HEAD and verification-failure tests pass.
+- Upgrade contract: `SIGNING-V2.md`; nodes and panel must be switched together.
+- [x] Owner separately authorized coordinated release/deployment, retaining
+      existing proxy entry points and accepting v1-link invalidation.
+- [ ] Complete coordinated rollout and verify actual running revisions/traffic.
+- Historical audit evidence: `AUDIT-2026-09-09.md`; current protocol: `SIGNING-V2.md`.
+- The original audit was local-only. The subsequent v2 rollout has separate,
+  bounded authorization; no absolute bug-freedom or unexecuted live check is claimed.
+
 ## Hard Glass and reserved whitelist — approved local implementation
 - [x] Shared dark hard-glass theme across the existing workspaces and controls.
 - [x] Member list interaction rebuild and viewport-fixed details with safe drafts,

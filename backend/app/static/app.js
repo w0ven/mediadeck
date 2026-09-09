@@ -67,6 +67,17 @@ function toast(msg, bad) {
   clearTimeout(t._h);
   t._h = setTimeout(() => (t.style.display = 'none'), 3200);
 }
+function bindAsyncButton(id, action) {
+  const button = document.getElementById(id);
+  if (!button) return;
+  button.onclick = async () => {
+    if (button.disabled) return;
+    button.disabled = true; button.setAttribute('aria-busy', 'true');
+    try { await action(); }
+    catch (error) { toast('操作失败: ' + error.message, 1); }
+    finally { button.disabled = false; button.removeAttribute('aria-busy'); }
+  };
+}
 async function api(path, opts) {
   const r = await fetch(path, Object.assign({ headers: { 'Content-Type': 'application/json' } }, opts));
   if (!r.ok) {
@@ -89,6 +100,8 @@ function fmtAge(s) {
   if (s < 86400) return (s / 3600).toFixed(1) + ' 小时';
   return (s / 86400).toFixed(1) + ' 天';
 }
+// HTML attribute escaping alone does not quote an embedded JavaScript string.
+function jsArg(value) { return esc(JSON.stringify(String(value == null ? '' : value))); }
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) =>
     ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -234,32 +247,45 @@ async function copyText(text) {
 }
 
 let _modalKey = null;
+let _modalFocus = null;
+let _modalInert = [];
 function closeModal() {
   const el = $('#modal-root');
   if (el) el.remove();
   if (_modalKey) { document.removeEventListener('keydown', _modalKey); _modalKey = null; }
+  _modalInert.forEach(([node, prior]) => { node.inert = prior; });
+  _modalInert = [];
+  const focus = _modalFocus?.isConnected ? _modalFocus : document.querySelector('#member-detail:not(.hidden) #md-close');
+  if (focus && el) focus.focus({preventScroll:true});
+  _modalFocus = null;
+  document.body.classList.remove('modal-open');
 }
 function openModal(title, bodyHtml, opts) {
   closeModal();
+  _modalFocus = document.activeElement;
+  _modalInert = [...document.querySelectorAll('#layout')].map(node => [node, node.inert]);
+  _modalInert.forEach(([node]) => { node.inert = true; });
+  document.body.classList.add('modal-open');
   const wide = opts && opts.wide;
   const drawer = opts && opts.drawer;
   const root = document.createElement('div');
   root.id = 'modal-root';
   root.className = 'modal-root';
-  root.innerHTML = `<div class="modal ${wide ? 'wide' : ''} ${drawer ? 'drawer' : ''}" role="dialog" tabindex="-1">
-    <div class="modal-head"><h3>${esc(title)}</h3>
+  root.innerHTML = `<div class="modal ${wide ? 'wide' : ''} ${drawer ? 'drawer' : ''}" role="dialog" aria-modal="true" aria-labelledby="modal-title" tabindex="-1">
+    <div class="modal-head"><h3 id="modal-title">${esc(title)}</h3>
       <button class="btn sm" type="button" id="modal-close">关闭</button></div>
     <div class="modal-body">${bodyHtml}</div></div>`;
   document.body.appendChild(root);
   const box = root.querySelector('.modal');
-  const focusables = () => [...box.querySelectorAll('a[href],button,input,select,textarea')]
+  const focusables = () => [...box.querySelectorAll('a[href],button,input,select,textarea,summary')]
     .filter((x) => !x.disabled && x.offsetParent !== null);
   _modalKey = (e) => {
     if (e.key === 'Escape') { closeModal(); return; }
     if (e.key !== 'Tab') return;
     const list = focusables();
-    if (!list.length) return;
+    if (!list.length) { e.preventDefault(); box.focus(); return; }
     const first = list[0]; const last = list[list.length - 1];
+    if (!box.contains(document.activeElement)) { e.preventDefault(); first.focus(); return; }
     if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
     else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
   };
@@ -310,6 +336,7 @@ function go(route) {
   state.route = route;
   state.pageReady = false;
   stopEnrollPoll();
+  closeModal();
   const meta = navMeta(page);
   updateWorkspaceNav(page);
   $('#page-title').textContent = meta.label;
@@ -323,7 +350,9 @@ window.addEventListener('hashchange', () => {
   const route = routeFromHash();
   if (route !== state.route) go(route);
 });
-async function renderPage(page, manual, liveUpdate) {
+async function renderPage(page, manual, liveUpdate, sourceContext) {
+  // Completion of an old action must not repaint the workspace we left.
+  if (page !== state.page || (sourceContext && !sourceContext.isCurrent())) return;
   if (liveUpdate) { scheduleLiveFlush(); return; }
   if (manual && (!configCanLeave() || (typeof membersCanLeave === 'function' && !membersCanLeave()))) return;
   if (manual && typeof membersDispose === 'function') membersDispose();
@@ -336,6 +365,8 @@ async function renderPage(page, manual, liveUpdate) {
     await fn(context);
     if (!context.isCurrent()) return;
     state.pageReady = true;
+    const retry = $('#retry-page');
+    if (retry) retry.onclick = () => renderPage(page, true);
     $('#last-updated').textContent = '最近更新: ' + new Date().toLocaleTimeString();
     if (manual) toast('已刷新');
     scheduleLiveFlush();
@@ -355,10 +386,10 @@ PAGES.dashboard = async (context = pageContext('dashboard')) => {
   // click that did nothing.
   renderView(pageLoading(), context);
   const [sessions, pipe, nodes, overview] = await Promise.all([
-    api('/api/emby/sessions').catch(() => []),
+    api('/api/emby/sessions'),
     api('/api/pipeline').catch(() => ({ available: false })),
-    api('/api/nodes').catch(() => []),
-    api('/api/stats/overview?days=30').catch(() => null),
+    api('/api/nodes'),
+    api('/api/stats/overview?days=30'),
   ]);
   if (!context.isCurrent()) return;
   PAGE_MODELS.dashboard = {sessions, pipe, nodes, overview};
@@ -402,9 +433,10 @@ function paintDashboard(model, context) {
     </div>`, context);
 }
 
-PAGES.library = async () => {
+PAGES.library = async (context = pageContext('library')) => {
   $('#view').innerHTML = pageLoading();
-  const [libs, latest] = await Promise.all([api('/api/emby/libraries').catch(() => []), api('/api/emby/latest?limit=12').catch(() => [])]);
+  const [libs, latest] = await Promise.all([api('/api/emby/libraries'), api('/api/emby/latest?limit=12')]);
+  if (!context.isCurrent()) return;
   const total = libs.reduce((a, l) => a + (l.items || 0), 0);
   const kinds = new Set(libs.map((l) => l.type)).size;
   $('#view').innerHTML = `
@@ -421,15 +453,16 @@ PAGES.library = async () => {
         <td>${esc(l.locations)} 个路径</td></tr>`).join(''))}`;
 };
 
-PAGES.imports = async () => {
+PAGES.imports = async (context = pageContext('imports')) => {
   $('#view').innerHTML = pageLoading();
-  const js = await api('/api/imports?limit=50').catch(() => []);
+  const js = await api('/api/imports?limit=50');
+  if (!context.isCurrent()) return;
   $('#view').innerHTML = `
     ${card('新建导入', '提交网盘链接或云盘目录',
       `<div class="card-body"><div class="toolbar">
-        <select id="imp-kind"><option value="drive-link">网盘链接</option><option value="cloud-drive">云盘目录</option></select>
-        <input id="imp-src" placeholder="链接 / 目录引用" style="flex:1;min-width:240px">
-        <input id="imp-cat" placeholder="分类(可选)" style="width:120px">
+        <select id="imp-kind" aria-label="导入类型"><option value="drive-link">网盘链接</option><option value="cloud-drive">云盘目录</option></select>
+        <input id="imp-src" aria-label="导入来源" placeholder="链接 / 目录引用" style="flex:1;min-width:240px">
+        <input id="imp-cat" aria-label="导入分类" placeholder="分类(可选)" style="width:120px">
         <button class="btn primary" id="imp-go">提交</button>
       </div></div>`)}
     ${tableCard('导入任务', `${js.length} 个`, ['ID', '类型', '来源', '状态', '进度', ''],
@@ -441,31 +474,38 @@ PAGES.imports = async () => {
           <td><span class="tag ${cls}">${esc(j.state)}</span></td>
           <td><span class="bar"><i style="width:${p}%"></i></span> ${j.items_done}/${j.items_total}</td>
           <td>${(j.state === 'queued' || j.state === 'running')
-            ? `<button class="btn sm danger" onclick="cancelImport('${esc(j.id)}')">取消</button>` : ''}</td></tr>`;
+            ? `<button class="btn sm danger" onclick="cancelImport(${jsArg(j.id)})">取消</button>` : ''}</td></tr>`;
       }).join(''))}`;
   $('#imp-go').onclick = submitImport;
 };
 async function submitImport() {
+  const actionContext = pageContext('imports');
   const src = $('#imp-src').value.trim();
   if (!src) return toast('请输入来源', 1);
+  const button = $('#imp-go');
+  if (button.disabled) return;
+  button.disabled = true;
+  const context = pageContext('imports');
   try {
     await api('/api/imports', { method: 'POST', body: JSON.stringify({
       kind: $('#imp-kind').value, source_ref: src, category: $('#imp-cat').value.trim() }) });
-    toast('任务已提交'); renderPage('imports');
+    toast('任务已提交'); if (context.isCurrent()) renderPage('imports', false, false, actionContext);
   } catch (e) { toast('提交失败: ' + e.message, 1); }
+  finally { button.disabled = false; }
 }
 async function cancelImport(id) {
-  try { await api(`/api/imports/${id}/cancel`, { method: 'POST' }); toast('已取消'); renderPage('imports'); }
+  const actionContext = pageContext('imports');
+  try { await api(`/api/imports/${id}/cancel`, { method: 'POST' }); toast('已取消'); renderPage('imports', false, false, actionContext); }
   catch (e) { toast('取消失败: ' + e.message, 1); }
 }
 
 PAGES.nodes = async (context = pageContext('nodes')) => {
   renderView(pageLoading(), context);
   const [ns, log, dispatch, st] = await Promise.all([
-    api('/api/nodes').catch(() => []),
-    api('/api/dispatch/log?limit=20').catch(() => []),
-    api('/api/settings/dispatch').catch(() => ({ policy: '-', load_threshold: 0 })),
-    api('/api/settings').catch(() => ({ integration: {} })),
+    api('/api/nodes'),
+    api('/api/dispatch/log?limit=20'),
+    api('/api/settings/dispatch'),
+    api('/api/settings'),
   ]);
   if (!context.isCurrent()) return;
   PAGE_MODELS.nodes = {ns, log, dispatch, st};
@@ -495,7 +535,7 @@ function paintNodes(model, context) {
       `<div class="card-body"><div class="muted">请先到「系统设置 → 接入方式」填写面板对外地址，否则无法生成节点安装命令。</div></div>`)}
     ${card('新增节点', '只需名称；地址由节点安装后自动上报',
       `<div class="card-body"><div class="toolbar">
-        <input id="nd-name" placeholder="节点名称 如 node-a" style="width:160px">
+        <input id="nd-name" aria-label="节点名称" placeholder="节点名称 如 node-a" style="width:160px">
         <input id="nd-capacity" type="number" min="1" value="100" style="width:100px" title="并发容量（可选）">
         <button class="btn primary" id="nd-go">添加</button>
       </div>
@@ -510,7 +550,7 @@ function paintNodes(model, context) {
         <td>${esc(e.candidates)}</td>
         <td><span class="tag idle">${esc(e.reason || e.policy || '-')}</span></td>
         <td>${esc((e.context || '').slice(0, 44))}</td></tr>`).join(''))}`, context);
-  $('#nd-go').onclick = addNode;
+  bindAsyncButton('nd-go', addNode);
   ns.filter((n) => !context.live || !previous.has(n.name)).forEach((n) => fillNodeMounts(n));
 }
 
@@ -527,68 +567,70 @@ function nodeCard(n) {
         <td><code>${esc(p.node_path)}</code></td>
         <td><code>${esc(p.rclone_remote)}</code></td>
         <td><code>${esc(p.url_prefix)}</code></td>
-        <td><button class="btn sm danger" onclick="delPool('${esc(n.name)}',${i})">删除</button></td>
+        <td><button class="btn sm danger" onclick="delPool(${jsArg(n.name)},${i})">删除</button></td>
       </tr>`).join('')
     : '';
   return card(`⛁ ${n.name}`,
-    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · ${egressValid(n) ? (Number(n.egress_mbps)*1000000/8/1048576).toFixed(2) + ' MiB/s 整网卡出口' : '出口采样不可用'}`,
+    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · 整网卡出口以实测采样为准`,
     `<div class="card-body">
       <div class="toolbar" style="margin-bottom:10px">
         ${health}
+        ${egressCell(n)}
         <span class="muted">${esc(n.base_url)}</span>
         <span style="flex:1"></span>
-        <button class="btn sm" onclick="nodeCtl('${esc(n.name)}','${n.manually_disabled ? 'enable' : 'disable'}')">${n.manually_disabled ? '上线' : '下线'}</button>
-        <button class="btn sm" onclick="editNodeCapacity('${esc(n.name)}',${n.capacity})">改容量</button>
-        <button class="btn sm danger" onclick="deleteNode('${esc(n.name)}')">删除</button>
+        <button class="btn sm" onclick="nodeCtl(${jsArg(n.name)},'${n.manually_disabled ? 'enable' : 'disable'}')">${n.manually_disabled ? '上线' : '下线'}</button>
+        <button class="btn sm" onclick="editNodeCapacity(${jsArg(n.name)},${n.capacity})">改容量</button>
+        <button class="btn sm danger" onclick="deleteNode(${jsArg(n.name)})">删除</button>
       </div>
 
       <div class="sub" style="margin:12px 0 4px"><b>媒体根映射</b> — Emby 里的路径对应节点上的哪个目录</div>
       ${poolRows
-        ? `<table><thead><tr><th>名称</th><th>Emby 路径</th><th>节点路径</th><th>rclone remote</th><th>URL 前缀</th><th></th></tr></thead><tbody>${poolRows}</tbody></table>`
+        ? `<div class="table-scroll"><table><thead><tr><th>名称</th><th>Emby 路径</th><th>节点路径</th><th>rclone remote</th><th>URL 前缀</th><th></th></tr></thead><tbody>${poolRows}</tbody></table></div>`
         : '<div class="empty">未配置媒体根 — 该节点当前无法提供任何文件</div>'}
       <div class="toolbar" style="margin-top:8px">
-        <input id="pl-name-${esc(n.name)}" placeholder="名称 main" style="width:90px">
-        <input id="pl-emby-${esc(n.name)}" placeholder="Emby 路径 /media" style="width:150px">
-        <input id="pl-path-${esc(n.name)}" placeholder="节点路径 /mnt/gdrive/Media" style="flex:1;min-width:170px">
-        <input id="pl-remote-${esc(n.name)}" placeholder="remote rc2:Media" style="width:150px">
-        <input id="pl-url-${esc(n.name)}" placeholder="URL 前缀 /s/main" style="width:120px">
-        <button class="btn" onclick="addPool('${esc(n.name)}')">添加媒体根</button>
+        <input id="pl-name-${esc(n.name)}" aria-label="媒体根名称" placeholder="名称 main" style="width:90px">
+        <input id="pl-emby-${esc(n.name)}" aria-label="Emby 路径" placeholder="Emby 路径 /media" style="width:150px">
+        <input id="pl-path-${esc(n.name)}" aria-label="节点路径" placeholder="节点路径 /mnt/gdrive/Media" style="flex:1;min-width:170px">
+        <input id="pl-remote-${esc(n.name)}" aria-label="rclone remote" placeholder="remote rc2:Media" style="width:150px">
+        <input id="pl-url-${esc(n.name)}" aria-label="URL 前缀" placeholder="URL 前缀 /s/main" style="width:120px">
+        <button class="btn" onclick="addPool(${jsArg(n.name)})">添加媒体根</button>
       </div>
 
       <div class="sub" style="margin:14px 0 4px"><b>存储与安全</b></div>
-      <div class="form-row"><label>缓存目录</label>
+      <div class="form-row"><label for="nc-dir-${esc(n.name)}">缓存目录</label>
         <input id="nc-dir-${esc(n.name)}" value="${esc(n.cache_dir || '')}" placeholder="/var/cache/mediadeck"></div>
-      <div class="form-row"><label>缓存上限</label>
+      <div class="form-row"><label for="nc-size-${esc(n.name)}">缓存上限</label>
         <input id="nc-size-${esc(n.name)}" value="${esc(n.cache_size || '')}" placeholder="2T" style="width:120px">
         <span class="muted">别超过该盘可用空间</span></div>
       <div class="form-row"><label>签名密钥</label>
         <span class="${n.sign_secret_set ? 'tag ok' : 'tag bad'}">${n.sign_secret_set ? '已设置' : '未设置 · 链接永久公开'}</span>
         <span class="muted">${esc(n.sign_secret_masked || '')}</span>
-        <button class="btn sm" onclick="rotateNodeSecret('${esc(n.name)}')">重置密钥</button></div>
-      <div class="form-row"><label>签名参数</label>
+        <button class="btn sm" onclick="rotateNodeSecret(${jsArg(n.name)})">重置密钥</button></div>
+      <div class="form-row"><label for="nc-argd-${esc(n.name)}">签名参数</label>
         <input id="nc-argd-${esc(n.name)}" value="${esc(n.sign_arg_digest || 'md5')}" style="width:90px">
-        <input id="nc-arge-${esc(n.name)}" value="${esc(n.sign_arg_expires || 'expires')}" style="width:110px">
+        <input id="nc-arge-${esc(n.name)}" aria-label="签名有效期参数名" value="${esc(n.sign_arg_expires || 'expires')}" style="width:110px">
         <span class="muted">节点 nginx 用的参数名（已有站点常用 k / e）</span></div>
-      <div class="form-row"><label>链接有效期</label>
+      <div class="form-row"><label for="nc-ttl-${esc(n.name)}">链接有效期</label>
         <input id="nc-ttl-${esc(n.name)}" type="number" min="60" value="${esc(n.sign_ttl_seconds || 21600)}" style="width:120px">
         <span class="muted">秒</span></div>
       ${n.legacy_config ? `<div class="form-row"><label>旧式配置</label>
         <span class="tag warn">该节点仍保存独立 rclone.conf</span>
-        <button class="btn sm" onclick="migrateNodeStorage('${esc(n.name)}')">迁移到全局挂载</button></div>` : ''}
+        <button class="btn sm" onclick="migrateNodeStorage(${jsArg(n.name)})">迁移到全局挂载</button></div>` : ''}
       <div class="form-row"><label>全局挂载</label>
         <div id="nmounts-${esc(n.name)}" data-live-preserve class="muted">加载中…</div></div>
       <div class="form-row"><label>接入状态</label>
         ${n.enrolled ? `<span class="tag ok">已接入</span> <span class="muted">${esc(fmtAgeTs(n.first_seen_at))} · ${esc(n.enrolled_host || n.base_url)}</span>`
                       : '<span class="tag warn">待接入</span>'}</div>
       <div class="toolbar">
-        <button class="btn primary" onclick="saveNodeStorage('${esc(n.name)}')">保存</button>
-        <button class="btn" onclick="showEnroll('${esc(n.name)}')">获取安装命令</button>
+        <button class="btn primary" onclick="saveNodeStorage(${jsArg(n.name)})">保存</button>
+        <button class="btn" onclick="showEnroll(${jsArg(n.name)})">获取安装命令</button>
       </div>
       <div id="enroll-${esc(n.name)}" data-live-preserve style="margin-top:10px"></div>
     </div>`);
 }
 
 async function addPool(name) {
+  const actionContext = pageContext('nodes');
   const g = (k) => ($(`#pl-${k}-${CSS.escape(name)}`) || {}).value || '';
   const node = (state.nodes || []).find((n) => n.name === name);
   if (!node) return;
@@ -601,20 +643,24 @@ async function addPool(name) {
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ pools }) });
-    toast('媒体根已添加'); renderPage('nodes');
+    toast('媒体根已添加'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('添加失败: ' + e.message, 1); }
 }
 async function delPool(name, index) {
+  const actionContext = pageContext('nodes');
   const node = (state.nodes || []).find((n) => n.name === name);
   if (!node) return;
+  const target = (node.pools || [])[index];
+  if (!target || !confirm(`删除节点 ${name} 的媒体根 ${target.name || index + 1}（${target.emby_prefix || ''}）？该路径将不再由此节点提供播放。`)) return;
   const pools = (node.pools || []).filter((_, i) => i !== index);
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ pools }) });
-    toast('已删除'); renderPage('nodes');
+    toast('已删除'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 async function saveNodeStorage(name) {
+  const actionContext = pageContext('nodes');
   const g = (k) => ($(`#nc-${k}-${CSS.escape(name)}`) || {}).value || '';
   const mountIds = [...document.querySelectorAll(`.nmount-${CSS.escape(name)}:checked`)].map((x) => x.value);
   try {
@@ -622,28 +668,31 @@ async function saveNodeStorage(name) {
       cache_dir: g('dir').trim(), cache_size: g('size').trim(),
       sign_arg_digest: g('argd').trim(), sign_arg_expires: g('arge').trim(),
       sign_ttl_seconds: parseInt(g('ttl'), 10) || 21600,
-      mount_ids: mountIds,
+      ...($(`#nmounts-${CSS.escape(name)}`)?.dataset.loaded === 'true' ? {mount_ids: mountIds} : {}),
     }) });
-    toast('已保存'); renderPage('nodes');
+    toast('已保存'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 async function rotateNodeSecret(name) {
+  const actionContext = pageContext('nodes');
   if (!confirm(`重置 ${name} 的签名密钥？\n\n已发出的播放链接会立即失效，且必须重新在节点上执行安装命令。`)) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}/rotate-secret`, { method: 'POST' });
-    toast('密钥已重置，请重新部署该节点'); renderPage('nodes');
+    toast('密钥已重置，请重新部署该节点'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function editRcloneConf(name) {
+  const actionContext = pageContext('nodes');
   const text = prompt(`粘贴该节点使用的 rclone.conf 全文\n（建议为节点单独建 OAuth 身份，避免和主机抢配额）`);
   if (text === null) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ rclone_conf: text }) });
-    toast('已保存'); renderPage('nodes');
+    toast('已保存'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 function stopEnrollPoll() {
+  state.enrollVersion = (state.enrollVersion || 0) + 1;
   if (state.enrollTimer) { clearInterval(state.enrollTimer); state.enrollTimer = null; }
 }
 async function showEnroll(name) {
@@ -651,9 +700,15 @@ async function showEnroll(name) {
   const box = $(`#enroll-${CSS.escape(name)}`);
   if (!box) return;
   box.textContent = '生成中…';
+  const version = state.enrollVersion;
+  const current = () => state.enrollVersion === version && box.isConnected && state.page === 'nodes';
+  let polling = false;
   const paint = async () => {
+    if (!current() || polling) return;
+    polling = true;
     try {
       const r = await api(`/api/nodes/${encodeURIComponent(name)}/enroll`);
+      if (!current()) return;
       const enrolled = r.enrolled;
       box.innerHTML = `
         <div class="toolbar" style="margin-bottom:6px">
@@ -672,12 +727,13 @@ async function showEnroll(name) {
       if (rotBtn) rotBtn.onclick = () => rotateEnroll(name);
       if (enrolled) stopEnrollPoll();
     } catch (e) {
+      if (!current()) return;
       box.innerHTML = `<span class="tag bad">生成失败</span> ${esc(e.message)}`;
       stopEnrollPoll();
-    }
+    } finally { polling = false; }
   };
   await paint();
-  state.enrollTimer = setInterval(paint, 4000);
+  if (current()) state.enrollTimer = setInterval(paint, 4000);
 }
 async function rotateEnroll(name) {
   if (!confirm('重新生成后，旧的安装命令立即失效。继续？')) return;
@@ -688,11 +744,13 @@ async function rotateEnroll(name) {
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function nodeCtl(name, action) {
+  const actionContext = pageContext('nodes');
   try { await api(`/api/nodes/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
-    toast(action === 'disable' ? '已下线' : '已上线'); renderPage('nodes');
+    toast(action === 'disable' ? '已下线' : '已上线'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('操作失败: ' + e.message, 1); }
 }
 async function addNode() {
+  const actionContext = pageContext('nodes');
   const body = {
     name: $('#nd-name').value.trim(),
     capacity: parseFloat($('#nd-capacity').value) || 100,
@@ -701,8 +759,8 @@ async function addNode() {
   try {
     const created = await api('/api/nodes', { method: 'POST', body: JSON.stringify(body) });
     toast('节点已登记');
-    await renderPage('nodes');
-    showEnroll(created.name);
+    await renderPage('nodes', false, false, actionContext);
+    if (actionContext.isCurrent()) showEnroll(created.name);
   } catch (e) { toast('添加失败: ' + e.message, 1); }
 }
 async function fillNodeMounts(n) {
@@ -710,6 +768,7 @@ async function fillNodeMounts(n) {
   if (!box) return;
   try {
     const mounts = await api('/api/storage/mounts');
+    box.dataset.loaded = 'true';
     if (!mounts.length) { box.textContent = '还没有全局挂载，请先到「存储管理」添加'; return; }
     const chosen = new Set(n.mount_ids || []);
     box.innerHTML = mounts.map((m) => `<label style="margin-right:12px">
@@ -720,28 +779,31 @@ async function fillNodeMounts(n) {
   }
 }
 async function migrateNodeStorage(name) {
+  const actionContext = pageContext('nodes');
   if (!confirm(`把 ${name} 的旧式 rclone.conf 标记为已迁移？\n\n独立配置会保留，但之后请改用全局挂载列表。`)) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ mount_ids: [] }) });
     toast('已切换为全局挂载模式（旧配置仍保留，不会静默删除）');
-    renderPage('nodes');
+    renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function editNodeCapacity(name, current) {
+  const actionContext = pageContext('nodes');
   const value = prompt(`设置 ${name} 的并发容量（最多同时承载多少路播放）`, current);
   if (value === null) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ capacity: parseFloat(value) }) });
-    toast('容量已更新'); renderPage('nodes');
+    toast('容量已更新'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('更新失败: ' + e.message, 1); }
 }
 async function deleteNode(name) {
+  const actionContext = pageContext('nodes');
   if (!confirm(`确认删除节点 ${name}？该节点将不再参与播放分发。`)) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    toast('节点已删除'); renderPage('nodes');
+    toast('节点已删除'); renderPage('nodes', false, false, actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 
@@ -863,7 +925,8 @@ function paintTasks(t, context) {
 
 PAGES.settings = async (context = pageContext('settings')) => {
   $('#view').innerHTML = pageLoading();
-  const s = await api('/api/settings').catch(() => null);
+  const s = await api('/api/settings');
+  if (!context.isCurrent()) return;
   if (!s) { $('#view').innerHTML = `<div class="card"><div class="empty">设置加载失败</div></div>`; return; }
   const e = s.emby, d = s.dispatch, p = s.playback, ig = s.integration;
   const tg = await api('/api/settings/telegram').catch(() => ({}));
@@ -875,16 +938,16 @@ PAGES.settings = async (context = pageContext('settings')) => {
       `<div class="card-body"><div class="muted">所有数据均为模拟值，保存的配置不会连接真实服务。</div></div>`) : ''}
     ${card('Emby 对接', connected ? '已连接' : '尚未连接 — 用户管理与媒体库依赖此配置',
       `<div class="card-body">
-        <div class="form-row"><label>服务器地址</label>
+        <div class="form-row"><label for="em-url">服务器地址</label>
           <input id="em-url" value="${esc(e.url)}" placeholder="http://127.0.0.1:8096"></div>
-        <div class="form-row"><label>API Key</label>
+        <div class="form-row"><label for="em-key">API Key</label>
           <input id="em-key" type="password" placeholder="${e.api_key_set ? esc(e.api_key_masked) + '（留空则不修改）' : '在 Emby 后台「高级 → API 密钥」创建'}"></div>
-        <div class="form-row"><label>请求超时</label>
+        <div class="form-row"><label for="em-timeout">请求超时</label>
           <input id="em-timeout" type="number" min="1" max="120" value="${esc(e.timeout_seconds)}" style="width:110px"> <span class="muted">秒</span></div>
-        <div class="form-row"><label>启用集成</label>
+        <div class="form-row"><label for="em-enabled">启用集成</label>
           <input id="em-enabled" type="checkbox" ${e.enabled ? 'checked' : ''}>
           <span class="muted">关闭后面板不再调用 Emby</span></div>
-        <div class="form-row"><label>校验证书</label>
+        <div class="form-row"><label for="em-verify">校验证书</label>
           <input id="em-verify" type="checkbox" ${e.verify_ssl ? 'checked' : ''}>
           <span class="muted">自签名证书请取消勾选</span></div>
         <div class="toolbar">
@@ -900,24 +963,24 @@ PAGES.settings = async (context = pageContext('settings')) => {
           只需在反代里把<b>播放请求</b>转给面板；Web 界面、刮削、图片、转码照旧直接走 Emby。
           <b>面板地址</b>同时也是节点装机时回连取配置的地址，必须填。
         </div>
-        <div class="form-row"><label>面板地址</label>
+        <div class="form-row"><label for="ig-panel">面板地址</label>
           <input id="ig-panel" value="${esc(ig.panel_public_url)}" placeholder="https://deck.example.com"></div>
-        <div class="form-row"><label>Emby 地址</label>
+        <div class="form-row"><label for="ig-emby">Emby 地址</label>
           <input id="ig-emby" value="${esc(ig.emby_public_url)}" placeholder="https://emby.example.com"></div>
         <div class="muted" style="margin:14px 0 8px">
           <b>TMDB</b>（可选）。填了之后成员求片会显示片名、年份和海报；
           不填也能用，求片只会记下 TMDB 编号，上片员照样能处理。
           <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noreferrer">去申请 Key</a>
         </div>
-        <div class="form-row"><label>TMDB Key</label>
+        <div class="form-row"><label for="ig-tmdb">TMDB Key</label>
           <input id="ig-tmdb" type="password" autocomplete="new-password"
             placeholder="${ig.tmdb_api_key_set ? esc(ig.tmdb_api_key_masked) : '未配置'}">
           <span class="muted">${ig.tmdb_api_key_set ? '已配置，留空表示不修改' : '留空表示不启用'}</span></div>
-        <div class="form-row"><label>TMDB 语言</label>
+        <div class="form-row"><label for="ig-tmdb-lang">TMDB 语言</label>
           <input id="ig-tmdb-lang" value="${esc(ig.tmdb_language || 'zh-CN')}" style="width:120px">
           <span class="muted">zh-CN / en-US / ja-JP</span></div>
         <div class="toolbar">
-          <select id="ig-server" style="width:120px">
+          <select id="ig-server" aria-label="反代服务器类型" style="width:120px">
             <option value="caddy">Caddy</option><option value="nginx">nginx</option>
           </select>
           <button class="btn" id="ig-show">生成反代配置</button>
@@ -939,21 +1002,21 @@ PAGES.settings = async (context = pageContext('settings')) => {
         </div>
         <div id="ee-list" data-revision="${esc(ig.external_entries_revision)}">${entryRows(ig.external_entries || [])}</div>
         <div class="form-row" style="margin-top:12px">
-          <label>新增入口</label>
+          <label for="ee-id">新增入口</label>
           <input id="ee-id" placeholder="入口 ID，如 friend-a" style="width:180px">
           <input id="ee-origin" placeholder="https://对方域名" style="flex:1;min-width:180px">
         </div>
         <div class="form-row">
-          <label>推流域名</label>
+          <label for="ee-stream">推流域名</label>
           <input id="ee-stream" placeholder="https://推流域名（留空＝按路径分流，走全部节点）" style="flex:1;min-width:200px">
-          <select id="ee-node" style="width:130px">
+          <select id="ee-node" aria-label="固定节点" style="width:130px">
             <option value="">固定节点…</option>
             ${(s.nodes || []).map((n) => `<option value="${esc(n.name)}">${esc(n.name)}</option>`).join('')}
           </select>
           <button class="btn primary" id="ee-add">登记</button>
         </div>
         <div class="form-row">
-          <label>配置类型</label>
+          <label for="ee-server">配置类型</label>
           <select id="ee-server" style="width:120px">
             <option value="caddy">Caddy</option><option value="nginx">nginx</option>
           </select>
@@ -963,12 +1026,12 @@ PAGES.settings = async (context = pageContext('settings')) => {
       </div>`)}
     ${card('播放调度策略', '决定同一个文件由哪个推流节点承载',
       `<div class="card-body">
-        <div class="form-row"><label>策略</label>
+        <div class="form-row"><label for="dp-policy">策略</label>
           <select id="dp-policy" style="min-width:200px">
             <option value="affinity" ${d.policy === 'affinity' ? 'selected' : ''}>文件亲和（推荐）</option>
             <option value="least-load" ${d.policy === 'least-load' ? 'selected' : ''}>最低负载</option>
           </select></div>
-        <div class="form-row"><label>负载阈值</label>
+        <div class="form-row"><label for="dp-threshold">负载阈值</label>
           <input id="dp-threshold" type="number" step="0.05" min="0.05" max="1" value="${esc(d.load_threshold)}" style="width:110px">
           <span class="muted">节点容量占用率超过此值时改派其他节点（0.8 = 80%）</span></div>
         <div class="muted" style="margin:6px 0 10px">
@@ -984,10 +1047,10 @@ PAGES.settings = async (context = pageContext('settings')) => {
           开启后客户端播放请求经面板按文件亲和分发到节点。
           <b>转码、无法识别的条目、没有能提供该文件的节点时都会自动回退由 Emby 直供</b>，不会因面板出错导致放不了。
         </div>
-        <div class="form-row"><label>启用分流</label>
+        <div class="form-row"><label for="pb-enabled">启用分流</label>
           <input id="pb-enabled" type="checkbox" ${p.enabled ? 'checked' : ''}>
           <span class="muted">已有 ${mapped} 个节点配置了媒体根</span></div>
-        <div class="form-row"><label>仅直播</label>
+        <div class="form-row"><label for="pb-direct">仅直播</label>
           <input id="pb-direct" type="checkbox" ${p.direct_only ? 'checked' : ''}>
           <span class="muted">转码流由 Emby 主机生成，节点上没有，建议保持勾选</span></div>
         <div class="muted" style="margin:0 0 10px">
@@ -995,7 +1058,7 @@ PAGES.settings = async (context = pageContext('settings')) => {
           放在全局会导致一台机器上有的库能放、有的库 404。
         </div>
         <div class="toolbar">
-          <input id="pb-item" placeholder="填入 Emby ItemId 试算" style="width:190px">
+          <input id="pb-item" aria-label="试算 Emby ItemId" placeholder="填入 Emby ItemId 试算" style="width:190px">
           <button class="btn" id="pb-preview">预览路径</button>
           <button class="btn primary" id="pb-save">保存</button>
         </div>
@@ -1023,13 +1086,13 @@ PAGES.settings = async (context = pageContext('settings')) => {
       </div>`)}
     ${card('会员与计费', '流量采样与 Emby 策略下发',
       `<div class="card-body">
-        <div class="form-row"><label>自动下发</label>
+        <div class="form-row"><label for="mb-enforcement">自动下发</label>
           <input id="mb-enforcement" type="checkbox" ${s.membership && s.membership.enforcement_enabled ? 'checked' : ''}>
           <span class="muted">关闭时只观察，不改 Emby 账号策略</span></div>
-        <div class="form-row"><label>采样间隔</label>
+        <div class="form-row"><label for="mb-interval">采样间隔</label>
           <input id="mb-interval" type="number" min="5" max="60" value="${esc((s.membership || {}).sample_interval_seconds || 15)}" style="width:90px">
           <span class="muted">秒（5–60）</span></div>
-        <div class="form-row"><label>保留天数</label>
+        <div class="form-row"><label for="mb-keep">保留天数</label>
           <input id="mb-keep" type="number" min="30" value="${esc((s.membership || {}).retention_days || 400)}" style="width:90px">
           <span class="muted">播放记录与审计</span></div>
         <div class="toolbar"><button class="btn primary" id="mb-save">保存会员设置</button></div>
@@ -1037,12 +1100,12 @@ PAGES.settings = async (context = pageContext('settings')) => {
     ${card('图片缓存', '海报走本地磁盘，减轻 Emby CPU',
       `<div class="card-body">
         <div id="ic-stats" class="muted">读取中…</div>
-        <div class="form-row"><label>启用</label>
+        <div class="form-row"><label for="ic-enabled">启用</label>
           <input id="ic-enabled" type="checkbox" ${(s.image_cache || {}).enabled ? 'checked' : ''}></div>
-        <div class="form-row"><label>容量</label>
+        <div class="form-row"><label for="ic-gib">容量</label>
           <input id="ic-gib" type="number" min="1" value="${esc((s.image_cache || {}).max_gib || 4)}" style="width:90px">
           <span class="muted">GiB</span></div>
-        <div class="form-row"><label>保留</label>
+        <div class="form-row"><label for="ic-age">保留</label>
           <input id="ic-age" type="number" min="1" value="${esc((s.image_cache || {}).max_age_days || 30)}" style="width:90px">
           <span class="muted">天</span></div>
         <div class="toolbar">
@@ -1052,12 +1115,12 @@ PAGES.settings = async (context = pageContext('settings')) => {
         </div>
       </div>`)}`;
   $('#em-save').onclick = saveEmby;
-  $('#em-test').onclick = testEmby;
+  bindAsyncButton('em-test', testEmby);
   $('#dp-save').onclick = saveDispatch;
   $('#pb-save').onclick = savePlayback;
-  $('#pb-preview').onclick = previewPlayback;
+  bindAsyncButton('pb-preview', previewPlayback);
   $('#ig-save').onclick = saveIntegration;
-  $('#ig-show').onclick = showFrontendConfig;
+  bindAsyncButton('ig-show', showFrontendConfig);
   $('#ee-add').onclick = addEntry;
   $('#ee-list').onclick = (ev) => {
     const btn = ev.target.closest('button[data-act]');
@@ -1067,12 +1130,13 @@ PAGES.settings = async (context = pageContext('settings')) => {
   };
   $('#mb-save').onclick = saveMembership;
   $('#ic-save').onclick = saveImageCache;
-  $('#ic-sweep').onclick = sweepImageCache;
-  $('#ic-clear').onclick = clearImageCache;
+  bindAsyncButton('ic-sweep', sweepImageCache);
+  bindAsyncButton('ic-clear', clearImageCache);
   initSystemSettings();
   refreshImageCacheStats();
 };
 async function saveIntegration() {
+  const actionContext = pageContext('settings');
   try {
     /* An empty box means "leave the stored key alone", not "delete it":
        the operator edits a URL far more often than the credential. */
@@ -1083,7 +1147,7 @@ async function saveIntegration() {
       tmdb_api_key: typed === '' ? SECRET_KEEP : typed,
       tmdb_language: $('#ig-tmdb-lang').value.trim() || 'zh-CN',
     }) });
-    toast('接入配置已保存'); renderPage('settings');
+    toast('接入配置已保存'); renderPage('settings', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 /* Registered reverse-proxy entries -------------------------------------- */
@@ -1226,9 +1290,10 @@ function playbackPayload() {
   };
 }
 async function savePlayback() {
+  const actionContext = pageContext('settings');
   try {
     await api('/api/settings/playback', { method: 'PUT', body: JSON.stringify(playbackPayload()) });
-    toast('播放分流配置已保存'); renderPage('settings');
+    toast('播放分流配置已保存'); renderPage('settings', false, false, actionContext);
   } catch (err) { toast('保存失败: ' + err.message, 1); }
 }
 async function previewPlayback() {
@@ -1267,9 +1332,10 @@ function tgStatusText(tg) {
   return st.running ? '运行中' : '已启用，正在连接…';
 }
 async function saveEmby() {
+  const actionContext = pageContext('settings');
   try {
     await api('/api/settings/emby', { method: 'PUT', body: JSON.stringify(embyPayload()) });
-    toast('Emby 配置已保存，立即生效'); renderPage('settings');
+    toast('Emby 配置已保存，立即生效'); renderPage('settings', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 async function testEmby() {
@@ -1295,13 +1361,14 @@ async function saveDispatch() {
 }
 
 async function saveMembership() {
+  const actionContext = pageContext('settings');
   try {
     await api('/api/settings/membership', { method: 'PUT', body: JSON.stringify({
       enforcement_enabled: $('#mb-enforcement').checked,
       sample_interval_seconds: parseInt($('#mb-interval').value, 10),
       retention_days: parseInt($('#mb-keep').value, 10),
     }) });
-    toast('会员设置已保存'); renderPage('settings');
+    toast('会员设置已保存'); renderPage('settings', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 async function refreshImageCacheStats() {
@@ -1333,9 +1400,10 @@ async function clearImageCache() {
   catch (e) { toast('失败: ' + e.message, 1); }
 }
 
-PAGES.update = async () => {
+PAGES.update = async (context = pageContext('update')) => {
   $('#view').innerHTML = pageLoading();
-  const v = await api('/api/update/version').catch(() => ({ version: '?', commit: '?' }));
+  const v = await api('/api/update/version');
+  if (!context.isCurrent()) return;
   $('#view').innerHTML = `
     <div class="stat-grid">
       ${stat('⟳', esc(v.version), '当前版本', 'commit ' + esc(v.commit))}
@@ -1347,13 +1415,15 @@ PAGES.update = async () => {
         <button class="btn primary" id="apl" disabled>一键更新</button>
         <span id="upd-flag" class="muted">尚未检查</span>
       </div></div>`)}`;
-  $('#chk').onclick = checkUpdate;
-  $('#apl').onclick = applyUpdate;
+  bindAsyncButton('chk', checkUpdate);
+  bindAsyncButton('apl', applyUpdate);
   checkUpdate();
 };
 async function checkUpdate() {
+  const context = pageContext('update');
   try {
     const c = await api('/api/update/check');
+    if (!context.isCurrent()) return;
     $('#latest').textContent = c.latest || '-';
     $('#upd-flag').innerHTML = c.update_available
       ? '<span class="tag warn">有新版本可用</span>' : '<span class="tag ok">已是最新</span>';

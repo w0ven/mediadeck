@@ -75,7 +75,9 @@ def test_generated_site_contains_sync_auth_request_not_as_register() -> None:
                         node_path="/srv/media", url_prefix="/s")],
     )
     text = nginx_site(node)
-    assert "auth_request /_mediadeck/register;" in text
+    assert "auth_request /_mediadeck/verify;" in text
+    assert "auth_request /_mediadeck/register;" not in text
+    assert "secure_link_md5" not in text
     assert "set $md_u $arg_u;" in text
     assert "set $md_lip $server_addr;" in text
     assert "set $md_lp $server_port;" in text

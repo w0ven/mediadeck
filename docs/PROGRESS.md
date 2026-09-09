@@ -4,6 +4,64 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — signature v2 security fix, coordinated release candidate
+
+- Closed the audit signing blocker using domain-separated HMAC-SHA256 over a
+  canonical JSON array. All v1 signatures are rejected; URL argument names,
+  domains, media roots and transparent entry routing remain unchanged.
+- Reused the existing standalone node probe for fail-closed verification before
+  optional meterd registration. Signature failures never enter metering's existing
+  failure-tolerant branch. No new daemon, port or third-party dependency is needed.
+- Preserved ordinary proxy passthrough, Range/HEAD, canonical Unicode/encoded
+  paths, rate-zero and existing user tags. Unresolved real callers return to Emby
+  rather than receive anonymous uncapped direct links.
+- Final full suite: **1606 passed, 56 skipped, no XFAIL**, 120.28s. Independent
+  HMAC/v1 vectors and real isolated TLS/nginx/probe/meterd/nft tests verify both
+  argument-name pairs, two media roots, transparent proxying, tampering, version
+  rejection, optional collector failure and unavailable-verifier rejection.
+- Only a remaining old smoke expectation required correction: keep both known
+  users' attribution/rates, then assert origin fallback for the unresolved caller.
+  No production behavior was weakened to satisfy the old anonymous-link assertion.
+- Owner separately approved coordinated panel/node deployment, unchanged proxy
+  entry points and old-link invalidation without a vulnerable grace period.
+  `SIGNING-V2.md` documents the required sequence and no-v1-rollback boundary.
+  This entry records a tested release candidate, not a completed live rollout.
+
+---
+
+## 2026-09-09 — full-source audit and local corrective delivery (release blocked)
+
+- Reviewed all 69 production source files plus project configuration, not only
+  recent diffs. Preserved the approved Hard Glass direction, reserved whitelist
+  identity, business rules and production state. See `AUDIT-2026-09-09.md`.
+- Corrected transactional registration/points/invites/shop flows, asynchronous
+  authority/confirmation races, protected automatic Emby policy application,
+  Web/TG password-cache invalidation and Bot entitlement/re-signing integration.
+- Corrected atomic edge-log cursor/byte ingestion, kernel counter restart/reuse/
+  final-ACK handling, real probe freshness and attribution, effective measured
+  statistics, source selection, image cache cancellation and origin isolation.
+- Hardened persistence, settings and generated shell/systemd/nginx output,
+  notification schedules/retries, cancellation, blocking operator calls and
+  shutdown cleanup. No live installer, updater or production action was executed.
+- Corrected Web stale-response/dirty-draft races, duplicate submissions, plugin
+  payloads, filters, permission precision, inline script parameters and focus/
+  mobile behavior. Reviewed all 25 pages in isolated real Chromium; 18 demo
+  screenshots and detailed source/behavior evidence are retained with the audit.
+- Final integrated regression: **1562 passed, 56 skipped, 1 strict xfailed**
+  in 108.45s. New+existing Web set: 89 passed; both existing real-browser runners
+  report 25 pages and no browser errors. Six JavaScript syntax checks and diff
+  checks pass. Ruff has 40 baseline findings and no new rule/message findings.
+- **Unresolved security/release blocker:** v1 signature field concatenation can
+  be repartitioned to change rate/identity without invalidating the MAC. The
+  strict xfail is a demonstrated remaining vulnerability, not a passed fix.
+  Coordinated versioned panel/node migration and old-link handling require an
+  explicit owner decision. No evidence of actual exploitation was established.
+- This is local delivery only: no push, release, deployment, production data
+  mutation, key rotation or service restart. External live acceptance and the
+  signing migration are not implied by the successful local tests.
+
+---
+
 ## 2026-09-09 — approved Hard Glass UI and fixed whitelist identity (local)
 
 - Implemented the operator-approved dark Hard Glass direction as a shared theme:

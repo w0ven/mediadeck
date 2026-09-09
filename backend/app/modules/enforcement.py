@@ -27,6 +27,7 @@ hundreds of policies and bury real changes in noise.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -114,8 +115,14 @@ class EnforcementService:
         self._db = db
         self._members = members
         self._emby = emby
+        self._apply_lock = asyncio.Lock()
 
     async def reconcile(self, apply: bool = False, user_id: str | None = None,
+                        force: bool = False) -> dict[str, Any]:
+        async with self._apply_lock:
+            return await self._reconcile(apply, user_id, force)
+
+    async def _reconcile(self, apply: bool = False, user_id: str | None = None,
                         force: bool = False) -> dict[str, Any]:
         """Bring Emby in line with member state.
 
@@ -131,13 +138,17 @@ class EnforcementService:
         # minute, and reconcile runs on a timer.
         try:
             emby_users = {u["Id"]: u for u in await self._emby.list_users()}
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"无法读取 Emby 用户列表: {exc}",
+        except Exception:  # noqa: BLE001
+            return {"ok": False, "error": "无法读取 Emby 用户列表",
                     "planned": 0, "applied": 0}
 
         planned, applied, skipped, errors = [], 0, [], []
         for member in rows:
             uid = member["emby_user_id"]
+            member = self._members.get(uid)
+            if not member:
+                skipped.append({'user_id': uid, 'reason': 'unenrolled'})
+                continue
             emby_user = emby_users.get(uid)
             if not emby_user:
                 # The Emby account is gone; flag it rather than deleting the
@@ -168,7 +179,7 @@ class EnforcementService:
             diff = {k: v for k, v in want.items()
                     if _normalise(current.get(k)) != _normalise(v)}
             if not diff and not force:
-                if fp != member.get("applied_fingerprint"):
+                if apply and fp != member.get("applied_fingerprint"):
                     self._db.execute(
                         "UPDATE members SET applied_fingerprint=?,applied_at=? "
                         "WHERE emby_user_id=?", (fp, int(time.time()), uid))
@@ -186,7 +197,12 @@ class EnforcementService:
                 continue
 
             try:
-                ok = await self._emby.apply_policy(uid, want)
+                outcome = await self._emby.apply_member_policy(uid, want)
+                if outcome['status'] == 'skipped_admin':
+                    skipped.append({'user_id': uid, 'reason': 'administrator',
+                                    'username': member.get('username')})
+                    continue  # no remote success record or applied fingerprint
+                ok = outcome['status'] == 'applied'
             except Exception as exc:  # noqa: BLE001
                 ok = False
                 from app.modules.member_ops import redact
@@ -203,7 +219,7 @@ class EnforcementService:
             else:
                 if not any(e.get("user_id") == uid for e in errors):
                     errors.append({"user_id": uid,
-                                   "error": "apply_policy returned false"})
+                                   "error": "apply_member_policy failed"})
                 self._members.audit(
                     "system", "enforce.fail", uid,
                     f"state={member.get('state')}", ok=False)
@@ -238,6 +254,11 @@ class EnforcementService:
             (action[:40], 1 if ok else 0, redact(error), now, now, user_id))
 
     async def enforce_now(self, user_id: str, reason: str = "") -> dict[str, Any]:
+        # A slower old disable must not overwrite a newer renewal/enable.
+        async with self._apply_lock:
+            return await self._enforce_now(user_id, reason)
+
+    async def _enforce_now(self, user_id: str, reason: str = "") -> dict[str, Any]:
         """Apply one member immediately.
 
         Used when quota runs out mid-stream: waiting for the next timed pass
@@ -266,6 +287,10 @@ class EnforcementService:
                     "retryable": True, "error": err,
                     "errors": [{"target": user_id, "stage": "emby",
                                 "error": err, "retryable": True}]}
+        member = self._members.get(user_id)
+        if not member:
+            return {"ok": True, "skipped": "unenrolled", "local_ok": True,
+                    "remote_ok": None, "retryable": False, "error": "", "errors": []}
         if not emby_user:
             self._record_remote(user_id, "enforce", ok=False,
                                 error="emby_user_missing")
@@ -280,13 +305,17 @@ class EnforcementService:
                     "errors": []}
         want = desired_policy(member)
         try:
-            ok = await self._emby.apply_policy(user_id, want)
+            outcome = await self._emby.apply_member_policy(user_id, want)
+            if outcome['status'] == 'skipped_admin':
+                return {'ok': True, 'skipped': 'administrator', 'local_ok': True,
+                        'remote_ok': None, 'retryable': False, 'error': '', 'errors': []}
+            ok = outcome['status'] == 'applied'
         except Exception as exc:  # noqa: BLE001
             ok = False
             from app.modules.member_ops import redact
             err = redact(exc)
         else:
-            err = "" if ok else "apply_policy returned false"
+            err = "" if ok else "apply_member_policy failed"
         if ok:
             self._db.execute(
                 "UPDATE members SET applied_fingerprint=?,applied_at=? "
@@ -317,7 +346,8 @@ class EnforcementService:
         """
         return await self.terminate_users({user_id}, reason)
 
-    async def terminate_users(self, user_ids: set[str], reason: str = "") -> int:
+    async def terminate_users(self, user_ids: set[str], reason: str = "", *,
+                              strict: bool = False) -> int:
         """Stop every active session belonging to any of these members.
 
         One Emby session list, then stop matching rows. Calling terminate per
@@ -330,6 +360,8 @@ class EnforcementService:
         try:
             sessions = await self._emby.active_sessions_raw()
         except Exception:  # noqa: BLE001
+            if strict:
+                raise RuntimeError('播放会话读取未确认') from None
             return 0
         stopped_by: dict[str, int] = {}
         failures_by: dict[str, int] = {}
@@ -340,6 +372,8 @@ class EnforcementService:
             try:
                 if await self._emby.stop_session(session.get("Id"), reason):
                     stopped_by[uid] = stopped_by.get(uid, 0) + 1
+                elif strict:
+                    failures_by[uid] = failures_by.get(uid, 0) + 1
             except Exception:  # noqa: BLE001
                 failures_by[uid] = failures_by.get(uid, 0) + 1
         for uid, count in failures_by.items():
@@ -350,6 +384,8 @@ class EnforcementService:
             self._members.audit(
                 "system", "enforce.terminate", uid,
                 f"{count} session(s): {reason}")
+        if strict and failures_by:
+            raise RuntimeError('部分播放会话终止未确认')
         return sum(stopped_by.values())
 
 

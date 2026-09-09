@@ -178,6 +178,11 @@ class UsageSampler:
                     **state,
                     "user_id": user_id,
                     "username": session.get('UserName') or '',
+                    "remote_ip": session.get("RemoteEndPoint") or "",
+                    "device_id": session.get("DeviceId") or "",
+                    "client": session.get("Client") or "",
+                    "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
+                    "node": "",
                     "transcoded": bool(session.get('TranscodingInfo')),
                     "speed_bps": 0,
                     "item_id": current_item,
@@ -194,6 +199,14 @@ class UsageSampler:
                 }
                 continue
 
+            # Session endpoints/client metadata can change without a new Id.
+            # Sharing observes this tick's network, never a stale first address.
+            state.update({
+                "remote_ip": session.get("RemoteEndPoint") or "",
+                "device_id": session.get("DeviceId") or "",
+                "client": session.get("Client") or "",
+                "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
+            })
             delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
             was_playing = state.get('was_playing', False)
             state["last_ts"] = now
@@ -242,7 +255,7 @@ class UsageSampler:
             # able to abort a billing tick, so failures are swallowed here.
             with contextlib.suppress(Exception):
                 findings = self._sharing.observe(
-                    [s for s in self._live.values() if s.get("seconds", 0) >= 0], now)
+                    [s for s in self._live.values() if s.get("was_playing")], now)
                 for finding in findings:
                     member = self._members.get(finding["user_id"])
                     self._sharing.record(
@@ -257,7 +270,7 @@ class UsageSampler:
         result = {
             "ok": True,
             "sessions": len(seen),
-            "playing": sum(1 for s in self._live.values() if s.get("seconds", 0) >= 0),
+            "playing": sum(1 for s in self._live.values() if s.get("was_playing")),
             "billed_bytes": billed_bytes,
             "users": len(billed_users),
         }

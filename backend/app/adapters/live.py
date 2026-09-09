@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 
+from app.adapters.base import MemberPolicyResult
 from app.core.errors import EmbyNotConfigured, UpstreamError
 
 ConfigProvider = Callable[[], dict[str, Any]]
@@ -49,6 +50,8 @@ async def probe_emby(
         info = response.json()
     except ValueError:
         raise UpstreamError("返回内容不是有效 JSON，请确认地址指向 Emby 服务") from None
+    if not isinstance(info, dict):
+        raise UpstreamError("返回内容不是有效 Emby 信息，请确认地址指向 Emby 服务")
     return {
         "ok": True,
         "server_name": info.get("ServerName"),
@@ -177,25 +180,44 @@ class LiveEmby:
             data = r.json() or {}
         except ValueError:
             return None
+        if not isinstance(data, dict):
+            return None
         user = data.get("User") or {}
-        if not user.get("Id"):
+        if not isinstance(user, dict) or not user.get("Id"):
             return None
         return user
 
     async def apply_policy(self, user_id: str, policy_patch: dict[str, Any]) -> bool:
+        # Explicit Web/operator edits retain their existing semantics.
+        result = await self._apply_policy(user_id, policy_patch, protect_admin=False)
+        return result['status'] == 'applied'
+
+    async def apply_member_policy(self, user_id: str,
+                                  policy_patch: dict[str, Any]) -> MemberPolicyResult:
+        return await self._apply_policy(user_id, policy_patch, protect_admin=True)
+
+    async def _apply_policy(self, user_id: str, policy_patch: dict[str, Any], *,
+                            protect_admin: bool) -> MemberPolicyResult:
         base, headers, timeout, verify = self._conn()
         async with self._client(timeout, verify) as client:
             r = self._check(await client.get(f"{base}/emby/Users/{user_id}", headers=headers))
             if r.status_code != 200:
-                return False
-            policy = r.json().get("Policy") or {}
+                return {'status': 'failed'}
+            body = r.json()
+            if not isinstance(body, dict):
+                return {'status': 'failed'}
+            if protect_admin and not isinstance(body.get('Policy'), dict):
+                return {'status': 'failed'}
+            policy = dict(body.get('Policy') or {})
+            if protect_admin and policy.get('IsAdministrator'):
+                return {'status': 'skipped_admin'}
             policy.update(policy_patch)
             pr = self._check(
                 await client.post(
                     f"{base}/emby/Users/{user_id}/Policy", headers=headers, json=policy
                 )
             )
-            return pr.status_code in (200, 204)
+            return {'status': 'applied' if pr.status_code in (200, 204) else 'failed'}
 
     # -- playback ------------------------------------------------------------
     async def verify_item_access(self, item_id: str, token: str) -> bool:
@@ -225,9 +247,14 @@ class LiveEmby:
         if r.status_code != 200:
             return False
         try:
-            return bool((r.json() or {}).get("Items"))
+            data = r.json()
         except ValueError:
             return False
+        items = data.get("Items") if isinstance(data, dict) else None
+        return isinstance(items, list) and any(
+            isinstance(item, dict) and str(item.get("Id") or "") == str(item_id)
+            for item in items
+        )
 
     async def user_for_token(self, token: str,
                              device_id: str = "") -> str | None:
@@ -575,6 +602,8 @@ class LiveProbe:
                 r = await client.get(probe_url)
                 r.raise_for_status()
                 data = r.json()
+                if not isinstance(data, dict):
+                    raise TypeError("invalid probe document")
                 speeds = data.get("user_speeds")
                 return {
                     "ok": bool(data.get('ok', True)),
@@ -589,6 +618,6 @@ class LiveProbe:
                     "user_speeds_sampled_at": data.get('user_speeds_sampled_at'),
                     "user_speeds_window_seconds": data.get('user_speeds_window_seconds'),
                 }
-        except (httpx.HTTPError, ValueError, KeyError):
+        except (httpx.HTTPError, ValueError, TypeError, OverflowError, KeyError):
             return {"ok": False, "active_streams": 0, "egress_mbps": 0.0,
                     "user_speeds": {}}

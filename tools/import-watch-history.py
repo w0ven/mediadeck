@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import sqlite3
 import sys
+from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from app.modules.stats import StatsService, legacy_watch_fingerprint
 from app.core.db import Database
+from app.modules.stats import WATCH_START_SQL, StatsService, legacy_watch_fingerprint
 
 
 def main() -> None:
@@ -33,13 +33,16 @@ def main() -> None:
         raise SystemExit("export_fingerprint_invalid")
     c = sqlite3.connect("file:" + str(a.database.resolve()) + "?mode=ro", uri=True)
     has_totals = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_totals'").fetchone()
-    cutoff = c.execute("SELECT MIN(first_at) FROM watch_totals" if has_totals else
+    has_samples = c.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='watch_sample_totals'").fetchone()
+    cutoff = c.execute(WATCH_START_SQL if has_samples else
+                       "SELECT MIN(first_at) FROM watch_totals" if has_totals else
                        "SELECT MIN(started_at) FROM play_events").fetchone()[0]
     users = {r[0] for r in c.execute("SELECT emby_user_id FROM members")}
     bad = sum(
         r["emby_user_id"] not in users
         or not 0 <= int(r["seconds"]) <= int(r["ended_at"]) - int(r["started_at"])
-        or not int(r["started_at"]) < int(r["ended_at"]) <= int(cutoff or 0)
+        or not r["event_id"]
+        or not 0 <= int(r["started_at"]) < int(r["ended_at"]) <= int(cutoff or 0)
         for r in rows
     )
     if bad or len({r["event_id"] for r in rows}) != len(rows):

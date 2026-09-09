@@ -2,7 +2,7 @@
    Relies on helpers declared by app.js (api, toast, esc, PAGES, …). */
 
 function q(value) {
-  return encodeURIComponent(String(value == null ? '' : value));
+  return encodeURIComponent(String(value == null ? '' : value)).replace(/'/g, '%27');
 }
 function uq(value) {
   try { return decodeURIComponent(String(value == null ? '' : value)); }
@@ -21,18 +21,20 @@ function billingLabel(t) {
 }
 function fmtExpiry(ts) {
   if (!ts) return '不限期';
-  const d = Math.round((Number(ts) * 1000 - Date.now()) / 86400000);
-  if (d < 0) return '已过期';
+  const remaining = Number(ts) * 1000 - Date.now();
+  const d = Math.round(remaining / 86400000);
+  if (remaining < 0) return '已过期';
   if (d === 0) return '今天到期';
   return d + ' 天后';
 }
 
 /* ---------------- storage ---------------- */
-PAGES.storage = async () => {
+PAGES.storage = async (context = pageContext('storage')) => {
   $('#view').innerHTML = pageLoading();
   const [remotes, mounts] = await Promise.all([
     api('/api/storage/remotes'), api('/api/storage/mounts'),
   ]);
+  if (!context.isCurrent()) return;
   const healthy = mounts.filter((m) => m.status === 'active').length;
   const unhealthy = mounts.length - healthy;
   const usedRemotes = new Set(mounts.map((m) => m.remote));
@@ -45,9 +47,9 @@ PAGES.storage = async () => {
     </div>
     ${card('添加远程账号', '全局一份，节点从挂载列表勾选，不必每台机器再填',
       `<div class="card-body"><div class="toolbar">
-        <input id="sr-name" placeholder="名称 mock-drive" style="width:140px">
-        <input id="sr-type" placeholder="类型 drive / s3 / alias" style="width:160px">
-        <input id="sr-opt" placeholder='选项 JSON 如 {"token":"***"}' style="flex:1;min-width:180px">
+        <input id="sr-name" aria-label="远程账号名称" placeholder="名称 mock-drive" style="width:140px">
+        <input id="sr-type" aria-label="远程账号类型" placeholder="类型 drive / s3 / alias" style="width:160px">
+        <input id="sr-opt" aria-label="远程账号选项 JSON" placeholder='选项 JSON 如 {"token":"***"}' style="flex:1;min-width:180px">
         <button class="btn primary" id="sr-add">添加</button>
       </div></div>`)}
     ${tableCard('远程账号', `${remotes.length} 个`, ['名称', '类型', '状态', '测试', ''],
@@ -62,10 +64,10 @@ PAGES.storage = async () => {
       </tr>`).join(''))}
     ${card('添加挂载点', '目标限制在面板配置的挂载根目录内',
       `<div class="card-body"><div class="toolbar">
-        <input id="sm-name" placeholder="名称 media-main" style="width:140px">
-        <select id="sm-remote">${remotes.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('')}</select>
-        <input id="sm-path" placeholder="远端路径 media" style="width:140px">
-        <input id="sm-target" placeholder="目标 media-main" style="width:140px">
+        <input id="sm-name" aria-label="挂载名称" placeholder="名称 media-main" style="width:140px">
+        <select id="sm-remote" aria-label="远程账号">${remotes.map((r) => `<option value="${esc(r.name)}">${esc(r.name)}</option>`).join('')}</select>
+        <input id="sm-path" aria-label="远端路径" placeholder="远端路径 media" style="width:140px">
+        <input id="sm-target" aria-label="挂载目标" placeholder="目标 media-main" style="width:140px">
         <button class="btn primary" id="sm-add">添加</button>
       </div></div>`)}
     ${tableCard('挂载点', `${mounts.length} 个`, ['名称', '远程', '目标', '状态', ''],
@@ -78,10 +80,11 @@ PAGES.storage = async () => {
           <button class="btn sm" onclick="ctlMount('${q(m.name)}','stop')">停止</button>
           <button class="btn sm danger" onclick="deleteMount('${q(m.name)}')">删除</button>
         </td></tr>`).join(''))}`;
-  $('#sr-add').onclick = addRemote;
-  $('#sm-add').onclick = addMount;
+  bindAsyncButton('sr-add', addRemote);
+  bindAsyncButton('sm-add', addMount);
 };
 async function addRemote() {
+  const actionContext = pageContext('storage');
   let options = {};
   const raw = ($('#sr-opt').value || '').trim();
   if (raw) {
@@ -90,7 +93,7 @@ async function addRemote() {
   try {
     await api('/api/storage/remotes', { method: 'POST', body: JSON.stringify({
       name: $('#sr-name').value.trim(), type: $('#sr-type').value.trim(), options }) });
-    toast('已添加'); renderPage('storage');
+    toast('已添加'); renderPage('storage', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function testRemote(name) {
@@ -107,35 +110,39 @@ async function testRemote(name) {
   }
 }
 async function deleteRemote(name) {
+  const actionContext = pageContext('storage');
   name = uq(name);
   if (!confirm(`删除远程账号 ${name}？仍被挂载引用时会被拒绝。`)) return;
   try {
     await api(`/api/storage/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    toast('已删除'); renderPage('storage');
+    toast('已删除'); renderPage('storage', false, false, actionContext);
   } catch (e) { toast('无法删除: ' + e.message, 1); }
 }
 async function addMount() {
+  const actionContext = pageContext('storage');
   try {
     await api('/api/storage/mounts', { method: 'POST', body: JSON.stringify({
       name: $('#sm-name').value.trim(), remote: $('#sm-remote').value,
       remote_path: $('#sm-path').value.trim(), target: $('#sm-target').value.trim(),
     }) });
-    toast('挂载已添加'); renderPage('storage');
+    toast('挂载已添加'); renderPage('storage', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function ctlMount(name, action) {
+  const actionContext = pageContext('storage');
   name = uq(name);
   try {
     await api(`/api/storage/mounts/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
-    toast(action === 'start' ? '已启动' : '已停止'); renderPage('storage');
+    toast(action === 'start' ? '已启动' : '已停止'); renderPage('storage', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function deleteMount(name) {
+  const actionContext = pageContext('storage');
   name = uq(name);
   if (!confirm(`删除挂载点 ${name}？`)) return;
   try {
     await api(`/api/storage/mounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    toast('已删除'); renderPage('storage');
+    toast('已删除'); renderPage('storage', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 
@@ -197,7 +204,10 @@ function overrideEditor(m, libs) {
   const grp = m.group || {};
   const eff = m.effective || {};
   const sel = new Set(ov.libraries || []);
-  const libOpts = (libs || []).map((l) => {
+  // A failed/partial library listing must not erase saved selections on save.
+  const known = new Set((libs || []).map(l => l.id || l.name));
+  const options = [...(libs || []), ...[...sel].filter(id => !known.has(id)).map(id => ({id, name: `未读取到的媒体库：${id}`}))];
+  const libOpts = options.map((l) => {
     const id = l.id || l.name;
     return `<label style="margin-right:10px"><input type="checkbox" class="ov-lib" value="${esc(id)}" ${sel.has(id) ? 'checked' : ''}> ${esc(l.name)}</label>`;
   }).join('') || '<span class="muted">无法读取媒体库</span>';
@@ -205,7 +215,7 @@ function overrideEditor(m, libs) {
   const mode = ov.libraries_mode || 'inherit';
   const exp = ov.expires_at_override ? localInputFromTs(ov.expires_at_override) : '';
   const expMode = Object.prototype.hasOwnProperty.call(ov, 'expires_at_override') ? (ov.expires_at_override == null ? 'forever' : 'date') : 'inherit';
-  const extraGib = ov.extra_traffic_bytes ? (ov.extra_traffic_bytes / (1024 ** 3)).toFixed(2) : '';
+  const extraGib = ov.extra_traffic_bytes != null ? (ov.extra_traffic_bytes / (1024 ** 3)).toFixed(2) : '';
   return `
     <div class="ov-row"><div class="ov-label">并发</div>
       <div class="ov-src">${ovSource(m, 'max_streams', grp.max_streams || 0, eff.max_streams, (v) => v ? v + ' 路' : '不限')}</div>
@@ -216,7 +226,7 @@ function overrideEditor(m, libs) {
       <div class="ov-src">${ovSource(m, 'bandwidth_limit_kbps', grp.bandwidth_limit_kbps || 0, eff.bandwidth_limit_kbps, fmtKbps)}</div>
       <div class="ov-controls">
         <div style="margin-bottom:4px">${bwPresetButtons('ov-bandwidth')}</div>
-        <input id="ov-bandwidth" aria-label="带宽覆盖" type="number" min="0" step="0.1" placeholder="继承" value="${esc(num('bandwidth_limit_kbps') === '' ? '' : kbpsToMBps(num('bandwidth_limit_kbps')))}" style="width:110px">
+        <input id="ov-bandwidth" aria-label="带宽覆盖" type="number" min="0" step="0.1" placeholder="继承" ${storedNumberAttrs(num('bandwidth_limit_kbps'), num('bandwidth_limit_kbps') === '' ? '' : kbpsToMBps(num('bandwidth_limit_kbps')))} style="width:110px">
         <span class="muted">MB/s，0=不限速。保存后正在播放的人会重签限速。</span>
         <button class="btn sm" type="button" onclick="clearOverrideField('bandwidth_limit_kbps')">还原</button></div></div>
     <div class="ov-row"><div class="ov-label">设备</div>
@@ -234,18 +244,18 @@ function overrideEditor(m, libs) {
     <div class="ov-row"><div class="ov-label">媒体库</div>
       <div class="ov-src">${ovSource(m, 'libraries_mode', 'inherit', eff.libraries_mode || 'inherit')}</div>
       <div class="ov-controls">
-        <select id="ov-libmode">
+        <select id="ov-libmode" aria-label="媒体库覆盖方式">
           ${['inherit', 'replace', 'extend'].map((x) => `<option value="${x}" ${mode === x ? 'selected' : ''}>${esc({ inherit: '继承', replace: '替换', extend: '追加' }[x])}</option>`).join('')}
         </select>
         <button class="btn sm" type="button" onclick="clearOverrideField('libraries')">还原</button>
         <div>${libOpts}</div></div></div>
     <div class="ov-row"><div class="ov-label">到期覆盖</div>
       <div class="ov-src">${ovSource(m, 'expires_at_override', grp.duration_days ? (grp.duration_days + ' 天') : '不限期', (m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at), (v) => typeof v === 'string' ? v : v ? fmtExpiry(v) : '不限期')}</div>
-      <div class="ov-controls"><select id="ov-exp-mode" aria-label="到期覆盖模式">${[['inherit','继承原期限'],['date','指定到期'],['forever','不限期覆盖']].map(([key,label]) => `<option value="${key}" ${expMode === key ? 'selected' : ''}>${label}</option>`).join('')}</select><input id="ov-exp" aria-label="指定到期时间" type="datetime-local" value="${esc(exp)}">
+      <div class="ov-controls"><select id="ov-exp-mode" aria-label="到期覆盖模式">${[['inherit','继承原期限'],['date','指定到期'],['forever','不限期覆盖']].map(([key,label]) => `<option value="${key}" ${expMode === key ? 'selected' : ''}>${label}</option>`).join('')}</select><input id="ov-exp" aria-label="指定到期时间" type="datetime-local" ${storedNumberAttrs(ov.expires_at_override ?? '', exp)}>
         <button class="btn sm" type="button" onclick="clearOverrideField('expires_at_override')">还原</button></div></div>
     <div class="ov-row"><div class="ov-label">额外流量</div>
       <div class="ov-src">${ovSource(m, 'extra_traffic_bytes', 0, (m.overrides || {}).extra_traffic_bytes || 0, fmtBytes)}</div>
-      <div class="ov-controls"><input id="ov-extra" aria-label="额外流量GiB" type="number" min="0" step="0.01" placeholder="0" value="${esc(extraGib)}" style="width:110px">
+      <div class="ov-controls"><input id="ov-extra" aria-label="额外流量GiB" type="number" min="0" step="0.01" placeholder="0" ${storedNumberAttrs(ov.extra_traffic_bytes ?? '', extraGib)} style="width:110px">
         <span class="muted">GiB，叠加在本月额度上，月初清零</span>
         <button class="btn sm" type="button" onclick="clearOverrideField('extra_traffic_bytes')">还原</button></div></div>
     <div class="toolbar" style="margin-top:10px">
@@ -260,7 +270,7 @@ function collectOverridesFromForm(existing) {
   else ov.max_streams = parseInt(streams, 10);
   const bandwidth = ($('#ov-bandwidth') || {}).value;
   if (bandwidth === '' || bandwidth == null) delete ov.bandwidth_limit_kbps;
-  else ov.bandwidth_limit_kbps = mBpsToKbps(parseFloat(bandwidth));
+  else ov.bandwidth_limit_kbps = readStoredNumber($('#ov-bandwidth'), value => mBpsToKbps(parseFloat(value)));
   const devices = ($('#ov-devices') || {}).value;
   if (devices === '' || devices == null) delete ov.max_devices;
   else ov.max_devices = parseInt(devices, 10);
@@ -284,20 +294,22 @@ function collectOverridesFromForm(existing) {
   if (expMode === 'inherit') delete ov.expires_at_override;
   else if (expMode === 'forever') ov.expires_at_override = null;
   else {
-    const stamp = Math.floor(new Date(exp).getTime() / 1000);
+    if (!exp) throw new Error('请选择有效的到期时间');
+    const stamp = readStoredNumber($('#ov-exp'), value => Math.floor(new Date(value).getTime() / 1000));
     if (!Number.isFinite(stamp)) throw new Error('请选择有效的到期时间');
     ov.expires_at_override = stamp;
   }
   const extra = (($('#ov-extra') || {}).value || '').trim();
   if (extra === '') delete ov.extra_traffic_bytes;
-  else ov.extra_traffic_bytes = Math.round(parseFloat(extra) * 1024 ** 3);
+  else ov.extra_traffic_bytes = readStoredNumber($('#ov-extra'), value => Math.round(parseFloat(value) * 1024 ** 3));
   return ov;
 }
 
 /* ---------------- user groups ---------------- */
-PAGES.groups = async () => {
+PAGES.groups = async (context = pageContext('groups')) => {
   $('#view').innerHTML = pageLoading();
   const groups = await api('/api/groups');
+  if (!context.isCurrent()) return;
   state.groups = groups;
   $('#view').innerHTML = `
     <div class="stat-grid">
@@ -318,7 +330,7 @@ PAGES.groups = async () => {
           <button class="btn sm" onclick="editGroup('${q(g.id)}')">编辑</button>
           <button class="btn sm danger" onclick="deleteGroup('${q(g.id)}',${g.member_count || 0})">删除</button>
         </td></tr>`).join(''))}`;
-  $('#group-create').onclick = () => submitGroup('new');
+  bindAsyncButton('group-create', () => submitGroup('new'));
 };
 function groupNeedsTraffic(m) { return m === 'traffic' || m === 'both'; }
 function groupNeedsTime(m) { return m === 'time' || m === 'both'; }
@@ -338,32 +350,41 @@ function groupLimitsText(g) {
   bits.push(g.allow_download ? '下载' : '禁下载');
   return bits.join(' · ');
 }
+// Presentation rounding is not an entitlement change. Keep exact stored units
+// until the operator actually edits that field.
+function storedNumberAttrs(original, displayed) {
+  return `value="${esc(displayed)}" data-original="${esc(original)}" data-initial="${esc(displayed)}"`;
+}
+function readStoredNumber(input, convert) {
+  return input.dataset.original !== undefined && input.value === input.dataset.initial
+    ? Number(input.dataset.original) : convert(input.value);
+}
 function groupForm(prefix, g) {
   const v = (k, d) => esc(g[k] != null ? g[k] : d);
-  const gib = g.traffic_quota_bytes ? (g.traffic_quota_bytes / (1024 ** 3)).toFixed(0) : '1024';
+  const gib = g.traffic_quota_bytes == null ? '1024' : String(g.traffic_quota_bytes / (1024 ** 3));
   const mode = g.billing_mode || 'both';
   return `
-    <div class="form-row"><label>ID</label><input id="${prefix}-id" value="${v('id', '')}" ${prefix === 'new' ? '' : 'disabled'} placeholder="standard"></div>
-    <div class="form-row"><label>名称</label><input id="${prefix}-name" value="${v('name', '')}" placeholder="普通用户"></div>
-    <div class="form-row"><label>描述</label><input id="${prefix}-description" value="${v('description', '')}"></div>
-    <div class="form-row"><label>默认组</label><input id="${prefix}-default" type="checkbox" ${g.is_default ? 'checked' : ''}>
+    <div class="form-row"><label for="${prefix}-id">ID</label><input id="${prefix}-id" value="${v('id', '')}" ${prefix === 'new' ? '' : 'disabled'} placeholder="standard"></div>
+    <div class="form-row"><label for="${prefix}-name">名称</label><input id="${prefix}-name" value="${v('name', '')}" placeholder="普通用户"></div>
+    <div class="form-row"><label for="${prefix}-description">描述</label><input id="${prefix}-description" value="${v('description', '')}"></div>
+    <div class="form-row"><label for="${prefix}-default">默认组</label><input id="${prefix}-default" type="checkbox" ${g.is_default ? 'checked' : ''}>
       <span class="muted">新纳入的账号进这个组</span></div>
     <div class="help">计费方式。时间=有到期日；流量=每月 1 日重置额度；两者可同时启用。</div>
-    <div class="form-row"><label>计费</label>
+    <div class="form-row"><label for="${prefix}-billing">计费</label>
       <select id="${prefix}-billing">
         ${[['both', '时间+流量'], ['traffic', '仅流量'], ['time', '仅时间'], ['none', '不计费']].map(([val, label]) =>
           `<option value="${val}" ${mode === val ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
-    <div class="form-row"><label>默认时长</label><input id="${prefix}-days" type="number" min="0" value="${v('duration_days', 30)}" style="width:100px"><span class="muted">天，计时间的组必填</span></div>
-    <div class="form-row"><label>月流量</label><input id="${prefix}-gib" type="number" min="0" value="${esc(gib)}" style="width:110px"><span class="muted">GiB，计流量的组必填</span></div>
+    <div class="form-row"><label for="${prefix}-days">默认时长</label><input id="${prefix}-days" type="number" min="0" value="${v('duration_days', 30)}" style="width:100px"><span class="muted">天，计时间的组必填</span></div>
+    <div class="form-row"><label for="${prefix}-gib">月流量</label><input id="${prefix}-gib" type="number" min="0" step="any" ${storedNumberAttrs(g.traffic_quota_bytes ?? 1024 ** 4, gib)} style="width:110px"><span class="muted">GiB，计流量的组必填</span></div>
     <div class="help">默认限制。0 = 不限。成员详情里可以逐个覆盖。</div>
-    <div class="form-row"><label>带宽限速</label>
+    <div class="form-row"><label for="${prefix}-bandwidth">带宽限速</label>
       <div><div style="margin-bottom:4px">${bwPresetButtons(prefix + '-bandwidth')}</div>
-      <input id="${prefix}-bandwidth" type="number" min="0" step="0.1" value="${esc(kbpsToMBps(g.bandwidth_limit_kbps || 0))}" style="width:110px">
+      <input id="${prefix}-bandwidth" type="number" min="0" step="0.1" ${storedNumberAttrs(g.bandwidth_limit_kbps || 0, kbpsToMBps(g.bandwidth_limit_kbps || 0))} style="width:110px">
       <span class="muted">MB/s，0 = 不限速。保存后该组未覆盖成员会重签限速。</span></div></div>
-    <div class="form-row"><label>并发</label><input id="${prefix}-streams" type="number" min="0" value="${v('max_streams', 2)}" style="width:90px"><span class="muted">路，0 = 不限</span></div>
-    <div class="form-row"><label>设备</label><input id="${prefix}-devices" type="number" min="0" value="${v('max_devices', 3)}" style="width:90px"><span class="muted">台，0 = 不限</span></div>
-    <div class="form-row"><label>每月求片</label><input id="${prefix}-requests" type="number" min="0" value="${v('request_quota', 3)}" style="width:90px"><span class="muted">次/月，0 = 不限；被拒绝的求片也算一次</span></div>
+    <div class="form-row"><label for="${prefix}-streams">并发</label><input id="${prefix}-streams" type="number" min="0" value="${v('max_streams', 2)}" style="width:90px"><span class="muted">路，0 = 不限</span></div>
+    <div class="form-row"><label for="${prefix}-devices">设备</label><input id="${prefix}-devices" type="number" min="0" value="${v('max_devices', 3)}" style="width:90px"><span class="muted">台，0 = 不限</span></div>
+    <div class="form-row"><label for="${prefix}-requests">每月求片</label><input id="${prefix}-requests" type="number" min="0" value="${v('request_quota', 3)}" style="width:90px"><span class="muted">次/月，0 = 不限；被拒绝的求片也算一次</span></div>
     <div class="form-row"><label>权限</label>
       <label><input id="${prefix}-transcode" type="checkbox" ${g.allow_transcode == null || g.allow_transcode ? 'checked' : ''}> 转码</label>
       <label><input id="${prefix}-download" type="checkbox" ${g.allow_download ? 'checked' : ''}> 下载</label></div>`;
@@ -377,8 +398,8 @@ function groupPayload(prefix) {
     is_default: $(`#${prefix}-default`).checked,
     billing_mode: $(`#${prefix}-billing`).value,
     duration_days: parseInt($(`#${prefix}-days`).value, 10) || 0,
-    traffic_quota_bytes: Math.round(gib * 1024 ** 3),
-    bandwidth_limit_kbps: mBpsToKbps(parseFloat($(`#${prefix}-bandwidth`).value) || 0),
+    traffic_quota_bytes: readStoredNumber($(`#${prefix}-gib`), () => Math.round(gib * 1024 ** 3)),
+    bandwidth_limit_kbps: readStoredNumber($(`#${prefix}-bandwidth`), value => mBpsToKbps(parseFloat(value) || 0)),
     max_streams: parseInt($(`#${prefix}-streams`).value, 10) || 0,
     max_devices: parseInt($(`#${prefix}-devices`).value, 10) || 0,
     request_quota: parseInt($(`#${prefix}-requests`).value, 10) || 0,
@@ -387,17 +408,22 @@ function groupPayload(prefix) {
   };
 }
 async function submitGroup(prefix, existingId) {
+  const actionContext = pageContext('groups');
+  const context = pageContext('groups');
+  const modal = existingId ? $('#modal-root') : null;
   const payload = groupPayload(prefix);
   try {
     if (existingId) {
       if (!confirm('保存后会立即更新该组未单独覆盖限速的成员，正在播放的人会重签限速。')) return;
       await api(`/api/groups/${encodeURIComponent(existingId)}`, { method: 'PUT', body: JSON.stringify(payload) });
-      toast('已保存'); closeModal();
+      toast('已保存');
+      if (!context.isCurrent() || !modal.isConnected) return;
+      closeModal();
     } else {
       await api('/api/groups', { method: 'POST', body: JSON.stringify(payload) });
       toast('已创建');
     }
-    renderPage('groups');
+    if (context.isCurrent()) renderPage('groups', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 function editGroup(id) {
@@ -406,25 +432,34 @@ function editGroup(id) {
   if (!g) return;
   openModal('编辑用户组 ' + g.name, `${groupForm('edit', g)}
     <div class="toolbar">
-      <button class="btn" id="group-preview">预览变更</button>
+      <button class="btn" id="group-preview">当前策略（不含草稿）</button>
       <button class="btn primary" id="group-save">保存</button>
     </div>`, { wide: true });
-  $('#group-save').onclick = () => submitGroup('edit', id);
-  $('#group-preview').onclick = () => enforcementPreview();
+  bindAsyncButton('group-save', () => submitGroup('edit', id));
+  const modal = $('#modal-root');
+  const preview = document.createElement('div');
+  modal.querySelector('.modal-body').append(preview);
+  bindAsyncButton('group-preview', async () => {
+    const r = await api('/api/enforcement/preview');
+    if (!modal.isConnected) return;
+    preview.innerHTML = `<p class="help">当前已保存策略的下发预览；不包含上方未保存的用户组修改，不会写入服务。</p>${tableCard('当前将变更', '', ['用户', '状态', '字段'],
+      (r.changes || []).map(c => `<tr><td>${esc(c.username)}</td><td>${esc(c.state)}</td><td>${esc(Object.keys(c.changes || {}).join(', '))}</td></tr>`).join(''))}`;
+  });
 }
 async function deleteGroup(id, count) {
+  const actionContext = pageContext('groups');
   id = uq(id);
   if (isWhitelistGroup(id)) return toast('白名单是固定系统分组，不能删除', 1);
   if (count) return toast(`仍有 ${count} 个用户在该组，请先迁移`, 1);
   if (!confirm(`删除用户组 ${id}？`)) return;
   try {
     await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
-    toast('已删除'); renderPage('groups');
+    toast('已删除'); renderPage('groups', false, false, actionContext);
   } catch (e) { toast('无法删除: ' + e.message, 1); }
 }
 
 /* ---------------- stats ---------------- */
-PAGES.stats = async () => {
+PAGES.stats = async (context = pageContext('stats')) => {
   const days = state.statsDays || 30;
   $('#view').innerHTML = pageLoading();
   const [overview, daily, users, titles, clients, methods] = await Promise.all([
@@ -433,8 +468,9 @@ PAGES.stats = async () => {
     api(`/api/stats/top-users?days=${days}`),
     api(`/api/stats/top-titles?days=${days}`),
     api(`/api/stats/clients?days=${days}`),
-    api(`/api/stats/play-methods?days=${days}`).catch(() => ({ total: 0, methods: [] })),
+    api(`/api/stats/play-methods?days=${days}`),
   ]);
+  if (!context.isCurrent()) return;
   const trafficNow = (overview.traffic || {}).month_bytes;
   const hoursNow = (overview.traffic || {}).window_hours || 0;
   const playsNow = (overview.playback || {}).window_plays || 0;
@@ -538,11 +574,11 @@ function bindChartHover(daily) {
 }
 
 /* ---------------- audit ---------------- */
-PAGES.audit = async () => {
+PAGES.audit = async (context = pageContext('audit')) => {
   $('#view').innerHTML = pageLoading();
   state.auditOffset = 0;
   state.auditLimit = 50;
-  await loadAudit();
+  await loadAudit(context);
 };
 function auditQuery() {
   const qs = new URLSearchParams();
@@ -556,9 +592,12 @@ function auditQuery() {
   if (subject) qs.set('subject', subject);
   return qs;
 }
-async function loadAudit() {
+async function loadAudit(context = pageContext('audit')) {
+  const generation = state.auditGeneration = (state.auditGeneration || 0) + 1;
+  const current = () => context.isCurrent() && generation === state.auditGeneration;
   try {
     const data = await api('/api/audit?' + auditQuery().toString());
+    if (!current()) return;
     const items = Array.isArray(data) ? data : (data.items || []);
     const total = Array.isArray(data) ? items.length : (data.total || 0);
     const limit = Array.isArray(data) ? items.length : (data.limit || 50);
@@ -568,9 +607,9 @@ async function loadAudit() {
     const pages = Math.max(1, Math.ceil(total / Math.max(limit, 1)));
     $('#view').innerHTML = `
       <div class="filter-bar">
-        <input id="au-actor" placeholder="操作者" style="width:120px" value="${esc((($('#au-actor') || {}).value || ''))}">
-        <input id="au-action" placeholder="动作" style="width:140px" value="${esc((($('#au-action') || {}).value || ''))}">
-        <input id="au-subject" placeholder="对象" style="width:140px" value="${esc((($('#au-subject') || {}).value || ''))}">
+        <input id="au-actor" aria-label="操作者筛选" placeholder="操作者" style="width:120px" value="${esc((($('#au-actor') || {}).value || ''))}">
+        <input id="au-action" aria-label="动作筛选" placeholder="动作" style="width:140px" value="${esc((($('#au-action') || {}).value || ''))}">
+        <input id="au-subject" aria-label="对象筛选" placeholder="对象" style="width:140px" value="${esc((($('#au-subject') || {}).value || ''))}">
         <button class="btn" id="au-go">筛选</button>
       </div>
       <div class="pager">
@@ -588,6 +627,7 @@ async function loadAudit() {
       state.auditOffset = offset + limit; loadAudit();
     };
   } catch (e) {
+    if (!current()) return;
     $('#view').innerHTML = pageError(e);
     if ($('#retry-page')) $('#retry-page').onclick = () => loadAudit();
   }
@@ -610,6 +650,7 @@ function auditRows(rows) {
 PAGES.tgbot = async (context = pageContext('tgbot')) => {
   $('#view').innerHTML = pageLoading();
   const tg = await api('/api/settings/telegram').catch(() => null);
+  if (!context.isCurrent()) return;
   if (!tg) { $('#view').innerHTML = pageError('无法读取 Telegram 配置'); return; }
   if (!context.isCurrent()) return;
   const st = tg.status || {};
@@ -627,10 +668,10 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
     </div>
     ${card('机器人对接', 'Token 仅保存在服务端，不会回传浏览器',
       `<div class="card-body">
-        <div class="form-row"><label>Bot Token</label>
+        <div class="form-row"><label for="tg-token">Bot Token</label>
           <input id="tg-token" type="password" autocomplete="new-password"
             placeholder="${tg.bot_token_set ? esc(tg.bot_token_masked) + '（留空则不修改）' : '向 @BotFather 申请后粘贴'}"></div>
-        <div class="form-row"><label>启用机器人</label>
+        <div class="form-row"><label for="tg-enabled">启用机器人</label>
           <input id="tg-enabled" type="checkbox" ${tg.enabled ? 'checked' : ''}>
           <span class="muted">关闭后停止收发消息，配置保留</span></div>
         <div class="form-row"><label for="tg-embyurl">Emby 地址</label>
@@ -653,25 +694,25 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
       </div>`)}
     ${card('注册开户', '注册需要凭证：预授权、邀请码或卡密，三选一',
       `<div class="card-body">
-        <div class="form-row"><label>管理员预授权</label>
+        <div class="form-row"><label for="tg-ch-admin">管理员预授权</label>
           <input id="tg-ch-admin" type="checkbox" ${tg.allow_admin_grant ? 'checked' : ''}>
           <span class="muted">名单在「邀请与授权」页维护</span></div>
-        <div class="form-row"><label>邀请码</label>
+        <div class="form-row"><label for="tg-ch-invite">邀请码</label>
           <input id="tg-ch-invite" type="checkbox" ${tg.allow_invite ? 'checked' : ''}>
           <span class="muted">老用户用自己的名额生成</span></div>
-        <div class="form-row"><label>卡密</label>
+        <div class="form-row"><label for="tg-ch-redeem">卡密</label>
           <input id="tg-ch-redeem" type="checkbox" ${tg.allow_redeem ? 'checked' : ''}>
           <span class="muted">在「卡密管理」页批量生成</span></div>
         <div class="help">三个通道全部关闭 = 停止注册。卡密自带套餐和天数，下面的赠送天数只对预授权和邀请码生效。</div>
-        <div class="form-row"><label>赠送天数</label>
+        <div class="form-row"><label for="tg-regdays">赠送天数</label>
           <input id="tg-regdays" type="number" min="0" max="3650" value="${esc(tg.register_days)}" style="width:100px">
           <span class="muted">0 = 不限期</span></div>
-        <div class="form-row"><label>注册名额</label>
+        <div class="form-row"><label for="tg-max">注册名额</label>
           <input id="tg-max" type="number" min="0" value="${esc(tg.max_users)}" style="width:100px">
           <span class="muted">0 = 不限；名额是防止链接外泄后被刷爆的唯一闸门</span></div>
-        <div class="form-row"><label>默认用户组</label>
+        <div class="form-row"><label for="tg-group">默认用户组</label>
           <input id="tg-group" value="${esc(tg.default_group_id || '')}" placeholder="留空使用系统默认组"></div>
-        <div class="form-row"><label>要求群组</label>
+        <div class="form-row"><label for="tg-reqgroup">要求群组</label>
           <input id="tg-reqgroup" value="${esc(tg.require_group || '')}" placeholder="@yourgroup 或 -100xxxxxxxxx">
           <span class="muted">留空则不限制</span></div>
         <div class="toolbar"><button class="btn primary" id="tg-save2">保存</button></div>
@@ -689,7 +730,7 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           <span id="tg-rankresult" class="muted"></span>
         </div>
       </div>`)}`;
-  $('#tg-sendrank').onclick = sendRankingsNow;
+  bindAsyncButton('tg-sendrank', sendRankingsNow);
   $('#tg-logo-preview').onclick = () => {
     const box = $('#tg-logo-preview-box'), img = $('#tg-logo-image'), hint = $('#tg-logo-hint');
     try {
@@ -747,15 +788,14 @@ async function sendRankingsNow() {
    masks them and reveals one on demand, while the generation result and the
    CSV export show them in full -- those are the operator handing cards out,
    which is the entire point of minting them. */
-PAGES.redeem = async () => {
+PAGES.redeem = async (context = pageContext('redeem')) => {
   $('#view').innerHTML = pageLoading();
   const [listing, groups] = await Promise.all([
     api('/api/redeem'), api('/api/groups')]);
+  if (!context.isCurrent()) return;
   state.redeemListing = listing;
   const codes = listing.codes || [];
   const st = listing.stats || {};
-  const statusLabel = { unused: ['ok', '未使用'], used: ['idle', '已使用'],
-    revoked: ['bad', '已作废'] };
   $('#view').innerHTML = `
     <div class="stat-grid">
       ${stat('🎟', st.unused || 0, '未使用', '可以发出去的')}
@@ -764,39 +804,47 @@ PAGES.redeem = async () => {
     </div>
     ${card('生成卡密', '每张卡自带套餐和天数，注册时一次性核销',
       `<div class="card-body">
-        <div class="form-row"><label>套餐</label>
+        <div class="form-row"><label for="rd-group">套餐</label>
           <select id="rd-group">${groups.map((g) => `<option value="${esc(g.id)}" ${g.is_default ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></div>
-        <div class="form-row"><label>天数</label>
+        <div class="form-row"><label for="rd-days">天数</label>
           <input id="rd-days" type="number" min="0" max="3650" value="30" style="width:110px">
           <span class="muted">0 = 不限期</span></div>
-        <div class="form-row"><label>数量</label>
+        <div class="form-row"><label for="rd-count">数量</label>
           <input id="rd-count" type="number" min="1" max="500" value="10" style="width:110px">
           <span class="muted">一次最多 500 张</span></div>
-        <div class="form-row"><label>批次名</label>
+        <div class="form-row"><label for="rd-batch">批次名</label>
           <input id="rd-batch" placeholder="留空自动按时间生成"></div>
-        <div class="form-row"><label>备注</label>
+        <div class="form-row"><label for="rd-note">备注</label>
           <input id="rd-note" placeholder="给自己看的说明，例如「双十一活动」"></div>
         <div class="toolbar"><button class="btn primary" id="rd-make">生成</button></div>
         <div id="rd-result"></div>
       </div>`)}
     <div class="filter-bar">
-      <select id="rd-f-status">
+      <select id="rd-f-status" aria-label="卡密状态筛选">
         <option value="">全部状态</option>
         <option value="unused">未使用</option><option value="used">已使用</option>
         <option value="revoked">已作废</option>
       </select>
-      <select id="rd-f-batch"><option value="">全部批次</option>${
+      <select id="rd-f-batch" aria-label="卡密批次筛选"><option value="">全部批次</option>${
   (listing.batches || []).map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join('')}</select>
       <button class="btn primary" id="rd-filter">筛选</button>
       <button class="btn" id="rd-export">导出 CSV</button>
     </div>
-    ${tableCard('卡密', `${codes.length} 张`,
+    <div id="redeem-table">${redeemTable(codes)}</div>`;
+  bindAsyncButton('rd-make', generateRedeem);
+  $('#rd-filter').onclick = () => renderRedeemFiltered();
+  $('#rd-export').onclick = exportRedeem;
+};
+function redeemTable(codes) {
+  const statusLabel = { unused: ['ok', '未使用'], used: ['idle', '已使用'],
+    revoked: ['bad', '已作废'] };
+  return tableCard('卡密', `${codes.length} 张`,
     ['卡密', '套餐', '天数', '状态', '批次', '使用者', '使用时间', ''],
     codes.map((c) => {
       const [cls, label] = statusLabel[c.status] || ['idle', c.status];
       return `<tr>
-        <td><span class="code-cell" title="点击复制完整卡密"
-          onclick="copyRedeem('${q(c.code)}', this)">${esc(c.masked)}</span></td>
+        <td><button type="button" class="code-cell linkish" title="点击复制完整卡密"
+          onclick="copyRedeem('${q(c.code)}', this)">${esc(c.masked)}</button></td>
         <td>${esc(c.group_name || c.group_id)}</td>
         <td>${c.days ? esc(c.days) + ' 天' : '不限期'}</td>
         <td><span class="tag ${cls}">${esc(label)}</span></td>
@@ -804,13 +852,10 @@ PAGES.redeem = async () => {
         <td>${esc(c.used_by || '—')}</td>
         <td>${c.used_at ? esc(fmtAgeTs(c.used_at)) : '<span class="muted">—</span>'}</td>
         <td class="icon-actions">${c.status === 'unused'
-    ? `<button class="btn sm danger" title="作废" onclick="revokeRedeem('${q(c.code)}')">⊘</button>`
+    ? `<button class="btn sm danger" aria-label="作废" title="作废" onclick="revokeRedeem('${q(c.code)}')">⊘</button>`
     : ''}</td></tr>`;
-    }).join(''))}`;
-  $('#rd-make').onclick = generateRedeem;
-  $('#rd-filter').onclick = () => renderRedeemFiltered();
-  $('#rd-export').onclick = exportRedeem;
-};
+    }).join(''));
+}
 function redeemFilterQuery() {
   const params = new URLSearchParams();
   const stv = (($('#rd-f-status') || {}).value || '');
@@ -821,21 +866,14 @@ function redeemFilterQuery() {
 }
 async function renderRedeemFiltered() {
   const qs = redeemFilterQuery();
+  const host = $('#redeem-table');
+  const generation = state.redeemGeneration = (state.redeemGeneration || 0) + 1;
   try {
     const listing = await api('/api/redeem' + (qs ? '?' + qs : ''));
+    if (!host?.isConnected || generation !== state.redeemGeneration) return;
     state.redeemListing = listing;
-    // Re-render through the page so the table, stats and options stay in
-    // agreement rather than drifting apart cell by cell.
-    const keep = { status: ($('#rd-f-status') || {}).value, batch: ($('#rd-f-batch') || {}).value };
-    await PAGES.redeem();
-    if ($('#rd-f-status')) $('#rd-f-status').value = keep.status || '';
-    if ($('#rd-f-batch')) $('#rd-f-batch').value = keep.batch || '';
-    const rows = listing.codes || [];
-    const tbody = document.querySelector('#view table tbody');
-    if (tbody && rows.length === 0) {
-      tbody.innerHTML = '<tr><td colspan="8" class="empty">没有匹配的卡密</td></tr>';
-    }
-  } catch (e) { toast('筛选失败: ' + e.message, 1); }
+    host.innerHTML = redeemTable(listing.codes || []);
+  } catch (e) { if (host?.isConnected) toast('筛选失败: ' + e.message, 1); }
 }
 async function generateRedeem() {
   const body = {
@@ -899,12 +937,13 @@ function exportRedeem() {
   window.open('/api/redeem/export.csv' + (qs ? '?' + qs : ''), '_blank');
 }
 async function revokeRedeem(value) {
+  const actionContext = pageContext('redeem');
   value = uq(value);
   if (!confirm('作废这张卡密？作废后无法再用来注册。')) return;
   try {
     await api(`/api/redeem/${encodeURIComponent(value)}/revoke`, { method: 'POST' });
     toast('已作废');
-    renderPage('redeem', true);
+    renderPage('redeem', true, false, actionContext);
   } catch (e) { toast('作废失败: ' + e.message, 1); }
 }
 
@@ -913,13 +952,26 @@ async function revokeRedeem(value) {
    id, or a member spending an invite slot. Both are shown next to the channel
    switches, because "why can nobody register" is usually one of them being
    off. */
-PAGES.invites = async () => {
+async function loadInviteMembers(context) {
+  const members = [];
+  let page = 1;
+  while (context.isCurrent()) {
+    const listing = await api(`/api/members?page=${page}&page_size=200`);
+    const rows = listing.members || [];
+    members.push(...rows);
+    if (!rows.length || members.length >= listing.total) break;
+    page++;
+  }
+  return {members};
+}
+PAGES.invites = async (context = pageContext('invites')) => {
   $('#view').innerHTML = pageLoading();
   const [grants, listing, tg] = await Promise.all([
-    api('/api/registration/grants').catch(() => []),
-    api('/api/members').catch(() => ({ members: [] })),
-    api('/api/settings/telegram').catch(() => ({})),
+    api('/api/registration/grants'),
+    loadInviteMembers(context),
+    api('/api/settings/telegram'),
   ]);
+  if (!context.isCurrent()) return;
   const members = (listing.members || []).slice()
     .sort((a, b) => String(a.username).localeCompare(String(b.username)));
   state.inviteMembers = members;
@@ -935,13 +987,13 @@ PAGES.invites = async () => {
     </div>
     ${card('注册通道', '三个通道各自独立；全部关闭等于停止注册',
     `<div class="card-body">
-        <div class="form-row"><label>管理员预授权</label>
+        <div class="form-row"><label for="ch-admin">管理员预授权</label>
           <input id="ch-admin" type="checkbox" ${tg.allow_admin_grant ? 'checked' : ''}>
           <span class="muted">名单里的 Telegram 账号无需任何凭证</span></div>
-        <div class="form-row"><label>邀请码</label>
+        <div class="form-row"><label for="ch-invite">邀请码</label>
           <input id="ch-invite" type="checkbox" ${tg.allow_invite ? 'checked' : ''}>
           <span class="muted">老用户用自己的名额生成</span></div>
-        <div class="form-row"><label>卡密</label>
+        <div class="form-row"><label for="ch-redeem">卡密</label>
           <input id="ch-redeem" type="checkbox" ${tg.allow_redeem ? 'checked' : ''}>
           <span class="muted">管理员生成，见「卡密管理」</span></div>
         ${tg.enabled ? '' : '<div class="help">机器人当前未启用，通道开关不会生效。</div>'}
@@ -949,7 +1001,7 @@ PAGES.invites = async () => {
       </div>`)}
     ${card('管理员预授权', '直接放行某个 Telegram 账号，不需要邀请码或卡密',
     `<div class="card-body">
-        <div class="form-row"><label>Telegram ID</label>
+        <div class="form-row"><label for="gr-id">Telegram ID</label>
           <input id="gr-id" placeholder="纯数字，例如 6425070392" style="max-width:260px">
           <button class="btn primary" id="gr-add">授权</button></div>
         <div class="help">让对方发 /start 给机器人，机器人会回显他的数字 ID。</div>
@@ -959,31 +1011,32 @@ PAGES.invites = async () => {
             <td>${g.used_at ? '<span class="tag idle">已使用</span>' : '<span class="tag ok">待使用</span>'}</td>
             <td>${esc(g.granted_by || '—')}</td>
             <td>${esc(fmtAgeTs(g.created_at))}</td>
-            <td class="icon-actions"><button class="btn sm danger" title="撤销"
+            <td class="icon-actions"><button class="btn sm danger" aria-label="撤销" title="撤销"
               onclick="revokeGrant('${q(g.tg_user_id)}')">🗑</button></td>
           </tr>`).join('')}</tbody></table>` : '<div class="empty">还没有预授权的账号</div>'}
       </div>`)}
     ${card('邀请名额', '发放后成员可在机器人里自助生成邀请码',
     `<div class="card-body">
-        <div class="form-row"><label>成员</label>
+        <div class="form-row"><label for="iq-member">成员</label>
           <select id="iq-member" style="max-width:260px">${members.map((m) => `<option value="${esc(m.emby_user_id)}">${esc(m.username)}（${m.invite_quota || 0}）</option>`).join('')}</select>
-          <input id="iq-delta" type="number" value="1" style="width:90px">
+          <input id="iq-delta" aria-label="邀请名额调整数量" type="number" value="1" style="width:90px">
           <button class="btn primary" id="iq-give">发放</button></div>
         <div class="help">填负数即可收回名额；名额不会低于 0。</div>
         ${withQuota.length ? `<table><thead><tr><th>成员</th><th>剩余名额</th><th>已邀请</th><th></th></tr></thead><tbody>
           ${withQuota.map((m) => `<tr>
             <td>${esc(m.username)}</td><td>${esc(m.invite_quota || 0)}</td>
             <td>${esc(m.invitee_count || 0)}</td>
-            <td class="icon-actions"><button class="btn sm" title="查看邀请码"
+            <td class="icon-actions"><button class="btn sm" aria-label="查看邀请码" title="查看邀请码"
               onclick="showMemberInvites('${q(m.emby_user_id)}','${q(m.username)}')">👁</button></td>
           </tr>`).join('')}</tbody></table>` : '<div class="empty">还没有成员持有邀请名额</div>'}
         <div id="iq-detail"></div>
       </div>`)}`;
-  $('#ch-save').onclick = saveChannels;
-  $('#gr-add').onclick = addGrant;
-  $('#iq-give').onclick = giveQuota;
+  bindAsyncButton('ch-save', saveChannels);
+  bindAsyncButton('gr-add', addGrant);
+  bindAsyncButton('iq-give', giveQuota);
 };
 async function saveChannels() {
+  const actionContext = pageContext('invites');
   try {
     await api('/api/settings/telegram', {
       method: 'POST',
@@ -994,30 +1047,33 @@ async function saveChannels() {
         allow_redeem: (($('#ch-redeem') || {}).checked) || false,
       }) });
     toast('已保存');
-    renderPage('invites', true);
+    renderPage('invites', true, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 async function addGrant() {
+  const actionContext = pageContext('invites');
   const value = (($('#gr-id') || {}).value || '').trim();
   if (!value) { toast('请填写 Telegram ID', 1); return; }
   try {
     await api('/api/registration/grants', {
       method: 'POST', body: JSON.stringify({ tg_user_id: value }) });
     toast('已授权');
-    renderPage('invites', true);
+    renderPage('invites', true, false, actionContext);
   } catch (e) { toast('授权失败: ' + e.message, 1); }
 }
 async function revokeGrant(value) {
+  const actionContext = pageContext('invites');
   value = uq(value);
   if (!confirm('撤销这条预授权？对方将无法直接注册。')) return;
   try {
     await api(`/api/registration/grants/${encodeURIComponent(value)}`,
       { method: 'DELETE' });
     toast('已撤销');
-    renderPage('invites', true);
+    renderPage('invites', true, false, actionContext);
   } catch (e) { toast('撤销失败: ' + e.message, 1); }
 }
 async function giveQuota() {
+  const actionContext = pageContext('invites');
   const id = ($('#iq-member') || {}).value || '';
   const delta = Number(($('#iq-delta') || {}).value || 0);
   if (!id || !delta) { toast('请选择成员并填写数量', 1); return; }
@@ -1025,7 +1081,7 @@ async function giveQuota() {
     const r = await api(`/api/members/${encodeURIComponent(id)}/invite-quota`, {
       method: 'POST', body: JSON.stringify({ delta }) });
     toast(`名额已更新为 ${r.quota}`);
-    renderPage('invites', true);
+    renderPage('invites', true, false, actionContext);
   } catch (e) { toast('发放失败: ' + e.message, 1); }
 }
 async function showMemberInvites(id, username) {
@@ -1041,7 +1097,7 @@ async function showMemberInvites(id, username) {
       <div class="help" style="margin-top:16px"><b>${esc(username)}</b> · 剩余名额 ${esc(d.quota)}</div>
       ${codes.length ? `<table><thead><tr><th>邀请码</th><th>剩余次数</th><th>有效期</th><th>状态</th></tr></thead><tbody>
         ${codes.map((c) => `<tr>
-          <td><span class="code-cell" onclick="copyRedeem('${q(c.code)}', this)">${esc(c.masked)}</span></td>
+          <td><button type="button" class="code-cell linkish" onclick="copyRedeem('${q(c.code)}', this)">${esc(c.masked)}</button></td>
           <td>${esc(c.uses_left)}</td>
           <td>${c.expires_at ? esc(fmtExpiry(c.expires_at)) : '永久'}</td>
           <td>${c.revoked ? '<span class="tag bad">已作废</span>'
@@ -1066,7 +1122,7 @@ PAGES.tggroup = async () => {
         </div>
         <div id="ga-result" style="margin-top:12px"></div>
       </div>`)}`;
-  $('#ga-run').onclick = runGroupAudit;
+  bindAsyncButton('ga-run', runGroupAudit);
 };
 async function runGroupAudit() {
   const st = $('#ga-status');
@@ -1107,10 +1163,11 @@ const PLUGIN_CATEGORIES = [
   { id: 'request', label: '求片' },
 ];
 
-PAGES.automation = async () => {
+PAGES.automation = async (context = pageContext('automation')) => {
   $('#view').innerHTML = pageLoading();
   const cards = await api(`/api/plugins?category=${encodeURIComponent(automation.category)}`)
     .catch(() => null);
+  if (!context.isCurrent()) return;
   if (!cards) { $('#view').innerHTML = pageError('无法读取任务列表'); return; }
 
   const tabs = PLUGIN_CATEGORIES.map((c) =>
@@ -1174,7 +1231,7 @@ function pluginField(pid, f, value) {
     input = `<input id="${id}" value="${esc(v)}" style="flex:1;min-width:200px">`;
   }
   return `<div class="form-row">
-    <label>${esc(f.label)}</label>${input}
+    <label for="${esc(id)}">${esc(f.label)}</label>${input}
     ${f.help ? `<span class="muted">${esc(f.help)}</span>` : ''}
   </div>`;
 }
@@ -1225,7 +1282,7 @@ function pluginCard(c) {
           ${busy ? '运行中…' : '立即运行'}</button>
         <button class="btn sm" data-act="history">${open ? '收起历史' : '历史'}</button>
       </div>
-      <div style="margin-top:12px">${pluginLastRun(c)}</div>
+      <div class="plugin-result" style="margin-top:12px">${pluginLastRun(c)}</div>
       <div class="plugin-history" data-history="${esc(c.id)}">
         ${open ? '<div class="muted">读取中…</div>' : ''}
       </div>
@@ -1257,36 +1314,50 @@ function pluginPayload(c) {
   return { enabled: sw ? sw.checked : c.enabled, config };
 }
 
-async function savePlugin(c) {
-  try {
-    await api(`/api/plugins/${encodeURIComponent(c.id)}`, {
-      method: 'POST', body: JSON.stringify(pluginPayload(c)) });
-    toast('已保存');
-    renderPage('automation');
-  } catch (e) { toast('保存失败: ' + e.message, 1); }
-}
-
-async function runPlugin(c) {
-  // Save first: running with what is on screen rather than what was last
-  // stored is what the operator means by "试一次".
+async function savePlugin(c, run = false) {
+  const el = pluginCardEl(c.id);
+  if (!el || automation.busy[c.id]) return;
+  const invalid = [...el.querySelectorAll('input,select,textarea')].find(input => !input.checkValidity());
+  if (invalid) { invalid.reportValidity(); return; }
+  // Capture before any DOM update, and never reload unrelated plugin editors.
+  const payload = pluginPayload(c);
+  const buttons = [...el.querySelectorAll('[data-act="save"],[data-act="run"]')];
   automation.busy[c.id] = true;
-  renderPage('automation');
+  buttons.forEach(button => { button.disabled = true; });
+  configFeedback(el, run ? '正在保存并运行…' : '正在保存…');
   try {
-    await api(`/api/plugins/${encodeURIComponent(c.id)}`, {
-      method: 'POST', body: JSON.stringify(pluginPayload(c)) });
-    const r = await api(`/api/plugins/${encodeURIComponent(c.id)}/run`, { method: 'POST' });
-    toast(r.ok ? '运行完成' : ('运行失败: ' + (r.error || '见卡片结果')), !r.ok);
+    const saved = await api(`/api/plugins/${encodeURIComponent(c.id)}`, {
+      method: 'POST', body: JSON.stringify(payload) });
+    Object.assign(c, saved);
+    if (run) {
+      const r = await api(`/api/plugins/${encodeURIComponent(c.id)}/run`, { method: 'POST' });
+      // The run response includes the recorded result, even on task failure.
+      if (r.card && el.isConnected) el.querySelector('.plugin-result').innerHTML = pluginLastRun(r.card);
+      if (!r.ok) throw new Error(r.error || '任务运行失败，见运行历史');
+    }
+    if (!el.isConnected) return;
+    el.querySelector('.plugin-switch span').textContent = c.enabled ? '已启用' : '已停用';
+    el.querySelector('.card-head .sub').textContent = pluginScheduleText(c);
+    configFeedback(el, run ? '运行完成' : '已保存；其他草稿仍保留。');
+    if (automation.open[c.id] && el.isConnected) loadPluginHistory(c.id);
   } catch (e) {
-    toast('运行失败: ' + e.message, 1);
+    if (el.isConnected) configFeedback(el, (run ? '运行失败：' : '保存失败：') + e.message + '。输入已保留，可重试。', true);
+    toast('操作失败: ' + e.message, 1);
   } finally {
     automation.busy[c.id] = false;
-    renderPage('automation');
+    buttons.forEach(button => { button.disabled = false; });
   }
 }
+function runPlugin(c) { return savePlugin(c, true); }
 
 function togglePluginHistory(c) {
+  const el = pluginCardEl(c.id);
+  if (!el) return;
   automation.open[c.id] = !automation.open[c.id];
-  renderPage('automation');
+  el.querySelector('[data-act="history"]').textContent = automation.open[c.id] ? '收起历史' : '历史';
+  const box = el.querySelector('.plugin-history');
+  box.hidden = !automation.open[c.id];
+  if (automation.open[c.id]) loadPluginHistory(c.id);
 }
 
 async function loadPluginHistory(pid) {
@@ -1315,12 +1386,13 @@ async function loadPluginHistory(pid) {
    refuse, which is why the block log is shown right next to them -- a refusal
    that leaves no trace is indistinguishable from a broken node. */
 
-PAGES.access = async () => {
+PAGES.access = async (context = pageContext('access')) => {
   $('#view').innerHTML = pageLoading();
   const [rules, blocks] = await Promise.all([
     api('/api/access/rules').catch(() => null),
-    api('/api/access/blocks?limit=100').catch(() => []),
+    api('/api/access/blocks?limit=100'),
   ]);
+  if (!context.isCurrent()) return;
   if (!rules) { $('#view').innerHTML = pageError('无法读取访问规则'); return; }
 
   const dayAgo = (Date.now() / 1000) - 86400;
@@ -1338,20 +1410,20 @@ PAGES.access = async () => {
     </div>
     ${card('新增规则', '客户端按 User-Agent 正则匹配；网段填单个地址或 CIDR',
       `<div class="card-body">
-        <div class="form-row"><label>类型</label>
+        <div class="form-row"><label for="ac-kind">类型</label>
           <select id="ac-kind">
             <option value="client">客户端（User-Agent）</option>
             <option value="network">网段（IP / CIDR）</option>
           </select></div>
-        <div class="form-row"><label>内容</label>
+        <div class="form-row"><label for="ac-pattern">内容</label>
           <input id="ac-pattern" placeholder="例如 curl|wget 或 203.0.113.0/24"></div>
-        <div class="form-row"><label>动作</label>
+        <div class="form-row"><label for="ac-action">动作</label>
           <select id="ac-action">
             <option value="deny">拒绝</option>
             <option value="allow">放行</option>
           </select>
           <span class="muted">放行规则优先于拒绝，用来给例外开口子</span></div>
-        <div class="form-row"><label>备注</label>
+        <div class="form-row"><label for="ac-note">备注</label>
           <input id="ac-note" placeholder="写清楚为什么加这条，几个月后你会需要"></div>
         <div class="toolbar"><button class="btn primary" id="ac-add">添加规则</button></div>
       </div>`)}
@@ -1364,7 +1436,7 @@ PAGES.access = async () => {
           ? '<span class="tag bad">拒绝</span>' : '<span class="tag ok">放行</span>'}</td>
         <td class="muted">${esc(r.note || '-')}</td>
         <td><input type="checkbox" ${r.enabled ? 'checked' : ''}
-          onchange="toggleAccessRule(${r.id}, this.checked)"></td>
+          aria-label="启用规则 ${esc(r.pattern)}" onchange="toggleAccessRule(${r.id}, this.checked, this)"></td>
         <td class="row-actions">
           <button class="btn sm danger" onclick="deleteAccessRule(${r.id})">删除</button>
         </td></tr>`).join(''))}
@@ -1376,10 +1448,11 @@ PAGES.access = async () => {
         <td>${esc(b.remote_ip || '-')}</td>
         <td class="muted">${esc(b.reason || '')}${b.rule_id ? ` (#${esc(b.rule_id)})` : ''}</td>
       </tr>`).join(''))}`;
-  $('#ac-add').onclick = addAccessRule;
+  bindAsyncButton('ac-add', addAccessRule);
 };
 
 async function addAccessRule() {
+  const actionContext = pageContext('access');
   const pattern = $('#ac-pattern').value.trim();
   if (!pattern) { toast('请填写规则内容', 1); return; }
   try {
@@ -1387,7 +1460,7 @@ async function addAccessRule() {
       kind: $('#ac-kind').value, pattern, action: $('#ac-action').value,
       note: $('#ac-note').value.trim(), enabled: true }) });
     toast('规则已添加');
-    renderPage('access', true);
+    renderPage('access', true, false, actionContext);
   } catch (e) {
     // A bad regex or netmask comes back as a 400 with the reason; showing it
     // verbatim is the difference between fixing it and guessing.
@@ -1395,27 +1468,33 @@ async function addAccessRule() {
   }
 }
 
-async function toggleAccessRule(id, enabled) {
+async function toggleAccessRule(id, enabled, input) {
+  const actionContext = pageContext('access');
+  if (input?.disabled) return;
+  if (input) input.disabled = true;
   try {
     await api(`/api/access/rules/${id}/enabled`, {
       method: 'POST', body: JSON.stringify({ enabled }) });
     toast(enabled ? '规则已启用' : '规则已停用');
-    renderPage('access');
-  } catch (e) { toast('操作失败: ' + e.message, 1); }
+    renderPage('access', false, false, actionContext);
+  } catch (e) { if (input) input.checked = !enabled; toast('操作失败: ' + e.message, 1); }
+  finally { if (input) input.disabled = false; }
 }
 
 async function deleteAccessRule(id) {
+  const actionContext = pageContext('access');
   if (!confirm('删除这条规则？')) return;
   try {
     await api(`/api/access/rules/${id}`, { method: 'DELETE' });
     toast('规则已删除');
-    renderPage('access', true);
+    renderPage('access', true, false, actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 
-PAGES.sharing = async () => {
+PAGES.sharing = async (context = pageContext('sharing')) => {
   $('#view').innerHTML = pageLoading();
   const data = await api('/api/sharing?limit=50').catch(() => null);
+  if (!context.isCurrent()) return;
   if (!data) { $('#view').innerHTML = pageError('无法读取共享检测结果'); return; }
   const st = data.status || {};
   const items = data.items || [];
@@ -1454,12 +1533,13 @@ function shopUnit(kind) {
   const found = SHOP_KINDS.find((k) => k.id === kind);
   return found ? found.unit : '';
 }
-PAGES.shop = async () => {
+PAGES.shop = async (context = pageContext('shop')) => {
   $('#view').innerHTML = pageLoading();
   const [items, orders] = await Promise.all([
     api('/api/shop/items').catch(() => null),
-    api('/api/shop/orders?limit=50').catch(() => []),
+    api('/api/shop/orders?limit=50'),
   ]);
+  if (!context.isCurrent()) return;
   if (!items) { $('#view').innerHTML = pageError('无法读取商城商品'); return; }
   // Kept so the edit dialog can prefill from the row already on screen
   // rather than re-fetching one item.
@@ -1479,25 +1559,25 @@ PAGES.shop = async () => {
     </div>
     ${card('新增商品', '数量的单位随类型变化：流量按 GB，天数按天，提速按 Mbps，名额按个',
     `<div class="card-body">
-        <div class="form-row"><label>类型</label>
+        <div class="form-row"><label for="sh-kind">类型</label>
           <select id="sh-kind">${SHOP_KINDS.map((k) =>
     `<option value="${esc(k.id)}">${esc(k.label)}</option>`).join('')}</select>
           <span class="muted" id="sh-unit">单位 GB</span></div>
-        <div class="form-row"><label>名称</label>
+        <div class="form-row"><label for="sh-name">名称</label>
           <input id="sh-name" placeholder="例如「流量包 50GB」"></div>
-        <div class="form-row"><label>说明</label>
+        <div class="form-row"><label for="sh-desc">说明</label>
           <input id="sh-desc" placeholder="成员在机器人里看到的一句话说明"></div>
-        <div class="form-row"><label>消耗积分</label>
+        <div class="form-row"><label for="sh-cost">消耗积分</label>
           <input id="sh-cost" type="number" min="1" value="100" style="width:110px"></div>
-        <div class="form-row"><label>数量</label>
+        <div class="form-row"><label for="sh-amount">数量</label>
           <input id="sh-amount" type="number" min="1" value="50" style="width:110px"></div>
-        <div class="form-row"><label>每人限兑</label>
+        <div class="form-row"><label for="sh-limit">每人限兑</label>
           <input id="sh-limit" type="number" min="0" value="0" style="width:110px">
           <span class="muted">0 = 不限</span></div>
-        <div class="form-row"><label>排序</label>
+        <div class="form-row"><label for="sh-sort">排序</label>
           <input id="sh-sort" type="number" value="0" style="width:110px">
           <span class="muted">越小越靠前</span></div>
-        <div class="form-row"><label>立即上架</label>
+        <div class="form-row"><label for="sh-enabled">立即上架</label>
           <input id="sh-enabled" type="checkbox"></div>
         <div class="toolbar"><button class="btn primary" id="sh-add">新增商品</button></div>
       </div>`)}
@@ -1512,10 +1592,10 @@ PAGES.shop = async () => {
         <td>${i.per_user_limit ? esc(i.per_user_limit) + ' 次' : '<span class="muted">不限</span>'}</td>
         <td>${esc(i.sort)}</td>
         <td><input type="checkbox" ${i.enabled ? 'checked' : ''}
-          onchange="toggleShopItem(${Number(i.id)}, this.checked)"></td>
+          aria-label="上架 ${esc(i.name)}" onchange="toggleShopItem(${Number(i.id)}, this.checked)"></td>
         <td class="icon-actions">
-          <button class="btn sm" title="编辑" onclick="editShopItem(${Number(i.id)})">✎</button>
-          <button class="btn sm danger" title="删除"
+          <button class="btn sm" aria-label="编辑" title="编辑" onclick="editShopItem(${Number(i.id)})">✎</button>
+          <button class="btn sm danger" aria-label="删除" title="删除"
             onclick="deleteShopItem(${Number(i.id)}, '${q(i.name)}')">🗑</button>
         </td></tr>`).join('')
       : '<tr><td colspan="8"><div class="empty">还没有商品</div></td></tr>')}
@@ -1534,7 +1614,7 @@ PAGES.shop = async () => {
       if (unit) unit.textContent = '单位 ' + shopUnit(kindSel.value);
     };
   }
-  if ($('#sh-add')) $('#sh-add').onclick = addShopItem;
+  if ($('#sh-add')) bindAsyncButton('sh-add', addShopItem);
 };
 function shopFormPayload() {
   return {
@@ -1549,34 +1629,36 @@ function shopFormPayload() {
   };
 }
 async function addShopItem() {
+  const actionContext = pageContext('shop');
   const payload = shopFormPayload();
   if (!payload.name) { toast('请填写商品名称', 1); return; }
   try {
     await api('/api/shop/items', { method: 'POST', body: JSON.stringify(payload) });
-    toast('已新增商品'); renderPage('shop');
+    toast('已新增商品'); renderPage('shop', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function toggleShopItem(id, enabled) {
+  const actionContext = pageContext('shop');
   try {
     await api(`/api/shop/items/${Number(id)}`, {
       method: 'PUT', body: JSON.stringify({ enabled }) });
-    toast(enabled ? '已上架' : '已下架'); renderPage('shop');
-  } catch (e) { toast('失败: ' + e.message, 1); renderPage('shop'); }
+    toast(enabled ? '已上架' : '已下架'); renderPage('shop', false, false, actionContext);
+  } catch (e) { toast('失败: ' + e.message, 1); renderPage('shop', false, false, actionContext); }
 }
 function editShopItem(id) {
   const item = ((state.shopItems || []).find((i) => i.id === id));
   const row = item || { id };
   openModal('编辑商品', `
-    <div class="form-row"><label>名称</label><input id="se-name" value="${esc(row.name || '')}"></div>
-    <div class="form-row"><label>说明</label><input id="se-desc" value="${esc(row.description || '')}"></div>
-    <div class="form-row"><label>消耗积分</label>
+    <div class="form-row"><label for="se-name">名称</label><input id="se-name" value="${esc(row.name || '')}"></div>
+    <div class="form-row"><label for="se-desc">说明</label><input id="se-desc" value="${esc(row.description || '')}"></div>
+    <div class="form-row"><label for="se-cost">消耗积分</label>
       <input id="se-cost" type="number" min="1" value="${esc(row.cost || 1)}" style="width:110px"></div>
-    <div class="form-row"><label>数量</label>
+    <div class="form-row"><label for="se-amount">数量</label>
       <input id="se-amount" type="number" min="1" value="${esc(row.amount || 1)}" style="width:110px"></div>
-    <div class="form-row"><label>每人限兑</label>
+    <div class="form-row"><label for="se-limit">每人限兑</label>
       <input id="se-limit" type="number" min="0" value="${esc(row.per_user_limit || 0)}" style="width:110px">
       <span class="muted">0 = 不限</span></div>
-    <div class="form-row"><label>排序</label>
+    <div class="form-row"><label for="se-sort">排序</label>
       <input id="se-sort" type="number" value="${esc(row.sort || 0)}" style="width:110px"></div>
     <div class="toolbar"><button class="btn primary" id="se-save">保存</button></div>`);
   const save = $('#se-save');
@@ -1600,10 +1682,11 @@ function editShopItem(id) {
   }
 }
 async function deleteShopItem(id, name) {
+  const actionContext = pageContext('shop');
   if (!confirm(`确定删除商品「${uq(name)}」？已产生的兑换记录会保留。`)) return;
   try {
     await api(`/api/shop/items/${Number(id)}`, { method: 'DELETE' });
-    toast('已删除'); renderPage('shop');
+    toast('已删除'); renderPage('shop', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 
@@ -1643,13 +1726,14 @@ function requestActions(row) {
   }
   return '<span class="muted">—</span>';
 }
-PAGES.requests = async () => {
+PAGES.requests = async (context = pageContext('requests')) => {
   $('#view').innerHTML = pageLoading();
   const query = requestsView.status ? `?status=${encodeURIComponent(requestsView.status)}` : '';
   const [rows, stats] = await Promise.all([
     api(`/api/requests${query}`).catch(() => null),
-    api('/api/requests/stats').catch(() => ({})),
+    api('/api/requests/stats'),
   ]);
+  if (!context.isCurrent()) return;
   if (!rows) { $('#view').innerHTML = pageError('无法读取求片列表'); return; }
 
   const tabs = REQUEST_STATUS_TABS.map((t) =>
@@ -1691,6 +1775,7 @@ function switchRequestStatus(id) {
   renderPage('requests');
 }
 async function claimRequest(id) {
+  const actionContext = pageContext('requests');
   try {
     const r = await api(`/api/requests/${Number(id)}/claim`, {
       method: 'POST', body: JSON.stringify({}) });
@@ -1699,10 +1784,11 @@ async function claimRequest(id) {
     toast(r && r.ok === false
       ? `已被 ${r.claimed_by_name || '其他上片员'} 接单`
       : '已接单');
-    renderPage('requests');
+    renderPage('requests', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function resolveRequest(id, done) {
+  const actionContext = pageContext('requests');
   let note = '';
   if (!done) {
     note = prompt('无法处理的原因？会原样发给求片人。', '暂时找不到片源');
@@ -1714,6 +1800,6 @@ async function resolveRequest(id, done) {
     await api(`/api/requests/${Number(id)}/resolve`, {
       method: 'POST', body: JSON.stringify({ done: !!done, note }) });
     toast(done ? '已标记处理完成' : '已拒绝并通知求片人');
-    renderPage('requests');
+    renderPage('requests', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }

@@ -14,6 +14,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
+from app.core.errors import UpstreamError
+
 
 class JobState(StrEnum):
     QUEUED = "queued"
@@ -69,23 +71,39 @@ class ImportManager:
         source_ref = source_ref.strip()
         if not source_ref:
             raise ValueError("empty source_ref")
+        if self._executor is None:
+            raise ValueError("import executor not configured")
         job = ImportJob(kind=kind, source_ref=source_ref, category=category.strip())
         self._jobs[job.id] = job
-        if self._executor is not None:
+        try:
             self._executor.start(job)
+        except Exception as exc:  # noqa: BLE001 - retain a visible failed job
+            job.state = JobState.FAILED
+            job.error = f"executor start failed: {type(exc).__name__}"
+            job.updated_at = time.time()
         return job
+
+    def _refresh(self, job: ImportJob) -> None:
+        if self._executor is None or job.state in (JobState.DONE, JobState.FAILED):
+            return
+        try:
+            self._executor.refresh(job)
+        except Exception as exc:  # noqa: BLE001 - retry polling on the next read
+            job.error = f"executor refresh failed: {type(exc).__name__}"
+        else:
+            if job.error.startswith("executor refresh failed:"):
+                job.error = ""
 
     def get(self, job_id: str) -> ImportJob | None:
         job = self._jobs.get(job_id)
-        if job and self._executor is not None:
-            self._executor.refresh(job)
+        if job:
+            self._refresh(job)
         return job
 
     def list(self, state: str | None = None, limit: int = 100) -> list[ImportJob]:
         jobs = sorted(self._jobs.values(), key=lambda j: j.created_at, reverse=True)
-        if self._executor is not None:
-            for job in jobs:
-                self._executor.refresh(job)
+        for job in jobs:
+            self._refresh(job)
         if state:
             jobs = [j for j in jobs if j.state.value == state]
         return jobs[: max(1, min(limit, 500))]
@@ -94,11 +112,15 @@ class ImportManager:
         job = self._jobs.get(job_id)
         if not job or job.state in (JobState.DONE, JobState.FAILED):
             return False
+        if self._executor is not None:
+            try:
+                self._executor.cancel(job)
+            except Exception as exc:  # noqa: BLE001 - never claim a failed cancel succeeded
+                job.error = f"executor cancel failed: {type(exc).__name__}"
+                raise UpstreamError(job.error) from None
         job.state = JobState.FAILED
         job.error = "cancelled by operator"
         job.updated_at = time.time()
-        if self._executor is not None:
-            self._executor.cancel(job)
         return True
 
 

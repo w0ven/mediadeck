@@ -45,6 +45,7 @@ counters for reasons nobody could later reconstruct.
 from __future__ import annotations
 
 import gzip
+import math
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -90,14 +91,17 @@ def parse_line(line: str) -> EdgeEvent | None:
         return None
     try:
         ts = float(parts[0])
-    except ValueError:
+        day_key(ts)  # Reject non-finite/out-of-range time before aggregation.
+    except (ValueError, OverflowError, OSError):
         return None
 
     utag = ""
+    labelled_user = False
     status: int | None = None
     positional: list[str] = []
     for token in parts[1:]:
         if token.startswith("u="):
+            labelled_user = True
             utag = token[2:]
         elif token.startswith("s="):
             try:
@@ -109,7 +113,9 @@ def parse_line(line: str) -> EdgeEvent | None:
         else:
             positional.append(token)
 
-    if not utag:
+    if labelled_user and not utag:
+        utag = UNKNOWN_TAG
+    if not labelled_user:
         # Oldest shape: "<msec> <tag> <bytes> <secs>".
         if len(positional) < 3:
             return None
@@ -125,7 +131,7 @@ def parse_line(line: str) -> EdgeEvent | None:
         took = float(positional[1])
     except ValueError:
         return None
-    if not utag or utag == "-" or sent <= 0:
+    if not utag or utag == "-" or sent <= 0 or not math.isfinite(took):
         return None
     return EdgeEvent(ts=ts, utag=utag, bytes_sent=sent,
                      seconds=max(0.0, took), status=status)
@@ -221,32 +227,80 @@ class TrafficLedger:
         it adds. The ledger never stores a computed total that could drift
         from the sum of its rows.
         """
+        with self._db.write() as conn:
+            return self._record(conn, node, buckets, tag_to_user)
+
+    @staticmethod
+    def _record(conn: Any, node: str, buckets: dict, tag_to_user: dict) -> dict[str, int]:
         rows = 0
         total = 0
         unknown = 0
-        with self._db.write() as conn:
-            for (day, utag), values in buckets.items():
-                user_id = tag_to_user.get(utag, "")
-                if not user_id:
-                    unknown += values["bytes"]
-                conn.execute(
-                    "INSERT INTO edge_usage_daily"
-                    "(day,node,utag,emby_user_id,bytes,requests,seconds) "
-                    "VALUES(?,?,?,?,?,?,?) "
-                    "ON CONFLICT(day,node,utag) DO UPDATE SET "
-                    "bytes=bytes+excluded.bytes, "
-                    "requests=requests+excluded.requests, "
-                    "seconds=seconds+excluded.seconds, "
-                    # A tag resolves once its member is known; backfilling it
-                    # here means history becomes attributable retroactively
-                    # instead of staying orphaned forever.
-                    "emby_user_id=CASE WHEN excluded.emby_user_id<>'' "
-                    "THEN excluded.emby_user_id ELSE edge_usage_daily.emby_user_id END",
-                    (day, node, utag, user_id, values["bytes"],
-                     values["requests"], values["seconds"]))
-                rows += 1
-                total += values["bytes"]
+        for (day, utag), values in buckets.items():
+            user_id = tag_to_user.get(utag, "")
+            if not user_id:
+                unknown += values["bytes"]
+            conn.execute(
+                "INSERT INTO edge_usage_daily"
+                "(day,node,utag,emby_user_id,bytes,requests,seconds) "
+                "VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(day,node,utag) DO UPDATE SET "
+                "bytes=bytes+excluded.bytes, "
+                "requests=requests+excluded.requests, "
+                "seconds=seconds+excluded.seconds, "
+                # A tag resolves once its member is known; backfilling it
+                # here means history becomes attributable retroactively
+                # instead of staying orphaned forever.
+                "emby_user_id=CASE WHEN excluded.emby_user_id<>'' "
+                "THEN excluded.emby_user_id ELSE edge_usage_daily.emby_user_id END",
+                (day, node, utag, user_id, values["bytes"],
+                 values["requests"], values["seconds"]))
+            rows += 1
+            total += values["bytes"]
         return {"rows": rows, "bytes": total, "unknown_bytes": unknown}
+
+    def ingest_batch(self, node: str, payload: dict[str, Any],
+                     tag_to_user: dict[str, str]) -> dict[str, int]:
+        """Commit reported bytes and the confirmed cursor in one transaction.
+
+        New reporters send previous_offset for compare-and-swap, including a
+        copytruncate. Legacy single batches still deduplicate by end offset.
+        A plain-file rename keeps its inode and therefore its high watermark.
+        """
+        path = str(payload.get("path") or "")
+        inode, offset = int(payload.get("inode") or 0), int(payload.get("offset") or 0)
+        previous = payload.get("previous_offset")
+        previous = int(previous) if previous is not None else None
+        lines = payload.get("lines")
+        if (not path or inode <= 0 or offset <= 0 or not isinstance(lines, list)
+                or len(lines) > MAX_LINES_PER_INGEST or (previous is not None and previous < 0)):
+            raise ValueError("invalid log batch or cursor")
+        buckets = aggregate(parse_lines(str(line) for line in lines))
+        empty = {"rows": 0, "bytes": 0, "unknown_bytes": 0}
+        with self._db.write() as conn:
+            # Most recently committed cursor wins after a copytruncate; MAX
+            # offset would resurrect the old, longer file's stale position.
+            row = conn.execute(
+                "SELECT offset FROM edge_cursors WHERE node=? AND inode=? "
+                "ORDER BY updated_at DESC, rowid DESC LIMIT 1", (node, inode)).fetchone()
+            current = int(row["offset"]) if row else 0
+            if previous is not None and previous != current:
+                if offset <= current:
+                    return empty
+                raise ValueError("log cursor changed; fetch cursors and retry")
+            if previous is None and offset <= current:
+                return empty
+            if offset == current:
+                return empty
+            result = self._record(conn, node, buckets, tag_to_user)
+            # Synchronise renamed aliases too, so truncation cannot expose an
+            # older position via the previous path.
+            conn.execute("UPDATE edge_cursors SET offset=?,updated_at=? WHERE node=? AND inode=?",
+                         (offset, time.time(), node, inode))
+            conn.execute(
+                "INSERT INTO edge_cursors(node,path,inode,offset,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(node,path) DO UPDATE SET inode=excluded.inode,offset=excluded.offset,"
+                "updated_at=excluded.updated_at", (node, path, inode, offset, time.time()))
+            return result
 
     def relink(self, tag_to_user: dict[str, str]) -> int:
         """Attach newly-known tags to rows ingested before the member existed."""

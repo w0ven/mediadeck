@@ -25,6 +25,7 @@ from __future__ import annotations
 import argparse
 import glob
 import gzip
+import itertools
 import json
 import os
 import sys
@@ -81,10 +82,14 @@ def read_since(path: str, offset: int) -> tuple[list[str], int, int]:
             return [], offset, inode      # already consumed
         try:
             with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
-                lines = fh.read().splitlines()
+                lines = [line.rstrip("\n") for line in itertools.islice(fh, MAX_LINES_PER_PASS + 1)]
         except OSError:
             return [], offset, inode
-        return lines[:MAX_LINES_PER_PASS], stat.st_size, inode
+        if len(lines) > MAX_LINES_PER_PASS:
+            # Legacy gzip cursors mean "consumed whole archive". Never claim
+            # that after shipping only its prefix; leave it unacknowledged.
+            raise ValueError("archive exceeds one batch; explicit offline import required")
+        return lines, stat.st_size, inode
 
     # A file shorter than the cursor was truncated or replaced: it is a
     # different file that happens to share a name, so start over.
@@ -151,8 +156,16 @@ def run_once(panel: str, node: str, creds: str, base_log: str,
         return 1
 
     sent_total = 0
+    archive_problem = False
     for path in log_paths(base_log):
         known = cursors.get(path) or {}
+        try:
+            current_inode = os.stat(path).st_ino
+            aliases = [c for c in cursors.values() if int(c.get("inode") or 0) == current_inode]
+            if aliases:
+                known = max(aliases, key=lambda c: float(c.get("updated_at") or 0))
+        except OSError:
+            continue
         offset = int(known.get("offset") or 0)
         if int(known.get("inode") or 0) and os.path.exists(path):
             try:
@@ -161,37 +174,36 @@ def run_once(panel: str, node: str, creds: str, base_log: str,
             except OSError:
                 offset = 0
 
-        lines, new_offset, inode = read_since(path, offset)
+        try:
+            lines, new_offset, inode = read_since(path, offset)
+        except ValueError:
+            print("archive exceeds supported batch; cursor not advanced", flush=True)
+            archive_problem = True
+            continue
         if not lines:
             continue
 
-        for start in range(0, len(lines), BATCH_LINES):
-            chunk = lines[start:start + BATCH_LINES]
-            final = start + BATCH_LINES >= len(lines)
-            payload = {
-                "path": path,
-                "inode": inode,
-                # The cursor only advances on the last chunk: a failure
-                # part-way through must re-send from the previous confirmed
-                # position rather than skip the remainder.
-                "offset": new_offset if final else offset,
-                "lines": chunk,
-            }
-            try:
-                result = post(panel, node, creds, payload)
-            except (urllib.error.URLError, OSError, ValueError) as exc:
-                print(f"post failed for {path}: {type(exc).__name__}: {exc}",
-                      flush=True)
-                return 1
-            sent_total += len(chunk)
-            if verbose:
-                print(f"{path}: sent {len(chunk)} lines, "
-                      f"accepted={result.get('events')} "
-                      f"bytes={result.get('bytes')}", flush=True)
+        # One bounded read -> one atomic panel commit. Splitting it while
+        # holding the old cursor would re-bill all preceding chunks on retry.
+        payload = {"path": path, "inode": inode, "offset": new_offset,
+                   "previous_offset": offset, "lines": lines}
+        try:
+            result = post(panel, node, creds, payload)
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            print(f"post failed: {type(exc).__name__}", flush=True)
+            return 1
+        if not result.get("ok"):
+            return 1
+        cursors[path] = {"inode": inode, "offset": new_offset, "updated_at": time.time()}
+        sent_total += len(lines)
+        if verbose:
+            print(f"{path}: sent {len(lines)} lines, "
+                  f"accepted={result.get('events')} "
+                  f"bytes={result.get('bytes')}", flush=True)
 
     if verbose:
         print(f"done: {sent_total} lines", flush=True)
-    return 0
+    return 1 if archive_problem else 0
 
 
 def main() -> int:

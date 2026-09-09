@@ -247,7 +247,7 @@ class FlowMeter:
                 "ON CONFLICT(key) DO UPDATE SET value='1'")
             self._db.commit()
             for row in self._db.execute(
-                "SELECT * FROM conns WHERE settled=0"
+                "SELECT * FROM conns WHERE settled=0 AND detached=0"
             ).fetchall():
                 # Re-bind the existing element. Do NOT delete+add: that
                 # would zero a live kernel counter and look like a new
@@ -367,6 +367,7 @@ class FlowMeter:
                     # conn_id on a reused 4-tuple must not inherit the previous
                     # absolute reading (the panel would treat it as a fresh
                     # watermark starting at 0 and credit the leftover).
+                    self._detach_previous(row, now)
                     self._delete_element(row)
                     self._add_element(row)
                 except NftError as exc:
@@ -387,6 +388,32 @@ class FlowMeter:
                 "conn_id": conn_id, "generation": 1, "utag": utag,
                 "family": family,
             }
+
+    def _detach_previous(self, row: dict[str, Any], now: float) -> None:
+        """Freeze the previous tuple owner before replacing its kernel element.
+
+        A detached connection may still need reporting/ack, but must never read
+        or delete the new owner's counter. A failed read refuses registration
+        instead of throwing away a counter that has not been settled.
+        """
+        previous = self._db.execute(
+            "SELECT * FROM conns WHERE local_ip=? AND local_port=? AND remote_ip=? "
+            "AND remote_port=? AND settled=0 AND detached=0",
+            (row["local_ip"], row["local_port"], row["remote_ip"], row["remote_port"]),
+        ).fetchall()
+        if not previous:
+            return
+        key = format_tuple(row["local_ip"], row["local_port"], row["remote_ip"], row["remote_port"])
+        snap = self._read_all().get(key)
+        for old in previous:
+            counter = int(snap["bytes"]) if snap is not None else int(old["last_counter"])
+            packets = int(snap["packets"]) if snap is not None else int(old["last_packets"])
+            generation = int(old["generation"]) + int(counter < int(old["last_counter"]))
+            self._db.execute(
+                "UPDATE conns SET detached=1,closed_at=COALESCE(closed_at,?),"
+                "last_counter=?,last_packets=?,generation=?,final_acked=0 WHERE conn_id=?",
+                (now, counter, packets, generation, old["conn_id"]))
+        self._db.commit()
 
     def mark_closed(self, conn_id: str, at: float | None = None) -> None:
         with self._lock:
@@ -426,6 +453,12 @@ class FlowMeter:
                 key = format_tuple(conn["local_ip"], conn["local_port"],
                                    conn["remote_ip"], conn["remote_port"])
                 if readings is None:
+                    continue
+                if conn["detached"]:
+                    samples.append(self._sample_from(conn, conn["last_counter"],
+                                                     conn["last_packets"],
+                                                     observed_at, closed=True,
+                                                     coverage="retained"))
                     continue
                 snap = readings.get(key)
                 generation = int(conn["generation"])
@@ -498,6 +531,18 @@ class FlowMeter:
     def ack(self, boot_id: str, seq: int) -> int:
         """Panel confirmed this envelope. Recycle closed+acked conns."""
         with self._lock:
+            pending = self._db.execute(
+                "SELECT payload FROM pending WHERE boot_id=? AND seq=? AND acked=0",
+                (boot_id, int(seq))).fetchone()
+            if pending:
+                envelope = json.loads(pending["payload"])
+                for sample in envelope.get("samples", []):
+                    if (envelope.get("nft_ok") and sample.get("closed")
+                            and sample.get("coverage") in ("observed", "retained")):
+                        self._db.execute(
+                            "UPDATE conns SET final_acked=1 WHERE conn_id=? "
+                            "AND generation=? AND last_counter=? AND closed_at IS NOT NULL",
+                            (sample["conn_id"], sample["generation"], sample["counter_bytes"]))
             cur = self._db.execute(
                 "UPDATE pending SET acked=1 WHERE boot_id=? AND seq=? AND acked=0",
                 (boot_id, int(seq)))
@@ -618,12 +663,12 @@ class FlowMeter:
              "ipv6_addr", ".", "inet_service", ";", "counter", ";", "}"],
             ["nft", "add", "chain", "inet", TABLE, "egress",
              "{", "type", "filter", "hook", "output", "priority", "-10", ";", "}"],
-            ["nft", "add", "rule", "inet", TABLE, "egress",
-             "ip", "saddr", ".", "tcp", "sport", ".",
-             "ip", "daddr", ".", "tcp", "dport", f"@{SET_V4}"],
-            ["nft", "add", "rule", "inet", TABLE, "egress",
-             "ip6", "saddr", ".", "tcp", "sport", ".",
-             "ip6", "daddr", ".", "tcp", "dport", f"@{SET_V6}"],
+            # One atomic transaction, touching only our dedicated chain.
+            # `add rule` alone duplicates matches on each restart and counts
+            # each packet N times. Set elements/counters must remain intact.
+            ["nft", (f"flush chain inet {TABLE} egress; "
+             f"add rule inet {TABLE} egress ip saddr . tcp sport . ip daddr . tcp dport @{SET_V4}; "
+             f"add rule inet {TABLE} egress ip6 saddr . tcp sport . ip6 daddr . tcp dport @{SET_V6}")],
         ]
         for cmd in steps:
             code, _out, err = _run(cmd)
@@ -670,10 +715,10 @@ class FlowMeter:
         if unacked:
             return
         rows = self._db.execute(
-            "SELECT * FROM conns WHERE closed_at IS NOT NULL AND settled=0"
+            "SELECT * FROM conns WHERE closed_at IS NOT NULL AND settled=0 AND final_acked=1"
         ).fetchall()
         for row in rows:
-            if self._enabled:
+            if self._enabled and not row["detached"]:
                 self._delete_element(dict(row))
             self._db.execute(
                 "UPDATE conns SET settled=1 WHERE conn_id=?", (row["conn_id"],))
@@ -746,6 +791,9 @@ class FlowMeter:
         if "nginx_cid" not in cols:
             self._db.execute(
                 "ALTER TABLE conns ADD COLUMN nginx_cid TEXT NOT NULL DEFAULT ''")
+        for column in ("detached", "final_acked"):
+            if column not in cols:
+                self._db.execute(f"ALTER TABLE conns ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0")
         self._db.commit()
 
     def _tuple_still_live(self, local_ip: str, local_port: int,

@@ -486,9 +486,10 @@ class MemberService:
 
     # -- write ---------------------------------------------------------------
     def upsert(self, user_id: str, username: str, payload: dict[str, Any],
-               actor: str = "system") -> dict[str, Any]:
+               actor: str = "system", *, conn: Any = None) -> dict[str, Any]:
         if not user_id:
             raise ConfigError("缺少 Emby 用户 ID")
+        execute = conn.execute if conn is not None else self._db.execute
         now = int(time.time())
         existing = self._db.one(
             "SELECT * FROM members WHERE emby_user_id=?", (user_id,))
@@ -600,7 +601,7 @@ class MemberService:
             now,
         )
         if existing:
-            self._db.execute(
+            execute(
                 "UPDATE members SET username=?,group_id=?,roles=?,status=?,"
                 "expires_at=?,traffic_used_bytes=?,traffic_period_start=?,"
                 "note=?,contact=?,updated_at=?,overrides_json=? WHERE emby_user_id=?",
@@ -614,9 +615,9 @@ class MemberService:
                 {"group_id": group_id, "roles": roles_csv,
                  "status": status, "expires_at": expires_at,
                  "expires_at_override": overrides_after.get('expires_at_override')},
-            )))
+            )), conn=conn)
         else:
-            self._db.execute(
+            execute(
                 "INSERT INTO members (username,group_id,roles,status,expires_at,"
                 "traffic_used_bytes,traffic_period_start,note,contact,updated_at,"
                 "emby_user_id,created_at,overrides_json,register_via,inviter_id,"
@@ -628,7 +629,7 @@ class MemberService:
                 "expires_at": {"from": None, "to": expires_at},
                 "register_via": {"from": None, "to": register_via},
                 "inviter_id": {"from": None, "to": inviter_id},
-            }))
+            }), conn=conn)
         return self.get(user_id)  # type: ignore[return-value]
 
     def enroll_defaults(self, emby_users: list[dict[str, Any]],
@@ -814,32 +815,33 @@ class MemberService:
         silently moving a link would leave the old member believing they still
         get notifications.
         """
-        member = self.get(user_id)
-        if not member:
-            raise KeyError(user_id)
-        tg_user_id = str(tg_user_id or "").strip()
-        if not tg_user_id:
-            raise ValueError("tg_user_id 不能为空")
+        with self._db.write() as conn:
+            member = self.get(user_id)
+            if not member:
+                raise KeyError(user_id)
+            tg_user_id = str(tg_user_id or "").strip()
+            if not tg_user_id:
+                raise ValueError("tg_user_id 不能为空")
 
-        previous = self.find_by_telegram(tg_user_id)
-        now = int(time.time())
-        if previous and previous["emby_user_id"] != user_id:
-            self._db.execute(
-                "UPDATE members SET tg_user_id='',tg_username='',tg_bound_at=NULL,"
+            previous = self.find_by_telegram(tg_user_id)
+            now = int(time.time())
+            if previous and previous["emby_user_id"] != user_id:
+                conn.execute(
+                    "UPDATE members SET tg_user_id='',tg_username='',tg_bound_at=NULL,"
+                    "updated_at=? WHERE emby_user_id=?",
+                    (now, previous["emby_user_id"]))
+                self.audit(actor, "member.telegram.unbind", previous["emby_user_id"],
+                           "chat rebound to another member", conn=conn)
+
+            conn.execute(
+                "UPDATE members SET tg_user_id=?,tg_username=?,tg_bound_at=?,"
                 "updated_at=? WHERE emby_user_id=?",
-                (now, previous["emby_user_id"]))
-            self.audit(actor, "member.telegram.unbind", previous["emby_user_id"],
-                       "chat rebound to another member")
-
-        self._db.execute(
-            "UPDATE members SET tg_user_id=?,tg_username=?,tg_bound_at=?,"
-            "updated_at=? WHERE emby_user_id=?",
-            (tg_user_id, str(tg_username or "").strip(), now, now, user_id))
-        # The numeric chat id is an identifier, not a secret, but there is no
-        # reason to spill it into the log either.
-        self.audit(actor, "member.telegram.bind", user_id,
-                   f"linked to @{tg_username}" if tg_username else "linked")
-        return self.get(user_id)  # type: ignore[return-value]
+                (tg_user_id, str(tg_username or "").strip(), now, now, user_id))
+            # The numeric chat id is an identifier, not a secret, but there is no
+            # reason to spill it into the log either.
+            self.audit(actor, "member.telegram.bind", user_id,
+                       f"linked to @{tg_username}" if tg_username else "linked", conn=conn)
+            return self.get(user_id)  # type: ignore[return-value]
 
     def unbind_telegram(self, user_id: str, actor: str = "operator") -> dict[str, Any]:
         member = self.get(user_id)
@@ -1207,8 +1209,9 @@ class MemberService:
 
     # -- audit ---------------------------------------------------------------
     def audit(self, actor: str, action: str, subject: str = "",
-              detail: str = "", ok: bool = True) -> None:
-        self._db.execute(
+              detail: str = "", ok: bool = True, *, conn: Any = None) -> None:
+        execute = conn.execute if conn is not None else self._db.execute
+        execute(
             "INSERT INTO audit_log (ts,actor,action,subject,detail,ok) "
             "VALUES (?,?,?,?,?,?)",
             (int(time.time()), actor[:60], action[:60], subject[:80],

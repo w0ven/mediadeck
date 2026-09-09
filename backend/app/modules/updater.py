@@ -14,7 +14,9 @@ restart does not kill the updater mid-flight.
 from __future__ import annotations
 
 import re
+import shlex
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -22,12 +24,18 @@ SEMVER_TAG = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
 def _run(args: list[str], cwd: Path, timeout: int = 30) -> tuple[int, str]:
-    proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout, check=False)
+    try:
+        proc = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return 1, "process unavailable or timed out"
     return proc.returncode, (proc.stdout or proc.stderr).strip()
 
 
 def semver_key(tag: str) -> tuple[int, int, int] | None:
-    match = SEMVER_TAG.match(tag.strip())
+    if not isinstance(tag, str):
+        return None
+    match = SEMVER_TAG.fullmatch(tag)
     if not match:
         return None
     return tuple(int(g) for g in match.groups())  # type: ignore[return-value]
@@ -45,6 +53,8 @@ class Updater:
     def __init__(self, repo_root: str, service_name: str = "mediadeck") -> None:
         self._root = Path(repo_root)
         self._service = service_name
+        self._update_lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
 
     def version(self) -> dict[str, Any]:
         code, desc = _run(["git", "describe", "--tags", "--always", "--dirty"], self._root)
@@ -71,6 +81,12 @@ class Updater:
         }
 
     def update(self, target: str | None = None) -> dict[str, Any]:
+        with self._update_lock:
+            return self._update(target)
+
+    def _update(self, target: str | None) -> dict[str, Any]:
+        if self._process is not None and self._process.poll() is None:
+            return {"started": False, "error": "update already running"}
         info = self.check()
         if not info.get("ok"):
             return {"started": False, "error": info.get("error", "check failed")}
@@ -80,15 +96,21 @@ class Updater:
         if not info.get("update_available") and target is None:
             return {"started": False, "error": "already up to date",
                     "current": info.get("current")}
+        code, dirty = _run(["git", "status", "--porcelain"], self._root)
+        if code != 0 or dirty:
+            return {"started": False, "error": "working tree is not clean or unavailable"}
         script = (
-            f"cd {self._root} && git fetch --tags origin && "
-            f"git checkout --force {tag} && "
+            f"cd {shlex.quote(str(self._root))} && git fetch --tags origin && "
+            f"git checkout {shlex.quote(tag)} && "
             f"cd backend && .venv/bin/pip install -q -e . && "
-            f"systemctl restart {self._service}"
+            f"systemctl restart {shlex.quote(self._service)}"
         )
-        subprocess.Popen(["/bin/sh", "-c", f"sleep 1 && {script}"],
-                         start_new_session=True,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        try:
+            self._process = subprocess.Popen(
+                ["/bin/sh", "-c", f"sleep 1 && {script}"], start_new_session=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            return {"started": False, "error": "cannot start update helper"}
         return {"started": True, "target": tag}
 
 

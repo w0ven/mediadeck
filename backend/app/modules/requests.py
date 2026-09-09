@@ -200,7 +200,7 @@ class RequestService:
     # -- create --------------------------------------------------------------
 
     async def create(self, user_id: str, media_type: str, tmdb_id: int,
-                     note: str = "") -> dict[str, Any]:
+                     note: str = "", *, confirmed_type: bool = False) -> dict[str, Any]:
         """Open a request, charging one slot against the member's month.
 
         TMDB enrichment happens *before* the transaction and is allowed to
@@ -234,7 +234,11 @@ class RequestService:
         meta: dict[str, Any] | None = None
         if self._tmdb is not None:
             resolved_type, meta = await self._tmdb.resolve(media_type, tmdb_id)
-            if meta is not None:
+            if confirmed_type and resolved_type != media_type and media_type in MEDIA_TYPES:
+                # The bot already confirmed this type. Metadata is optional;
+                # a miss must never substitute another work after confirmation.
+                meta = None
+            elif meta is not None:
                 media_type = resolved_type
         if media_type not in MEDIA_TYPES:
             media_type = "movie"
@@ -246,6 +250,13 @@ class RequestService:
 
         try:
             with self._db.write() as conn:
+                # Enrichment yielded to other requests and account edits.
+                member = self._members.get(user_id) if self._members else None
+                if not member:
+                    raise RequestError('账号不存在')
+                quota = self.quota_for(member)
+                if quota and self.used(user_id, now) >= quota:
+                    raise RequestError(f'本月求片次数已用完（每月 {quota} 次）')
                 cur = conn.execute(
                     "INSERT INTO media_requests"
                     "(emby_user_id,username,tg_user_id,tmdb_id,media_type,title,"

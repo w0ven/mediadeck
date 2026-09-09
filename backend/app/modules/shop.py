@@ -24,6 +24,8 @@ import json
 import time
 from typing import Any
 
+from app.modules.groups import needs_traffic
+
 GB = 1024 ** 3
 KBPS_PER_MBPS = 1024
 
@@ -236,6 +238,13 @@ class ShopService:
         the reward before it is granted, and any later failure rolls the debit
         back with everything else.
         """
+        # Hold the same DB lock for validation and fulfilment: concurrent
+        # orders must see the preceding order's limits and personal overlay.
+        with self._db.write() as conn:
+            return self._redeem(conn, user_id, item_id, actor)
+
+    def _redeem(self, conn: Any, user_id: str, item_id: int,
+                actor: str) -> dict[str, Any]:
         user_id = str(user_id or "")
         item = self.get(item_id)
         if not item:
@@ -264,20 +273,17 @@ class ShopService:
                 raise ShopError("你的账号已是不限速，无需兑换提速")
 
         now = int(time.time())
-        with self._db.write() as conn:
-            balance = self._points._apply(
-                conn, user_id, -cost, "shop.redeem", f"item:{item_id}",
-                actor, now)
-            note = self._grant(conn, user_id, member, kind, amount)
-            conn.execute(
-                "INSERT INTO shop_orders"
-                "(emby_user_id,item_id,item_name,cost,kind,amount,created_at) "
-                "VALUES(?,?,?,?,?,?,?)",
-                (user_id, int(item_id), str(item["name"]), cost, kind,
-                 amount, now))
-
-        self._audit(actor, "shop.redeem", user_id,
-                    f"item={item_id} {item['name']} cost={cost} {note}")
+        balance = self._points._apply(
+            conn, user_id, -cost, "shop.redeem", f"item:{item_id}", actor, now)
+        note = self._grant(conn, user_id, member, kind, amount)
+        conn.execute(
+            "INSERT INTO shop_orders"
+            "(emby_user_id,item_id,item_name,cost,kind,amount,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (user_id, int(item_id), str(item["name"]), cost, kind, amount, now))
+        conn.execute(
+            "INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)",
+            (now, actor, 'shop.redeem', user_id, f'item={item_id} cost={cost} {note}'))
         return {
             "ok": True,
             "item": item,
@@ -299,10 +305,10 @@ class ShopService:
         if kind not in KINDS:
             raise ShopError(f"类型必须是 {'/'.join(KINDS)} 之一")
         amount = _as_int(amount, "数量", 1, 1_000_000)
-        member = self._members.get(str(user_id)) if self._members else None
-        if not member:
-            raise ShopError("账号不存在")
         with self._db.write() as conn:
+            member = self._members.get(str(user_id)) if self._members else None
+            if not member:
+                raise ShopError("账号不存在")
             note = self._grant(conn, str(user_id), member, kind, amount)
         self._audit(actor, "shop.grant", str(user_id), f"{kind} {amount} {note}")
         return note
@@ -318,6 +324,8 @@ class ShopService:
         """
         now = int(time.time())
         if kind == "traffic":
+            if not needs_traffic(member.get('billing_mode') or ''):
+                raise ShopError('账号不计流量，无需兑换流量包')
             overrides = dict(member.get("overrides") or {})
             before = int(overrides.get("extra_traffic_bytes") or 0)
             overrides["extra_traffic_bytes"] = before + amount * GB
@@ -329,12 +337,19 @@ class ShopService:
             return f"+{amount}GB 流量"
 
         if kind == "days":
-            base = max(now, int(member.get("expires_at") or now))
+            effective = member.get('expires_at_effective')
+            if not effective:
+                raise ShopError('永久用户无需兑换天数，请先明确设置有效期')
+            expires = max(now, int(effective)) + amount * 86400
+            overrides = dict(member.get('overrides') or {})
+            field, value = 'expires_at', expires
+            if 'expires_at_override' in overrides:
+                overrides['expires_at_override'] = expires
+                field, value = 'overrides_json', json.dumps(overrides, ensure_ascii=False, sort_keys=True)
             conn.execute(
-                "UPDATE members SET expires_at=?, status=CASE WHEN status IN "
+                f"UPDATE members SET {field}=?, status=CASE WHEN status IN "
                 "('expired','exhausted') THEN 'active' ELSE status END,"
-                "updated_at=? WHERE emby_user_id=?",
-                (base + amount * 86400, now, user_id))
+                "updated_at=? WHERE emby_user_id=?", (value, now, user_id))
             return f"+{amount} 天"
 
         if kind == "bandwidth":
@@ -342,6 +357,8 @@ class ShopService:
             current = int(overrides.get(
                 "bandwidth_limit_kbps",
                 member.get("bandwidth_limit_kbps") or 0) or 0)
+            if current <= 0:
+                raise ShopError('账号已不限速，无需提速')
             overrides["bandwidth_limit_kbps"] = current + amount * KBPS_PER_MBPS
             conn.execute(
                 "UPDATE members SET overrides_json=?,updated_at=? "

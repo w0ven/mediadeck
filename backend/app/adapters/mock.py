@@ -5,6 +5,8 @@ import random
 import time
 from typing import Any
 
+from app.adapters.base import MemberPolicyResult
+
 
 class MockEmby:
     def __init__(self) -> None:
@@ -87,6 +89,16 @@ class MockEmby:
             return False
         user["Policy"].update(policy_patch)
         return True
+
+    async def apply_member_policy(self, user_id: str,
+                                  policy_patch: dict[str, Any]) -> MemberPolicyResult:
+        user = self._users.get(user_id)
+        if not user or not isinstance(user.get('Policy'), dict):
+            return {'status': 'failed'}
+        if user['Policy'].get('IsAdministrator'):
+            return {'status': 'skipped_admin'}
+        ok = await self.apply_policy(user_id, policy_patch)
+        return {'status': 'applied' if ok else 'failed'}
 
     async def verify_item_access(self, item_id: str, token: str) -> bool:
         # Mirrors the live adapter: only a non-empty token is ever accepted.
