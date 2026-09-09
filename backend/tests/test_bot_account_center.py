@@ -257,10 +257,11 @@ def test_unknown_measured_never_uses_old_estimate_or_zero_percent():
         "metering": {"measurement_status": "no_usage_records", "coverage": {"degraded": False}},
     }
     text = "\n".join(quota_lines(m))
-    assert "尚无实测记录" in text and "%" not in text and "999" not in text
+    assert "已用：<b>暂未测得</b>" in text and "剩余：<b>暂无法确认</b>" in text
+    assert "%" not in text and "999" not in text and "估算" not in text
     m["measured_used_bytes"] = 512
     text = "\n".join(quota_lines(m))
-    assert "50.0%" in text and "512 B" in text
+    assert "已用：<b>512 B</b>" in text and "剩余：<b>512 B</b>" in text
 
 
 def test_personal_and_admin_watch_totals_survive_prune(bot):
@@ -274,7 +275,8 @@ def test_personal_and_admin_watch_totals_survive_prune(bot):
     assert s["recorded_seconds"] == 600 and s["seconds_30d"] == 100
     bot._stats.prune(400)
     assert bot._stats.watch_summary("u1")["recorded_seconds"] == 600
-    assert "10分" in bot._user_card(bot.members.get("u1"))
+    assert "近30天：<b>1分</b>" in bot._user_card(bot.members.get("u1"))
+    assert "累计已记录：10分" in bot._admin_details(bot.members.get("u1"))
     assert "近30天观看" in bot._usage_text(bot.members.get("u1"))
     bot._stats.bind_live_watch(lambda: [{"user_id": "u1", "seconds": 70, "started_at": now - 100}])
     assert bot._stats.watch_summary("u1")["recorded_seconds"] == 670

@@ -147,7 +147,7 @@ def test_group_myinfo_is_own_brief_card(bot):
     run(bot._handle_message(_msg("/myinfo", user=ALICE, username="alice_tg")))
     body = last_text(bot)
     assert "alice" in body
-    assert "状态" in body and "有效期" in body
+    assert "普通用户 · ✅ 正常" in body and "到期" in body
     assert "密码" not in body and "token" not in body
     assert "选择要查看的内容" not in body
     assert bot._panel[f"g:{GROUP}:0:{ALICE}"]
@@ -192,7 +192,8 @@ def test_private_rank_and_myinfo_aliases_still_work(bot):
     bot.calls.clear()
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)
-    assert "选择要查看的内容" in last_text(bot)
+    assert "本月流量" in last_text(bot) and "观看记录" in last_text(bot)
+    assert "resetpw" in str(bot.calls[-1][1].get('reply_markup'))
 
 
 def test_reply_kk_opens_admin_card_in_the_group(bot):
@@ -200,7 +201,7 @@ def test_reply_kk_opens_admin_card_in_the_group(bot):
     run(bot._handle_message(_msg("/kk", reply=reply)))
     body = last_text(bot)
     assert "alice" in body
-    assert "状态" in body
+    assert "管理目标 · alice" in body and "✅ 正常" in body
     assert "密码" not in body
     key = f"g:{GROUP}:0:{ADMIN}"
     assert bot._pending[key][0] == "admin_user"

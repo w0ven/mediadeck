@@ -7,7 +7,7 @@ import pytest
 from test_tg_interaction_context import ADMIN, GROUP, SECOND, VIEWER, click, command
 from test_tg_interaction_context import env as context_env  # noqa: F401
 
-from app.modules.bot_views import POEMS, poetry_line
+from app.modules.bot_views import POEMS
 
 
 @pytest.fixture
@@ -111,12 +111,13 @@ def test_group_measurement_unknown_is_not_zero_or_legacy_estimate(env, used):
     env.members.add_traffic('u1', 987654)
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
-    assert '实测账本' in text and 'private-node-label' not in text
-    assert '987654' not in text and '旧估算' not in text
+    assert '本月流量' in text and '数据不完整' in text
+    assert '来源' not in text and 'private-node-label' not in text
+    assert '987654' not in text and '估算' not in text
     if used is None:
-        assert '暂未测得' in text and '本月剩余：暂无法确认' in text
+        assert '暂未测得' in text and '剩余：<b>暂无法确认</b>' in text
     elif used == 0:
-        assert '0 B' in text and '本月剩余：1.0 TiB' in text
+        assert '0 B' in text and '剩余：<b>1.0 TiB</b>' in text
     else:
         assert '1.0 KiB' in text
 
@@ -235,13 +236,15 @@ def test_outbound_notice_does_not_change_admin_panel_or_copy_group_topic(env):
     asyncio.run(run())
 
 
-def test_poetry_is_local_attributed_and_stable_for_card_refresh(env):
+def test_local_poems_retain_attribution_but_never_appear_on_account_cards(env):
     assert len(POEMS) >= 15 and len(set(POEMS)) == len(POEMS)
     assert all('《' in author and len(verse) > 8 for verse, author in POEMS)
     env.members.upsert('u1', 'ViewerA', {'group_id': 'whitelist'})
     first = env.bot._brief_card(env.members.get('u1'))
     second = env.bot._brief_card(env.members.get('u1'))
-    assert poetry_line('u1') in first and first == second
+    assert first == second
+    assert not any(verse in first for verse, _ in POEMS)
+    assert first.count('白名单') == 1
 
 
 def test_all_rendered_callbacks_fit_telegram_limit_and_escape_external_text(env):

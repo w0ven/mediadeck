@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import secrets
-import time
 from html import escape
 from typing import Any
 
@@ -29,13 +27,17 @@ POEMS = (
 )
 
 
-def poetry_line(identity: str | None = None) -> str:
-    if identity is None:
-        verse, source = secrets.choice(POEMS)
-    else:
-        index = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:4], 'big') % len(POEMS)
-        verse, source = POEMS[index]
-    return f'「{escape(verse)}」\n<i>— {escape(source)}</i>'
+def poetry_line() -> str:
+    verse, _source = secrets.choice(POEMS)
+    return f'<b>{escape(verse)}</b>'
+
+
+def member_mention(member: dict[str, Any]) -> str:
+    name = escape(str(member.get('username') or '—'))
+    tg_id = str(member.get('tg_user_id') or '')
+    if tg_id.isascii() and tg_id.isdigit() and 0 < int(tg_id) < 2**63:
+        return f'<a href="tg://user?id={int(tg_id)}">{name}</a>'
+    return name
 
 
 def duration(seconds: int | None) -> str:
@@ -64,38 +66,17 @@ def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
     sample = member.get("metering") or {}
     used = member.get("measured_used_bytes") if measured else member.get("traffic_used_bytes")
     quota = int(member.get("traffic_quota_bytes") or 0)
-    label = "本月实测流量" if measured else "旧估算流量"
-    if used is None:
-        lines = [
-            f"{label}：本月尚无实测记录"
-            if sample.get("measurement_status") == "no_usage_records"
-            else f"{label}：暂未测得",
-            f"流量配额：{bytes_label(quota) if quota else '不限'}",
-        ]
-    else:
-        pct = float(used) / quota * 100 if quota else None
-        bar = ""
-        if pct is not None:
-            n = round(min(100, max(0, pct)) / 10)
-            bar = "▰" * n + "▱" * (10 - n) + f"  {pct:.1f}%\n"
-        lines = [
-            label,
-            bar + bytes_label(int(used)) + (" / " + bytes_label(quota) if quota else " · 不限额"),
-        ]
+    label = '本月流量' + ('' if measured else '（估算）')
+    used_text = bytes_label(int(used)) if used is not None else '暂未测得'
     remaining = ('不限' if not quota else
                  bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
-    lines.append('本月剩余：' + remaining)
-    lines.append('来源：' + ('实测账本' if measured else '旧估算（非实测）'))
-    if measured:
-        cov = sample.get("coverage") or {}
-        if cov.get("degraded"):
-            missing = '' if public else "、".join(str(n["name"]) for n in cov.get("nodes", []) if not n.get("ok"))
-            lines.append(
-                "⚠ 采集不完整" + ("：" + escape(missing) if missing else "") + "，用量待核实"
-            )
-        elif sample.get("as_of"):
-            lines.append(f"采集正常 · 更新于 {max(0, int(time.time() - sample['as_of']))} 秒前")
-    bw = int(member.get("bandwidth_limit_kbps") or 0)
-    cap = f"{bw / 1000:g} Mbps" if bw >= 1000 else (f"{bw} kbps" if bw else "不限")
-    lines.append("带宽上限：" + cap)
+    lines = [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
+    if measured and (sample.get('coverage') or {}).get('degraded'):
+        lines.append('⚠ 数据不完整')
     return lines
+
+
+def bandwidth_lines(member: dict[str, Any]) -> list[str]:
+    bw = int(member.get('bandwidth_limit_kbps') or 0)
+    cap = f'{bw / 1000:g} Mbps' if bw >= 1000 else (f'{bw} kbps' if bw else '不限')
+    return ['⚡ <b>带宽</b>', f'上限：<b>{cap}</b>']

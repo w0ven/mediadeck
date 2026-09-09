@@ -206,11 +206,13 @@ def test_help_lists_every_command(bot) -> None:
 def test_kk_reports_the_account_at_a_glance(bot) -> None:
     bot.points.add("u1", 120, "test", actor="test")
     reply = _run(bot, "/kk alice")
-    for fragment in ("alice", "状态", "用户组", "有效期", "积分", "注册渠道",
-                     "邀请人", "下级", "Telegram", "设备数", "最近活跃",
-                     "求片剩余"):
+    for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "本月流量", "带宽", "积分：120"):
         assert fragment in reply
-    assert "120" in reply
+    details = _tap(bot, 'admin_binding')
+    for fragment in ("alice", "状态", "用户组", "有效期", "积分", "注册渠道",
+                     "邀请人", "下级", "Telegram", "设备数", "最近活跃", "求片剩余"):
+        assert fragment in details
+    assert "120" in details
 
 
 def test_kk_accepts_an_at_handle(bot) -> None:
@@ -589,7 +591,7 @@ def test_looking_up_a_user_from_the_menu_can_renew_in_place(bot) -> None:
     _tap(bot, "admin_find")
     _run(bot, "alice")
     card = bot.edits[-1][1]
-    assert "alice" in card and "状态" in card
+    assert "管理目标 · alice" in card and "✅ 正常" in card
     _tap(bot, "admin_renew")
     _run(bot, "30")
     after = bot.members.get("u1")["expires_at"]

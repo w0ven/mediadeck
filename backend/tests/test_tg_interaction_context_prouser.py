@@ -98,6 +98,8 @@ def test_prouser_button_keeps_target_and_escapes_names(env):
         text = env.tg.text(GROUP, mid)
         assert '&lt;b&gt;Viewer&lt;/b&gt;' in text
         assert '&lt;i&gt;Operator&lt;/i&gt;' in text
-        assert 'admin_card' in str(env.tg.actions(GROUP, mid))
+        assert not env.tg.actions(GROUP, mid)
+        assert env.bot._admin_panels[(str(GROUP), mid)]['user_id'] == 'u1'
+        assert f'tg://user?id={VIEWER}' in text and f'tg://user?id={ADMIN}' in text
     asyncio.run(run())
     assert env.members.get('u1')['group_id'] == 'whitelist'

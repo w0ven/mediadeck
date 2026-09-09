@@ -4,6 +4,36 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — approved compact Bot cards, announcement-only poetry and command cleanup
+
+- Applied the operator-approved preview: account identity, monthly traffic,
+  bandwidth, watch history and points are visually separate. Removed poetry,
+  provenance/collection timestamps, repeated whitelist labels and explanatory
+  footers from ordinary cards; missing/estimated/partial data remains explicit.
+- Whitelist success is one concise poem and clickable recipient/issuer mention,
+  with no account appendix, author/source line or management buttons. Repeated
+  grants and local/remote failures do not produce misleading congratulations.
+- Private administrator details remain accessible through the existing binding
+  action; target/operator identity, group privacy and entitlement auditing stay
+  intact. No member rights or grant behavior were changed by the presentation.
+- `/kk` and `/me` now best-effort delete only the triggering command after a
+  verified successful card send/edit, in groups and private chat. Failed displays,
+  invalid inputs and missing IDs preserve the command. Deletion failures stay
+  quiet and cannot overwrite another task's operational error. No new ACL or
+  configuration is required; replied-to user messages are never cleanup targets.
+- Added 45 presentation/cleanup regressions; targeted Bot/account suite: 497
+  passed. Final full suite: **1710 passed, 56 skipped, no XFAIL**, 120.62s.
+  Two legacy whitelist-style tests were updated to assert the retained badge,
+  escaped custom group name and unchanged permissions instead of removed prose.
+- The full implementation was exercised locally using real dispatch/services
+  with FakeTelegram; no live grants or deletion of user messages were used for
+  acceptance. Production source changes remain limited to the two Bot modules.
+- Next: publish the corrective panel-only patch and verify the deployed revision,
+  health, polling and preserved configuration/account state within the approved
+  delivery cycle. No playback-node, Emby, schema or dependency changes.
+
+---
+
 ## 2026-09-09 — Telegram target context, richer cards and direct whitelist (local)
 
 - Fixed `/kk` navigation by binding each management card to its chat/message,
