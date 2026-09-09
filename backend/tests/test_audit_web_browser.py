@@ -281,9 +281,17 @@ def test_access_failed_toggle_restores_checkbox(page):
     page.route("**/api/access/rules/1/enabled", lambda r: r.fulfill(status=503, json={"detail": "demo failure"}))
     go(page, "access")
     box = page.locator('input[onchange*="toggleAccessRule"]')
-    box.uncheck()
+    expect(box).to_be_checked()
+    # A fast rejected request can restore the checkbox before uncheck() checks
+    # its postcondition. Test the user click and failed update, not a transient
+    # unchecked state that the application is expected to roll back.
+    with page.expect_request("**/api/access/rules/1/enabled") as request:
+        box.click()
+    assert request.value.method == "POST"
+    assert request.value.post_data_json == {"enabled": False}
     expect(page.locator("#toast")).to_contain_text("失败")
     expect(box).to_be_checked()
+    expect(box).to_be_enabled()
 
 
 def test_inline_argument_apostrophe_is_data(page):

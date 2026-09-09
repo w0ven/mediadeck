@@ -102,8 +102,8 @@ def test_buttons_and_show_keep_current_operation_message(bot):
     bot.calls.clear()
     tap(bot, "me", mid=mid)
     run(bot._show("901", "input accepted", bot.info_menu()))
-    assert [m for m, _ in bot.calls] == ["editMessageText", "editMessageText"]
-    assert all(p["message_id"] == mid for _, p in bot.calls)
+    assert [m for m, _ in bot.calls] == ["answerCallbackQuery", "editMessageText", "editMessageText"]
+    assert all(p["message_id"] == mid for m, p in bot.calls if m == "editMessageText")
 
 
 def test_password_requires_confirmation_and_double_tap_is_noop(bot):
@@ -115,7 +115,8 @@ def test_password_requires_confirmation_and_double_tap_is_noop(bot):
     changes = len(bot.calls)
     tap(bot, f"resetpw_ok:{nonce}")
     assert len(bot.password_changes) == 1
-    assert len(bot.calls) == changes  # keep the successful password visible
+    assert bot.calls[changes:] == [("answerCallbackQuery", {"callback_query_id": "cb", "text": ""})]
+    # Only ACK the replay: keep the successful password visible.
     assert bot.password_changes[0][1] not in str(bot.members.audit_log())
 
 
@@ -146,7 +147,7 @@ def test_chat_commands_replace_legacy_scope_and_actual_language(bot):
         assert method == "setMyCommands"
         assert payload["scope"] == {"type": "chat", "chat_id": "900"}
         assert {c["command"] for c in payload["commands"]} == {
-            "start", "me", "usage", "rebind", "rank", "help", "rules", "manage", "kk"}
+            "start", "me", "usage", "rebind", "rank", "help", "rules", "manage", "kk", "prouser"}
     assert [p["language_code"] for _, p in bot.calls] == ["", "zh"]
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
     assert len(bot.calls) == 2
@@ -200,8 +201,8 @@ def test_kk_gift_is_bound_confirmation_and_not_direct_account_creation(bot):
     assert grant["gift_days"] == 30
     assert grant["gift_group_id"] == "standard"
     assert bot.members.find_by_telegram("777") is None
-    assert all(p.get("chat_id") == "900" for _, p in bot.calls)  # no recipient DM
-    assert all(m == "editMessageText" for m, _ in bot.calls)
+    assert [m for m, _ in bot.calls] == ["answerCallbackQuery", "editMessageText"]
+    assert all(p.get("chat_id") == "900" for m, p in bot.calls if m == "editMessageText")  # no recipient DM
     assert "t.me/deck_test_bot?start=" + grant["gift_code"] in bot.calls[-1][1]["text"]
     assert grant["gift_code"] not in str(bot.members.audit_log())
     tap(bot, f"admin_gift_ok:{nonce}", chat="900", mid=mid)
@@ -209,7 +210,7 @@ def test_kk_gift_is_bound_confirmation_and_not_direct_account_creation(bot):
 
 
 @pytest.mark.parametrize("action", ["cancel", "command", "demote", "expired", "wrong_message"])
-def test_gift_confirmation_does_not_survive_cancel_or_permission_change(bot, action):
+def test_gift_confirmation_does_not_survive_cancel_or_permission_change(bot, action, monkeypatch):
     command(bot, "/kk 777")
     mid = bot._panel["900"]
     tap(bot, "admin_gift", chat="900", mid=mid)
@@ -221,8 +222,9 @@ def test_gift_confirmation_does_not_survive_cancel_or_permission_change(bot, act
     elif action == "demote":
         bot.members.set_roles("admin1", [], actor="test")
     elif action == "expired":
-        kind, _, extra = bot._pending["900"]
-        bot._pending["900"] = (kind, time.time() - 1, extra)
+        # Expire the real message-bound confirmation, not only the session mirror.
+        expires = bot._pending["900"][1]
+        monkeypatch.setattr(time, 'time', lambda: expires + 1)
     else:
         mid += 1
     tap(bot, f"admin_gift_ok:{nonce}", chat="900", mid=mid)

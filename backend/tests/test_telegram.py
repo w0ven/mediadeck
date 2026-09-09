@@ -234,6 +234,10 @@ def _bot(members=None, emby=None, cfg=None, db=None) -> TelegramBot:
         bot.sent.append(text)  # type: ignore[attr-defined]
         return True
 
+    async def fake_ack(callback_id, text=''):
+        return None
+
+    bot._answer_callback = fake_ack  # tests of HTTP transport opt in separately below
     bot.send = fake_send  # type: ignore[assignment]
     return bot
 
@@ -945,7 +949,7 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "me_status", "me_points", "devices", "usage", "resetpw",
-        "my_requests", "home", "rebind"}
+        "my_requests", "home", "rebind", "me"}
     assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home", "checkin", "transfer"}
 
 

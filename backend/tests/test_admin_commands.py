@@ -78,15 +78,25 @@ def bot(tmp_path):
                            shop=shop, requests=requests, groups=groups)
     instance.sent = []
     instance.edits = []
+    instance.next_mid = 6
 
     async def fake_send(chat, text, keyboard=None):
         instance.sent.append((str(chat), text, keyboard))
+        instance.next_mid += 1
+        instance._touch_panel(chat, instance.next_mid)
+        instance._remember_menu(chat, instance.next_mid, keyboard)
         return True
 
     async def fake_edit(chat, mid, text, keyboard=None):
         instance.edits.append((str(chat), text))
+        instance._touch_panel(chat, mid)
+        instance._remember_menu(chat, mid, keyboard)
         return True
 
+    async def fake_call(method, payload=None, timeout=20):
+        return True  # acknowledgements/menu retirement never contact Telegram
+
+    instance._call = fake_call
     instance.send = fake_send
     instance._edit = fake_edit
     instance.db = db
@@ -112,7 +122,7 @@ def _run(bot, text: str, chat: str = ADMIN_CHAT, username: str = "rootadmin"):
 def _tap(bot, data: str, chat: str = ADMIN_CHAT):
     asyncio.run(bot._handle_callback({
         "id": "cb1", "data": data,
-        "message": {"chat": {"id": chat}, "message_id": 7},
+        "message": {"chat": {"id": chat}, "message_id": bot._panel.get(str(chat), 7)},
         "from": {"id": chat, "username": "rootadmin", "first_name": "T"},
     }))
     return bot.edits[-1][1] if bot.edits else ""
@@ -221,9 +231,9 @@ def _confirm_group(bot, policy='keep'):
 def test_prouser_moves_the_account_into_the_whitelist(bot) -> None:
     reply = _run(bot, "/prouser alice")
     assert "白名单" in reply
-    assert bot.members.get("u1")["group_id"] == "standard"
-    _confirm_group(bot)
     assert bot.members.get("u1")["group_id"] == "whitelist"
+    assert '确认换组' not in reply
+    assert 'group_confirm' not in bot._pending[ADMIN_CHAT][2]
 
 
 def test_prouser_recreates_a_missing_whitelist_group(bot) -> None:
@@ -231,13 +241,11 @@ def test_prouser_recreates_a_missing_whitelist_group(bot) -> None:
     operator never having tidied their group list."""
     bot.db.execute("DELETE FROM groups WHERE id='whitelist'")  # legacy missing group
     _run(bot, "/prouser alice")
-    _confirm_group(bot)
     assert bot.members.get("u1")["group_id"] == "whitelist"
 
 
 def test_revuser_moves_the_account_back_to_the_default_group(bot) -> None:
     _run(bot, "/prouser alice")
-    _confirm_group(bot)
     reply = _run(bot, "/revuser alice")
     assert "确认换组" in reply
     assert bot._pending[ADMIN_CHAT][2]['group_confirm']['group_id'] == 'standard'
@@ -582,7 +590,8 @@ def test_looking_up_a_user_from_the_menu_can_renew_in_place(bot) -> None:
     _run(bot, "alice")
     card = bot.edits[-1][1]
     assert "alice" in card and "状态" in card
-    _tap(bot, "admin_renew:30")
+    _tap(bot, "admin_renew")
+    _run(bot, "30")
     after = bot.members.get("u1")["expires_at"]
     assert after >= before + 29 * 86400
     assert "alice" in bot.edits[-1][1]

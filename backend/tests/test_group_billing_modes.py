@@ -134,9 +134,20 @@ def test_bot_group_confirm_can_cancel_then_applies_once(bot):
 
 def test_bot_changed_group_definition_invalidates_confirmation(bot):
     run = asyncio.run
-    run(bot._handle_message(msg("/prouser 901", user="900")))
+    # /prouser grants directly; obtain a real preview from the group menu.
+    run(bot._handle_message(msg("/kk 901", user="900")))
     mid = bot._panel["900"]
+    run(bot._handle_callback(cb("admin_groups", user="900", mid=mid)))
+    run(bot._handle_callback(cb("admin_group_pick:" + WHITELIST_GROUP_ID, user="900", mid=mid)))
     action = "admin_group_apply:keep:" + bot._pending["900"][2]["group_confirm"]["nonce"]
+    assert bot.members.get("u1")["group_id"] == "standard"
     bot.groups.update(WHITELIST_GROUP_ID, {"name": "Renamed"})
+    bot.calls.clear()
     run(bot._handle_callback(cb(action, user="900", mid=mid)))
     assert bot.members.get("u1")["group_id"] == "standard"
+    assert any(
+        method == "editMessageText"
+        and payload["message_id"] == mid
+        and "用户或用户组已变化，请重新预览" in payload["text"]
+        for method, payload in bot.calls
+    )

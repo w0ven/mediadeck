@@ -159,7 +159,9 @@ def test_all_bot_entitlement_paths_use_injected_callback(integrated, monkeypatch
             await bot._admin_handle_text(12, member, 'admin_renew_days', {'user_id': 'u1'}, '7')
         elif path == 'button':
             bot._hold_admin_user(12, member, 'operator')
-            await bot._admin_user_action(12, 80, member, 'admin_renew:7')
+            await bot._admin_user_action(12, 80, member, 'admin_renew')
+            kind, _, extra = bot._pending['12']
+            await bot._admin_handle_text(12, member, kind, extra, '7')
         elif path == 'bulk':
             await bot._handle_command(12, '12', 'operator', '/renewall 7')
             await bot._handle_callback(callback('admin_ok'))
