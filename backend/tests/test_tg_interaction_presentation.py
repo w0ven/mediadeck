@@ -182,7 +182,7 @@ def test_card_has_compact_sections_and_truthful_unknown(env, chat, used):
     for forbidden in ('来源', '采集', '更新于', 'hidden-node', '这是本人', '请选择', '《'):
         assert forbidden not in text
     if used is None:
-        assert '已用：<b>暂未测得</b>' in text and '剩余：<b>暂无法确认</b>' in text
+        assert '已用：<b>计量暂不可用</b>' in text and '剩余：<b>暂无法确认</b>' in text
     elif used == 0:
         assert '已用：<b>0 B</b>' in text and '剩余：<b>1.0 TiB</b>' in text
     else:

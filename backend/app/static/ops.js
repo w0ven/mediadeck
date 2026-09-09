@@ -692,6 +692,27 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           <span id="tg-result" class="muted"></span>
         </div>
       </div>`)}
+    ${card('会员播放线路', 'Bot「播放线路」给会员看的入口；不是内部节点名',
+      `<div class="card-body">
+        <p class="help">按会员实际填写的地址排列。全部留空则沿用上面的 Emby 地址，并继续显示节点水位。名称和地址会按纯文本发出，不能写 HTML。</p>
+        <textarea id="tg-lines" hidden aria-label="播放线路配置">${esc(JSON.stringify(tg.playback_lines || []))}</textarea>
+        <div class="line-layout">
+          <div>
+            <div id="tg-line-rows" class="line-rows"></div>
+            <div class="toolbar"><button type="button" class="btn" id="tg-line-add">＋ 添加线路</button></div>
+            <div class="form-row"><label for="tg-lines-note">页脚说明</label>
+              <textarea id="tg-lines-note" rows="4" maxlength="1500" placeholder="例如：主线路建议挂梯；优选请按自己的运营商选择">${esc(tg.playback_lines_note || '')}</textarea></div>
+            <div class="form-row"><label for="tg-lines-load">显示节点水位</label>
+              <input id="tg-lines-load" type="checkbox" ${tg.playback_lines_show_load !== false ? 'checked' : ''}>
+              <span class="muted">水位是内部调度状态，可选附在地址后面</span></div>
+            <button type="button" class="btn primary" id="tg-save-lines">保存播放线路</button>
+          </div>
+          <aside class="line-preview" aria-live="polite">
+            <div class="line-preview-kicker">Bot 预览</div>
+            <div id="tg-line-preview" class="line-preview-body"></div>
+          </aside>
+        </div>
+      </div>`)}
     ${card('注册开户', '注册需要凭证：预授权、邀请码或卡密，三选一',
       `<div class="card-body">
         <div class="form-row"><label for="tg-ch-admin">管理员预授权</label>

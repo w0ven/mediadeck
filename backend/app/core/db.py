@@ -381,7 +381,32 @@ CREATE TABLE IF NOT EXISTS admin_grants (
     used_at     INTEGER,
     gift_code   TEXT,
     gift_group_id TEXT,
-    gift_days   INTEGER
+    gift_days   INTEGER,
+    origin_chat_id TEXT,
+    origin_message_id INTEGER,
+    origin_thread_id INTEGER,
+    origin_bot_id TEXT
+);
+
+-- Delivery facts for a committed gift registration, not a second entitlement.
+-- Separate from the re-armable admin_grants row so old receipts survive reuse.
+CREATE TABLE IF NOT EXISTS tg_gift_receipts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    gift_key TEXT NOT NULL UNIQUE,
+    grant_id INTEGER NOT NULL,
+    tg_user_id TEXT NOT NULL,
+    emby_user_id TEXT NOT NULL,
+    bot_id TEXT NOT NULL,
+    chat_id TEXT NOT NULL,
+    origin_message_id INTEGER NOT NULL,
+    thread_id INTEGER,
+    body TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    message_id INTEGER,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS redeem_log (
@@ -673,6 +698,9 @@ class Database:
             self._ensure_column("admin_grants", "gift_code", "TEXT")
             self._ensure_column("admin_grants", "gift_group_id", "TEXT")
             self._ensure_column("admin_grants", "gift_days", "INTEGER")
+            for field, ddl in (("origin_chat_id", "TEXT"), ("origin_message_id", "INTEGER"),
+                               ("origin_thread_id", "INTEGER"), ("origin_bot_id", "TEXT")):
+                self._ensure_column("admin_grants", field, ddl)
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_gift_code "
                 "ON admin_grants(gift_code) WHERE gift_code IS NOT NULL")

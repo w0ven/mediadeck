@@ -4,6 +4,41 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — group gift registration receipt and new-account traffic copy
+
+- Group gifts now persist origin chat/message/topic on the qualification. After
+  private registration commits, the original group/topic gets a new success
+  notice: recipient mention, username, group and term. No password, claim code,
+  link, card or poem. Private gifts and legacy grants without origin stay quiet.
+- Delivery is a separate durable row from the grant. Restart recovers pending
+  notices; an interrupted send is marked failed rather than auto-duplicated.
+  Recipients get one private retry. Failed delivery never rolls back the account.
+- Account cards distinguish healthy “no playback this period” from unavailable
+  metering. A known quota can show as remaining when there are no usage records;
+  unknown usage is not written as zero, and degraded coverage does not show a
+  full remaining quota.
+- Comparison against the embyboss reference is recorded locally. Red envelopes,
+  inline search, check-in shops, mass broadcast and leave-deletion enablement
+  stay out of this change. New membership gates remain default off.
+- Added 31 receipt regressions. Combined with the playback-line editor for one
+  panel/Bot release.
+
+---
+
+## 2026-09-10 — member-facing playback lines are operator-editable
+
+- Bot 「播放线路」 previously only showed the Emby public URL plus internal node
+  utilisation. Operators could not publish carrier-specific ingress names
+  without changing code.
+- Telegram settings now store `playback_lines` (label + HTTPS origin + hint),
+  an optional footer note, and a toggle for node-load. Empty list keeps the
+  previous fallback so existing deployments do not go blank. Operator copy is
+  HTML-escaped. The panel Bot page has a dedicated editor with live preview.
+- No production endpoints, tokens or media titles are in the change. Live line
+  list is saved in the panel after deploy.
+
+---
+
 ## 2026-09-10 — ordinary reply metadata must not change Bot administrator identity
 
 - Reproduced the exact administrator-authority-changed callback rejection when

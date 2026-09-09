@@ -32,14 +32,63 @@ from urllib.parse import urlsplit
 from app.core.config import NodePool, Settings, StreamNode, demo_nodes
 from app.core.errors import ConfigError, ConflictError
 from app.core.store import SettingsStore
-from app.modules.entries import validate_entries
+from app.modules.entries import https_origin, validate_entries
 from app.modules.group_membership import RULE_DEFAULTS, normalize_rules
 from app.modules.signing import MAX_TTL, MIN_TTL, generate_secret
 
 SECRET_UNCHANGED = "__KEEP__"
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
 MAX_NODES = 64
+MAX_PLAYBACK_LINES = 16
+PLAYBACK_LINE_LABEL_MAX = 40
+PLAYBACK_LINE_HINT_MAX = 80
+PLAYBACK_LINES_NOTE_MAX = 1500
 MAX_POOLS = 12
+
+
+def normalize_playback_lines(raw: Any) -> list[dict[str, str]]:
+    """Member-facing ingress list. Empty means 'use the previous fallback'."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError("播放线路必须是列表")
+    if len(raw) > MAX_PLAYBACK_LINES:
+        raise ConfigError(f"播放线路最多 {MAX_PLAYBACK_LINES} 条")
+    seen: set[str] = set()
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("播放线路格式错误")
+        label = str(item.get("label") or "").strip()
+        if (not label or len(label) > PLAYBACK_LINE_LABEL_MAX
+                or any(ord(c) < 32 for c in label)):
+            raise ConfigError(f"线路名称必填，最长 {PLAYBACK_LINE_LABEL_MAX} 字")
+        try:
+            origin = https_origin(item.get("url"))
+        except ConfigError:
+            raise ConfigError("线路地址必须是 HTTPS 域名，不能包含路径") from None
+        if origin in seen:
+            raise ConfigError("播放线路地址不能重复")
+        hint = str(item.get("hint") or "").strip()
+        if len(hint) > PLAYBACK_LINE_HINT_MAX or any(ord(c) < 32 for c in hint):
+            raise ConfigError(f"线路说明最长 {PLAYBACK_LINE_HINT_MAX} 字")
+        seen.add(origin)
+        row = {"label": label, "url": origin}
+        if hint:
+            row["hint"] = hint
+        out.append(row)
+    return out
+
+
+def normalize_playback_lines_note(raw: Any) -> str:
+    note = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(note) > PLAYBACK_LINES_NOTE_MAX:
+        raise ConfigError(f"线路备注最长 {PLAYBACK_LINES_NOTE_MAX} 字")
+    if any(ord(c) < 32 and c != "\n" for c in note):
+        raise ConfigError("线路备注含有非法字符")
+    return note
+
+
 # Used until the node calls home. `.invalid` is reserved and never resolves.
 PENDING_BASE_URL = "https://pending.invalid"
 PENDING_PROBE_URL = "http://127.0.0.1:9800/load"
@@ -97,6 +146,12 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     "emby_public_url": "",
     # Public artwork URL only; Telegram fetches it. Empty keeps text-only menus.
     "menu_logo_url": "",
+    # Addresses shown to members on 「播放线路」. Empty keeps the previous
+    # fallback: the Emby public URL plus node utilisation. These are the
+    # member-facing ingress names, not the internal node pool.
+    "playback_lines": [],
+    "playback_lines_note": "",
+    "playback_lines_show_load": True,
     # NOTE: the daily ranking post and the expiry reminder used to be
     # configured here (rankings_* / notify_expiring*). They are plugins now
     # ("排行推送" / "到期提醒" on the automation page), and their settings live
@@ -616,6 +671,14 @@ class SettingsService:
         for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url"):
             cfg[key] = str(cfg[key] or "").strip()
         try:
+            cfg["playback_lines"] = normalize_playback_lines(cfg.get("playback_lines"))
+            cfg["playback_lines_note"] = normalize_playback_lines_note(
+                cfg.get("playback_lines_note"))
+        except ConfigError:
+            cfg["playback_lines"] = []
+            cfg["playback_lines_note"] = ""
+        cfg["playback_lines_show_load"] = bool(cfg.get("playback_lines_show_load", True))
+        try:
             cfg["group_interaction_chats"] = parse_group_interaction_chats(
                 cfg.get("group_interaction_chats"))
         except ConfigError:
@@ -694,6 +757,19 @@ class SettingsService:
                     or parsed.username or parsed.password or parsed.fragment):
                 raise ConfigError("Logo 请填写不含凭据的 HTTPS 图片直链，留空关闭")
 
+        if "playback_lines" in payload:
+            lines = normalize_playback_lines(payload.get("playback_lines"))
+        else:
+            lines = list(current.get("playback_lines") or [])
+        if "playback_lines_note" in payload:
+            lines_note = normalize_playback_lines_note(payload.get("playback_lines_note"))
+        else:
+            lines_note = str(current.get("playback_lines_note") or "")
+        if "playback_lines_show_load" in payload:
+            show_load = _bool(payload.get("playback_lines_show_load"))
+        else:
+            show_load = bool(current.get("playback_lines_show_load", True))
+
         if "group_interaction_chats" in payload:
             chats = parse_group_interaction_chats(payload.get("group_interaction_chats"))
         else:
@@ -722,6 +798,9 @@ class SettingsService:
             "group_interaction_chats": chats,
             "emby_public_url": emby_url,
             "menu_logo_url": logo,
+            "playback_lines": lines,
+            "playback_lines_note": lines_note,
+            "playback_lines_show_load": show_load,
         })
         return self.telegram_public()
 

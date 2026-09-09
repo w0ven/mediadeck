@@ -353,7 +353,9 @@ class RegistrationService:
             # second row: UNIQUE(tg_user_id) is what keeps "granted" countable.
             self._db.execute(
                 "UPDATE admin_grants SET used_at=NULL,granted_by=?,created_at=?,"
-                "gift_code=NULL,gift_group_id=NULL,gift_days=NULL WHERE tg_user_id=?", (str(granted_by)[:60], now, tg_user_id))
+                "gift_code=NULL,gift_group_id=NULL,gift_days=NULL,origin_chat_id=NULL,"
+                "origin_message_id=NULL,origin_thread_id=NULL,origin_bot_id=NULL WHERE tg_user_id=?",
+                (str(granted_by)[:60], now, tg_user_id))
         else:
             self._db.execute(
                 "INSERT INTO admin_grants(tg_user_id,granted_by,created_at,used_at)"
@@ -366,7 +368,8 @@ class RegistrationService:
             return str(grant.get("gift_group_id") or ""), int(grant.get("gift_days") or 0)
         return self._default_group(), self._default_days()
 
-    def issue_gift(self, tg_user_id: str, granted_by: str) -> dict[str, Any]:
+    def issue_gift(self, tg_user_id: str, granted_by: str, *,
+                   origin: dict[str, Any] | None = None) -> dict[str, Any]:
         """One recipient-bound registration qualification, not an Emby account.
 
         Repeated gifting of an unused qualification returns the same link.
@@ -380,6 +383,16 @@ class RegistrationService:
         group, days = self.gift_terms(target)
         if not group or (self._groups is not None and not self._groups.get(group)):
             raise ConfigError("默认用户组不存在，请先在面板设置")
+        origin = origin or {}
+        chat = str(origin.get('chat_id') or '')
+        mid = origin.get('message_id')
+        thread = origin.get('thread_id')
+        bot_id = str(origin.get('bot_id') or '')
+        if origin and (not chat.startswith('-') or not chat[1:].isdigit()
+                       or not isinstance(mid, int) or mid <= 0 or not bot_id.isdigit()
+                       or (thread is not None and (not isinstance(thread, int) or thread <= 0))):
+            raise ConfigError('赠送来源群信息无效，未发放资格')
+        source = (chat or None, mid, thread, bot_id or None)
         now = int(time.time())
         for _ in range(20):
             try:
@@ -388,15 +401,23 @@ class RegistrationService:
                         raise ConfigError("对方已有账号，请使用用户管理")
                     row = conn.execute("SELECT * FROM admin_grants WHERE tg_user_id=?", (target,)).fetchone()
                     if row and row["gift_code"] and not row["used_at"]:
+                        # Reposting a link cannot redirect its original receipt.
+                        if origin and not row['origin_chat_id']:
+                            conn.execute('UPDATE admin_grants SET origin_chat_id=?,origin_message_id=?, '
+                                         'origin_thread_id=?,origin_bot_id=? WHERE id=?', (*source, row['id']))
+                            row = conn.execute('SELECT * FROM admin_grants WHERE id=?', (row['id'],)).fetchone()
                         return dict(row)
                     code = "GIFT" + generate_code(12)
                     conn.execute(
                         "INSERT INTO admin_grants(tg_user_id,granted_by,created_at,used_at,"
-                        "gift_code,gift_group_id,gift_days) VALUES(?,?,?,NULL,?,?,?) "
+                        "gift_code,gift_group_id,gift_days,origin_chat_id,origin_message_id,origin_thread_id,origin_bot_id) "
+                        "VALUES(?,?,?,NULL,?,?,?,?,?,?,?) "
                         "ON CONFLICT(tg_user_id) DO UPDATE SET granted_by=excluded.granted_by,"
                         "created_at=excluded.created_at,used_at=NULL,gift_code=excluded.gift_code,"
-                        "gift_group_id=excluded.gift_group_id,gift_days=excluded.gift_days",
-                        (target, str(granted_by)[:60], now, code, group, days))
+                        "gift_group_id=excluded.gift_group_id,gift_days=excluded.gift_days,"
+                        "origin_chat_id=excluded.origin_chat_id,origin_message_id=excluded.origin_message_id,"
+                        "origin_thread_id=excluded.origin_thread_id,origin_bot_id=excluded.origin_bot_id",
+                        (target, str(granted_by)[:60], now, code, group, days, *source))
                 return self.get_grant(target) or {}
             except sqlite3.IntegrityError:
                 continue

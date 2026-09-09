@@ -46,6 +46,7 @@ from app.modules.bot_views import (
     poetry_line,
     quota_lines,
 )
+from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
@@ -276,6 +277,7 @@ class TelegramBot(RebindBotMixin):
         self._in_flight: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._registration_lock = asyncio.Lock()
+        self._gift_receipts = GiftReceipts(self) if db is not None and registration is not None else None
         self.membership = GroupMembership(self)
 
     def bind_plugins(self, registry: Any) -> None:
@@ -780,8 +782,8 @@ class TelegramBot(RebindBotMixin):
                          timeout=10)
 
     async def send_message(self, chat_id: str | int, text: str,
-                           keyboard: list[list[dict[str, str]]] | None = None
-                           ) -> int | None:
+                           keyboard: list[list[dict[str, str]]] | None = None, *,
+                           thread_id: int | None = None) -> int | None:
         """Like send(), but returns the message id.
 
         The request fan-out needs it: when one uploader claims, every other
@@ -797,6 +799,8 @@ class TelegramBot(RebindBotMixin):
             payload["message_thread_id"] = thread
         if keyboard:
             payload["reply_markup"] = {"inline_keyboard": keyboard}
+        if thread_id is not None:
+            payload['message_thread_id'] = thread_id
         result = await self._call("sendMessage", payload)
         if isinstance(result, dict) and result.get("message_id"):
             self._remember_menu(chat_id, result["message_id"], keyboard)
@@ -880,6 +884,8 @@ class TelegramBot(RebindBotMixin):
 
     async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str) -> None:
         body, keyboard = self._home(tg_id, tg_name)
+        if self._gift_receipts and not _GROUP.get():
+            keyboard += await self._gift_receipts.retry_menu(tg_id)
         logo = str(self._cfg().get('menu_logo_url') or '')
         if self._panel.get(self._pkey(chat_id)):
             await self._show(chat_id, body, keyboard)
@@ -1359,6 +1365,7 @@ class TelegramBot(RebindBotMixin):
             await self._show(chat_id, '❌ 创建未确认，请联系管理员。', self.guest_menu())
             return
         committed = False
+        receipt_id = None
         try:
             setting = asyncio.create_task(self._emby.set_user_password(emby_id, password))
             try:
@@ -1395,6 +1402,10 @@ class TelegramBot(RebindBotMixin):
                     if (admission is not None and self._registration is not None
                             and not self._registration.consume(admission, emby_id, conn=conn)):
                         raise ConfigError('注册资格已被使用或撤回，注册未完成。')
+                    if self._gift_receipts:
+                        group = self._groups.get(group_id) if self._groups and group_id else None
+                        receipt_id = self._gift_receipts.stage(conn, admission, member,
+                            str((group or {}).get('name') or group_id or '用户组'))
             else:
                 member = self._members.upsert(emby_id, username, payload, actor='telegram')
                 self._members.bind_telegram(emby_id, tg_user_id, tg_username, actor='telegram')
@@ -1417,6 +1428,15 @@ class TelegramBot(RebindBotMixin):
         lines.append('有效期：' + _fmt_expiry(expires))
         lines.append('\n<i>请立刻保存密码，这条消息不会再发第二次。</i>')
         await self._show(chat_id, '\n'.join(lines), self.member_menu())
+        if receipt_id:
+            try:
+                receipt = await self._gift_receipts.deliver(receipt_id)
+                if receipt and receipt['status'] != 'sent':
+                    await self.send(chat_id, '账号注册成功。群回执暂未送达，恢复群权限后可重试一次。',
+                        [[{'text': '重试群回执一次', 'callback_data': f'gift_receipt_retry:{receipt_id}'}]])
+            except Exception:  # noqa: BLE001 - registration already committed; never claim rollback
+                self._last_error = '注册成功，群回执未确认；请在私聊 /start 查看回执'
+                await self.send(chat_id, '账号注册成功。群回执尚未确认，可发送 /start 查看回执。')
 
     # -- member invites -------------------------------------------------------
 
@@ -1549,28 +1569,20 @@ class TelegramBot(RebindBotMixin):
             f"当前余额：<b>{result.get('balance')}</b>",
             self.member_menu())
 
-    async def _nodes_text(self) -> str:
-        """Which line a member would be served from, and how busy it is.
+    def _load_lines(self) -> list[str]:
+        """Node utilisation, shown as a percentage rather than stream counts.
 
-        Utilisation is shown as a percentage rather than stream counts: the
-        capacity of a node is an operator concept, and '3 streams' means
-        nothing without it.
+        Capacity is an operator concept, and '3 streams' means nothing without
+        it. Internal node names stay here: member-facing addresses belong in
+        the configured playback-line list.
         """
-        server = str(self._cfg().get("emby_public_url") or "").strip()
-        if self._scheduler is None:
-            if server:
-                return f"🌐 <b>线路</b>\n\n服务器：{escape(server)}\n\n暂无节点水位。"
-            return "🌐 <b>线路</b>\n\n暂无线路信息。"
         nodes: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
-            nodes = self._scheduler.snapshot()
+            if self._scheduler is not None:
+                nodes = self._scheduler.snapshot()
         if not nodes:
-            if server:
-                return f"🌐 <b>线路</b>\n\n服务器：{escape(server)}\n\n暂无节点水位。"
-            return "🌐 <b>线路</b>\n\n暂无线路信息。"
-        lines = ["🌐 <b>线路</b>\n"]
-        if server:
-            lines.append(f"服务器：{escape(server)}\n")
+            return ["暂无节点水位。"]
+        rows = []
         for node in nodes:
             percent = round(float(node.get("utilisation") or 0) * 100)
             if not node.get("enabled", True) or node.get("manually_disabled"):
@@ -1583,9 +1595,45 @@ class TelegramBot(RebindBotMixin):
                 mark = f"🟡 {percent}%"
             else:
                 mark = f"🟢 {percent}%"
-            lines.append(f"{escape(str(node.get('name') or '-'))} · {mark}")
-        lines.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
-        return "\n".join(lines)
+            rows.append(f"{escape(str(node.get('name') or '-'))} · {mark}")
+        rows.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
+        return rows
+
+    async def _nodes_text(self) -> str:
+        """Member-facing playback addresses, then optional node load.
+
+        Custom lines are operator copy: labels and URLs are escaped, never
+        treated as Telegram HTML. An empty list keeps the previous fallback
+        (public Emby URL plus load) so existing deployments do not go blank.
+        """
+        cfg = self._cfg()
+        custom = list(cfg.get("playback_lines") or [])
+        note = str(cfg.get("playback_lines_note") or "").strip()
+        show_load = bool(cfg.get("playback_lines_show_load", True))
+        parts = ["🌐 <b>播放线路</b>\n"]
+        if custom:
+            for item in custom:
+                parts.append(f"<b>{escape(str(item.get('label') or ''))}</b>")
+                parts.append(f"<code>{escape(str(item.get('url') or ''))}</code>")
+                hint = str(item.get("hint") or "").strip()
+                if hint:
+                    parts.append(f"<i>{escape(hint)}</i>")
+                parts.append("")
+        else:
+            server = str(cfg.get("emby_public_url") or "").strip()
+            if server:
+                parts.append(f"服务器：{escape(server)}\n")
+            elif not show_load:
+                return "🌐 <b>播放线路</b>\n\n暂无线路信息。"
+        if note:
+            parts.append(escape(note).replace("\n", "\n"))
+            parts.append("")
+        if show_load:
+            if custom or str(cfg.get("emby_public_url") or "").strip():
+                parts.append("节点水位")
+            parts.extend(self._load_lines())
+        text = "\n".join(parts).strip()
+        return text if text != "🌐 <b>播放线路</b>" else "🌐 <b>播放线路</b>\n\n暂无线路信息。"
 
     def _watch_text(self, member: dict[str, Any]) -> str:
         if self._stats is None or not hasattr(self._stats, 'watch_summary'):
@@ -2483,7 +2531,10 @@ class TelegramBot(RebindBotMixin):
             return
         previous = self._registration.get_grant(target)
         try:
-            issued = self._registration.issue_gift(target, self._admin_actor(member, ""))
+            origin = ({'chat_id': str(chat_id), 'message_id': message_id,
+                       'thread_id': _THREAD.get(), 'bot_id': self._token().split(':', 1)[0]}
+                      if _GROUP.get() else None)
+            issued = self._registration.issue_gift(target, self._admin_actor(member, ""), origin=origin)
         except ConfigError as exc:
             await self._edit(chat_id, message_id, f"❌ {escape(str(exc))}", self.admin_menu())
             return
@@ -3750,6 +3801,27 @@ class TelegramBot(RebindBotMixin):
     async def _run_bound_callback(self, data: str, chat_id: Any, message_id: Any,
                                    callback_id: str, tg_user_id: str, tg_name: str,
                                    message: dict[str, Any], in_group: bool) -> None:
+        # Committed receipt retries are recipient-only transport work, never
+        # a replay of registration or an administrative operation.
+        if data.startswith('gift_receipt_retry:'):
+            if in_group or not self._gift_receipts:
+                await self._answer_callback(callback_id, '请在本人私聊查看注册群回执。')
+                return
+            try:
+                rid = int(data.split(':', 1)[1])
+                row = await self._gift_receipts.deliver(rid, retry_tg=tg_user_id)
+                if row is None:
+                    text = '这不是你的注册群回执。'
+                elif row['status'] == 'sent':
+                    text = '注册群回执已送达。'
+                elif row['attempts'] >= 2:
+                    text = '回执仍未送达，已保留失败记录，请联系管理员；账号注册不受影响。'
+                else:
+                    text = '原群或绑定状态暂不可用，请恢复后重试；账号注册不受影响。'
+            except (ValueError, TypeError):
+                text = '回执标识无效。'
+            await self._answer_callback(callback_id, text)
+            return
         # Review cards have independent persisted notice/authority checks.
         if data.startswith('tg_rebind_review:'):
             await self._dispatch_bound_callback(data, chat_id, message_id, callback_id,
@@ -4289,6 +4361,10 @@ class TelegramBot(RebindBotMixin):
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self.run())
+        if self._gift_receipts and self.enabled:
+            receipt_task = asyncio.create_task(self._gift_receipts.run())
+            self._in_flight.add(receipt_task)
+            receipt_task.add_done_callback(self._in_flight.discard)
 
     async def stop(self) -> None:
         if self._task:
