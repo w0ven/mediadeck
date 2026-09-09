@@ -1549,28 +1549,20 @@ class TelegramBot(RebindBotMixin):
             f"当前余额：<b>{result.get('balance')}</b>",
             self.member_menu())
 
-    async def _nodes_text(self) -> str:
-        """Which line a member would be served from, and how busy it is.
+    def _load_lines(self) -> list[str]:
+        """Node utilisation, shown as a percentage rather than stream counts.
 
-        Utilisation is shown as a percentage rather than stream counts: the
-        capacity of a node is an operator concept, and '3 streams' means
-        nothing without it.
+        Capacity is an operator concept, and '3 streams' means nothing without
+        it. Internal node names stay here: member-facing addresses belong in
+        the configured playback-line list.
         """
-        server = str(self._cfg().get("emby_public_url") or "").strip()
-        if self._scheduler is None:
-            if server:
-                return f"🌐 <b>线路</b>\n\n服务器：{escape(server)}\n\n暂无节点水位。"
-            return "🌐 <b>线路</b>\n\n暂无线路信息。"
         nodes: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
-            nodes = self._scheduler.snapshot()
+            if self._scheduler is not None:
+                nodes = self._scheduler.snapshot()
         if not nodes:
-            if server:
-                return f"🌐 <b>线路</b>\n\n服务器：{escape(server)}\n\n暂无节点水位。"
-            return "🌐 <b>线路</b>\n\n暂无线路信息。"
-        lines = ["🌐 <b>线路</b>\n"]
-        if server:
-            lines.append(f"服务器：{escape(server)}\n")
+            return ["暂无节点水位。"]
+        rows = []
         for node in nodes:
             percent = round(float(node.get("utilisation") or 0) * 100)
             if not node.get("enabled", True) or node.get("manually_disabled"):
@@ -1583,9 +1575,45 @@ class TelegramBot(RebindBotMixin):
                 mark = f"🟡 {percent}%"
             else:
                 mark = f"🟢 {percent}%"
-            lines.append(f"{escape(str(node.get('name') or '-'))} · {mark}")
-        lines.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
-        return "\n".join(lines)
+            rows.append(f"{escape(str(node.get('name') or '-'))} · {mark}")
+        rows.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
+        return rows
+
+    async def _nodes_text(self) -> str:
+        """Member-facing playback addresses, then optional node load.
+
+        Custom lines are operator copy: labels and URLs are escaped, never
+        treated as Telegram HTML. An empty list keeps the previous fallback
+        (public Emby URL plus load) so existing deployments do not go blank.
+        """
+        cfg = self._cfg()
+        custom = list(cfg.get("playback_lines") or [])
+        note = str(cfg.get("playback_lines_note") or "").strip()
+        show_load = bool(cfg.get("playback_lines_show_load", True))
+        parts = ["🌐 <b>播放线路</b>\n"]
+        if custom:
+            for item in custom:
+                parts.append(f"<b>{escape(str(item.get('label') or ''))}</b>")
+                parts.append(f"<code>{escape(str(item.get('url') or ''))}</code>")
+                hint = str(item.get("hint") or "").strip()
+                if hint:
+                    parts.append(f"<i>{escape(hint)}</i>")
+                parts.append("")
+        else:
+            server = str(cfg.get("emby_public_url") or "").strip()
+            if server:
+                parts.append(f"服务器：{escape(server)}\n")
+            elif not show_load:
+                return "🌐 <b>播放线路</b>\n\n暂无线路信息。"
+        if note:
+            parts.append(escape(note).replace("\n", "\n"))
+            parts.append("")
+        if show_load:
+            if custom or str(cfg.get("emby_public_url") or "").strip():
+                parts.append("节点水位")
+            parts.extend(self._load_lines())
+        text = "\n".join(parts).strip()
+        return text if text != "🌐 <b>播放线路</b>" else "🌐 <b>播放线路</b>\n\n暂无线路信息。"
 
     def _watch_text(self, member: dict[str, Any]) -> str:
         if self._stats is None or not hasattr(self._stats, 'watch_summary'):

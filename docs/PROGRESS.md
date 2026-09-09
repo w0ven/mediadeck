@@ -4,6 +4,20 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — member-facing playback lines are operator-editable
+
+- Bot 「播放线路」 previously only showed the Emby public URL plus internal node
+  utilisation. Operators could not publish carrier-specific ingress names
+  without changing code.
+- Telegram settings now store `playback_lines` (label + HTTPS origin + hint),
+  an optional footer note, and a toggle for node-load. Empty list keeps the
+  previous fallback so existing deployments do not go blank. Operator copy is
+  HTML-escaped. The panel Bot page has a dedicated editor with live preview.
+- No production endpoints, tokens or media titles are in the change. Next:
+  merge, deploy the tag, then save the live line list in the UI.
+
+---
+
 ## 2026-09-10 — ordinary reply metadata must not change Bot administrator identity
 
 - Reproduced the exact administrator-authority-changed callback rejection when

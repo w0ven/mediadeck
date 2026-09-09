@@ -14,14 +14,17 @@ from __future__ import annotations
 
 import asyncio
 import time
-import pytest
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.modules.settings import mask_secret
 from app.modules.telegram import (
-    USERNAME_RE, TelegramBot, generate_password, looks_like_credential,
+    USERNAME_RE,
+    TelegramBot,
+    generate_password,
+    looks_like_credential,
 )
 
 # Shaped like a real credential so format validation is exercised. Assembled
@@ -1350,6 +1353,67 @@ def test_the_line_view_shows_the_server_address() -> None:
     bot = _bot()
     text = asyncio.run(bot._nodes_text())
     assert "https://emby.example" in text
+    assert "播放线路" in text
+
+
+def test_custom_playback_lines_replace_the_fallback_address() -> None:
+    bot = _bot(cfg={"playback_lines": [
+        {"label": "电信优选", "url": "https://ct.example.com", "hint": "建议本网"},
+        {"label": "主线路", "url": "https://emby.example.com"},
+    ], "playback_lines_note": "按运营商选择", "playback_lines_show_load": False})
+    text = asyncio.run(bot._nodes_text())
+    assert "电信优选" in text and "https://ct.example.com" in text
+    assert "主线路" in text
+    assert "按运营商选择" in text
+    assert "暂无节点水位" not in text
+    assert "<script>" not in text
+
+
+def test_custom_playback_lines_escape_operator_html() -> None:
+    bot = _bot(cfg={"playback_lines": [
+        {"label": "<b>xss</b>", "url": "https://play.example.com", "hint": "<i>hint</i>"},
+    ], "playback_lines_note": "<script>alert(1)</script>", "playback_lines_show_load": False})
+    text = asyncio.run(bot._nodes_text())
+    assert "&lt;b&gt;xss&lt;/b&gt;" in text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in text
+    assert "<b>xss</b>" not in text
+
+
+def test_playback_lines_can_be_saved_without_touching_other_telegram_fields() -> None:
+    with TestClient(app) as client:
+        client.post("/api/settings/telegram", auth=ADMIN,
+                    json={"bot_token": FAKE_CRED, "enabled": True, "register_days": 9})
+        saved = client.post("/api/settings/telegram", auth=ADMIN, json={
+            "playback_lines": [
+                {"label": "备用", "url": "https://alt.example.com", "hint": "夜间"},
+            ],
+            "playback_lines_note": "一条备注",
+            "playback_lines_show_load": False,
+        }).json()
+        assert saved["register_days"] == 9
+        assert saved["playback_lines"] == [
+            {"label": "备用", "url": "https://alt.example.com", "hint": "夜间"}]
+        assert saved["playback_lines_note"] == "一条备注"
+        assert saved["playback_lines_show_load"] is False
+        kept = client.post("/api/settings/telegram", auth=ADMIN,
+                           json={"register_days": 11}).json()
+        assert kept["register_days"] == 11
+        assert kept["playback_lines"][0]["url"] == "https://alt.example.com"
+
+
+def test_playback_lines_reject_paths_and_overlong_lists() -> None:
+    with TestClient(app) as client:
+        client.post("/api/settings/telegram", auth=ADMIN,
+                    json={"bot_token": FAKE_CRED, "enabled": True})
+        bad_path = client.post("/api/settings/telegram", auth=ADMIN, json={
+            "playback_lines": [{"label": "坏", "url": "https://play.example.com/path"}]})
+        assert bad_path.status_code >= 400
+        too_many = client.post("/api/settings/telegram", auth=ADMIN, json={
+            "playback_lines": [
+                {"label": f"线{i}", "url": f"https://n{i}.example.com"}
+                for i in range(17)
+            ]})
+        assert too_many.status_code >= 400
 
 
 def test_member_help_is_not_a_permission_error() -> None:
