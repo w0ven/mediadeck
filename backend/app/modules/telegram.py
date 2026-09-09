@@ -39,7 +39,13 @@ import httpx
 
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_rebinding import RebindBotMixin
-from app.modules.bot_views import duration, poetry_line, quota_lines
+from app.modules.bot_views import (
+    bandwidth_lines,
+    duration,
+    member_mention,
+    poetry_line,
+    quota_lines,
+)
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
 from app.modules.requests import RequestError
@@ -200,6 +206,7 @@ _GROUP: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _ACTOR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "tg_actor", default="")
 _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_call_error', default=None)
+_QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
 class TelegramBot(RebindBotMixin):
@@ -340,6 +347,25 @@ class TelegramBot(RebindBotMixin):
             self._http_loop = loop
         return self._http
 
+    def _record_call_error(self, error: str) -> None:
+        _CALL_ERROR.set(error)
+        if not _QUIET_CALL.get():
+            self._last_error = error
+
+    async def _delete_trigger_command(self, chat_id: Any, message_id: Any) -> None:
+        if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
+            return
+        # Best-effort housekeeping must neither publish noise nor overwrite
+        # another task's operational error (even when Telegram denies deletion).
+        token = _QUIET_CALL.set(True)
+        error_token = _CALL_ERROR.set(None)
+        try:
+            with contextlib.suppress(Exception):
+                await self._call('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, timeout=10)
+        finally:
+            _CALL_ERROR.reset(error_token)
+            _QUIET_CALL.reset(token)
+
     async def _call(self, method: str, payload: dict[str, Any] | None = None,
                     timeout: float = 20) -> Any:
         _CALL_ERROR.set('')
@@ -355,19 +381,16 @@ class TelegramBot(RebindBotMixin):
             body = r.json()
         except Exception as exc:  # noqa: BLE001 - surfaced through status
             # The token is in the URL, so raw exception text is not safe to keep.
-            self._last_error = f"{type(exc).__name__}: 请求失败"
-            _CALL_ERROR.set(self._last_error)
+            self._record_call_error(f"{type(exc).__name__}: 请求失败")
             return None
         if not isinstance(body, dict):
-            self._last_error = 'Telegram 返回格式无效'
-            _CALL_ERROR.set(self._last_error)
+            self._record_call_error('Telegram 返回格式无效')
             return None
         if not body.get("ok"):
             from app.modules.member_ops import redact
-            self._last_error = redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***'))
-            _CALL_ERROR.set(self._last_error)
+            self._record_call_error(redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
-        self._last_error = ""
+        self._record_call_error('')
         return body.get("result")
 
     async def verify(self) -> dict[str, Any]:
@@ -835,12 +858,11 @@ class TelegramBot(RebindBotMixin):
         return False
 
     async def _show(self, chat_id: Any, text: str,
-                    keyboard: list[list[dict[str, str]]] | None = None) -> None:
+                    keyboard: list[list[dict[str, str]]] | None = None) -> bool:
         mid = self._panel.get(self._pkey(chat_id))
         if mid:
-            await self._edit(chat_id, mid, text, keyboard)
-            return
-        await self.send(chat_id, text, keyboard)
+            return await self._edit(chat_id, mid, text, keyboard)
+        return await self.send(chat_id, text, keyboard)
 
     async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str) -> None:
         body, keyboard = self._home(tg_id, tg_name)
@@ -1022,12 +1044,12 @@ class TelegramBot(RebindBotMixin):
     @staticmethod
     def _whitelist_decoration(member: dict[str, Any]) -> str:
         # Identity is the reserved group ID, never its editable display name or role.
-        return ("💠 <b>白名单 · 专属成员</b>\n" + poetry_line(str(member.get("emby_user_id") or "")) + "\n") if member.get("group_id") == WHITELIST_GROUP_ID else ""
+        return '💠 ' if member.get('group_id') == WHITELIST_GROUP_ID else ''
 
     @staticmethod
     def _group_label(member: dict[str, Any]) -> str:
         name = escape(str(member.get('group_name') or '默认'))
-        return f"💠 {name} · 固定分组" if member.get('group_id') == WHITELIST_GROUP_ID else name
+        return name
 
     def _home(self, tg_user_id: str, tg_name: str) -> tuple[str, list[list[dict[str, str]]]]:
         member = self._member_for_chat(tg_user_id)
@@ -1541,10 +1563,11 @@ class TelegramBot(RebindBotMixin):
         return (f"近24小时观看：{window('seconds_24h', 'incomplete_24h')}\n"
                 f"近30天观看：{window('seconds_30d', 'incomplete_30d')}\n"
                 f"累计已记录：{duration(s['recorded_seconds'])}\n"
-                f"统计起点：{start}\n<i>按实际采样区间统计，暂停和停机时间不补算。</i>")
+                f"统计起点：{start}")
 
     def _usage_text(self, member: dict[str, Any]) -> str:
-        lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member, public=_GROUP.get()), ""]
+        lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member, public=_GROUP.get()),
+                 '', *bandwidth_lines(member), '']
         streams, devices = member.get('max_streams'), member.get('max_devices')
         if streams not in (None, ''):
             lines.append(f"同时播放：{streams} 路")
@@ -2270,10 +2293,13 @@ class TelegramBot(RebindBotMixin):
         if _GROUP.get():
             rows += self._private_button('manage_' + user_id, '完整管理 · 私聊')
         else:
-            rows.insert(2, [{'text': '🔗 绑定信息', 'callback_data': 'admin_binding'}])
+            rows.insert(2, [{'text': '📋 详细资料 / 绑定', 'callback_data': 'admin_binding'}])
         return rows
 
     def _user_card(self, target: dict[str, Any]) -> str:
+        return self._account_card(target, public=_GROUP.get(), managing=True)
+
+    def _admin_details(self, target: dict[str, Any]) -> str:
         if _GROUP.get():
             return self._account_card(target, public=True, managing=True)
         user_id = str(target.get("emby_user_id"))
@@ -2339,11 +2365,10 @@ class TelegramBot(RebindBotMixin):
             + "<i>发送 /start 可取消。</i>",
             [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
 
-    async def _admin_lookup(self, chat_id: Any, query: str, actor: str) -> None:
+    async def _admin_lookup(self, chat_id: Any, query: str, actor: str) -> bool | None:
         target = self._find_target(query)
         if target:
-            await self._admin_show_user(chat_id, target, actor)
-            return
+            return await self._admin_show_user(chat_id, target, actor)
         tg_id = str(query).strip()
         if not tg_id.isdigit() or not (0 < int(tg_id) < 2**63):
             await self._show(chat_id, "找不到该用户。未注册的人请使用 Telegram 数字 ID。",
@@ -2433,19 +2458,20 @@ class TelegramBot(RebindBotMixin):
             "<i>Bot 没有主动私信对方。返回前请先复制链接。</i>", buttons)
 
     async def _admin_show_user(self, chat_id: Any, target: dict[str, Any],
-                               actor: str, notice: str = '') -> None:
+                               actor: str, notice: str = '') -> bool:
         previous = self._admin_panel(chat_id)
         if previous and previous['user_id'] != str(target.get('emby_user_id') or ''):
             # A card is never silently retargeted; late buttons still name the
             # account originally shown on that message.
             self._panel.pop(self._pkey(chat_id), None)
         self._hold_admin_user(chat_id, target, actor)
-        await self._show(chat_id, self._user_card(target) + notice,
-                         self._user_admin_keyboard(str(target.get("emby_user_id"))))
+        shown = await self._show(chat_id, self._user_card(target) + notice,
+                                 self._user_admin_keyboard(str(target.get("emby_user_id"))))
         waiting = self._pending.get(self._pkey(chat_id))
         if waiting and waiting[0] == "admin_user":
             waiting[2]["message_id"] = self._panel.get(self._pkey(chat_id))
         self._remember_admin_panel(chat_id, target, actor)
+        return shown
 
     def _admin_held_target(self, chat_id: Any) -> tuple[dict[str, Any] | None, str]:
         panel = self._admin_panel(chat_id)
@@ -2536,9 +2562,8 @@ class TelegramBot(RebindBotMixin):
             return
         if data == "admin_binding":
             await self._edit(chat_id, message_id,
-                f"🔗 <b>绑定信息</b>\n\n账号：{escape(str(target.get('username') or '—'))}\n"
-                f"Telegram ID：<code>{escape(str(target.get('tg_user_id') or '未绑定'))}</code>\n"
-                "更换 TG 由新 Telegram 私聊验证 Emby 密码后提交申请，管理员在绑定群审核。",
+                self._admin_details(target) + '\n\n'
+                + "更换 TG 由新 Telegram 私聊验证 Emby 密码后提交申请，管理员在绑定群审核。",
                 self._user_admin_keyboard(user_id))
             return
         if data == "admin_groups":
@@ -2658,37 +2683,30 @@ class TelegramBot(RebindBotMixin):
 
     def _account_card(self, member: dict[str, Any], *, public: bool = False,
                        managing: bool = False) -> str:
-        heading = '管理目标 · 群内账号卡' if managing and public else (
-            '我的群内账号' if public else '我的账号')
+        name = escape(str(member.get('username') or '—'))
+        badge = self._whitelist_decoration(member) or '👤 '
+        heading = f'🛠 <b>管理目标 · {name}</b>' if managing else badge + f'<b>{name}</b>'
         expiry = member.get('expires_at_effective', member.get('expires_at'))
-        term = (_fmt_expiry(expiry) + ' · ' + time.strftime('%Y-%m-%d', time.localtime(expiry))) if expiry else '永久'
-        lines = [self._whitelist_decoration(member) + f'👤 <b>{heading}</b>',
-                 '账号：<b>' + escape(str(member.get('username') or '—')) + '</b>',
-                 '状态：' + self._status_label(member),
-                 '用户组：' + self._group_label(member), '有效期：' + term, '',
-                 *quota_lines(member, public=public)]
+        term = time.strftime('%Y-%m-%d 到期', time.localtime(expiry)) if expiry else '♾ 永久'
+        lines = [heading,
+                 self._group_label(member) + ' · ' + self._status_label(member) + ' · ' + term, '',
+                 *quota_lines(member, public=public), '', *bandwidth_lines(member), '',
+                 '🎬 <b>观看记录</b>']
         balance = None
         if self._points is not None:
             with contextlib.suppress(Exception):
                 balance = int(self._points.balance(str(member['emby_user_id'])))
-        lines += ['', '积分：' + (str(balance) if balance is not None else '暂不可用')]
         summary = None
         if self._stats is not None and hasattr(self._stats, 'watch_summary'):
             with contextlib.suppress(Exception):
                 summary = self._stats.watch_summary(str(member['emby_user_id']))
-        for key, label, uncertain in (('seconds_24h', '近24小时观看', 'incomplete_24h'),
-                                      ('seconds_30d', '近30天观看', 'incomplete_30d')):
+        for key, label, uncertain in (('seconds_24h', '近24小时', 'incomplete_24h'),
+                                      ('seconds_30d', '近30天', 'incomplete_30d')):
             value = (summary or {}).get(key)
             text = duration(value)
-            if (summary or {}).get(uncertain):
-                text += '（仅已确认区间，跨界历史不完整）'
-            lines.append(label + '：' + text)
-        if managing:
-            lines += ['', '🛠 管理员正在查看此目标账号；下方操作只针对该账号。']
-        elif public:
-            lines += ['', '这是本人账号摘要；完整资料与敏感操作请在私聊查看。']
-        else:
-            lines += ['', '选择要查看的内容：']
+            hint = '（部分记录）' if (summary or {}).get(uncertain) else ''
+            lines.append(label + '：<b>' + text + '</b>' + hint)
+        lines += ['', '💰 <b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         return '\n'.join(lines)
 
     def _brief_card(self, member: dict[str, Any]) -> str:
@@ -2700,7 +2718,7 @@ class TelegramBot(RebindBotMixin):
                 *self._private_button('account', '完整账号 · 私聊')]
 
     def _usage_brief(self, member: dict[str, Any]) -> str:
-        return '\n'.join(quota_lines(member))
+        return '\n'.join([*quota_lines(member), '', *bandwidth_lines(member)])
 
     async def _expire_own_card(self, chat_id: Any, message_id: int,
                                delay: float = GROUP_BRIEF_TTL) -> None:
@@ -2752,7 +2770,7 @@ class TelegramBot(RebindBotMixin):
 
     async def _handle_command(self, chat_id: Any, tg_user_id: str,
                               tg_username: str, text: str,
-                              display_name: str = "") -> None:
+                              display_name: str = "") -> bool | None:
         # A command starts a NEW operation. Text inputs/buttons within that
         # operation still edit its panel. Never delete before a new menu exists.
         self._check_bot_identity()
@@ -2769,8 +2787,8 @@ class TelegramBot(RebindBotMixin):
         old_panel = self._panel.pop(key, None)
         self._pending.pop(key, None)
         try:
-            await self._dispatch_command(chat_id, tg_user_id, tg_username,
-                                         text, display_name)
+            return await self._dispatch_command(chat_id, tg_user_id, tg_username,
+                                                text, display_name)
         finally:
             new = self._menu_panel.get(key)
             if old and new and new != old and not self._admin_panel(chat_id, old):
@@ -2780,7 +2798,7 @@ class TelegramBot(RebindBotMixin):
 
     async def _dispatch_command(self, chat_id: Any, tg_user_id: str,
                                 tg_username: str, text: str,
-                                display_name: str = "") -> None:
+                                display_name: str = "") -> bool | None:
         """Dispatch an admin '/' command.
 
         Every command re-checks the role: a member could have been demoted
@@ -2881,6 +2899,9 @@ class TelegramBot(RebindBotMixin):
                 await self._show(chat_id, "当前 Telegram 没有绑定账号。", self.guest_menu())
             return
         if command == "me":
+            if args:
+                await self._show(chat_id, '用法：/me（不带参数）')
+                return
             if not member:
                 if in_group:
                     return
@@ -2888,14 +2909,11 @@ class TelegramBot(RebindBotMixin):
                                  self.guest_menu())
                 return
             if in_group:
-                await self._show(chat_id, self._brief_card(member), self._group_account_menu())
-                self._schedule_brief_cleanup(chat_id)
-                return
-            await self._show(
-                chat_id,
-                self._account_card(member),
-                self.info_menu())
-            return
+                shown = await self._show(chat_id, self._brief_card(member), self._group_account_menu())
+                if shown:
+                    self._schedule_brief_cleanup(chat_id)
+                return shown
+            return await self._show(chat_id, self._account_card(member), self.info_menu())
         if not self.is_admin(member):
             if in_group:
                 return
@@ -2918,7 +2936,7 @@ class TelegramBot(RebindBotMixin):
                              self.admin_menu())
             return
         try:
-            await handler(chat_id, actor, args)
+            return await handler(chat_id, actor, args)
         except (ConfigError, ShopError, RequestError) as exc:
             await self.send(chat_id, f"❌ {_public_error(exc)}")
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
@@ -2941,7 +2959,10 @@ class TelegramBot(RebindBotMixin):
         await self.send(chat_id, ADMIN_HELP)
 
     async def _cmd_kk(self, chat_id: Any, actor: str,
-                      args: list[str]) -> None:
+                      args: list[str]) -> bool | None:
+        if len(args) > 1:
+            await self._show(chat_id, '用法：/kk TelegramID或账号名，也可回复对方消息使用。')
+            return
         if not args:
             if _GROUP.get():
                 await self._show(chat_id, "请回复对方消息，或带上 Telegram 数字 ID。")
@@ -2950,7 +2971,7 @@ class TelegramBot(RebindBotMixin):
             await self._show(chat_id, "🔍 请指定用户：发送 Telegram 数字 ID、用户名，或转发对方消息。",
                              [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
             return
-        await self._admin_lookup(chat_id, args[0], actor)
+        return await self._admin_lookup(chat_id, args[0], actor)
 
     async def _preview_group_change(self, chat_id: Any, target: dict, actor: str, group_id: str) -> None:
         from app.modules.member_ops import group_preview
@@ -3049,8 +3070,7 @@ class TelegramBot(RebindBotMixin):
             await self._show(chat_id, '账号不存在或已标记缺失，未授予白名单；不会自动注册。')
             return
         if target.get('group_id') == WHITELIST_GROUP_ID:
-            body = 'ℹ <b>已在白名单，未重复授予</b>\n\n账号：' + escape(str(target.get('username') or '—'))
-            body += '\n原有状态、权限与历史保持不变。'
+            body = 'ℹ ' + member_mention(target) + ' 已在白名单，未重复授予。'
             updated = target
         else:
             try:
@@ -3065,15 +3085,13 @@ class TelegramBot(RebindBotMixin):
             self._members.audit(actor, 'telegram.prouser', uid,
                                 'group=' + WHITELIST_GROUP_ID + '; status and roles preserved')
             notice = await self._after_member_change(target)
-            body = ('⚠ <b>白名单已写入本地</b>' if notice else poetry_line() + '\n\n🎉 <b>白名单授予</b>')
-            body += '\n\n获授账号：<b>' + escape(str(updated.get('username') or '—')) + '</b>'
-            body += '\n签发者：' + escape(str(reviewer.get('username') or actor))
-            body += '\n固定用户组：' + self._group_label(updated)
-            body += '\n有效期：' + _fmt_expiry(updated.get('expires_at_effective', updated.get('expires_at')))
-            body += '\n账号状态：' + self._status_label(updated) + '（保持原状态）'
-            body += '\n不授予管理员权限；积分、用量及其他个人权益保留。' + notice
+            if notice:
+                body = '⚠ ' + member_mention(updated) + '：白名单已写入本地，远端未确认，请管理员重试同步。'
+            else:
+                body = (poetry_line() + '\n\n🎉 恭喜 ' + member_mention(updated)
+                        + '\n获得 ' + member_mention(reviewer) + ' 签发的 <b>💠 白名单</b>！')
         self._hold_admin_user(chat_id, updated, actor)
-        await self._show(chat_id, body, self._user_admin_keyboard(uid))
+        await self._show(chat_id, body)
         self._remember_admin_panel(chat_id, updated, actor)
 
     async def _cmd_prouser(self, chat_id: Any, actor: str,
@@ -3586,8 +3604,11 @@ class TelegramBot(RebindBotMixin):
         # typed a command instead of the answer they were asked for meant the
         # command, not a title called "/help".
         if text.startswith("/"):
-            await self._handle_command(
+            shown = await self._handle_command(
                 chat_id, tg_user_id, tg_username, text, display_name=tg_name)
+            command = text.split()[0].lower().split('@', 1)[0]
+            if shown and command in ('/kk', '/me'):
+                await self._delete_trigger_command(chat_id, message.get('message_id'))
             return
 
         if in_group:

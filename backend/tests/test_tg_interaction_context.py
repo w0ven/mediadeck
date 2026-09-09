@@ -141,9 +141,9 @@ def test_group_me_has_useful_public_data_and_no_private_fields(env):
     env.members.upsert('u1', 'ViewerA', {'group_id': 'whitelist', 'note': 'private-note', 'contact': 'private-contact'})
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
-    for expected in ('ViewerA', '白名单', '有效期', '积分', '50', '近24小时', '来源'):
+    for expected in ('ViewerA', '白名单', '永久', '积分', '50', '近24小时', '本月流量', '带宽'):
         assert expected in text
-    for forbidden in ('private-note', 'private-contact', '邀请码', '密码：', 'device_id', 'token'):
+    for forbidden in ('private-note', 'private-contact', '邀请码', '密码：', 'device_id', 'token', '来源', '采集', '《'):
         assert forbidden not in text
     assert any(b.get('url', '').startswith('https://t.me/') for b in env.tg.actions(GROUP, mid))
 

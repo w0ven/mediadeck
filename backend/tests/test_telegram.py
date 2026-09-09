@@ -1370,7 +1370,7 @@ def test_unknown_member_commands_open_the_menu_instead_of_refusing() -> None:
     assert "下方按钮" in bot.sent[-1]  # type: ignore[attr-defined]
 
 
-def test_usage_shows_a_quota_bar_and_caps() -> None:
+def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     member = {
         "emby_user_id": "u1", "username": "someone", "status": "active",
         "expires_at": int(time.time()) + 86400,
@@ -1382,8 +1382,9 @@ def test_usage_shows_a_quota_bar_and_caps() -> None:
     }
     bot = _bot(_FakeMembers({"999": member}))
     text = bot._usage_text(member)
-    assert "50.0%" in text and "▰" in text
-    assert "20 Mbps" in text
+    assert "本月流量（估算）" in text
+    assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
+    assert "⚡ <b>带宽</b>" in text and "上限：<b>20 Mbps</b>" in text
     assert "同时播放：2" in text
     assert "已登记设备：1 / 3" in text
 

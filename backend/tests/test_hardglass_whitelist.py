@@ -31,11 +31,13 @@ def test_decorations_do_not_reset_custom_limits_or_add_roles(subject):
     before=subject.db.one("SELECT * FROM members WHERE emby_user_id='u1'")
     member=subject.members.get('u1')
     home,keys=subject._home('901','Alice')
-    assert '白名单 · 专属成员' in home and '内部成员' in home
+    assert home.startswith('💠 ') and home.count('内部成员') == 1
+    assert '白名单 · 专属成员' not in home
     assert 'admin' not in {b.get('callback_data') for row in keys for b in row}
     assert member['roles']==[] and member['max_streams']==3 and member['max_devices']==4
-    assert '白名单 · 专属成员' in subject._user_card(member)
-    assert '白名单 · 专属成员' in subject._usage_text(member)
+    assert subject._whitelist_decoration(member) == '💠 '
+    assert '内部成员' in subject._user_card(member)
+    assert subject._usage_text(member).startswith('💠 ')
     assert subject.db.one("SELECT * FROM members WHERE emby_user_id='u1'")==before
     subject.groups.seed_defaults()
     assert subject.groups.get(WHITELIST_GROUP_ID)['name']=='内部成员'
@@ -46,9 +48,10 @@ def test_white_named_vip_and_admin_role_are_not_whitelist(subject):
     subject.groups.update('vip',{'name':'白名单 VIP'})
     subject.members.upsert('u1','alice',{'group_id':'vip'})
     home,_=subject._home('901','Alice')
-    assert '白名单 · 专属成员' not in home and '固定分组' not in home
+    assert not home.startswith('💠 ') and '固定分组' not in home
+    assert subject._whitelist_decoration(subject.members.get('u1')) == ''
     admin_home,keys=subject._home('900','Admin')
-    assert '白名单 · 专属成员' not in admin_home
+    assert not admin_home.startswith('💠 ')
     assert 'admin' in {b.get('callback_data') for row in keys for b in row}
 
 
@@ -65,7 +68,8 @@ def test_reserved_group_id_survives_renaming_and_name_is_escaped(subject):
     subject.members.upsert('u1','alice',{'group_id':WHITELIST_GROUP_ID})
     home,_=subject._home('901','Alice')
     assert '&lt;b&gt;Internal&lt;/b&gt;' in home
-    assert '白名单 · 专属成员' in home
+    assert home.startswith('💠 ')
+    assert '白名单 · 专属成员' not in home
 
 
 def test_fixed_group_api_refusal_and_theme_assets_are_served():
