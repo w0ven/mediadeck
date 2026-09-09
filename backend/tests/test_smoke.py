@@ -577,7 +577,9 @@ def test_signing_digest_matches_nginx_and_survives_cjk() -> None:
                       rate_bps=0, utag="")
 
 
-def test_signing_rate_is_tamper_proof_and_legacy_links_still_verify() -> None:
+def test_signing_rate_is_tamper_proof_and_legacy_links_are_rejected() -> None:
+    import hashlib
+
     from app.modules.signing import compute_digest, sign_url, verify
     path = "/s/main/Movies/Demo.mkv"
     url = sign_url("https://n.test", path, "s3cr3t", 600, now=1000,
@@ -592,9 +594,10 @@ def test_signing_rate_is_tamper_proof_and_legacy_links_still_verify() -> None:
                       rate_bps=0, utag="ab12cd34ef")
     assert not verify(path, signed, 1600, "s3cr3t", now=1000,
                       rate_bps=2_500_000, utag="other")
-    # Links minted before the rollout (no r/u at all) must still verify.
-    legacy = compute_digest(path, 1600, "s3cr3t")
-    assert verify(path, legacy, 1600, "s3cr3t", now=1000)
+    # Independently construct the old link; calling the new signer would
+    # falsely label a v2 token as a v1 compatibility check.
+    legacy = base64.urlsafe_b64encode(hashlib.md5(f"1600{path} s3cr3t".encode()).digest()).decode().rstrip("=")
+    assert not verify(path, legacy, 1600, "s3cr3t", now=1000)
 
 
 def test_new_node_gets_a_signing_key_automatically() -> None:
@@ -685,14 +688,16 @@ def test_enroll_script_is_token_authenticated_and_self_contained() -> None:
         script = r.text
         assert "rclone mount" in script
         assert "vfs-cache-mode full" in script
-        assert "secure_link_md5" in script
+        assert "secure_link_md5" not in script
+        assert '"version": 2' in script
+        assert "/etc/mediadeck/signing.json" in script
         assert "node-shared-secret" in script          # node shares the key
         assert "user_allow_other" in script            # else nginx 403s
         assert "certbot" in script
         assert "/agent/loadprobe.py" in script
         assert "/agent/flowmeter.py" in script
         assert "/agent/meterd.py" in script
-        assert "auth_request /_mediadeck/register;" in script
+        assert "auth_request /_mediadeck/verify;" in script
         assert "set $md_u $arg_u;" in script
         assert "mediadeck-meterd.service" in script
         assert "[rc2]" in script                       # Drive identity pushed
@@ -854,8 +859,13 @@ def test_shared_key_is_attributed_by_device_not_by_first_caller() -> None:
     """A fleet-wide credential must never inherit another member's cap.
 
     Caching the resolution by token alone would hand the first resolved
-    user's rate to every other stream sharing that key.
+    user's rate to every other stream sharing that key. An ambiguous caller
+    returns to Emby rather than receiving an anonymous uncapped signature.
     """
+    from urllib.parse import parse_qs, urlsplit
+
+    from app.modules.signing import user_tag
+
     with TestClient(app) as client:
         for node in client.get("/api/nodes", headers=_basic()).json():
             client.delete(f"/api/nodes/{node['name']}", headers=_basic())
@@ -877,18 +887,37 @@ def test_shared_key_is_attributed_by_device_not_by_first_caller() -> None:
         first = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                            headers=headers, follow_redirects=False)
         assert "r=1000000" in first.headers["location"]
+        assert first.status_code == 302
+        first_args = parse_qs(urlsplit(first.headers["location"]).query)
+        assert first_args["u"] == [user_tag("u1")]
+        assert first_args["k"][0].startswith("v2.")
 
         headers["X-Emby-Device-Id"] = "dev:u2"
         second = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                             headers=headers, follow_redirects=False)
         # Same token, different device: bob's 2 Mbps, not alice's 8.
         assert "r=250000" in second.headers["location"]
+        assert second.status_code == 302
+        second_args = parse_qs(urlsplit(second.headers["location"]).query)
+        assert second_args["u"] == [user_tag("u2")]
+        assert second_args["k"][0].startswith("v2.")
 
-        # Unidentifiable on that shared key -> fail open, never guess.
+        # Unidentifiable on that shared key -> origin fallback, never guess.
         headers.pop("X-Emby-Device-Id")
         third = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                            headers=headers, follow_redirects=False)
-        assert "r=0" in third.headers["location"]
+        origin = app.state.settings_service.emby_config()["url"].rstrip("/")
+        assert third.status_code == 302
+        assert third.headers["location"] == (
+            f"{origin}/emby/Videos/item42/stream.mkv?Static=true")
+        assert third.headers["x-mediadeck-decision"] == "unattributed-caller"
+        assert third.headers["x-mediadeck-node"] == ""
+        third_args = parse_qs(urlsplit(third.headers["location"]).query, keep_blank_values=True)
+        assert third_args == {"Static": ["true"]}
+        assert {"k", "e", "md5", "expires", "r", "u"}.isdisjoint(third_args)
+        decision = app.state.playback.recent(1)[0]
+        assert decision["reason"] == "unattributed-caller"
+        assert decision["redirected"] is False and decision["signed"] is False
 
 
 def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> None:

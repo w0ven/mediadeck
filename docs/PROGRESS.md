@@ -4,6 +4,31 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — signature v2 security fix, coordinated release candidate
+
+- Closed the audit signing blocker using domain-separated HMAC-SHA256 over a
+  canonical JSON array. All v1 signatures are rejected; URL argument names,
+  domains, media roots and transparent entry routing remain unchanged.
+- Reused the existing standalone node probe for fail-closed verification before
+  optional meterd registration. Signature failures never enter metering's existing
+  failure-tolerant branch. No new daemon, port or third-party dependency is needed.
+- Preserved ordinary proxy passthrough, Range/HEAD, canonical Unicode/encoded
+  paths, rate-zero and existing user tags. Unresolved real callers return to Emby
+  rather than receive anonymous uncapped direct links.
+- Final full suite: **1606 passed, 56 skipped, no XFAIL**, 120.28s. Independent
+  HMAC/v1 vectors and real isolated TLS/nginx/probe/meterd/nft tests verify both
+  argument-name pairs, two media roots, transparent proxying, tampering, version
+  rejection, optional collector failure and unavailable-verifier rejection.
+- Only a remaining old smoke expectation required correction: keep both known
+  users' attribution/rates, then assert origin fallback for the unresolved caller.
+  No production behavior was weakened to satisfy the old anonymous-link assertion.
+- Owner separately approved coordinated panel/node deployment, unchanged proxy
+  entry points and old-link invalidation without a vulnerable grace period.
+  `SIGNING-V2.md` documents the required sequence and no-v1-rollback boundary.
+  This entry records a tested release candidate, not a completed live rollout.
+
+---
+
 ## 2026-09-09 — full-source audit and local corrective delivery (release blocked)
 
 - Reviewed all 69 production source files plus project configuration, not only

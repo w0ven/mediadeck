@@ -354,8 +354,12 @@ class PlaybackRouter:
                 try:
                     rate_bps, utag = await self._rate_resolver(
                         caller_token, caller_device, cache_scope)
-                except Exception:  # noqa: BLE001 - fail open: sign uncapped
+                except Exception:  # noqa: BLE001 - leave access decisions to origin
                     rate_bps, utag = 0, ""
+                if not utag:
+                    decision = self._passthrough(request_path, query, "unattributed-caller")
+                    self._record(decision, item_id)
+                    return decision
             target = sign_url(
                 chosen.node.base_url, url_path, secret,
                 int(getattr(chosen.node, "sign_ttl_seconds", 21600) or 21600),

@@ -22,10 +22,13 @@ operator reviews and runs.
 """
 from __future__ import annotations
 
+import json
 import re
 import shlex
 from typing import Any
 from urllib.parse import urlparse
+
+from app.modules.signing import validate_arg_names
 
 LOADPROBE_PORT = 9800
 METERD_PORT = 9801
@@ -81,38 +84,73 @@ def enroll_command(panel_url: str, token: str) -> str:
             f"sudo env MEDIADECK_ENROLL_TOKEN={shlex.quote(token)} bash")
 
 
-def nginx_site(node: Any) -> str:
-    """nginx vhost serving this node's media roots.
+def signing_config(node: Any, *, metering: bool = False) -> str:
+    """Private probe configuration; does not enable a collector or scheduler."""
+    validate_arg_names(node.sign_arg_digest, node.sign_arg_expires)
+    return json.dumps({"version": 2, "secret": str(node.sign_secret or ""),
+                       "arg_digest": node.sign_arg_digest, "arg_expires": node.sign_arg_expires,
+                       "metering": metering, "metering_port": METERD_PORT}, ensure_ascii=False)
 
-    ``secure_link_md5`` is computed over the *decoded* ``$uri``; using the
-    encoded form breaks every path containing a space or CJK character, which
-    is most of a Chinese media library.
+
+def nginx_signing_guard() -> str:
+    """Replace (do not add beside) an existing media auth_request directive."""
+    return """set $md_verify_path $uri;
+        set $md_verify_method $request_method;
+        set $md_u $arg_u;
+        set $md_lip $server_addr;
+        set $md_lp $server_port;
+        set $md_a $remote_addr;
+        set $md_p $remote_port;
+        set $md_cid $pid.$connection;
+        auth_request /_mediadeck/verify;"""
+
+
+def nginx_signing_endpoint() -> str:
+    """One fail-closed signature gate; optional meter failures stay inside probe.
+
+    No error_page-to-allow here. The endpoint is internal and receives only
+    nginx-captured metadata, not client-supplied authentication assertions.
+    """
+    return f"""location = /_mediadeck/verify {{
+        internal;
+        proxy_pass http://127.0.0.1:{LOADPROBE_PORT}/verify;
+        proxy_pass_request_body off;
+        proxy_pass_request_headers off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Mediadeck-Target $request_uri;
+        proxy_set_header X-Mediadeck-Path $md_verify_path;
+        proxy_set_header X-Mediadeck-Method $md_verify_method;
+        proxy_set_header X-Mediadeck-Local-Addr $md_lip;
+        proxy_set_header X-Mediadeck-Local-Port $md_lp;
+        proxy_set_header X-Mediadeck-Remote-Addr $md_a;
+        proxy_set_header X-Mediadeck-Remote-Port $md_p;
+        proxy_set_header X-Mediadeck-Connection $md_cid;
+        proxy_connect_timeout 300ms;
+        proxy_read_timeout 2s;
+        proxy_intercept_errors off;
+        access_log off;
+    }}"""
+
+
+def nginx_site(node: Any) -> str:
+    """nginx media vhost with v2-only HMAC verification on the existing probe.
+
+    This is a fresh-install template, not permission to replace production
+    aliases. For existing sites apply only the guard/internal endpoint.
     """
     _config_name(node.name)
     host = _host_of(node.base_url) or f"{node.name}.example.com"
     secret = str(getattr(node, "sign_secret", "") or "")
-    for arg in (node.sign_arg_digest, node.sign_arg_expires):
-        if not re.fullmatch(r"[A-Za-z0-9_]+", arg):
-            raise ValueError("invalid signing argument name")
-    # geo's values are literal, not complex expressions. Expanding this
-    # variable once preserves a secret containing $ without evaluating it.
-    literals = ([f"geo $mediadeck_sign_secret {{ default {_nginx_quote(secret)}; }}"]
-                if secret else [])
+    validate_arg_names(node.sign_arg_digest, node.sign_arg_expires)
+    literals: list[str] = []
 
     if secret:
-        secure = f"""
-    # Signed URLs. The panel generates ?r=&u=&{node.sign_arg_expires}=&{node.sign_arg_digest}=;
-    # digest = md5("<expires><decoded-uri><r><u> <secret>") — must match the panel.
-    # r/u sit inside the digest, so a client cannot edit its own rate cap or
-    # identity off the URL. Legacy links without r/u still verify: empty args
-    # reduce the string to the old form.
-    secure_link $arg_{node.sign_arg_digest},$arg_{node.sign_arg_expires};
-    secure_link_md5 "$secure_link_expires$uri$arg_r$arg_u $mediadeck_sign_secret";
+        secure = """
+    # v2 HMAC only. The secret lives in the probe's private signing.json.
+    # v1 links are intentionally rejected; there is no MD5 fallback.
+    merge_slashes off;
 """
-        guard = """
-        if ($secure_link = "")  { return 403; }   # bad or missing signature
-        if ($secure_link = "0") { return 410; }   # valid but expired
-"""
+        guard = ""
     else:
         secure = """
     # WARNING: signing disabled. Every URL handed to a client is a permanent
@@ -162,7 +200,7 @@ def nginx_site(node: Any) -> str:
         # Known deny is an nginx map file written by meterd. It survives a
         # dead HTTP process, so 502 fail-open cannot admit an exhausted tag.
         if ($md_denied) {{ return 403; }}
-        auth_request /_mediadeck/register;
+        {nginx_signing_guard() if secret else 'auth_request /_mediadeck/register;'}
         # Speed attribution is independent of billing register.
         mirror /_mediadeck/announce;
 
@@ -251,7 +289,9 @@ server {{
 {secure}
 {"".join(locations) or "    # NOTE: no media roots configured for this node yet."}
 
-    # Sync 4-tuple registration (server addr/port + client addr/port + signed u).
+    {nginx_signing_endpoint() if secret else ''}
+
+    # Optional unsigned-mode 4-tuple registration; NEVER a signature gate.
     location = /_mediadeck/register {{
         internal;
         proxy_pass http://127.0.0.1:{METERD_PORT}/register?lip=$md_lip&lp=$md_lp&a=$md_a&p=$md_p&u=$md_u&cid=$md_cid;
@@ -347,7 +387,7 @@ After=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /opt/mediadeck-agent/loadprobe.py --port {LOADPROBE_PORT}
+ExecStart=/usr/bin/python3 /opt/mediadeck-agent/loadprobe.py --port {LOADPROBE_PORT} --signing-config /etc/mediadeck/signing.json
 Restart=always
 RestartSec=5
 
@@ -405,6 +445,10 @@ def install_script(node: Any, panel_url: str) -> str:
     probe_end = _delimiter("MEDIADECK_PROBE_EOF", probe_config)
     meter_end = _delimiter("MEDIADECK_METERD_EOF", meter_config)
     token_end = _delimiter("MEDIADECK_TOKEN_EOF", report_token)
+    # This installer already provisions meterd; standalone probe config
+    # generation defaults to metering=False and never installs a collector.
+    sign_config = signing_config(node, metering=True)
+    sign_end = _delimiter("MEDIADECK_SIGNING_EOF", sign_config)
 
     sign_note = ("已启用签名：nginx 校验有效期，过期链接自动失效"
                  if secret else
@@ -558,6 +602,9 @@ curl -fsSL {shlex.quote(panel + '/agent/loadprobe.py')} -o /opt/mediadeck-agent/
 curl -fsSL {shlex.quote(panel + '/agent/flowmeter.py')} -o /opt/mediadeck-agent/flowmeter.py
 curl -fsSL {shlex.quote(panel + '/agent/meterd.py')} -o /opt/mediadeck-agent/meterd.py
 mkdir -p /etc/mediadeck /var/lib/mediadeck
+install -m 600 /dev/stdin /etc/mediadeck/signing.json <<'{sign_end}'
+{sign_config}
+{sign_end}
 install -m 600 /dev/stdin /etc/mediadeck/report.token <<'{token_end}'
 {report_token}
 {token_end}

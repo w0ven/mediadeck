@@ -1,4 +1,5 @@
 """Render-only injection regressions; never execute generated installers/units."""
+import json
 import re
 import shlex
 import shutil
@@ -7,7 +8,15 @@ import subprocess
 import pytest
 
 from app.core.config import NodePool, StreamNode
-from app.modules.provisioning import enroll_command, install_script, nginx_site, rclone_mount_unit
+from app.modules.provisioning import (
+    enroll_command,
+    install_script,
+    nginx_signing_endpoint,
+    nginx_signing_guard,
+    nginx_site,
+    rclone_mount_unit,
+    signing_config,
+)
 
 
 def node_with(**changes):
@@ -58,9 +67,9 @@ def test_nginx_literals_do_not_become_directives_or_recursive_variables():
     node.pools[0] = node.pools[0].model_copy(update={"node_path": path, "url_prefix": '/s/";\nreturn 200; #'})
     text = nginx_site(node)
     assert '\nreturn 200;' not in text
-    assert 'geo $mediadeck_sign_secret' in text
-    assert 'secure_link_md5 "$secure_link_expires$uri$arg_r$arg_u $mediadeck_sign_secret";' in text
-    assert '\\"$request_uri\\"' in text
+    assert 'secure_link_md5' not in text and secret not in text
+    assert 'auth_request /_mediadeck/verify;' in text
+    assert json.loads(signing_config(node))["secret"] == secret
     assert 'alias $mediadeck_pool_path_0/;' in text
 
 
@@ -80,9 +89,9 @@ server {{
 listen 127.0.0.1:18999;
 location /s/ {{
 alias $mediadeck_pool_path_0/;
-secure_link $arg_k,$arg_e;
-secure_link_md5 "$secure_link_expires$uri$arg_r$arg_u $mediadeck_sign_secret";
+{nginx_signing_guard()}
 }}
+{nginx_signing_endpoint()}
 }}
 }}
 ''')

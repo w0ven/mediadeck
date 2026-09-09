@@ -17,15 +17,17 @@ from app.modules.stats import StatsService
 from app.modules.usage import UsageSampler
 
 
-@pytest.mark.xfail(strict=True, reason="v1 signing ambiguity requires coordinated protocol change; signing format preserved by audit contract")
 def test_signed_rate_and_identity_fields_cannot_be_repartitioned():
     from app.modules.signing import compute_digest, verify
 
     path, expiry, secret = "/s/main/demo.mkv", 1800000060, "fixture-signing-secret"
     digest = compute_digest(path, expiry, secret, rate_bps=1000, utag="1abcdef012")
-    # Same MAC input after moving the tag's first digit into the rate. This
-    # increases the limit tenfold and changes accounting/deny identity.
-    assert digest == compute_digest(path, expiry, secret, rate_bps=10001, utag="abcdef012")
+    # The old r/u repartition is invalid, not an equivalent authentication.
+    with pytest.raises(ValueError):
+        compute_digest(path, expiry, secret, rate_bps=10001, utag="abcdef012")
+    # Even two syntactically valid fields cannot migrate bytes across path/r.
+    assert compute_digest(path + "1", expiry, secret, 0, "1abcdef012") != compute_digest(
+        path, expiry, secret, 10, "1abcdef012")
     assert not verify(path, digest, expiry, secret, now=1800000000,
                       rate_bps=10001, utag="abcdef012")
 

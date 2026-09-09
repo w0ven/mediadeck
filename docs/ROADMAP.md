@@ -10,14 +10,18 @@ top-down without asking. Every item ships as its own PR + release tag.
       background-integration, persistence and adapter defects.
 - [x] Integrate cross-module fixes and verify: 1562 passed, 56 skipped, 1 strict
       expected failure; all 25 pages exercised in isolated Chromium.
-- [ ] RELEASE BLOCKER: replace ambiguous v1 playback signatures through an
-      owner-approved coordinated panel/node migration. Existing v1 links and the
-      compatibility window require an explicit decision; this defect is NOT fixed.
-- [ ] Separately authorize production delivery and external-system acceptance.
-- Evidence and remaining limits: `AUDIT-2026-09-09.md`.
-- This phase permits local corrective implementation and temporary test artifacts,
-  not production data changes, restarts, upstream release or deployment. No claim
-  of absolute bug freedom is made; completion requires scoped coverage and evidence.
+- [x] Replace ambiguous v1 playback signatures with v2 HMAC-SHA256 and an
+      independent probe verification gate; original security XFAIL now passes.
+      Owner approved rejecting old links without a v1 grace period.
+- [x] Final v0.30.0 candidate: 1606 passed, 56 skipped, no XFAIL; real nginx
+      file/transparent-proxy/Range/HEAD and verification-failure tests pass.
+- Upgrade contract: `SIGNING-V2.md`; nodes and panel must be switched together.
+- [x] Owner separately authorized coordinated release/deployment, retaining
+      existing proxy entry points and accepting v1-link invalidation.
+- [ ] Complete coordinated rollout and verify actual running revisions/traffic.
+- Historical audit evidence: `AUDIT-2026-09-09.md`; current protocol: `SIGNING-V2.md`.
+- The original audit was local-only. The subsequent v2 rollout has separate,
+  bounded authorization; no absolute bug-freedom or unexecuted live check is claimed.
 
 ## Hard Glass and reserved whitelist — approved local implementation
 - [x] Shared dark hard-glass theme across the existing workspaces and controls.
