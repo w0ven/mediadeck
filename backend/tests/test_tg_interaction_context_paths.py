@@ -122,7 +122,7 @@ def test_group_measurement_unknown_is_not_zero_or_legacy_estimate(env, used):
         assert '1.0 KiB' in text
 
 
-@pytest.mark.parametrize('action', ['devices', 'invite_new', 'buyok:1', 'admin_code', 'admin_gift', 'resetpw', 'rebind', 'watch_recent', 'orders', 'me_nodes', 'transfer_ok'])
+@pytest.mark.parametrize('action', ['devices', 'invite_new', 'buyok:1', 'admin_code', 'resetpw', 'rebind', 'watch_recent', 'orders', 'me_nodes', 'transfer_ok'])
 def test_group_sensitive_callbacks_are_private_only_and_do_not_write(env, action):
     async def run():
         mid = await command(env, '/kk ViewerA')

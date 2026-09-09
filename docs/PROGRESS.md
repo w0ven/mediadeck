@@ -4,6 +4,48 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — linked chats, recipient-bound group gifts and responsive database work (local)
+
+- Added verified Telegram group/channel associations, independent Bot-use gate
+  and leave/kick deletion switches, and manual/scheduled membership checks. All
+  enabled targets are required; new gate/deletion/scheduling remain default off.
+  Existing required-group, interaction-group and review settings retain meaning.
+- Explicitly enabled deletion rechecks current Telegram presence, Bot permissions,
+  Deck/Emby administrator status, binding and configuration generation before
+  deleting only the member's Emby/Deck account. Unknown queries retain accounts;
+  administrators are exempt, whitelist members are not. Points, watch and audit
+  history remain; no invitation cascade or startup migration sweep is added.
+- HardGlass settings and membership results use the existing scoped-save, dirty
+  state and plugin scheduler paths. Chromium exercised the formal desktop/mobile
+  UI with temporary local APIs, including permission failures and scan results.
+- Group administrators can gift through `/kk`, confirm the existing group/days,
+  then edit the same message to recipient/issuer mentions and one private claim
+  button. No public claim-code text, password, account appendix or poetry. Reuse
+  the existing grant/deep-link service; foreign clicks cannot consume the gift.
+  Group/channel rechecks resume only the recipient's registration intent.
+- Offloaded heavy read, metering, usage and housekeeping SQLite work from the
+  event loop while preserving policy ordering and committed watch snapshots.
+  Membership workers retain ordered event persistence and fresh delete guards;
+  cancellation waits for non-cancellable writes rather than closing DB early.
+- Added 125 tests across membership/API/Chromium, group gifts and slow-IO paths;
+  migrated one obsolete private-only gift parameter without weakening other
+  sensitive callback checks. Final full suite: **1834 passed, 56 skipped, no
+  XFAIL**, 159.45s. Gift/membership integration: 484 targeted tests passed.
+- An earlier full-suite invocation timed out after 420 seconds near a legacy
+  smoke test without an error stack. That file passed independently (53 tests),
+  and the unchanged full suite then passed with test names and a 30-second
+  faulthandler enabled; the initial timeout was not reproduced or root-caused.
+  No source or assertions were changed to obtain that passing rerun.
+- New/changed implementation and new tests pass scoped lint and JS syntax checks;
+  existing unrelated Bot-module/test lint findings are retained, not swept away.
+- This batch is local only: no push/release/deployment, live Telegram grant,
+  production membership scan or automatic deletion was performed. Production
+  latency improvement still requires separately authorized deployment and live
+  acceptance. Next: owner review, then separately authorized panel/Bot release;
+  enabling the new destructive rule remains an explicit UI decision.
+
+---
+
 ## 2026-09-09 — approved compact Bot cards, announcement-only poetry and command cleanup
 
 - Applied the operator-approved preview: account identity, monthly traffic,

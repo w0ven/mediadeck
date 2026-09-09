@@ -19,11 +19,13 @@ value on save to mean "leave the stored secret untouched".
 """
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import re
 import secrets
 import threading
+import time
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,6 +33,7 @@ from app.core.config import NodePool, Settings, StreamNode, demo_nodes
 from app.core.errors import ConfigError, ConflictError
 from app.core.store import SettingsStore
 from app.modules.entries import validate_entries
+from app.modules.group_membership import RULE_DEFAULTS, normalize_rules
 from app.modules.signing import MAX_TTL, MIN_TTL, generate_secret
 
 SECRET_UNCHANGED = "__KEEP__"
@@ -88,6 +91,7 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # list is not "every group", it is none. Numeric chat ids preferred;
     # @public handles are accepted for the same operator convenience.
     "group_interaction_chats": [],
+    "membership_rules": RULE_DEFAULTS,
     # Shown to a new member alongside their credentials; without it they have
     # a username and password and nowhere to use them.
     "emby_public_url": "",
@@ -616,6 +620,14 @@ class SettingsService:
                 cfg.get("group_interaction_chats"))
         except ConfigError:
             cfg["group_interaction_chats"] = []
+        raw_rules = cfg.get('membership_rules')
+        try:
+            rules = normalize_rules(raw_rules, verified=True)
+            rules['generation'] = str(raw_rules.get('generation') or '')
+            rules['enabled_since'] = int(raw_rules.get('enabled_since') or 0)
+            cfg['membership_rules'] = rules
+        except (ValueError, TypeError):
+            cfg['membership_rules'] = copy.deepcopy(RULE_DEFAULTS)
         return cfg
 
     def telegram_public(self) -> dict[str, Any]:
@@ -631,7 +643,7 @@ class SettingsService:
         public["bot_token_set"] = bool(cfg["bot_token"])
         return public
 
-    def save_telegram(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def save_telegram(self, payload: dict[str, Any], *, membership_verified: bool = False) -> dict[str, Any]:
         current = self.telegram_config()
         token = payload.get("bot_token", SECRET_UNCHANGED)
         # The sentinel means "the field was not retyped", which is what an edit
@@ -687,7 +699,17 @@ class SettingsService:
         else:
             chats = list(current.get("group_interaction_chats") or [])
 
+        rules = current['membership_rules']
+        if 'membership_rules' in payload:
+            rules = normalize_rules(payload['membership_rules'], verified=membership_verified)
+            if (rules['gate_enabled'] or rules['delete_enabled']) and not enabled:
+                raise ConfigError('启用关联校验/删除前必须启用Bot并核实权限')
+            rules['generation'] = secrets.token_hex(8)
+            rules['enabled_since'] = int(time.time())
+        if token != current['bot_token'] and (rules['gate_enabled'] or rules['delete_enabled']):
+            raise ConfigError('更换Bot前请先关闭关联门禁和删除开关，再重新核实关联权限')
         self._store.set_section("telegram", {
+            "membership_rules": rules,
             "enabled": enabled,
             "bot_token": token,
             **channels,
