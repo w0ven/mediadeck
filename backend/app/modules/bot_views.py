@@ -67,8 +67,11 @@ def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
     used = member.get("measured_used_bytes") if measured else member.get("traffic_used_bytes")
     quota = int(member.get("traffic_quota_bytes") or 0)
     label = '本月流量' + ('' if measured else '（估算）')
-    used_text = bytes_label(int(used)) if used is not None else '暂未测得'
-    remaining = ('不限' if not quota else
+    no_records = (measured and used is None and sample.get('measurement_status') == 'no_usage_records'
+                  and (sample.get('coverage') or {}).get('degraded') is False)
+    used_text = (bytes_label(int(used)) if used is not None else
+                 '本周期暂无播放记录' if no_records else '计量暂不可用')
+    remaining = ('不限' if not quota else bytes_label(quota) if no_records else
                  bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
     lines = [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
     if measured and (sample.get('coverage') or {}).get('degraded'):

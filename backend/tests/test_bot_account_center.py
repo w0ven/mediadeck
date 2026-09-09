@@ -257,8 +257,12 @@ def test_unknown_measured_never_uses_old_estimate_or_zero_percent():
         "metering": {"measurement_status": "no_usage_records", "coverage": {"degraded": False}},
     }
     text = "\n".join(quota_lines(m))
-    assert "已用：<b>暂未测得</b>" in text and "剩余：<b>暂无法确认</b>" in text
+    assert "已用：<b>本周期暂无播放记录</b>" in text and "剩余：<b>1.0 KiB</b>" in text
+    assert m["measured_used_bytes"] is None
     assert "%" not in text and "999" not in text and "估算" not in text
+    m["metering"]["coverage"]["degraded"] = True
+    text = "\n".join(quota_lines(m))
+    assert "已用：<b>计量暂不可用</b>" in text and "剩余：<b>暂无法确认</b>" in text
     m["measured_used_bytes"] = 512
     text = "\n".join(quota_lines(m))
     assert "已用：<b>512 B</b>" in text and "剩余：<b>512 B</b>" in text

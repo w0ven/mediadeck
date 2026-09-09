@@ -115,7 +115,7 @@ def test_group_measurement_unknown_is_not_zero_or_legacy_estimate(env, used):
     assert '来源' not in text and 'private-node-label' not in text
     assert '987654' not in text and '估算' not in text
     if used is None:
-        assert '暂未测得' in text and '剩余：<b>暂无法确认</b>' in text
+        assert '计量暂不可用' in text and '剩余：<b>暂无法确认</b>' in text
     elif used == 0:
         assert '0 B' in text and '剩余：<b>1.0 TiB</b>' in text
     else:

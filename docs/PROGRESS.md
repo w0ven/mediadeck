@@ -4,6 +4,27 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — group gift registration receipt and new-account traffic copy
+
+- Group gifts now persist origin chat/message/topic on the qualification. After
+  private registration commits, the original group/topic gets a new success
+  notice: recipient mention, username, group and term. No password, claim code,
+  link, card or poem. Private gifts and legacy grants without origin stay quiet.
+- Delivery is a separate durable row from the grant. Restart recovers pending
+  notices; an interrupted send is marked failed rather than auto-duplicated.
+  Recipients get one private retry. Failed delivery never rolls back the account.
+- Account cards distinguish healthy “no playback this period” from unavailable
+  metering. A known quota can show as remaining when there are no usage records;
+  unknown usage is not written as zero, and degraded coverage does not show a
+  full remaining quota.
+- Comparison against the embyboss reference is recorded locally. Red envelopes,
+  inline search, check-in shops, mass broadcast and leave-deletion enablement
+  stay out of this change. New membership gates remain default off.
+- Added 31 receipt regressions. Full suite: **1885 passed, 56 skipped**. No new
+  lint. Next: combine with the playback-line editor and deploy the panel/Bot.
+
+---
+
 ## 2026-09-10 — ordinary reply metadata must not change Bot administrator identity
 
 - Reproduced the exact administrator-authority-changed callback rejection when
