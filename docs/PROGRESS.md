@@ -4,6 +4,30 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — ordinary reply metadata must not change Bot administrator identity
+
+- Reproduced the exact administrator-authority-changed callback rejection when
+  a non-topic group command and its Bot callback carry different or missing
+  `message_thread_id` values. Reply metadata incorrectly became part of the
+  management session key although administrator role, binding and owner stayed
+  unchanged. The original fixtures omitted this ordinary reply shape.
+- Limit topic routing/session identity to messages marked `is_topic_message`.
+  Only `_thread_id` changes in production; administrator/owner/binding checks,
+  target selection, nonce expiry, one-use confirmation and topic isolation stay
+  intact. No configuration, account, schema or entitlement change is required.
+- Added 20 regressions. Three new reproduction cases fail before the correction;
+  437 related tests pass afterward. Final full suite: **1854 passed, 56 skipped,
+  no XFAIL**, 140.38s. No new lint findings. Updated topic fixtures to include
+  the actual topic marker rather than weakening their isolation assertions.
+- The real reported Telegram update payload was not retained. The code defect
+  and matching symptom are reproduced, but recovery of that specific user's
+  workflow still requires reopening `/kk` after the corrective rollout.
+- This corrects a defect reported during the authorized panel/Bot delivery and
+  acceptance cycle. Next: publish the scoped patch and verify runtime revision,
+  polling and preserved state; new membership rules and schedules stay off.
+
+---
+
 ## 2026-09-10 — linked chats, recipient-bound group gifts and responsive database work (local)
 
 - Added verified Telegram group/channel associations, independent Bot-use gate
