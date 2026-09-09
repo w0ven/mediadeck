@@ -20,8 +20,22 @@ Newest entries first. Every working session appends one entry.
 - Comparison against the embyboss reference is recorded locally. Red envelopes,
   inline search, check-in shops, mass broadcast and leave-deletion enablement
   stay out of this change. New membership gates remain default off.
-- Added 31 receipt regressions. Full suite: **1885 passed, 56 skipped**. No new
-  lint. Next: combine with the playback-line editor and deploy the panel/Bot.
+- Added 31 receipt regressions. Combined with the playback-line editor for one
+  panel/Bot release.
+
+---
+
+## 2026-09-10 — member-facing playback lines are operator-editable
+
+- Bot 「播放线路」 previously only showed the Emby public URL plus internal node
+  utilisation. Operators could not publish carrier-specific ingress names
+  without changing code.
+- Telegram settings now store `playback_lines` (label + HTTPS origin + hint),
+  an optional footer note, and a toggle for node-load. Empty list keeps the
+  previous fallback so existing deployments do not go blank. Operator copy is
+  HTML-escaped. The panel Bot page has a dedicated editor with live preview.
+- No production endpoints, tokens or media titles are in the change. Live line
+  list is saved in the panel after deploy.
 
 ---
 

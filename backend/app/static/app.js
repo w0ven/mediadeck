@@ -30,7 +30,7 @@ const NAV = [
     { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看完扫描、刷新、通知、上传与拉取' },
   ]},
   { group: '机器人', icon: '✈', items: [
-    { id: 'tgbot', icon: '✈', label: '机器人', sub: '注册通道、名额与运行状态' },
+    { id: 'tgbot', icon: '✈', label: '机器人', sub: '注册通道、播放线路与运行状态' },
     { id: 'shop', icon: '🎁', label: '兑换商城', sub: '积分商品、限购与兑换记录' },
     { id: 'tggroup', icon: '⚑', label: '群组核查', sub: '已关联成员的群成员状态' },
     { id: 'automation', icon: '⚡', label: '任务中心', sub: '任务与玩法插件的开关、配置与运行结果' },

@@ -129,6 +129,84 @@ function initSystemSettings() {
   configureSave('mb-save','/api/settings/membership','PUT',() => ({enforcement_enabled:$('#mb-enforcement').checked,sample_interval_seconds:Number($('#mb-interval').value),retention_days:Number($('#mb-keep').value)}));
   configureSave('ic-save','/api/settings/image-cache','PUT',() => ({enabled:$('#ic-enabled').checked,max_gib:Number($('#ic-gib').value),max_age_days:Number($('#ic-age').value)}),refreshImageCacheStats);
 }
+function initPlaybackLinesEditor() {
+  const field = $('#tg-lines');
+  if (!field) return;
+  let lines = [];
+  try { lines = JSON.parse(field.value || '[]'); } catch { lines = []; }
+  if (!Array.isArray(lines)) lines = [];
+  const sync = () => {
+    field.value = JSON.stringify(lines.map(item => ({
+      label: String(item.label || '').trim(),
+      url: String(item.url || '').trim(),
+      hint: String(item.hint || '').trim(),
+    })).filter(item => item.label || item.url || item.hint));
+    const preview = $('#tg-line-preview');
+    if (!preview) return;
+    const rows = JSON.parse(field.value);
+    const note = ($('#tg-lines-note')?.value || '').trim();
+    const load = $('#tg-lines-load')?.checked !== false;
+    const fallback = ($('#tg-embyurl')?.value || '').trim();
+    let html = '<div class="line-preview-title">播放线路</div>';
+    if (rows.length) {
+      html += rows.map(item => `<div class="line-preview-item"><strong>${esc(item.label || '未命名')}</strong><code>${esc(item.url || '未填写地址')}</code>${item.hint ? `<em>${esc(item.hint)}</em>` : ''}</div>`).join('');
+    } else if (fallback) {
+      html += `<div class="line-preview-item"><strong>服务器</strong><code>${esc(fallback)}</code></div>`;
+    } else {
+      html += '<p class="muted">尚未填写线路，会员将看到“暂无线路信息”。</p>';
+    }
+    if (note) html += `<p class="line-preview-note">${esc(note).replaceAll('\n', '<br>')}</p>`;
+    if (load) html += '<p class="muted">保存后仍会附上当前节点水位。</p>';
+    preview.innerHTML = html;
+  };
+  const draw = () => {
+    const host = $('#tg-line-rows');
+    if (!host) return;
+    if (!lines.length) lines = [{label: '', url: '', hint: ''}];
+    host.innerHTML = lines.map((item, i) => `<article class="line-row" data-line-row="${i}">
+      <header><span>线路 ${i + 1}</span><button type="button" class="btn sm line-remove" ${lines.length < 2 && !(item.label || item.url || item.hint) ? 'hidden' : ''}>移除</button></header>
+      <div class="form-row"><label for="tg-line-label-${i}">名称</label><input id="tg-line-label-${i}" maxlength="40" value="${esc(item.label || '')}" placeholder="例如 电信优选"></div>
+      <div class="form-row"><label for="tg-line-url-${i}">地址</label><input id="tg-line-url-${i}" type="url" value="${esc(item.url || '')}" placeholder="https://play.example.com"></div>
+      <div class="form-row"><label for="tg-line-hint-${i}">说明</label><input id="tg-line-hint-${i}" maxlength="80" value="${esc(item.hint || '')}" placeholder="可选，例如建议挂梯"></div>
+    </article>`).join('');
+    host.querySelectorAll('[data-line-row]').forEach(row => {
+      const index = Number(row.dataset.lineRow);
+      row.oninput = () => {
+        lines[index] = {
+          label: row.querySelector(`#tg-line-label-${index}`).value,
+          url: row.querySelector(`#tg-line-url-${index}`).value,
+          hint: row.querySelector(`#tg-line-hint-${index}`).value,
+        };
+        sync(); updateDirtyBadges();
+      };
+      row.querySelector('.line-remove').onclick = () => {
+        lines.splice(index, 1);
+        if (!lines.length) lines = [{label: '', url: '', hint: ''}];
+        draw(); sync(); updateDirtyBadges();
+      };
+    });
+    sync();
+  };
+  $('#tg-line-add').onclick = () => {
+    if (lines.length >= 16) return;
+    lines.push({label: '', url: '', hint: ''});
+    draw(); sync(); updateDirtyBadges();
+  };
+  $('#tg-lines-note').oninput = sync;
+  $('#tg-lines-load').onchange = sync;
+  $('#tg-embyurl')?.addEventListener('input', sync);
+  configureSave('tg-save-lines', '/api/settings/telegram', 'POST', () => ({
+    playback_lines: JSON.parse(field.value || '[]').filter(item => item.label && item.url),
+    playback_lines_note: ($('#tg-lines-note')?.value || '').trim(),
+    playback_lines_show_load: $('#tg-lines-load')?.checked !== false,
+  }), result => {
+    lines = result.playback_lines || [];
+    field.value = JSON.stringify(lines);
+    configBaselines.set(field, field.value);
+    draw();
+  });
+  draw();
+}
 function initTelegramSettings(tg) {
   const logoRow = $('#tg-logo').closest('.form-row'), help = logoRow.nextElementSibling, preview = $('#tg-logo-preview-box');
   const box = document.createElement('div'); box.innerHTML = card('首页外观','只改变 Bot 首页图片，不影响注册和群组', '<div class="card-body logo-body"></div>');
@@ -139,12 +217,13 @@ function initTelegramSettings(tg) {
   $('#view').append(groupBox.firstElementChild);
   $('#view').insertAdjacentHTML('beforeend', membershipSettingsCards(tg));
   $('#tg-save').textContent = '保存机器人连接'; $('#tg-save2').textContent = '保存注册规则'; $('#tg-test').textContent = '测试已保存连接';
-  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'membership',label:'群组与频道',keys:['群组与频道','定时成员检测']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
+  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'lines',label:'播放线路',keys:['会员播放线路']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'membership',label:'群组与频道',keys:['群组与频道','定时成员检测']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
   const payloadKeys = keys => { const all = telegramPagePayload(); return Object.fromEntries(keys.map(k => [k,all[k]])); };
   configureSave('tg-save','/api/settings/telegram','POST',() => payloadKeys(['bot_token','enabled','emby_public_url']));
   configureSave('tg-save2','/api/settings/telegram','POST',() => payloadKeys(['allow_admin_grant','allow_invite','allow_redeem','register_days','max_users','default_group_id','require_group']));
   configureSave('tg-save-logo','/api/settings/telegram','POST',() => ({menu_logo_url:$('#tg-logo').value.trim()}));
   configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean)}));
+  initPlaybackLinesEditor();
   initMembershipSettings(tg);
   $('#tg-test').onclick = async () => {
     const el = $('#tg-result'), button = $('#tg-test'); button.disabled = true; el.textContent = '测试中…';
