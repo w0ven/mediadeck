@@ -32,11 +32,14 @@ readers, because writes go through the shared SQLite connection lock.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import contextvars
 import json
 import time
 import uuid
 from datetime import UTC, datetime
+from functools import partial
 from typing import Any
 
 from app.core.db import Database
@@ -85,6 +88,24 @@ def is_playing(session: dict[str, Any]) -> bool:
     return not bool((session.get("PlayState") or {}).get("IsPaused"))
 
 
+async def run_usage_io(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run a usage/housekeeping DB step without abandoning it on shutdown."""
+    worker = asyncio.get_running_loop().run_in_executor(
+        None, partial(contextvars.copy_context().run, fn, *args, **kwargs))
+    cancelled = None
+    while True:
+        try:
+            result = await asyncio.shield(worker)
+            break
+        except asyncio.CancelledError as exc:
+            # SQLite cannot cancel a blocking call. Join the writer before
+            # releasing the tick lock or letting shutdown close the database.
+            cancelled = exc
+    if cancelled is not None:
+        raise cancelled
+    return result
+
+
 class UsageSampler:
     """Stateful sampler. One instance, ticked on a timer."""
 
@@ -112,9 +133,17 @@ class UsageSampler:
         # Device-cap refusals collected during a tick, kicked after billing so
         # one over-limit client cannot abort accounting for everyone else.
         self._pending_kicks: list[tuple[str, str]] = []
+        self._tick_lock = asyncio.Lock()
+        self._publish_live()
 
     # -- main loop -----------------------------------------------------------
     async def tick(self, node_of: Any = None) -> dict[str, Any]:
+        # One tick owns session state until its worker commits, even if its
+        # caller is cancelled. A second tick must not overlap that write.
+        async with self._tick_lock:
+            return await self._tick(node_of)
+
+    async def _tick(self, node_of: Any) -> dict[str, Any]:
         now = time.time()
         try:
             sessions = await self._emby.active_sessions_raw()
@@ -122,6 +151,16 @@ class UsageSampler:
             self._last_error = str(exc)[:200]
             return {"ok": False, "error": self._last_error}
 
+        result, billed_users = await run_usage_io(self._sample, sessions, now, node_of)
+        if billed_users and self._enforcement:
+            result["enforced"] = await self._enforce_exhausted(billed_users)
+        if self._pending_kicks and self._enforcement:
+            result["device_kicks"] = await self._kick_refused_devices()
+        return result
+
+    def _sample(self, sessions: list[dict[str, Any]], now: float,
+                node_of: Any) -> tuple[dict[str, Any], list[str]]:
+        """Existing ordered persistence, off the ASGI/event-loop thread."""
         self._ticks += 1
         self._last_error = None
         seen: set[str] = set()
@@ -274,15 +313,11 @@ class UsageSampler:
             "billed_bytes": billed_bytes,
             "users": len(billed_users),
         }
-        # Enforcement runs after accounting so a member who just crossed their
-        # quota is stopped in this tick rather than the next one.
-        if billed_users and self._enforcement:
-            result["enforced"] = await self._enforce_exhausted(list(billed_users))
-        if self._pending_kicks and self._enforcement:
-            result["device_kicks"] = await self._kick_refused_devices()
         if self._sharing is not None:
             result["sharing_findings"] = sharing_found
-        return result
+        self._publish_live()
+        # Enforcement stays after committed accounting, in the async caller.
+        return result, list(billed_users)
 
     # -- persistence ---------------------------------------------------------
     def _record_watch(self, sid: str, state: dict, start: float, end: float) -> None:
@@ -318,15 +353,21 @@ class UsageSampler:
                     "last_seen_at=? WHERE emby_user_id=?",
                     (chunk, int(now), user_id))
 
+    def _publish_live(self) -> None:
+        # Readers must never iterate the worker's mutable session dictionary
+        # or wait on a mutex held during slow disk I/O.
+        self._watch_view = tuple(
+            {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled')}
+            for state in self._live.values())
+        self._speed_view = {sid: int(s.get("speed_bps") or 0) for sid, s in self._live.items()}
+
     def live_watch(self) -> list[dict[str, Any]]:
-        """Already sampled active-session time; querying does not advance clocks."""
-        return [{k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled')}
-                for state in self._live.values()]
+        """Already committed sampled time; querying does not advance clocks."""
+        return [dict(row) for row in self._watch_view]
 
     def live_speeds(self) -> dict[str, int]:
-        """session id -> bytes/second over the last sample window."""
-        return {sid: int(s.get("speed_bps") or 0)
-                for sid, s in self._live.items()}
+        """session id -> bytes/second over the last committed sample window."""
+        return dict(self._speed_view)
 
     def _finish(self, sid: str, state: dict[str, Any], now: float) -> None:
         seconds = int(state.get("seconds") or 0)
@@ -382,8 +423,8 @@ class UsageSampler:
                 stopped = False
             if stopped:
                 kicked += 1
-            self._members.audit(
-                "system", "device.kick", user_id, f"session={sid}")
+            await run_usage_io(self._members.audit,
+                               "system", "device.kick", user_id, f"session={sid}")
         self._pending_kicks = []
         return kicked
 
@@ -396,7 +437,7 @@ class UsageSampler:
         """
         acted = 0
         for user_id in user_ids:
-            member = self._members.get(user_id)
+            member = await run_usage_io(self._members.get, user_id)
             if not member or member["state"] != "exhausted":
                 continue
             # Already enforced recently; avoid hammering Emby every tick.

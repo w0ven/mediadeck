@@ -1108,21 +1108,38 @@ async function showMemberInvites(id, username) {
   } catch (e) { box.innerHTML = `<div class="help">加载失败：${esc(e.message)}</div>`; }
 }
 
-PAGES.tggroup = async () => {
-  $('#view').innerHTML = `
-    <div class="help">
-      核查已关联成员是否还在要求的群组里。<b>只报告，不自动停用</b>：
-      退群和停止付费不是一回事，这个判断留给人。
-    </div>
-    ${card('群组核查', '需要机器人是该群管理员才能查询',
-      `<div class="card-body">
-        <div class="toolbar">
-          <button class="btn primary" id="ga-run">开始核查</button>
-          <span id="ga-status" class="muted">尚未执行</span>
-        </div>
-        <div id="ga-result" style="margin-top:12px"></div>
-      </div>`)}`;
+PAGES.tggroup = async (context = pageContext('tggroup')) => {
+  $('#view').innerHTML = `${card('群组与频道成员检测','所有启用关联项都必须满足；仅核查Deck已绑定TG会员，不枚举群/频道全员', `<div class="card-body">
+    <div class="toolbar"><button class="btn" onclick="go('tgbot?section=membership')">关联设置</button><button class="btn primary" id="gm-scan">开始检测并按开关处理</button><span id="gm-scan-state" role="status"></span></div>
+    <p class="help" id="gm-scan-policy"></p><div id="gm-scan-progress"></div><div id="gm-scan-results"></div><div id="gm-event-result"></div></div>`)}
+    <details><summary>旧注册要求群核查（只报告，保持原行为）</summary>${card('群组核查','只检查原require_group，不执行本次关联删除规则',`<div class="card-body"><button class="btn" id="ga-run">开始旧核查</button><span id="ga-status"></span><div id="ga-result"></div></div>`)}</details>`;
   bindAsyncButton('ga-run', runGroupAudit);
+  let data = null;
+  const labels = {present:'符合要求',absent:'不符合要求',unknown:'无法核实',exempt:'管理员豁免',unbound:'未绑定TG'};
+  const actions = {detected:'仅检测，未删除',kept:'保留账号',rechecking:'执行前复核',deleted:'已删除本人',failed_retained:'删除失败，本地保留',cancelled:'条件变化，已取消'};
+  const render = value => {
+    data=value;
+    const scan=value.scan||{}, rows=scan.rows||[], on=value.rules?.delete_enabled;
+    $('#gm-scan-policy').textContent=on?'删除开关已开启：包括未观测离群的存量会员，明确不符合时立即再次核实并删除本人。仅Deck/Emby管理员豁免，白名单适用；历史保留、不连带。':'删除开关关闭：手动/定时只检测，不删除账号。查询未知始终保留账号。';
+    $('#gm-scan').disabled=!!scan.running;
+    $('#gm-scan-state').textContent=scan.running?(scan.current?(scan.current.action==='rechecking'?'执行前复核：':'正在检测：')+scan.current.username:'检测进行中'):scan.id?(scan.cancelled||scan.interrupted?'已中止':'检测已结束'):'尚未检测';
+    const counts=Object.keys(labels).map(key=>`${labels[key]} ${rows.filter(r=>r.state===key).length}`).join(' · ');
+    $('#gm-scan-progress').innerHTML=`<p>${esc(counts)}</p><p>进度 ${Number(scan.processed||0)} / ${Number(scan.total||0)} ${scan.started_at?'· 开始于 '+esc(new Date(scan.started_at*1000).toLocaleString()):''}</p>${scan.running?`<progress max="${Math.max(1,Number(scan.total||0))}" value="${Number(scan.processed||0)}" style="width:100%"></progress>`:''}${scan.error?`<p class="danger-text">检测异常：${esc(scan.error)}；未完成账号保持原状</p>`:''}`;
+    $('#gm-scan-results').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>账号 / TG</th><th>用户组</th><th>逐项核查</th><th>检测结果</th><th>删除动作</th></tr></thead><tbody>${rows.map(row=>`<tr><td><b>${esc(row.username)}</b><small class="muted"> ${esc(row.tg_user_id||'未绑定')}</small></td><td>${esc(row.group_id==='whitelist'?'💠 白名单':row.group_id)}</td><td>${(row.targets||[]).map(t=>`${esc(t.title||t.chat_id)}：${esc(labels[t.state]||'无法核实')}`).join('<br>')}</td><td>${esc(labels[row.state]||'无法核实')}</td><td>${esc(actions[row.action]||row.action||'未删除')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">尚无成员检测结果</div>';
+    const event=value.last_event;
+    $('#gm-event-result').textContent=event?'最近事件处理：'+event.username+' · '+(labels[event.state]||'无法核实')+' · '+(actions[event.action]||event.action):'尚无离群事件处理记录；旧通知不会迁移为删除任务。';
+  };
+  const refresh=async()=>{
+    try{const value=await api('/api/telegram/membership');if(!context.isCurrent())return;render(value);if(value.scan?.running)setTimeout(refresh,1000);}
+    catch(err){if(context.isCurrent())$('#gm-scan-state').textContent='读取失败：'+err.message;}
+  };
+  $('#gm-scan').onclick=async()=>{
+    if(data?.rules?.delete_enabled&&!confirm('删除开关已开启：本次检测会重新核实并删除不合规存量会员本人（含白名单），历史保留，不连带。继续？'))return;
+    $('#gm-scan').disabled=true;
+    try{await api('/api/telegram/membership/scan',{method:'POST'});if(context.isCurrent())await refresh();}
+    catch(err){if(context.isCurrent()){$('#gm-scan-state').textContent=err.message;$('#gm-scan').disabled=false;}}
+  };
+  await refresh();
 };
 async function runGroupAudit() {
   const st = $('#ga-status');

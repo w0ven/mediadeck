@@ -46,6 +46,7 @@ from app.modules.bot_views import (
     poetry_line,
     quota_lines,
 )
+from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
 from app.modules.requests import RequestError
@@ -246,6 +247,9 @@ class TelegramBot(RebindBotMixin):
         self._started_at = 0.0
         # chat id -> what the bot is waiting for, with a deadline
         self._pending: dict[str, tuple[str, float, dict[str, Any]]] = {}
+        # Only a recipient's gift-registration intent may survive membership
+        # guidance. Never save/replay an administrative action through the gate.
+        self._gift_claims: dict[tuple[str, int], tuple[float, str, str]] = {}
         # chat id -> the one panel message this conversation is editing.
         # A request that keeps adding replies is what made 求片 feel messy.
         self._panel: dict[str, int] = {}
@@ -272,6 +276,7 @@ class TelegramBot(RebindBotMixin):
         self._in_flight: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
         self._registration_lock = asyncio.Lock()
+        self.membership = GroupMembership(self)
 
     def bind_plugins(self, registry: Any) -> None:
         """Late-bind the plugin registry.
@@ -281,6 +286,8 @@ class TelegramBot(RebindBotMixin):
         runs both ways and one of them has to be attached afterwards.
         """
         self._plugins = registry
+        if registry.get('group_membership') is None:
+            registry.register(GroupMembershipPlugin(self.membership, registry))
 
     async def _after_member_change(self, before: dict[str, Any]) -> str:
         """Report remote uncertainty without undoing a committed local grant."""
@@ -550,6 +557,7 @@ class TelegramBot(RebindBotMixin):
             self._photo_panels.clear()
             self._menu_panel.clear()
             self._pending.clear()
+            self._gift_claims.clear()
             self._chat_commands.clear()
             self._card_actor.clear()
             self._admin_panels.clear()
@@ -818,6 +826,9 @@ class TelegramBot(RebindBotMixin):
         if not new:
             return False
         self._touch_panel(chat_id, new)
+        claim = self._gift_claims.pop(old_key, None)
+        if claim:
+            self._gift_claims[(str(chat_id), int(new))] = claim
         waiting = self._pending.get(self._pkey(chat_id))
         if waiting and waiting[2].get('message_id') == message_id:
             waiting[2]['message_id'] = new
@@ -1104,6 +1115,9 @@ class TelegramBot(RebindBotMixin):
         for chat, (_, deadline, _) in list(self._pending.items()):
             if deadline <= now:
                 self._pending.pop(chat, None)
+        for key, claim in list(self._gift_claims.items()):
+            if claim[0] + PENDING_TTL <= now:
+                self._gift_claims.pop(key, None)
         for key, panel in list(self._admin_panels.items()):
             if panel['expires'] <= now:
                 self._admin_panels.pop(key, None)
@@ -1111,6 +1125,29 @@ class TelegramBot(RebindBotMixin):
         for key, deadline in list(self._retired_panels.items()):
             if deadline <= now:
                 self._retired_panels.pop(key, None)
+
+    def _gift_claim_problem(self, tg_id: str, code: str) -> str:
+        if self._member_for_chat(tg_id):
+            return '你已经有账号了，不能重复领取注册资格。'
+        admission = self._resolve(tg_id, code)
+        if admission is None:
+            return '注册服务暂不可用，请稍后重新打开领取链接。'
+        return '' if admission.allowed else admission.reason
+
+    async def _resume_gift_claim(self, chat_id: Any, message_id: int, tg_id: str) -> bool:
+        claim = self._gift_claims.pop((str(chat_id), int(message_id)), None)
+        if claim is None:
+            return False
+        deadline, owner, code = claim
+        problem = ('领取会话已过期，请重新打开群里的领取链接。' if deadline <= time.time()
+                   else '这份赠送资格不属于你的 Telegram 账号。' if owner != tg_id
+                   else self._gift_claim_problem(tg_id, code))
+        if problem:
+            self._pending.pop(self._pkey(chat_id), None)
+            await self._show(chat_id, '❌ ' + escape(problem), BACK_HOME)
+        else:
+            await self._start_registration(chat_id, tg_id, credential=code)
+        return True
 
     def registration_slots(self) -> tuple[int, int]:
         """(used, cap). A cap of 0 means unlimited."""
@@ -2383,10 +2420,9 @@ class TelegramBot(RebindBotMixin):
         await self._show(
             chat_id, f"👤 <b>Telegram 用户</b>\n\nID：<code>{tg_id}</code>\n"
             f"账号：尚未注册\n资格：{status}\n\n"
-            + ('赠送开号请在私聊操作，不在群里展示领取码。' if _GROUP.get()
+            + ('可在本群赠送专属注册资格，对方领取后前往私聊注册。' if _GROUP.get()
              else "可赠送专属注册资格，由对方自己设置用户名。"),
-            (self._private_button('person_' + tg_id, '赠送开号 · 私聊') if _GROUP.get()
-             else [[{"text": "🎁 赠送开号", "callback_data": "admin_gift"}]])
+            [[{"text": "🎁 赠送开号", "callback_data": "admin_gift"}]]
             + [[{'text': '刷新目标', 'callback_data': 'admin_card'},
                 {'text': '管理入口', 'callback_data': 'admin_root'}]])
         self._pending[self._pkey(chat_id)] = (
@@ -2408,11 +2444,14 @@ class TelegramBot(RebindBotMixin):
             return
         target = str(extra.get("tg_id") or "")
         if self._member_for_chat(target):
-            await self._admin_show_user(chat_id, self._member_for_chat(target),
-                                        self._admin_actor(member, ""))
+            self._pending.pop(self._pkey(chat_id), None)
+            await self._edit(chat_id, message_id, "对方已有账号，不能重复赠送开号。请重新 /kk 查询。")
             return
         if self._registration is None:
             await self._edit(chat_id, message_id, "注册服务不可用。", self.admin_menu())
+            return
+        if _GROUP.get() and not self._start_link('gift'):
+            await self._edit(chat_id, message_id, "暂时无法生成 Bot 私聊入口，未发放资格，请稍后重新查询。")
             return
         group, days = self._registration.gift_terms(target)
         duration = f"{days} 天" if days else "永久"
@@ -2428,7 +2467,8 @@ class TelegramBot(RebindBotMixin):
                 f"🎁 <b>赠送开号资格</b>\n\n接收人：<code>{target}</code>\n"
                 f"用户组：{group_name}\n权益：{duration}（注册成功后起算）\n\n"
                 "只允许该 Telegram 领取，不会立即创建账号。\n"
-                "确认后生成链接，由你转发；仍须满足当前注册准入条件。",
+                + ("确认后在本群发布领取按钮；仍须满足当前注册准入条件。" if _GROUP.get()
+                   else "确认后生成链接，由你转发；仍须满足当前注册准入条件。"),
                 [[{"text": "确认赠送", "callback_data": f"admin_gift_ok:{nonce}"},
                   {"text": "取消", "callback_data": "admin"}]])
             return
@@ -2438,15 +2478,27 @@ class TelegramBot(RebindBotMixin):
         if (group, days) != (extra.get("group"), extra.get("days")):
             await self._edit(chat_id, message_id, "注册权益已变化，请重新查找并确认。", self.admin_menu())
             return
+        previous = self._registration.get_grant(target)
         try:
             issued = self._registration.issue_gift(target, self._admin_actor(member, ""))
         except ConfigError as exc:
             await self._edit(chat_id, message_id, f"❌ {escape(str(exc))}", self.admin_menu())
             return
-        self._members.audit(self._admin_actor(member, ""), "registration.gift", target,
-                            f"group={group} days={days}")
         code = str(issued.get("gift_code") or "")
+        if not previous or previous.get('gift_code') != code:
+            self._members.audit(self._admin_actor(member, ""), "registration.gift", target,
+                                f"group={group} days={days}")
         link = self._start_link(code)
+        if _GROUP.get():
+            issuer = str(member.get('tg_user_id') or _ACTOR.get())
+            issuer_name = str(member.get('tg_username') or '')
+            issuer_label = '@' + issuer_name if issuer_name else 'TG ' + issuer
+            await self._edit(chat_id, message_id,
+                f'🎁 <a href="tg://user?id={escape(issuer, quote=True)}">{escape(issuer_label)}</a> 为 '
+                f'<a href="tg://user?id={target}">TG {target}</a> 赠送了一份注册资格\n'
+                '点击下方领取，前往机器人完成注册。',
+                [[{'text': '领取并注册', 'url': link}]])
+            return
         buttons = [[{"text": "🎁 点击领取（仅指定用户）", "url": link}]] if link else []
         buttons.append([{"text": "◀ 返回管理", "callback_data": "admin"}])
         await self._edit(
@@ -2786,6 +2838,9 @@ class TelegramBot(RebindBotMixin):
             previous['pending'] = None
         old_panel = self._panel.pop(key, None)
         self._pending.pop(key, None)
+        for claim_key, claim in list(self._gift_claims.items()):
+            if claim_key[0] == str(chat_id) and claim[1] == tg_user_id:
+                self._gift_claims.pop(claim_key, None)
         try:
             return await self._dispatch_command(chat_id, tg_user_id, tg_username,
                                                 text, display_name)
@@ -3481,6 +3536,10 @@ class TelegramBot(RebindBotMixin):
         if not chat_id or not tg_user_id:
             return
         if self._anonymous_sender(message):
+            if (text and text.split()[0].lower().split('@', 1)[0] == '/kk'
+                    and not self._addressed_to_other_bot(text)
+                    and self._group_chat_allowed(message.get('chat') or {})):
+                await self.send(chat_id, '⛔ 无法核实匿名管理身份，请使用本人账号发送 /kk。')
             return
         if self._addressed_to_other_bot(text):
             return
@@ -3496,7 +3555,37 @@ class TelegramBot(RebindBotMixin):
     async def _handle_bound_message(self, message: dict[str, Any], chat_id: Any,
                                     tg_user_id: str, tg_username: str, tg_name: str,
                                     text: str, in_group: bool) -> None:
+        command = text.split()[0].lower().split('@', 1)[0] if text else ''
         reply = (message.get('reply_to_message') or {}).get('message_id')
+        waiting = self._pending.get(self._pkey(chat_id))
+        business_input = not in_group or text.startswith('/') or bool(
+            waiting and reply and waiting[2].get('message_id') == reply)
+        claim = None
+        if not in_group:
+            parts = text.split()
+            token = parts[1] if command == '/start' and len(parts) == 2 else text
+            if looks_like_credential(token) and token.upper().startswith('GIFT'):
+                # Validate recipient BEFORE the membership guide. A foreign
+                # link must not fall back to the clicker's own authorisation.
+                self._pending.pop(self._pkey(chat_id), None)
+                for key, saved in list(self._gift_claims.items()):
+                    if key[0] == str(chat_id) and saved[1] == tg_user_id:
+                        self._gift_claims.pop(key, None)
+                problem = self._gift_claim_problem(tg_user_id, token)
+                if problem:
+                    await self._show(chat_id, '❌ ' + escape(problem), BACK_HOME)
+                    return
+                claim = (time.time() + PENDING_TTL, tg_user_id, token)
+            elif waiting and waiting[0] == 'username' and not text.startswith('/'):
+                admission = waiting[2].get('admission')
+                if str(getattr(admission, 'credential', '')).startswith('GIFT'):
+                    claim = (waiting[1], tg_user_id, admission.credential)
+        if (business_input and command not in ('/help', '/rules', '/cancel')
+                and not await self.membership.gate(chat_id, tg_user_id)):
+            mid = self._panel.get(self._pkey(chat_id))
+            if claim and mid:
+                self._gift_claims[(str(chat_id), int(mid))] = claim
+            return
         mid = reply or self._panel.get(self._pkey(chat_id))
         panel = self._admin_panel(chat_id, mid)
         is_input = not text.startswith('/') or text.split('@', 1)[0] == '/cancel'
@@ -3643,11 +3732,11 @@ class TelegramBot(RebindBotMixin):
         if in_group:
             if self._anonymous_sender(message) or not tg_user_id:
                 if callback_id:
-                    await self._answer_callback(callback_id)
+                    await self._answer_callback(callback_id, '无法核实操作者身份，请使用本人账号。' if data.startswith('admin_gift') else '')
                 return
             if not self._group_chat_allowed(message.get("chat") or {}):
                 if callback_id:
-                    await self._answer_callback(callback_id)
+                    await self._answer_callback(callback_id, '此群未获授权，不能赠送开号。' if data.startswith('admin_gift') else '')
                 return
         with self._bind_session(chat_id, tg_user_id, group=in_group,
                                 thread_id=self._thread_id(message)):
@@ -3673,7 +3762,7 @@ class TelegramBot(RebindBotMixin):
             await self._answer_callback(callback_id, '这不是你的操作卡片，请发送自己的命令。')
             return
         panel = self._admin_panel(chat_id, message_id)
-        targeted = data.startswith(('admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or data in (
+        targeted = data.startswith(('admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or data in (
             'admin_card', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
             'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser')
         if panel:
@@ -3689,16 +3778,19 @@ class TelegramBot(RebindBotMixin):
             # Never borrow the selected user from another message in this chat.
             await self._answer_callback(callback_id, '目标管理卡已失效，请重新 /kk 查询。')
             return
+        if data.startswith('admin_gift') and panel and panel.get('user_id'):
+            await self._answer_callback(callback_id, '对方已有账号，不能重复赠送开号。')
+            return
         if data.startswith('admin_renew:'):
             # Old amount-only buttons have no one-use confirmation identity.
             await self._answer_callback(callback_id, '旧版快捷续期已失效，请重新选择续期并输入天数。')
             return
         if in_group:
-            public = data in ('me', 'me_status', 'usage', 'home', 'help', 'rules', 'rank', 'top',
+            public = data in ('membership_recheck', 'me', 'me_status', 'usage', 'home', 'help', 'rules', 'rank', 'top',
                               'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_renew', 'admin_score', 'admin_usage',
-                              'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser')
-            public = public or data.startswith(('rank:', 'top:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
+                              'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift')
+            public = public or data.startswith(('admin_gift_ok:', 'rank:', 'top:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
                 await self._answer_callback(callback_id, '请使用卡片上的私聊入口继续此操作。')
                 return
@@ -3710,6 +3802,17 @@ class TelegramBot(RebindBotMixin):
             await asyncio.sleep(0)
         try:
             self._touch_panel(chat_id, message_id)
+            if (data not in ('help', 'rules', 'panel_close', 'admin_cancel')
+                    and not await self.membership.gate(chat_id, tg_user_id)):
+                return
+            if data == 'membership_recheck':
+                current_mid = self._panel.get(self._pkey(chat_id), message_id)
+                if not in_group and await self._resume_gift_claim(chat_id, current_mid, tg_user_id):
+                    return
+                await self._show_home(chat_id, tg_user_id, tg_name)
+                return
+            if data in ('home', 'panel_close', 'register', 'personal_home'):
+                self._gift_claims.pop(panel_key, None)
             if data == 'panel_close':
                 self._pending.pop(self._pkey(chat_id), None)
                 self._admin_panels.pop(panel_key, None)
@@ -4112,6 +4215,10 @@ class TelegramBot(RebindBotMixin):
 
     async def _dispatch_update(self, update: dict[str, Any]) -> None:
         try:
+            # Membership events must invalidate earlier leaves immediately,
+            # not wait behind a slow chat callback or a scan's account lock.
+            if await self.membership.handle_update(update):
+                return
             async with self._lock_for(self._chat_key(update)):
                 if "message" in update:
                     await self._handle_message(update["message"])
@@ -4142,7 +4249,7 @@ class TelegramBot(RebindBotMixin):
         result = await self._call(
             "getUpdates",
             {"offset": self._offset, "timeout": POLL_TIMEOUT,
-             "allowed_updates": ["message", "callback_query"]},
+             "allowed_updates": ["message", "callback_query", "chat_member", "my_chat_member"]},
             timeout=HTTP_TIMEOUT)
         self._last_poll_at = time.time()
         if not isinstance(result, list):

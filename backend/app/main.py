@@ -75,7 +75,7 @@ from app.modules.tasks import MockTasks, TasksReader
 from app.modules.telegram import TelegramBot
 from app.modules.tmdb import TmdbClient
 from app.modules.updater import MockUpdater, Updater
-from app.modules.usage import UsageSampler
+from app.modules.usage import UsageSampler, run_usage_io
 
 app = FastAPI(title="mediadeck", version="0.1.0")
 security = HTTPBasic()
@@ -102,7 +102,7 @@ async def _role_admin_auth(username: str, password: str) -> str | None:
     emby = getattr(app.state, "emby", None)
     if not members or not emby or not username or not password:
         return None
-    candidates = [m for m in members.list(role="admin", limit=200)
+    candidates = [m for m in await asyncio.to_thread(members.list, role="admin", limit=200)
                   if (m.get("username") or "").lower() == username.lower()
                   and m.get("state") == "active"]
     if not candidates:
@@ -384,23 +384,23 @@ async def _startup() -> None:
                 # deletes and never enrolls: both are operator decisions.
                 with contextlib.suppress(Exception):
                     users = await app.state.emby.list_users()
-                    app.state.members.sync_emby(users, apply=True)
+                    await run_usage_io(app.state.members.sync_emby, users, apply=True)
             if now >= housekeeping_due:
                 housekeeping_due = now + 600
                 with contextlib.suppress(Exception):
-                    app.state.members.roll_periods()
+                    await run_usage_io(app.state.members.roll_periods)
                 # Enforcement only writes to Emby once the operator has
                 # switched it on; until then the panel observes and reports.
                 if membership["enforcement_enabled"]:
                     with contextlib.suppress(Exception):
                         await app.state.enforcement.reconcile(apply=True)
                 with contextlib.suppress(Exception):
-                    app.state.images.sweep()
+                    await run_usage_io(app.state.images.sweep)
 
             if now >= prune_due:
                 prune_due = now + 86400
                 with contextlib.suppress(Exception):
-                    app.state.stats.prune(int(membership["retention_days"]))
+                    await run_usage_io(app.state.stats.prune, int(membership["retention_days"]))
 
     app.state.usage_task = asyncio.create_task(usage_loop())
 
@@ -1162,7 +1162,7 @@ def _edge_node_or_401(name: str, request: Request) -> Any:
 
 
 @app.get("/api/edge/{name}/cursors", include_in_schema=False)
-async def edge_cursors(name: str, request: Request) -> dict[str, Any]:
+def edge_cursors(name: str, request: Request) -> dict[str, Any]:
     """Where this node's logs have been consumed to.
 
     The panel owns the cursors because it is the party that must not double
@@ -1176,8 +1176,8 @@ async def edge_cursors(name: str, request: Request) -> dict[str, Any]:
 
 
 @app.post("/api/edge/{name}/report", include_in_schema=False)
-async def edge_report(name: str, request: Request,
-                      payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+def edge_report(name: str, request: Request,
+                payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
     """Accept one batch of access-log lines from a node.
 
     Authenticated by the node's own long-lived credential rather than the
@@ -1201,9 +1201,14 @@ async def edge_report(name: str, request: Request,
             "unknown_bytes": result["unknown_bytes"]}
 
 
+# Preserve ingest -> policy publish -> sent/applied ordering across requests,
+# now that their blocking database work runs in FastAPI's worker pool.
+_measured_report_lock = threading.Lock()
+
+
 @app.post("/api/edge/{name}/measured", include_in_schema=False)
-async def edge_measured(name: str, request: Request,
-                        payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+def edge_measured(name: str, request: Request,
+                  payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
     """Idempotent measured-flow envelope from meterd."""
     _edge_node_or_401(name, request)
     if str(payload.get("node") or name) != name:
@@ -1211,15 +1216,16 @@ async def edge_measured(name: str, request: Request,
     if payload.get("unit") not in (None, "", METER_UNIT) and payload.get("unit") != METER_UNIT:
         raise HTTPException(422, "unsupported unit")
     payload["node"] = name
-    result = app.state.metering.ingest(payload)
-    policy = _meter_policy_snapshot()
-    app.state.metering.note_policy_sent(name, int(policy["rev"]))
-    applied = payload.get("policy_applied_rev")
-    if applied is not None:
-        try:
-            app.state.metering.note_policy_applied(name, int(applied))
-        except (TypeError, ValueError):
-            pass
+    with _measured_report_lock:
+        result = app.state.metering.ingest(payload)
+        policy = _meter_policy_snapshot()
+        app.state.metering.note_policy_sent(name, int(policy["rev"]))
+        applied = payload.get("policy_applied_rev")
+        if applied is not None:
+            try:
+                app.state.metering.note_policy_applied(name, int(applied))
+            except (TypeError, ValueError):
+                pass
     result["blocked_tags"] = policy["blocked_tags"]
     result["unblock_tags"] = []
     result["policy"] = policy
@@ -1231,7 +1237,7 @@ async def edge_measured(name: str, request: Request,
 @app.get("/api/metering", dependencies=[Depends(_auth)])
 async def metering_status() -> dict[str, Any]:
     cfg = app.state.settings_service.metering_config()
-    totals = app.state.metering.totals()
+    totals = await asyncio.to_thread(app.state.metering.totals)
     return {
         "config": cfg,
         "totals": totals,
@@ -1250,7 +1256,7 @@ async def metering_cutover(payload: dict[str, Any] = Body(...),  # noqa: B008
 
 
 @app.get("/api/edge/status", dependencies=[Depends(_auth)])
-async def edge_status(days: int = 30) -> dict[str, Any]:
+def edge_status(days: int = 30) -> dict[str, Any]:
     """Ledger health: coverage, per-node totals and unattributed bytes."""
     days = max(1, min(int(days or 30), 400))
     ledger: TrafficLedger = app.state.ledger
@@ -1603,7 +1609,7 @@ async def _telegram_member_changed(user_id: str, previous_bandwidth: int | None)
 # ---- user groups -----------------------------------------------------------
 @app.get("/api/groups", dependencies=[Depends(_auth)])
 async def groups_list() -> list[dict[str, Any]]:
-    return app.state.groups.list()
+    return await asyncio.to_thread(app.state.groups.list)
 
 
 @app.post("/api/groups", dependencies=[Depends(_auth)])
@@ -1654,26 +1660,26 @@ async def members_list(status: str | None = None, group_id: str | None = None,
     """
     paged = page is not None or offset is not None
     fetch_limit = 5000 if paged else max(1, min(int(limit or 500), 5000))
-    members = app.state.members.list(status=status, group_id=group_id,
-                                     role=role, search=search, limit=fetch_limit,
-                                     register_via=register_via,
-                                     inviter_id=inviter_id)
+    members = await asyncio.to_thread(
+        app.state.members.list, status=status, group_id=group_id,
+        role=role, search=search, limit=fetch_limit,
+        register_via=register_via, inviter_id=inviter_id)
     hours = {}
     with contextlib.suppress(Exception):
-        hours = app.state.stats.hours_this_month()
+        hours = await asyncio.to_thread(app.state.stats.hours_this_month)
     balances = {}
     with contextlib.suppress(Exception):
-        balances = app.state.points.balances()
+        balances = await asyncio.to_thread(app.state.points.balances)
     edge = {}
     with contextlib.suppress(Exception):
-        edge = app.state.ledger.summary_for_users()
+        edge = await asyncio.to_thread(app.state.ledger.summary_for_users)
     for member in members:
         member["watch_hours"] = hours.get(member["emby_user_id"], 0.0)
         member["points"] = balances.get(member["emby_user_id"], 0)
         member["edge"] = edge.get(member["emby_user_id"],
                                   {"bytes_7d": 0, "bytes_30d": 0,
                                    "bytes_total": 0})
-    known = member_ops.known_member_ids(app.state.members)
+    known = await asyncio.to_thread(member_ops.known_member_ids, app.state.members)
     emby_users: dict[str, Any] | None = None
     unmanaged_error: str | None = None
     try:
@@ -2293,37 +2299,37 @@ async def enforcement_apply(payload: dict[str, Any] = Body(default={}),  # noqa:
 # ---- statistics ------------------------------------------------------------
 @app.get("/api/stats/overview", dependencies=[Depends(_auth)])
 async def stats_overview(days: int = 30) -> dict[str, Any]:
-    return app.state.stats.overview(days)
+    return await asyncio.to_thread(app.state.stats.overview, days)
 
 
 @app.get("/api/stats/daily", dependencies=[Depends(_auth)])
 async def stats_daily(days: int = 30) -> list[dict[str, Any]]:
-    return app.state.stats.daily_series(days)
+    return await asyncio.to_thread(app.state.stats.daily_series, days)
 
 
 @app.get("/api/stats/top-users", dependencies=[Depends(_auth)])
 async def stats_top_users(days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
-    return app.state.stats.top_users(days, limit)
+    return await asyncio.to_thread(app.state.stats.top_users, days, limit)
 
 
 @app.get("/api/stats/top-titles", dependencies=[Depends(_auth)])
 async def stats_top_titles(days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
-    return app.state.stats.top_titles(days, limit)
+    return await asyncio.to_thread(app.state.stats.top_titles, days, limit)
 
 
 @app.get("/api/stats/clients", dependencies=[Depends(_auth)])
 async def stats_clients(days: int = 30) -> list[dict[str, Any]]:
-    return app.state.stats.client_breakdown(days)
+    return await asyncio.to_thread(app.state.stats.client_breakdown, days)
 
 
 @app.get("/api/stats/nodes", dependencies=[Depends(_auth)])
 async def stats_nodes(days: int = 30) -> list[dict[str, Any]]:
-    return app.state.stats.node_breakdown(days)
+    return await asyncio.to_thread(app.state.stats.node_breakdown, days)
 
 
 @app.get("/api/stats/play-methods", dependencies=[Depends(_auth)])
 async def stats_play_methods(days: int = 30) -> dict[str, Any]:
-    return app.state.stats.play_method_breakdown(days)
+    return await asyncio.to_thread(app.state.stats.play_method_breakdown, days)
 
 
 @app.get("/api/audit", dependencies=[Depends(_auth)])
@@ -2389,17 +2395,29 @@ async def telegram_get() -> dict[str, Any]:
     # Never the raw token: it is a bearer credential, and anyone holding it can
     # read every message the bot receives and post as it.
     return {**app.state.settings_service.telegram_public(),
+            "membership_schedule": app.state.plugins.card('group_membership'),
             "status": app.state.telegram.status()}
 
 
 @app.post("/api/settings/telegram", dependencies=[Depends(_auth)])
 async def telegram_save(payload: dict[str, Any] = Body(...),  # noqa: B008
                         user: str = Depends(_auth)) -> dict[str, Any]:
-    saved = app.state.settings_service.save_telegram(payload)
+    if 'membership_rules' in payload:
+        fingerprint = app.state.telegram.membership.fingerprint()
+        rules = await app.state.telegram.membership.prepare_rules(payload['membership_rules'])
+        if fingerprint != app.state.telegram.membership.fingerprint():
+            raise ConflictError('关联规则在核实期间已变化，请重新保存')
+        payload = {**payload, 'membership_rules': rules}
+    saved = app.state.settings_service.save_telegram(payload, membership_verified='membership_rules' in payload)
     # The audit trail records that the token changed, never what it changed to.
     app.state.members.audit(
         user, "settings.telegram", "",
         f"enabled={saved['enabled']} token_set={saved['bot_token_set']}")
+    if 'membership_rules' in payload:
+        rules = saved['membership_rules']
+        app.state.members.audit(user, 'settings.telegram.membership', rules['generation'],
+            f"gate={rules['gate_enabled']} delete={rules['delete_enabled']} "
+            + 'chats=' + ','.join(t['chat_id'] for t in rules['targets'] if t['enabled']))
     # Allowlist / identity changes must reinstall command scopes; the poll
     # loop picks this up on the next pass without a process restart.
     app.state.telegram.invalidate_commands()
@@ -2433,6 +2451,27 @@ async def telegram_group_audit() -> dict[str, Any]:
     paying, and suspending on that basis is a person's call.
     """
     return await app.state.telegram.audit_group_membership()
+
+
+@app.post('/api/telegram/membership/verify', dependencies=[Depends(_auth)])
+async def telegram_membership_verify(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
+    return await app.state.telegram.membership.prepare_rules(
+        {**payload, 'gate_enabled': False, 'delete_enabled': False}, force_verify=True)
+
+
+@app.get('/api/telegram/membership', dependencies=[Depends(_auth)])
+async def telegram_membership_status() -> dict[str, Any]:
+    service = app.state.telegram.membership
+    return {'scan': service.status(), 'last_event': service._load('last_event'),
+            'rules': service.rules(), 'schedule': app.state.plugins.card('group_membership')}
+
+
+@app.post('/api/telegram/membership/scan', dependencies=[Depends(_auth)])
+async def telegram_membership_scan(user: str = Depends(_auth)) -> dict[str, Any]:
+    result = app.state.telegram.membership.start_scan('manual')
+    app.state.members.audit(user, 'telegram.membership.scan', result['id'],
+                            '检测已绑定TG会员；按当前删除开关执行即时复核')
+    return result
 
 
 @app.post("/api/telegram/rankings/send", dependencies=[Depends(_auth)])

@@ -130,8 +130,11 @@ def test_other_bot_commands_are_ignored(bot):
     assert bot.calls == []
 
 
-def test_anonymous_and_channel_senders_are_ignored(bot):
+def test_anonymous_kk_is_refused_and_channel_business_is_ignored(bot):
     run(bot._handle_message(_msg("/kk 901", sender_chat={"id": GROUP, "type": "supergroup"})))
+    assert '无法核实匿名管理身份' in last_text(bot)
+    assert bot._pending == {} and not bot._admin_panels
+    bot.calls.clear()
     run(bot._handle_message(_msg("/me", sender_chat={"id": -100, "type": "channel"})))
     assert bot.calls == []
 
@@ -211,10 +214,11 @@ def test_reply_kk_opens_admin_card_in_the_group(bot):
 def test_kk_numeric_id_gifts_bound_link_claimed_only_in_private(bot):
     run(bot._handle_message(_msg("/kk 777")))
     mid = bot._panel[f"g:{GROUP}:0:{ADMIN}"]
-    assert 'person_777' in str(bot.calls)
+    assert 'admin_gift' in str(bot.calls)
     run(bot._handle_callback(_cb("admin_gift", mid=mid)))
     assert bot._registration.get_grant('777') is None
-    # The link preserves the target, but gift issuance and its credential stay private.
+    # Group gifting now opens a confirmation, not immediate issuance. The
+    # existing private deep-link administration path must remain supported.
     run(bot._handle_message(_msg('/start person_777', chat=ADMIN, chat_type='private')))
     private_mid = bot._panel[ADMIN]
     run(bot._handle_callback(_cb('admin_gift', chat=ADMIN, chat_type='private', mid=private_mid)))

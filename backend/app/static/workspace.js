@@ -137,13 +137,15 @@ function initTelegramSettings(tg) {
   $('#view').append(appearance);
   const groupBox = document.createElement('div'); groupBox.innerHTML = card('群内交互','换绑只在这里配置的群中审核，群管理员还需具备 Deck 管理员角色', `<div class="card-body"><div class="form-row"><label for="tg-reviewgroups">审核与交互群</label><textarea id="tg-reviewgroups" rows="3" placeholder="-100xxxxxxxxx，每行一个群">${esc((tg.group_interaction_chats || []).join('\n'))}</textarea></div><p class="help">Bot 需要加入这些群。原 TG 失效的用户可用新 TG 验证 Emby 密码申请换绑，无需旧 TG 确认。</p><button class="btn primary" id="tg-save-groups">保存交互群</button></div>`);
   $('#view').append(groupBox.firstElementChild);
+  $('#view').insertAdjacentHTML('beforeend', membershipSettingsCards(tg));
   $('#tg-save').textContent = '保存机器人连接'; $('#tg-save2').textContent = '保存注册规则'; $('#tg-test').textContent = '测试已保存连接';
-  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
+  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'membership',label:'群组与频道',keys:['群组与频道','定时成员检测']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
   const payloadKeys = keys => { const all = telegramPagePayload(); return Object.fromEntries(keys.map(k => [k,all[k]])); };
   configureSave('tg-save','/api/settings/telegram','POST',() => payloadKeys(['bot_token','enabled','emby_public_url']));
   configureSave('tg-save2','/api/settings/telegram','POST',() => payloadKeys(['allow_admin_grant','allow_invite','allow_redeem','register_days','max_users','default_group_id','require_group']));
   configureSave('tg-save-logo','/api/settings/telegram','POST',() => ({menu_logo_url:$('#tg-logo').value.trim()}));
   configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean)}));
+  initMembershipSettings(tg);
   $('#tg-test').onclick = async () => {
     const el = $('#tg-result'), button = $('#tg-test'); button.disabled = true; el.textContent = '测试中…';
     try { const r = await api('/api/settings/telegram/verify',{method:'POST'}); if (el.isConnected) el.textContent = r.ok ? `连接正常 @${r.username}；启用状态未改变` : `连接失败：${r.error || '请检查配置'}`; }
@@ -151,6 +153,72 @@ function initTelegramSettings(tg) {
     finally { button.disabled = false; }
   };
 }
+// Linked membership rules are independent of the interaction/review allowlist.
+function membershipSettingsCards(tg) {
+  const rules = tg.membership_rules || {targets:[],gate_enabled:false,delete_enabled:false};
+  const schedule = tg.membership_schedule || {}, cfg = schedule.config || {};
+  return card('群组与频道','所有启用的关联项都必须加入/关注；关联不授予群内发言或审核权限',`<div class="card-body">
+    <div class="toolbar"><button class="btn" id="gm-add">＋ 添加关联</button><button class="btn" id="gm-verify">核实名称与权限</button><button class="btn" onclick="go('tggroup')">成员检测 →</button></div>
+    <textarea id="gm-targets" hidden aria-label="关联目标配置">${esc(JSON.stringify(rules.targets))}</textarea>
+    <div class="table-wrap"><table><thead><tr><th>关联目标 / 实际类型</th><th>加入或关注链接</th><th>Bot权限</th><th>启用 / 操作</th></tr></thead><tbody id="gm-target-rows"></tbody></table></div>
+    <p class="help" id="gm-verify-status">Bot须是关联目标的管理员，才能可靠查询并接收成员变动；不会自动升权、生成邀请或踢人。</p>
+    <div class="form-row"><label for="gm-gate">使用Bot前校验</label><input id="gm-gate" type="checkbox" ${rules.gate_enabled?'checked':''}><span class="muted">未满足时显示加入群组、关注频道与重新核实按钮；不改Emby直接登录。</span></div>
+    <div class="form-row"><label for="gm-delete">退群删除本人账户</label><input id="gm-delete" type="checkbox" ${rules.delete_enabled?'checked':''}><span class="tag warn">敏感操作 · 默认关闭</span></div>
+    <p class="help">主动退出、被踢以及手动/定时检测发现存量不合规会员，均在执行前立即再次核实。<b>仅Deck/Emby管理员豁免，白名单同样适用</b>；无宽限，仅删本人Emby＋Deck账号/绑定/设备，不连带邀请人或下级，保留积分、观看及审计历史。查询未知不删除。</p>
+    <button class="btn primary" id="gm-save">保存关联规则</button>
+  </div>`) + card('定时成员检测','核查Deck已绑定TG会员，不枚举群或频道全员',`<div class="card-body">
+    <div class="form-row"><label for="gm-schedule-on">启用定时检测</label><input id="gm-schedule-on" type="checkbox" ${schedule.enabled?'checked':''}></div>
+    <div class="form-row"><label for="gm-mode">检测周期</label><select id="gm-mode"><option value="daily" ${cfg.mode==='daily'?'selected':''}>每天</option><option value="interval" ${cfg.mode==='interval'?'selected':''}>固定间隔</option></select></div>
+    <div class="form-row"><label for="gm-hour">每天执行时间（服务器时区整点）</label><select id="gm-hour">${Array.from({length:24},(_,h)=>`<option value="${h}" ${Number(cfg.hour??4)===h?'selected':''}>${String(h).padStart(2,'0')}:00</option>`).join('')}</select></div>
+    <div class="form-row"><label for="gm-hours">间隔小时</label><input id="gm-hours" type="number" min="1" max="168" value="${esc(cfg.interval_hours??6)}"></div>
+    <p class="help">复用任务中心调度。删除开关关闭时只检测；开启时扫描可复核后删除存量不合规本人。无关联时不会执行。<a href="#/tggroup">查看检测进度与最近结果</a></p>
+    <div id="gm-schedule-result" class="muted"></div><button class="btn primary" id="gm-schedule-save">保存定时检测</button>
+  </div>`);
+}
+function initMembershipSettings(tg) {
+  let targets = JSON.parse($('#gm-targets').value || '[]');
+  const ready = () => {
+    const active = targets.filter(t=>t.enabled);
+    const ok = tg.enabled && active.length && active.every(t=>t.verification==='ready');
+    for (const id of ['gm-gate','gm-delete']) { const el=$('#'+id); el.disabled=!el.checked&&!ok; }
+  };
+  const sync = () => { $('#gm-targets').value=JSON.stringify(targets); ready(); updateDirtyBadges(); };
+  const label = t => t.verification==='ready'?'✓ 可核查':t.verification==='permission_unknown'?'权限不足 / 无法确认':'尚未核实 / 查询失败';
+  const draw = () => {
+    $('#gm-target-rows').innerHTML = targets.map((t,i)=>`<tr data-gm-row="${i}"><td><b class="gm-title">${esc(t.title||'尚未核实名称')}</b><small class="muted gm-type"> ${esc({group:'群组',supergroup:'群组',channel:'频道'}[t.type]||'类型待核实')}</small><input class="gm-id" aria-label="关联目标ID ${i+1}" value="${esc(t.chat_id)}" placeholder="-100… 或 @名称"></td><td><input class="gm-url" aria-label="加入链接 ${i+1}" value="${esc(t.join_url)}" placeholder="https://t.me/…"></td><td class="gm-permission">${esc(label(t))}</td><td><input class="gm-enabled" aria-label="启用关联 ${i+1}" type="checkbox" ${t.enabled?'checked':''}><button class="btn small gm-remove">移除</button></td></tr>`).join('') || '<tr><td colspan="4" class="muted">尚未关联群组或频道；门禁与删除不可启用。</td></tr>';
+    // The hidden serialized field is the single dirty baseline for dynamic rows.
+    $('#gm-target-rows').querySelectorAll('[data-gm-row]').forEach(row=>{
+      const index=Number(row.dataset.gmRow);
+      row.oninput=row.onchange=()=>{
+        const t=targets[index], next=row.querySelector('.gm-id').value.trim();
+        if(next!==t.chat_id){t.title='';t.type='';t.verification='unverified';row.querySelector('.gm-title').textContent='尚未核实名称';row.querySelector('.gm-type').textContent='类型待核实';row.querySelector('.gm-permission').textContent=label(t);}
+        t.chat_id=next;t.join_url=row.querySelector('.gm-url').value.trim();t.enabled=row.querySelector('.gm-enabled').checked;sync();
+      };
+      row.querySelector('.gm-remove').onclick=()=>{targets.splice(index,1);draw();sync();};
+    });
+    ready();
+  };
+  draw();
+  $('#gm-add').onclick=()=>{targets.push({chat_id:'',join_url:'',enabled:true,title:'',type:'',verification:'unverified'});draw();sync();};
+  $('#gm-verify').onclick=async()=>{
+    const button=$('#gm-verify'), section=button.closest('.card'), submitted=JSON.stringify(targets);button.disabled=true;
+    configFeedback(section,'正在核实关联身份与Bot权限…');
+    try{
+      const result=await api('/api/telegram/membership/verify',{method:'POST',body:JSON.stringify({targets})});
+      if(!section.isConnected)return;
+      if(JSON.stringify(targets)===submitted){targets=result.targets;draw();sync();}
+      configFeedback(section,result.targets.every(t=>!t.enabled||t.verification==='ready')?'身份与权限已核实；请保存关联规则。':'存在查询失败或权限不足：不能启用门禁/删除。',result.targets.some(t=>t.enabled&&t.verification!=='ready'));
+    }catch(err){if(section.isConnected)configFeedback(section,err.message,true);}finally{button.disabled=false;}
+  };
+  let submitted='';
+  configureSave('gm-save','/api/settings/telegram','POST',()=>{submitted=JSON.stringify(targets);return {membership_rules:{targets,gate_enabled:$('#gm-gate').checked,delete_enabled:$('#gm-delete').checked}};},result=>{
+    if(JSON.stringify(targets)===submitted){targets=result.membership_rules.targets;draw();$('#gm-targets').value=JSON.stringify(targets);configBaselines.set($('#gm-targets'),$('#gm-targets').value);}
+  });
+  configureSave('gm-schedule-save','/api/plugins/group_membership','POST',()=>({enabled:$('#gm-schedule-on').checked,config:{mode:$('#gm-mode').value,hour:Number($('#gm-hour').value),interval_hours:Number($('#gm-hours').value)}}));
+  const schedule=tg.membership_schedule;
+  $('#gm-schedule-result').textContent=schedule?.last_run ? '最近调度结果：'+JSON.stringify(schedule.last_run.summary||{}) : '尚无调度记录（默认关闭）';
+}
+
 let workspaceInert = null;
 function setWorkspaceMenu(open, restoreFocus = false) {
   const wasOpen = document.body.classList.contains('nav-open');
