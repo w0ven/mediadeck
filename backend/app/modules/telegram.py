@@ -654,9 +654,12 @@ class TelegramBot(RebindBotMixin):
     @staticmethod
     def _thread_id(message: dict[str, Any] | None) -> int | None:
         message = message or {}
-        raw = message.get("message_thread_id")
-        if raw is None and not message.get("is_topic_message"):
+        # Reply chains can carry message_thread_id without being a forum
+        # topic; it may differ or disappear on the Bot's callback message.
+        # Only actual topics define a separate management session/routing scope.
+        if not message.get("is_topic_message"):
             return None
+        raw = message.get("message_thread_id")
         try:
             value = int(raw)
         except (TypeError, ValueError):
