@@ -210,12 +210,19 @@ def test_reply_kk_opens_admin_card_in_the_group(bot):
 def test_kk_numeric_id_gifts_bound_link_claimed_only_in_private(bot):
     run(bot._handle_message(_msg("/kk 777")))
     mid = bot._panel[f"g:{GROUP}:0:{ADMIN}"]
+    assert 'person_777' in str(bot.calls)
     run(bot._handle_callback(_cb("admin_gift", mid=mid)))
-    nonce = bot._pending[f"g:{GROUP}:0:{ADMIN}"][2]["nonce"]
-    run(bot._handle_callback(_cb(f"admin_gift_ok:{nonce}", mid=mid)))
+    assert bot._registration.get_grant('777') is None
+    # The link preserves the target, but gift issuance and its credential stay private.
+    run(bot._handle_message(_msg('/start person_777', chat=ADMIN, chat_type='private')))
+    private_mid = bot._panel[ADMIN]
+    run(bot._handle_callback(_cb('admin_gift', chat=ADMIN, chat_type='private', mid=private_mid)))
+    nonce = bot._pending[ADMIN][2]['nonce']
+    run(bot._handle_callback(_cb(f'admin_gift_ok:{nonce}', chat=ADMIN, chat_type='private', mid=private_mid)))
     grant = bot._registration.get_grant("777")
     assert grant and grant["gift_code"]
     assert "t.me/cola_embybot?start=" + grant["gift_code"] in last_text(bot)
+    assert all(grant['gift_code'] not in str(p) for _, p in bot.calls if p.get('chat_id') == GROUP)
     assert bot.members.find_by_telegram("777") is None
     bot.calls.clear()
     run(bot._handle_message(_msg("/start " + grant["gift_code"], chat=GROUP, user="777",
@@ -238,10 +245,11 @@ def test_two_admins_and_topics_do_not_cross_sessions(bot):
     assert bot._pending[f"g:{GROUP}:12:{OTHER_ADMIN}"][2]["user_id"] == "u1"
     bot.calls.clear()
     before = bot.members.get("u1")["expires_at"]
-    run(bot._handle_callback(_cb("admin_renew:30", user=OTHER_ADMIN, mid=first, thread=11)))
+    run(bot._handle_callback(_cb("admin_renew", user=OTHER_ADMIN, mid=first, thread=11)))
     assert [m for m, _ in bot.calls if m != "answerCallbackQuery"] == []
     assert bot.members.get("u1")["expires_at"] == before
-    run(bot._handle_callback(_cb("admin_renew:30", mid=first, thread=11)))
+    run(bot._handle_callback(_cb("admin_renew", mid=first, thread=11)))
+    run(bot._handle_message(_msg('30', thread=11, reply={'message_id': first})))
     after = bot.members.get("u1")["expires_at"]
     assert after >= (before or 0) + 29 * 86400
 
@@ -293,8 +301,7 @@ def test_group_renew_and_score_accept_reply_or_args(bot):
     assert bot.points.balance("u1") == 8
     run(bot._handle_message(_msg("/prouser alice")))
     key = f'g:{GROUP}:0:{ADMIN}'
-    saved = bot._pending[key][2]['group_confirm']
-    run(bot._handle_callback(_cb('admin_group_apply:keep:'+saved['nonce'], mid=bot._panel[key])))
+    assert 'group_confirm' not in bot._pending[key][2]
     assert bot.members.get("u1")["group_id"] == "whitelist"
     run(bot._handle_message(_msg("/revuser alice")))
     saved = bot._pending[key][2]['group_confirm']
@@ -324,8 +331,10 @@ def test_new_group_command_clears_only_same_actor_menu(bot):
     bot.calls.clear()
     run(bot._handle_message(_msg("/rank")))
     deleted = [p["message_id"] for m, p in bot.calls if m == "deleteMessage"]
-    assert admin_mid in deleted
+    assert admin_mid not in deleted  # target-management context is retained independently
     assert alice_mid not in deleted
+    run(bot._handle_callback(_cb('admin_card', mid=admin_mid)))
+    assert 'alice' in last_text(bot) and '管理目标' in last_text(bot)
 
 
 def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):

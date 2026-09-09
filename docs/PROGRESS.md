@@ -4,6 +4,38 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-09 — Telegram target context, richer cards and direct whitelist (local)
+
+- Fixed `/kk` navigation by binding each management card to its chat/message,
+  operator identity, topic and target. Return/cancel stays on the target account;
+  parallel cards never borrow the last selected account or revive old confirms.
+- Expanded group `/me` with effective status/group/expiry, measured quota and
+  remaining usage, bandwidth, points and sampled watch summaries. Unknown data
+  stays unknown; private fields and sensitive actions remain private-chat only.
+- Navigation and refresh edit the current message. Not-modified is successful;
+  uneditable/deleted messages get one replacement with migrated ownership, while
+  uncertain network failures do not resend results or repeat business actions.
+- `/prouser` now directly grants the reserved whitelist to an existing account
+  selected by reply, Telegram ID or account name, using existing administrator,
+  chat, audit and entitlement checks. Repeat grants are no-ops; account status,
+  roles, points and history are preserved. Remote-sync failures remain explicit.
+- Added 15 attributed public-domain verses: stable per-account decoration and
+  random whitelist congratulations. No external quotation API or dependency.
+- Added 59 interaction regressions; Bot/account targeted suite: 442 passed.
+  Final complete suite: **1665 passed, 56 skipped, no XFAIL**, 118.57s.
+  Changed-code lint has no new findings; existing global findings are retained.
+- Updated one group-billing test to obtain its confirmation through the group
+  menu rather than the now-direct `/prouser`. Preserved stale-definition denial.
+  Also corrected an existing browser test's `uncheck()` postcondition race with
+  the intended failed-request rollback; it now verifies the click, exact request,
+  failure notice and restored checkbox without changing Web production code.
+- Telegram transport was replaced locally with FakeTelegram and temporary SQLite;
+  real render/dispatch paths were exercised, but no live Telegram message was sent.
+  No push, release, deployment, production data change or service restart occurred.
+  Next: owner review and separately authorized release/live acceptance.
+
+---
+
 ## 2026-09-09 — signature v2 security fix, coordinated release candidate
 
 - Closed the audit signing blocker using domain-separated HMAC-SHA256 over a
