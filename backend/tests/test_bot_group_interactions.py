@@ -190,7 +190,7 @@ def test_group_rank_is_rolling_watch_time_not_calendar_today(bot):
 
 def test_private_rank_and_myinfo_aliases_still_work(bot):
     run(bot._handle_command("900", ADMIN, "rootadmin", "/rank"))
-    assert "今日观影时长" in last_text(bot)
+    assert "今日观影榜" in last_text(bot)
     bot.calls.clear()
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)

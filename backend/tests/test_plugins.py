@@ -621,39 +621,31 @@ def test_group_audit_says_so_when_no_group_is_configured() -> None:
 def test_inactive_cleanup_ignores_members_seen_recently() -> None:
     members = FakeMembers([_member("1", last_seen_at=time.time() - 3600)])
     plugin = InactiveCleanupPlugin(make_ctx(members=members, telegram=FakeBot()))
-    summary = asyncio.run(plugin.run(
-        {"days": 7, "notify": True, "suspend_after_days": 3}))
+    summary = asyncio.run(plugin.run({"days": 7}))
     assert summary["不活跃人数"] == 0
-    assert summary["已通知"] == 0
+    assert summary["已停用"] == 0
 
 
-def test_inactive_cleanup_notifies_then_suspends_but_never_deletes() -> None:
+def test_inactive_cleanup_suspends_immediately_without_notice() -> None:
     old = time.time() - 40 * 86400
     members = FakeMembers([_member("1", last_seen_at=old)])
     bot = FakeBot()
-    ctx = make_ctx(members=members, telegram=bot)
-    plugin = InactiveCleanupPlugin(ctx)
-    config = {"days": 7, "notify": True, "suspend_after_days": 3}
-
-    first = asyncio.run(plugin.run(config))
-    assert first["不活跃人数"] == 1 and first["已通知"] == 1
-    assert first["说明"] == "不会删号"
-    assert members.status_calls == []
-
-    ctx.set_state("inactive_cleanup", {"1": time.time() - 5 * 86400})
-    assert asyncio.run(plugin.run(config))["已停用"] == 1
+    summary = asyncio.run(InactiveCleanupPlugin(
+        make_ctx(members=members, telegram=bot)).run({"days": 7}))
+    assert summary["不活跃人数"] == 1 and summary["已停用"] == 1
+    assert "未提前通知" in summary["说明"]
     assert members.status_calls == [("1", "suspended", "plugin:inactive_cleanup")]
+    assert bot.notified == []
     assert not hasattr(members, "deleted")
 
 
-def test_inactive_cleanup_with_suspend_disabled_only_ever_warns() -> None:
+def test_inactive_cleanup_skips_whitelist_members() -> None:
     old = time.time() - 40 * 86400
-    members = FakeMembers([_member("1", last_seen_at=old)])
-    ctx = make_ctx(members=members, telegram=FakeBot())
-    ctx.set_state("inactive_cleanup", {"1": time.time() - 90 * 86400})
-    summary = asyncio.run(InactiveCleanupPlugin(ctx).run(
-        {"days": 7, "notify": True, "suspend_after_days": 0}))
-    assert summary["已停用"] == 0
+    members = FakeMembers([_member("1", last_seen_at=old, group_id="whitelist")])
+    summary = asyncio.run(InactiveCleanupPlugin(
+        make_ctx(members=members, telegram=FakeBot())).run({"days": 7}))
+    assert summary["不活跃人数"] == 0
+    assert summary["白名单豁免"] == 1
     assert members.status_calls == []
 
 
@@ -661,17 +653,7 @@ def test_inactive_cleanup_skips_members_that_are_not_active() -> None:
     old = time.time() - 40 * 86400
     members = FakeMembers([_member("1", last_seen_at=old, status="suspended")])
     plugin = InactiveCleanupPlugin(make_ctx(members=members, telegram=FakeBot()))
-    assert asyncio.run(plugin.run(
-        {"days": 7, "notify": True, "suspend_after_days": 3}))["不活跃人数"] == 0
-
-
-def test_inactive_cleanup_does_not_message_when_notify_is_off() -> None:
-    old = time.time() - 40 * 86400
-    bot = FakeBot()
-    members = FakeMembers([_member("1", last_seen_at=old)])
-    asyncio.run(InactiveCleanupPlugin(make_ctx(members=members, telegram=bot)).run(
-        {"days": 7, "notify": False, "suspend_after_days": 3}))
-    assert bot.notified == []
+    assert asyncio.run(plugin.run({"days": 7}))["不活跃人数"] == 0
 
 
 # -- viewing_report ---------------------------------------------------------
@@ -686,15 +668,15 @@ def test_viewing_report_sends_a_private_summary_to_linked_members() -> None:
     assert "周报" in body and "剧集甲" in body
 
 
-def test_viewing_report_skips_members_with_nothing_to_report() -> None:
+def test_viewing_report_still_sends_when_there_is_nothing_to_report() -> None:
     members = FakeMembers([_member("1")])
     bot = FakeBot()
     empty = FakeStats({"series": [], "recent_plays": []})
     summary = asyncio.run(ViewingReportPlugin(
         make_ctx(members=members, telegram=bot, stats=empty)).run(
             {"period": "weekly", "hour": 20}))
-    assert summary["已发送"] == 0 and summary["无记录跳过"] == 1
-    assert bot.notified == []
+    assert summary["已发送"] == 1 and summary["无记录仍发送"] == 1
+    assert "还没有观看记录" in bot.notified[0][1]
 
 
 def test_viewing_report_weekly_lands_on_monday_only() -> None:

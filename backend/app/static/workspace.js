@@ -10,7 +10,6 @@ function fmtWatchSeconds(value) {
 function watchWindowLabel(watch, window) {
   if (!watch) return '暂无统计';
   const n = watch['seconds_' + window];
-  if (watch['incomplete_' + window]) return n ? `已确认 ${esc(fmtWatchSeconds(n))}<small class="muted"> · 部分跨界历史无法拆分</small>` : '有跨界历史，时长无法完整还原';
   return esc(fmtWatchSeconds(n));
 }
 function actualBytes(n) { return n == null ? '暂无实测记录' : fmtBytes(n); }
@@ -19,7 +18,7 @@ function configDirty() {
   return configRoot?.isConnected && [...configRoot.querySelectorAll('input,select,textarea')]
     .some(el => configBaselines.has(el) && configBaselines.get(el) !== controlValue(el));
 }
-function configCanLeave() { return !configDirty() || confirm('当前有未保存的配置。离开会丢弃这些修改，仍要离开吗？'); }
+async function configCanLeave() { return !configDirty() || (await window.deckConfirm('当前有未保存的配置。离开会丢弃这些修改，仍要离开吗？')); }
 window.addEventListener('beforeunload', e => { if (configDirty()) { e.preventDefault(); e.returnValue = ''; } });
 // Auxiliary preview/export controls do not represent persisted settings.
 function configFeedback(section, message, bad = false) {
@@ -225,6 +224,12 @@ function initTelegramSettings(tg) {
   configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean)}));
   initPlaybackLinesEditor();
   initMembershipSettings(tg);
+  // Editors rewrite hidden JSON after the first baseline snapshot.
+  for (const id of ['tg-lines', 'gm-targets']) {
+    const el = document.getElementById(id);
+    if (el) configBaselines.set(el, controlValue(el));
+  }
+  updateDirtyBadges();
   $('#tg-test').onclick = async () => {
     const el = $('#tg-result'), button = $('#tg-test'); button.disabled = true; el.textContent = '测试中…';
     try { const r = await api('/api/settings/telegram/verify',{method:'POST'}); if (el.isConnected) el.textContent = r.ok ? `连接正常 @${r.username}；启用状态未改变` : `连接失败：${r.error || '请检查配置'}`; }

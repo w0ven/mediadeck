@@ -78,23 +78,54 @@ from app.modules.updater import MockUpdater, Updater
 from app.modules.usage import UsageSampler, run_usage_io
 
 app = FastAPI(title="mediadeck", version="0.1.0")
-security = HTTPBasic()
+security = HTTPBasic(auto_error=False)
+SESSION_COOKIE = "mediadeck_session"
+SESSION_TTL = 7 * 86400
 
 
-async def _auth(credentials: HTTPBasicCredentials = Depends(security)) -> str:  # noqa: B008
+async def _check_login(username: str, password: str) -> str | None:
     cfg = settings()
-    user_ok = secrets.compare_digest(credentials.username, cfg.mediadeck_admin_user)
-    pass_ok = secrets.compare_digest(credentials.password, cfg.mediadeck_admin_password)
+    if not username or not password:
+        return None
+    user_ok = secrets.compare_digest(username, cfg.mediadeck_admin_user)
+    pass_ok = secrets.compare_digest(password, cfg.mediadeck_admin_password)
     if user_ok and pass_ok:
-        return credentials.username
+        return username
     # Members holding the admin *role* may operate the panel with their Emby
     # credentials (owner decision 2026-08-30). The role check runs first and
     # reads only our own DB, so a random visitor cannot use the panel login
     # form to brute-force Emby passwords of non-admin accounts.
-    member_user = await _role_admin_auth(credentials.username, credentials.password)
-    if member_user:
-        return member_user
-    raise HTTPException(status.HTTP_401_UNAUTHORIZED, headers={"WWW-Authenticate": "Basic"})
+    return await _role_admin_auth(username, password)
+
+
+def _session_user(request: Request) -> str | None:
+    token = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    if not token or not hasattr(app.state, "cache"):
+        return None
+    user = app.state.cache.get(f"panelsess:{token}")
+    return str(user) if user else None
+
+
+def _issue_session(response: Response, user: str) -> None:
+    token = secrets.token_urlsafe(32)
+    if hasattr(app.state, "cache"):
+        app.state.cache.set(f"panelsess:{token}", user, ttl=SESSION_TTL)
+    response.set_cookie(
+        SESSION_COOKIE, token, httponly=True, samesite="lax",
+        max_age=SESSION_TTL, path="/")
+
+
+async def _auth(request: Request,
+                credentials: HTTPBasicCredentials | None = Depends(security)) -> str:  # noqa: B008
+    if credentials is not None:
+        user = await _check_login(credentials.username, credentials.password)
+        if user:
+            return user
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED)
+    user = _session_user(request)
+    if user:
+        return user
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED)
 
 
 async def _role_admin_auth(username: str, password: str) -> str | None:
@@ -542,13 +573,51 @@ STATIC_DIR = FilePath(__file__).parent / "static"
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
+@app.get("/login", include_in_schema=False)
+async def login_page(request: Request) -> HTMLResponse:
+    if _session_user(request):
+        return RedirectResponse("/", status_code=303)
+    html = (STATIC_DIR / "login.html").read_text(encoding="utf-8")
+    return HTMLResponse(html)
+
+
+@app.post("/api/auth/login")
+async def auth_login(payload: dict[str, Any] = Body(...)) -> JSONResponse:  # noqa: B008
+    username = str(payload.get("username") or "")
+    password = str(payload.get("password") or "")
+    user = await _check_login(username, password)
+    if not user:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, detail="用户名或密码错误")
+    response = JSONResponse({"ok": True, "user": user})
+    _issue_session(response, user)
+    return response
+
+
+@app.post("/api/auth/logout")
+async def auth_logout(request: Request) -> JSONResponse:
+    token = (request.cookies.get(SESSION_COOKIE) or "").strip()
+    if token and hasattr(app.state, "cache"):
+        app.state.cache.delete(f"panelsess:{token}")
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
+
+
 @app.get("/api/whoami", dependencies=[Depends(_auth)])
 async def whoami(user: str = Depends(_auth)) -> dict[str, str]:
     return {"user": user}
 
 
 @app.get("/", include_in_schema=False)
-async def root(_: str = Depends(_auth)) -> HTMLResponse:
+async def root(request: Request,
+               credentials: HTTPBasicCredentials | None = Depends(security)) -> HTMLResponse:  # noqa: B008
+    user = None
+    if credentials is not None:
+        user = await _check_login(credentials.username, credentials.password)
+    if not user:
+        user = _session_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=303)
     # Cache-busting: stamp static asset URLs with the deployed commit so a
     # release is visible on the next reload without a forced refresh.
     html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
@@ -558,7 +627,8 @@ async def root(_: str = Depends(_auth)) -> HTMLResponse:
         ver = ""
     if ver:
         for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js",
-                      "members.js", "workspace.js", "workspace.css", "hardglass.css"):
+                      "members.js", "workspace.js", "workspace.css", "hardglass.css",
+                      "dialog.js"):
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     return HTMLResponse(html)
 

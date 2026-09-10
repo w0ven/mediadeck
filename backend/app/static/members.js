@@ -31,8 +31,8 @@
   function detailDirty() {
     return [...ms.detailBaseline].some(([el,value]) => el.isConnected && (el.type === 'checkbox' ? el.checked : el.value) !== value);
   }
-  function canLeaveDetail() {
-    return !detailDirty() || confirm('详情中有未保存的修改。离开将丢弃这些修改，仍要继续吗？');
+  async function canLeaveDetail() {
+    return !detailDirty() || (await window.deckConfirm('详情中有未保存的修改。离开将丢弃这些修改，仍要继续吗？'));
   }
   function rememberDetailForm(host) {
     ms.detailBaseline = new Map([...host.querySelectorAll('input,select,textarea')].filter(el=>!el.readOnly && !el.disabled)
@@ -66,8 +66,8 @@
     }
     ms.drawerActive=false;ms.detail=null;
   }
-  function closeDetail() {
-    if(!canLeaveDetail()) return;
+  async function closeDetail() {
+    if(!(await canLeaveDetail())) return;
     clearTimeout($('#m-q')?._searchTimer);
     const params=currentParams();params.delete('id');params.delete('tab');writeHash(params);
     disposeDrawer(true);
@@ -164,14 +164,14 @@
     return 'local';
   }
 
-  function setParam(key, value, { reload = true } = {}) {
+  async function setParam(key, value, { reload = true } = {}) {
     const params = currentParams();
     if (value == null || value === '') params.delete(key);
     else params.set(key, String(value));
     if (key !== 'page' && key !== 'id' && key !== 'tab') params.set('page', '1');
     if (!['id','tab'].includes(key)) { params.delete('id'); params.delete('tab'); }
     if (key === 'tab') {
-      if (!canLeaveDetail()) return;
+      if (!(await canLeaveDetail())) return;
       writeHash(params, { navigate: false });
       const id = params.get('id');
       if (id) fillDetail(id, value || 'overview');
@@ -551,9 +551,9 @@
     return loadMembers(membersContext(true));
   }
 
-  function openDetail(id) {
+  async function openDetail(id) {
     clearTimeout($('#m-q')?._searchTimer);
-    if (!canLeaveDetail()) return;
+    if (!(await canLeaveDetail())) return;
     const params = currentParams();
     params.set('id', id);
     if (!params.get('tab')) params.set('tab', 'overview');
@@ -680,7 +680,7 @@
       host.querySelectorAll('[data-dev]').forEach((b) => {
         b.onclick = () => runMemberAction(b, async current => {
           const blocked = b.dataset.block === '1';
-          if (!confirm(`${blocked ? '封锁' : '解封'}这个设备？`)) return;
+          if (!(await deckConfirm(`${blocked ? '封锁' : '解封'}这个设备？`))) return;
           const path = blocked ? 'block' : 'unblock';
           const r = await api(`/api/members/${encodeURIComponent(id)}/devices/${encodeURIComponent(b.dataset.dev)}/${path}`, { method: 'POST' });
           assertRemoteResult(r);
@@ -760,7 +760,7 @@
         const action = button.dataset.memberAction;
         let body = {};
         if (action === 'password') {
-          const value = prompt('新密码（至少6位；留空随机生成）', '');
+          const value = await deckPrompt('新密码（至少6位；留空随机生成）', '');
           if (value === null) return;
           if (value && value.length < 6) throw new Error('密码至少6位');
           body = value ? {password:value} : {};
@@ -768,7 +768,7 @@
           const names = {status:member.state === 'suspended' ? '解除手动停用' : '停用账号',
             kick:'结束当前所有播放','reset-traffic':'重置本月已用额度（保留历史账本）',
             'telegram/unbind':'解除Telegram绑定'};
-          if (!confirm(`确认${names[action]}？`)) return;
+          if (!(await deckConfirm(`确认${names[action]}？`))) return;
           if (action === 'status') body.status = member.state === 'suspended' ? 'active' : 'suspended';
         }
         const result = assertRemoteResult(await api(endpoint + '/' + action, {
@@ -784,7 +784,7 @@
     });
     host.querySelectorAll('[data-forget-device]').forEach((button) => {
       button.onclick = () => runMemberAction(button, async current => {
-        if (!confirm('移除这个设备的面板记录？不会删除其它设备。')) return;
+        if (!(await deckConfirm('移除这个设备的面板记录？不会删除其它设备。'))) return;
         assertRemoteResult(await api(endpoint + '/devices/' + encodeURIComponent(button.dataset.forgetDevice), {method:'DELETE'}));
         await refreshActionDetail(id, 'devices', current);
       });
@@ -793,7 +793,7 @@
     if (roles) roles.onclick = () => runMemberAction(roles, async current => {
       const submitted = detailSubmission(host.querySelectorAll('.md-role'));
       const selected = [...host.querySelectorAll('.md-role:checked')].map((input) => input.value);
-      if (!confirm(`确认修改角色为 ${selected.join('、') || '普通成员'}？管理员角色允许登录管理面板。`)) return;
+      if (!(await deckConfirm(`确认修改角色为 ${selected.join('、') || '普通成员'}？管理员角色允许登录管理面板。`))) return;
       assertRemoteResult(await api(endpoint + '/roles', {method:'POST',body:JSON.stringify({roles:selected})}));
       toast('角色已保存'); await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
     });
@@ -802,14 +802,14 @@
       if (![...host.querySelectorAll('#md-overrides input')].every((input) => input.reportValidity())) return;
       const submitted = detailSubmission(host.querySelectorAll('#md-overrides input,#md-overrides select'));
       const overrides = collectOverridesFromForm(member.overrides || {});
-      if (!confirm('保存个人权限覆盖？限速变化可能结束当前播放以重新生效。')) return;
+      if (!(await deckConfirm('保存个人权限覆盖？限速变化可能结束当前播放以重新生效。'))) return;
       const result = await api(endpoint + '/overrides', {method:'PUT',body:JSON.stringify(overrides)});
       assertRemoteResult(result); toast('权限覆盖已保存');
       await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
     });
     const clear = $('#ov-clear');
     if (clear) clear.onclick = () => runMemberAction(clear, async current => {
-      if (!confirm('清除全部个人覆盖并继承用户组？')) return;
+      if (!(await deckConfirm('清除全部个人覆盖并继承用户组？'))) return;
       const submitted = detailSubmission(host.querySelectorAll('#md-overrides input,#md-overrides select'));
       const result = await api(endpoint + '/overrides', {method:'PUT',body:'{}'});
       assertRemoteResult(result); toast('个人覆盖已清除');
@@ -821,7 +821,7 @@
       const delta = Number($('#md-points-delta').value);
       const reason = $('#md-points-reason').value.trim();
       if (!Number.isInteger(delta) || delta === 0 || !reason) throw new Error('请填写非零整数积分及调整原因');
-      if (!confirm(`确认调整积分 ${delta > 0 ? '+' : ''}${delta}？原因：${reason}`)) return;
+      if (!(await deckConfirm(`确认调整积分 ${delta > 0 ? '+' : ''}${delta}？原因：${reason}`))) return;
       assertRemoteResult(await api(`/api/points/${encodeURIComponent(id)}/adjust`, {method:'POST',body:JSON.stringify({delta,reason})}));
       toast('积分已调整'); await refreshActionDetail(id, 'invites', current, submitted);
     });
@@ -834,7 +834,7 @@
     const preview = await api(`/api/members/${encodeURIComponent(id)}/renew-preview?days=${days}`);
     if (!current()) return;
     if (!preview.allowed) return toast((preview.warnings || ['不可续期'])[0], 1);
-    if (!confirm(`将从 ${fmtExpiry(preview.current_expires_at_effective)} 续到 ${fmtExpiry(preview.new_expires_at)}。${preview.writes_override ? '写入个人覆盖层。' : ''}`)) return;
+    if (!(await deckConfirm(`将从 ${fmtExpiry(preview.current_expires_at_effective)} 续到 ${fmtExpiry(preview.new_expires_at)}。${preview.writes_override ? '写入个人覆盖层。' : ''}`))) return;
     const r = await api(`/api/members/${encodeURIComponent(id)}/renew`, {
       method: 'POST', body: JSON.stringify({ days }),
     });
@@ -858,7 +858,7 @@
       ...(preview.warnings || []),
       '其他个人权限与历史用量保留。确认换组？'
     ];
-    if (!confirm(lines.join('\n'))) return;
+    if (!(await deckConfirm(lines.join('\n')))) return;
     const r = await api(`/api/members/${encodeURIComponent(id)}/group`, {
       method: 'POST', body: JSON.stringify({ group_id: gid, expiry_policy: policy }),
     });
@@ -883,7 +883,7 @@
     const message = cascade
       ? `连带删除邀请人：${names}。\n将删除所列 Emby 账号及面板记录，不可恢复。`
       : `仅删除 ${name || id}，保留邀请人。\n将删除该 Emby 账号及面板记录，不可恢复。`;
-    if (!confirm(message)) return;
+    if (!(await deckConfirm(message))) return;
     const r = await api(`/api/members/${encodeURIComponent(id)}?cascade=${cascade}`, {
       method: 'DELETE', body: JSON.stringify({cascade, confirm_ids: objects.map((o) => o.emby_user_id)}),
     });
@@ -897,9 +897,9 @@
   async function bulk(action) {
     const ids = [...ms.selected];
     if (!ids.length) return toast('没有选中的用户', 1);
-    if (!confirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'停用',activate:'启用','reset-traffic':'重置用量'})[action]}？`)) return;
+    if (!(await deckConfirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'停用',activate:'启用','reset-traffic':'重置用量'})[action]}？`))) return;
     if (action === 'renew') {
-      const days = Number(prompt('续期天数', '30') || '0');
+      const days = Number((await deckPrompt('续期天数', '30')) || '0');
       if (!days) return;
       const r = await api('/api/members/bulk', {
         method: 'POST', body: JSON.stringify({ action: 'renew', user_ids: ids, days }),
@@ -961,9 +961,9 @@
     button.onclick = () => runMemberAction(button, async current => {
       const enable = !config.cutover;
       if (enable && !$('#meter-baseline').checked) throw new Error('请先明确确认计量基线与配额余额');
-      if (!confirm(enable
+      if (!(await deckConfirm(enable
         ? `确认启用实测配额并允许超额中断播放？${incomplete ? '当前存在未就绪节点，覆盖不完整。' : ''}`
-        : '确认停用实测限额并切回原计量来源？不会恢复过期或手动停用用户。')) return;
+        : '确认停用实测限额并切回原计量来源？不会恢复过期或手动停用用户。'))) return;
       assertRemoteResult(await api('/api/metering/cutover', {method:'POST',body:JSON.stringify({cutover:enable,baseline_confirmed:enable || !!config.baseline_confirmed})}));
       toast(enable ? '已启用实测限额' : '已停用实测限额');
       closeModal(); await refreshNow();

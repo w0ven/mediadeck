@@ -4,6 +4,23 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — viewing report, group scan progress, login page, /rank
+
+- Viewing reports always send, including members with no plays; poster uses the
+  ranking collage wall and whitelist shield.
+- Linked-chat membership scan and inactive cleanup post start/running/result in
+  the interaction group via editMessage. Cleanup suspends immediately, no
+  member notice; whitelist is exempt. Accounts are not deleted.
+- Bot settings no longer mark unsaved on load; hidden JSON baselines are reset
+  after the line/target editors rewrite them.
+- Panel login is a FoamV2-style page with a session cookie. Browser Basic popup
+  is gone; API tests still accept Authorization. Native confirm/prompt become
+  deckConfirm/deckPrompt except beforeunload.
+- /rank uses the podium card layout. Crossing sessions are clipped into the
+  watch window instead of showing “无法拆分”.
+
+---
+
 ## 2026-09-10 — collapse duplicate group gates; viewing-report poster
 
 - Task-center hides `group_audit`; membership scan under 群组与频道 is the only

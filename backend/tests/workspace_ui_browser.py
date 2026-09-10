@@ -128,7 +128,7 @@ def main():
                     assert '#/tgbot?section=groups' in page.url
                     route('members?id=demo-viewer&tab=overview','#md-group')
                     text = page.locator('#view').inner_text()
-                    assert '有跨界历史，时长无法完整还原' in text
+                    assert '跨界' not in text
                     assert '直链 7/30/累计' not in text and '会话估算' not in text
                     page.screenshot(path=str(artifact_dir/'member-watch-desktop.png'),full_page=True)
                     route('stats','#trend-svg')

@@ -1685,8 +1685,8 @@ def test_member_rankings_use_daily_weekly_watch_and_heat() -> None:
     actions = {b.get("callback_data") for row in keys for b in row}
     assert {"rank:24", "rank:168", "heat:1", "heat:7", "points_rank", "home"} <= actions
     assert "resetpw" not in actions
-    assert "今日观影时长" in bot._watch_rankings_text(24)
-    assert "本周观影时长" in bot._watch_rankings_text(168)
+    assert "今日观影榜" in bot._watch_rankings_text(24)
+    assert "本周观影榜" in bot._watch_rankings_text(168)
     heat = bot._heat_rankings_text(1)
     assert "今日热度排行" in heat
     assert "▎电影" in heat and "A Film" in heat

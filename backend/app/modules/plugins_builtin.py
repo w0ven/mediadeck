@@ -29,6 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
@@ -121,6 +122,18 @@ def _delivery_state(plugin: Plugin, config: dict[str, Any]) -> dict[str, Any]:
 def _telegram_ready(ctx: PluginContext) -> bool:
     bot = ctx.telegram
     return bool(bot) and bool(getattr(bot, "enabled", False))
+
+
+async def _progress(ctx: PluginContext, job: str, text: str) -> None:
+    """Start / running / result in the interaction group, edited in place."""
+    bot = ctx.telegram
+    if not _telegram_ready(ctx):
+        return
+    post = getattr(bot, "post_job_progress", None)
+    if not callable(post):
+        return
+    with contextlib.suppress(Exception):
+        await post(job, text)
 
 
 # ---------------------------------------------------------------------------
@@ -239,26 +252,22 @@ class InactiveCleanupPlugin(Plugin):
     Named "cleanup" but it does not delete: deletion cascades in ways a timer
     cannot judge. A shared household account that looks idle may be one person
     on holiday, and removing it takes the whole household's history with it.
-    Account removal stays a manual action on the member page (a later PR adds
-    an operator-reviewed queue for it); this plugin only warns and suspends,
-    both of which are reversible.
+    Account removal stays a manual action on the member page. This plugin
+    suspends matching accounts immediately. Whitelist members are exempt.
+    Progress is edited in the interaction group, not messaged to the member.
     """
 
     spec = Spec(
         id="inactive_cleanup",
         name="活跃清理",
-        description="找出长时间没有观看的成员，先提醒、必要时停用。"
-                    "本插件不会删号：删号会牵连同户其他人，这个判断留给人。",
+        description="找出长时间没有观看的成员并直接停用，不提前通知。"
+                    "白名单豁免活跃要求。本插件不会删号。",
         category="task",
         icon="🧹",
         hour=10,
         fields=[
             Field("days", "不活跃天数", kind="int", default=7, min=1, max=365,
-                  help="最近一次使用超过这个天数即视为不活跃"),
-            Field("notify", "通知本人", kind="bool", default=True,
-                  help="只通知已关联 Telegram 的成员"),
-            Field("suspend_after_days", "通知后停用天数", kind="int", default=3,
-                  min=0, max=90, help="通知后再过这么多天仍不活跃才停用；0 = 不停用"),
+                  help="最近一次使用超过这个天数即视为不活跃并直接停用"),
             Field("hour", "执行时间", kind="int", default=10, min=0, max=23,
                   help="每天几点执行（0–23）"),
         ],
@@ -269,16 +278,16 @@ class InactiveCleanupPlugin(Plugin):
         if members is None:
             return {"ok": False, "错误": "成员服务不可用"}
         days = max(1, int(config.get("days") or 7))
-        notify = bool(config.get("notify"))
-        suspend_after = max(0, int(config.get("suspend_after_days") or 0))
         now = time.time()
         cutoff = now - days * 86400
-        notices = _prune_notices(self.ctx.state(self.spec.id), now,
-                                 max(NOTICE_TTL, (suspend_after + 7) * 86400))
 
         idle: list[dict[str, Any]] = []
+        exempt = 0
         for member in members.list(limit=5000):
             if member.get("status") != "active":
+                continue
+            if str(member.get("group_id") or "") == WHITELIST_GROUP_ID:
+                exempt += 1
                 continue
             last_seen = member.get("last_seen_at")
             # Never-seen members count as inactive from their creation date,
@@ -288,57 +297,38 @@ class InactiveCleanupPlugin(Plugin):
             if reference and reference <= cutoff:
                 idle.append(member)
 
-        notified = suspended = errors = 0
-        idle_ids: set[str] = set()
-        for member in idle:
+        await _progress(self.ctx, "inactive_cleanup",
+                        f"🧹 <b>活跃清理</b>\n开始运行…\n不活跃 {len(idle)} 人，白名单豁免 {exempt} 人")
+        suspended = errors = 0
+        for index, member in enumerate(idle, 1):
             uid = str(member.get("emby_user_id") or "")
             if not uid:
                 continue
-            idle_ids.add(uid)
-            first_seen = float(notices.get(uid) or 0)
-            if not first_seen:
-                if notify:
-                    delivered = False
-                    if _telegram_ready(self.ctx) and member.get("tg_user_id"):
-                        with contextlib.suppress(Exception):
-                            delivered = await self.ctx.telegram.notify_member(
-                                member, self._notice_text(days, suspend_after))
-                    if not delivered:
-                        errors += 1
-                        continue
-                    notified += 1
-                notices[uid] = now
-                self.ctx.set_state(self.spec.id, notices)
-                continue
-            if suspend_after and now - first_seen >= suspend_after * 86400:
-                try:
-                    members.set_status(uid, "suspended",
-                                       actor="plugin:inactive_cleanup")
-                    suspended += 1
-                    notices.pop(uid, None)
-                except Exception:  # noqa: BLE001 - keep the notice for retry
-                    errors += 1
-
-        for uid in list(notices):
-            if uid not in idle_ids:
-                notices.pop(uid, None)  # came back; clock resets
-        self.ctx.set_state(self.spec.id, notices)
-
+            try:
+                members.set_status(uid, "suspended",
+                                   actor="plugin:inactive_cleanup")
+                suspended += 1
+            except Exception:  # noqa: BLE001 - keep going, report the miss
+                errors += 1
+            if index == 1 or index == len(idle) or index % 10 == 0:
+                name = html.escape(str(member.get("username") or uid))
+                await _progress(
+                    self.ctx, "inactive_cleanup",
+                    f"🧹 <b>活跃清理</b>\n运行中 {index}/{len(idle)} · {name}\n"
+                    f"已停用 {suspended}")
+        self.ctx.set_state(self.spec.id, {})
+        await _progress(
+            self.ctx, "inactive_cleanup",
+            f"🧹 <b>活跃清理</b>\n已完成\n"
+            f"不活跃 {len(idle)} · 已停用 {suspended} · 失败 {errors} · 白名单豁免 {exempt}")
         return {
             "ok": errors == 0,
             "失败": errors,
             "不活跃人数": len(idle),
-            "已通知": notified,
             "已停用": suspended,
-            "等待观察": len(notices),
-            "说明": "不会删号",
+            "白名单豁免": exempt,
+            "说明": "不会删号，未提前通知",
         }
-
-    @staticmethod
-    def _notice_text(days: int, suspend_after: int) -> str:
-        tail = ("如果不再需要可以忽略这条消息。" if suspend_after <= 0
-                else f"若继续 {suspend_after} 天没有使用，账号会被暂停（可随时联系管理员恢复）。")
-        return (f"💤 <b>活跃提醒</b>\n\n你的账号已经 {days} 天没有观看记录。\n" + tail)
 
 
 # ---------------------------------------------------------------------------
@@ -355,7 +345,7 @@ class ViewingReportPlugin(Plugin):
     spec = Spec(
         id="viewing_report",
         name="观影报告",
-        description="给已关联 Telegram 的成员发送本人的周报或月报（只发给本人，不公开）。手动运行在后台发送，避免页面超时。",
+        description="给已关联 Telegram 的成员发送本人的周报或月报（只发给本人，不公开）。没有观看记录也会发总结图。手动运行在后台发送，避免页面超时。",
         category="task",
         icon="📊",
         hour=20,
@@ -383,9 +373,10 @@ class ViewingReportPlugin(Plugin):
         days = 30 if monthly else 7
         label = "月报" if monthly else "周报"
 
-        sent = skipped = errors = 0
+        sent = empty = errors = 0
         delivery = _delivery_state(self, config)
-        for member in self.ctx.members.linked_telegram():
+        linked = list(self.ctx.members.linked_telegram())
+        for member in linked:
             uid = str(member.get("emby_user_id") or "")
             if not uid or uid in delivery["sent"]:
                 continue
@@ -396,13 +387,11 @@ class ViewingReportPlugin(Plugin):
                 errors += 1
                 continue
             if plays <= 0:
-                # Nothing watched: a report saying "you watched 0 things" is a
-                # notification nobody asked for, so it is not sent.
-                skipped += 1
-                continue
+                empty += 1
             caption = self._text(label, days, hours, plays, total_bytes, detail)
             ok = False
-            photo = self._poster(member, label, days, hours, plays, total_bytes, detail)
+            photo = await self._poster(
+                member, label, days, hours, plays, total_bytes, detail)
             notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
             if photo and callable(notify_photo):
                 with contextlib.suppress(Exception):
@@ -419,7 +408,7 @@ class ViewingReportPlugin(Plugin):
         if not errors:
             self.ctx.set_state(self.spec.id, {})
         return {"ok": errors == 0, "失败": errors,
-                "周期": label, "已发送": sent, "无记录跳过": skipped}
+                "周期": label, "已发送": sent, "无记录仍发送": empty}
 
     @staticmethod
     def _text(label: str, days: int, hours: float, plays: int,
@@ -431,19 +420,36 @@ class ViewingReportPlugin(Plugin):
         titles = _top_titles(detail)
         if titles:
             lines.append("\n<b>看得最多</b>")
-            lines.extend(f"{i}. {html.escape(name)} · {count} 次"
-                         for i, (name, count) in enumerate(titles, 1))
+            lines.extend(f"{i}. {html.escape(str(item['title']))} · {item['plays']} 次"
+                         for i, item in enumerate(titles, 1))
+        else:
+            lines.append("\n这段时间还没有观看记录。")
         return "\n".join(lines)
 
-    def _poster(self, member: dict[str, Any], label: str, days: int, hours: float,
-                plays: int, total_bytes: int, detail: dict[str, Any]) -> bytes | None:
-        titles = [{"title": name, "plays": count} for name, count in _top_titles(detail, 5)]
+    async def _poster(self, member: dict[str, Any], label: str, days: int,
+                      hours: float, plays: int, total_bytes: int,
+                      detail: dict[str, Any]) -> bytes | None:
+        titles = _top_titles(detail, 5)
+        covers: dict[str, bytes] = {}
+        fetch = getattr(getattr(self.ctx, "emby", None), "item_primary_image", None)
+        if callable(fetch):
+            for item in titles:
+                item_id = str(item.get("item_id") or "")
+                if not item_id or item_id in covers:
+                    continue
+                with contextlib.suppress(Exception):
+                    blob = await fetch(item_id)
+                    if blob:
+                        covers[item_id] = blob
+        display = str(member.get("tg_display_name") or "").strip()
+        handle = str(member.get("tg_username") or "").strip().lstrip("@")
+        name = display or (f"@{handle}" if handle else str(member.get("username") or "会员"))
         try:
             from app.modules.rank_poster import render_viewing_poster
             return render_viewing_poster(
-                name=str(member.get("tg_username") or member.get("username") or ""),
-                label=label, days=days, hours=hours, plays=plays,
-                traffic=_fmt_bytes(total_bytes), titles=titles)
+                name=name, label=label, days=days, hours=hours, plays=plays,
+                traffic=_fmt_bytes(total_bytes), titles=titles, covers=covers,
+                whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID)
         except Exception:  # noqa: BLE001 - caption still goes out
             return None
 
@@ -458,13 +464,18 @@ def _summarise(detail: dict[str, Any]) -> tuple[float, int, int]:
     return round(hours, 1), int(plays), total_bytes
 
 
-def _top_titles(detail: dict[str, Any], limit: int = 3) -> list[tuple[str, int]]:
-    counts: dict[str, int] = {}
+def _top_titles(detail: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
+    counts: dict[str, dict[str, Any]] = {}
     for play in detail.get("recent_plays") or []:
         name = str(play.get("series_name") or play.get("item_name") or "").strip()
-        if name:
-            counts[name] = counts.get(name, 0) + 1
-    return sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:limit]
+        if not name:
+            continue
+        row = counts.setdefault(name, {"title": name, "plays": 0, "item_id": ""})
+        row["plays"] += 1
+        item_id = str(play.get("item_id") or "")
+        if item_id and not row["item_id"]:
+            row["item_id"] = item_id
+    return sorted(counts.values(), key=lambda item: item["plays"], reverse=True)[:limit]
 
 
 def _fmt_bytes(n: int) -> str:

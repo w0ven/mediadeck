@@ -317,7 +317,7 @@ function navMeta(id) {
 function routeFromHash() {
   return (location.hash || '').replace(/^#\/?/, '') || 'dashboard';
 }
-function go(route) {
+async function go(route) {
   route = String(route || 'dashboard').replace(/^#\/?/, '');
   if (route.split('?')[0] === 'tgrequests') {
     route = 'tgbot?section=groups';
@@ -330,7 +330,7 @@ function go(route) {
     activateConfigSection(new URLSearchParams(route.split('?')[1]).get('section'));
     return;
   }
-  if (!configCanLeave() || (typeof membersCanLeave === 'function' && !membersCanLeave())) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
+  if (!(await configCanLeave()) || (typeof membersCanLeave === 'function' && !(await membersCanLeave()))) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
   if (typeof membersDispose === 'function') membersDispose();
   state.page = page;
   state.route = route;
@@ -346,15 +346,15 @@ function go(route) {
   connectLive(page);
   return pending;
 }
-window.addEventListener('hashchange', () => {
+window.addEventListener('hashchange', async () => {
   const route = routeFromHash();
-  if (route !== state.route) go(route);
+  if (route !== state.route) await go(route);
 });
 async function renderPage(page, manual, liveUpdate, sourceContext) {
   // Completion of an old action must not repaint the workspace we left.
   if (page !== state.page || (sourceContext && !sourceContext.isCurrent())) return;
   if (liveUpdate) { scheduleLiveFlush(); return; }
-  if (manual && (!configCanLeave() || (typeof membersCanLeave === 'function' && !membersCanLeave()))) return;
+  if (manual && (!(await configCanLeave()) || (typeof membersCanLeave === 'function' && !(await membersCanLeave())))) return;
   if (manual && typeof membersDispose === 'function') membersDispose();
   const fn = PAGES[page];
   if (!fn) { $('#view').innerHTML = '<div class="empty">页面不存在</div>'; return; }
@@ -651,7 +651,7 @@ async function delPool(name, index) {
   const node = (state.nodes || []).find((n) => n.name === name);
   if (!node) return;
   const target = (node.pools || [])[index];
-  if (!target || !confirm(`删除节点 ${name} 的媒体根 ${target.name || index + 1}（${target.emby_prefix || ''}）？该路径将不再由此节点提供播放。`)) return;
+  if (!target || !(await deckConfirm(`删除节点 ${name} 的媒体根 ${target.name || index + 1}（${target.emby_prefix || ''}）？该路径将不再由此节点提供播放。`))) return;
   const pools = (node.pools || []).filter((_, i) => i !== index);
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
@@ -675,7 +675,7 @@ async function saveNodeStorage(name) {
 }
 async function rotateNodeSecret(name) {
   const actionContext = pageContext('nodes');
-  if (!confirm(`重置 ${name} 的签名密钥？\n\n已发出的播放链接会立即失效，且必须重新在节点上执行安装命令。`)) return;
+  if (!(await deckConfirm(`重置 ${name} 的签名密钥？\n\n已发出的播放链接会立即失效，且必须重新在节点上执行安装命令。`))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}/rotate-secret`, { method: 'POST' });
     toast('密钥已重置，请重新部署该节点'); renderPage('nodes', false, false, actionContext);
@@ -683,7 +683,7 @@ async function rotateNodeSecret(name) {
 }
 async function editRcloneConf(name) {
   const actionContext = pageContext('nodes');
-  const text = prompt(`粘贴该节点使用的 rclone.conf 全文\n（建议为节点单独建 OAuth 身份，避免和主机抢配额）`);
+  const text = await deckPrompt(`粘贴该节点使用的 rclone.conf 全文\n（建议为节点单独建 OAuth 身份，避免和主机抢配额）`);
   if (text === null) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
@@ -736,7 +736,7 @@ async function showEnroll(name) {
   if (current()) state.enrollTimer = setInterval(paint, 4000);
 }
 async function rotateEnroll(name) {
-  if (!confirm('重新生成后，旧的安装命令立即失效。继续？')) return;
+  if (!(await deckConfirm('重新生成后，旧的安装命令立即失效。继续？'))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}/rotate-enroll`, { method: 'POST' });
     toast('已重新生成');
@@ -780,7 +780,7 @@ async function fillNodeMounts(n) {
 }
 async function migrateNodeStorage(name) {
   const actionContext = pageContext('nodes');
-  if (!confirm(`把 ${name} 的旧式 rclone.conf 标记为已迁移？\n\n独立配置会保留，但之后请改用全局挂载列表。`)) return;
+  if (!(await deckConfirm(`把 ${name} 的旧式 rclone.conf 标记为已迁移？\n\n独立配置会保留，但之后请改用全局挂载列表。`))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ mount_ids: [] }) });
@@ -790,7 +790,7 @@ async function migrateNodeStorage(name) {
 }
 async function editNodeCapacity(name, current) {
   const actionContext = pageContext('nodes');
-  const value = prompt(`设置 ${name} 的并发容量（最多同时承载多少路播放）`, current);
+  const value = await deckPrompt(`设置 ${name} 的并发容量（最多同时承载多少路播放）`, current);
   if (value === null) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
@@ -800,7 +800,7 @@ async function editNodeCapacity(name, current) {
 }
 async function deleteNode(name) {
   const actionContext = pageContext('nodes');
-  if (!confirm(`确认删除节点 ${name}？该节点将不再参与播放分发。`)) return;
+  if (!(await deckConfirm(`确认删除节点 ${name}？该节点将不再参与播放分发。`))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast('节点已删除'); renderPage('nodes', false, false, actionContext);
@@ -1224,11 +1224,11 @@ async function addEntry() {
   await changeEntries((entries) => entries.concat([row]), '入口已登记，可以生成配置了');
 }
 async function removeEntry(id) {
-  if (!confirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`)) return;
+  if (!(await deckConfirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`))) return;
   await changeEntries((entries) => entries.filter((e) => e.id !== id), '入口已删除');
 }
 async function rotateEntry(id) {
-  if (!confirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`)) return;
+  if (!(await deckConfirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`))) return;
   await changeEntries((entries) => {
     if (!entries.some((e) => e.id === id)) throw new Error('入口已删除，请刷新页面');
     return entries.map((e) => ({ ...e, rotate_proxy_key: e.id === id }));
@@ -1395,7 +1395,7 @@ async function sweepImageCache() {
   catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function clearImageCache() {
-  if (!confirm('清空全部海报缓存？下次打开媒体库会重新拉取。')) return;
+  if (!(await deckConfirm('清空全部海报缓存？下次打开媒体库会重新拉取。'))) return;
   try { await api('/api/settings/image-cache/clear', { method: 'POST' }); toast('已清空'); refreshImageCacheStats(); }
   catch (e) { toast('失败: ' + e.message, 1); }
 }
@@ -1431,7 +1431,7 @@ async function checkUpdate() {
   } catch (e) { toast('检查失败: ' + e.message, 1); }
 }
 async function applyUpdate() {
-  if (!confirm('确认更新？服务将自动重启。')) return;
+  if (!(await deckConfirm('确认更新？服务将自动重启。'))) return;
   try {
     const r = await api('/api/update/apply', { method: 'POST', body: JSON.stringify({}) });
     toast(`正在更新到 ${r.target}，请稍候…`);

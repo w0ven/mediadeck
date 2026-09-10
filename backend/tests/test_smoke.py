@@ -157,11 +157,16 @@ def test_semver_helpers() -> None:
 
 def test_root_serves_panel() -> None:
     with TestClient(app) as client:
-        assert client.get("/", follow_redirects=False).status_code == 401
+        assert client.get("/", follow_redirects=False).status_code == 303
+        login = client.get("/login")
+        assert login.status_code == 200 and "进入面板" in login.text
+        assert client.post("/api/auth/login", json={"username": "admin", "password": "wrong"}).status_code == 401
+        ok = client.post("/api/auth/login", json={"username": "admin", "password": "change-me"})
+        assert ok.status_code == 200 and ok.json()["ok"] is True
         r = client.get("/", headers=_basic())
         assert r.status_code == 200
         assert "mediadeck" in r.text and "/static/app.js" in r.text
-        assert "/static/ops.js" in r.text
+        assert "/static/ops.js" in r.text and "/static/dialog.js" in r.text
         assert client.get("/static/app.js", headers=_basic()).status_code == 200
         assert client.get("/static/ops.js", headers=_basic()).status_code == 200
         assert client.get("/api/whoami", headers=_basic()).json()["user"] == "admin"

@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaDeck | 登录</title>
+  <meta name="description" content="MediaDeck - Emby 智能管理面板">
+  <meta name="theme-color" content="#02050b">
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body>
+  <main class="login-stage">
+    <!-- 全屏极光背景图及流光层 -->
+    <img src="/static/brand/aurora-hero-bg.png" alt="极光背景" class="bg-aurora" aria-hidden="true">
+    <div class="bg-overlay-grad" aria-hidden="true"></div>
+    <div class="bg-light-blob" aria-hidden="true"></div>
+
+    <!-- 顶部极简品牌导航 -->
+    <header class="brand-nav">
+      <img src="/static/brand/logo.png" alt="MediaDeck Logo" class="brand-nav-logo">
+      <span class="brand-nav-tag">MediaDeck HardGlass</span>
+    </header>
+
+    <!-- 登录卡片外壳 -->
+    <div class="login-card-wrap">
+      <section class="login-card" aria-labelledby="login-title">
+        <div class="card-top-glow" aria-hidden="true"></div>
+
+        <!-- 品牌标识与标题 -->
+        <div class="card-header">
+          <div class="card-logo-box">
+            <img src="/static/brand/logo.png" alt="MediaDeck" class="card-logo">
+          </div>
+          <h1 id="login-title" class="card-title">MediaDeck</h1>
+          <p class="card-subtitle">Emby 智能管理面板</p>
+        </div>
+
+        <!-- 错误反馈栏（卡片内友好展示） -->
+        <div id="login-feedback" class="login-feedback" role="alert" aria-live="polite">
+          <span class="feedback-icon" aria-hidden="true">!</span>
+          <span id="feedback-text"></span>
+        </div>
+
+        <!-- 登录表单 -->
+        <form id="login-form" autocomplete="on">
+          <div class="form-group">
+            <label for="username" class="form-label">用户名</label>
+            <div class="input-container">
+              <input
+                type="text"
+                id="username"
+                name="username"
+                class="form-input"
+                placeholder="请输入面板用户名"
+                required
+                autocomplete="username"
+                autocapitalize="off"
+                spellcheck="false"
+                autofocus
+              >
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="password" class="form-label">密码</label>
+            <div class="input-container">
+              <input
+                type="password"
+                id="password"
+                name="password"
+                class="form-input"
+                placeholder="请输入管理密码"
+                required
+                autocomplete="current-password"
+              >
+            </div>
+          </div>
+
+          <button type="submit" id="submit-btn" class="btn-submit">
+            <span class="spinner" aria-hidden="true"></span>
+            <span class="btn-text">进入面板</span>
+          </button>
+        </form>
+      </section>
+
+      <footer class="login-footer">
+        MediaDeck &copy; Hard Glass UI Workspace
+      </footer>
+    </div>
+  </main>
+
+  <script src="/static/login.js"></script>
+</body>
+</html>
