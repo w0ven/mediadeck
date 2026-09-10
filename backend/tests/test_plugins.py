@@ -36,6 +36,7 @@ from app.modules.plugins_builtin import (
     InactiveCleanupPlugin,
     PluginContext,
     RankingsPostPlugin,
+    RankingsWeeklyPlugin,
     RequestDigestPlugin,
     ViewingReportPlugin,
     migrate_legacy_telegram_jobs,
@@ -728,6 +729,18 @@ def test_rankings_post_without_a_target_reports_instead_of_guessing() -> None:
     assert summary["ok"] is False and bot.broadcasts == []
 
 
+def test_weekly_rankings_post_on_sunday_and_not_midweek() -> None:
+    plugin = RankingsWeeklyPlugin(make_ctx(telegram=FakeBot()))
+    sunday = time.mktime((2026, 9, 13, 21, 0, 0, 6, 256, -1))
+    wednesday = time.mktime((2026, 9, 9, 21, 0, 0, 2, 252, -1))
+    assert plugin.due_today({}, sunday) is True
+    assert plugin.due_today({}, wednesday) is False
+    bot = FakeBot()
+    summary = asyncio.run(RankingsWeeklyPlugin(make_ctx(telegram=bot)).run(
+        {"chat_id": "@somechannel", "hour": 21}))
+    assert summary["ok"] is True and bot.broadcasts == [("@somechannel", 7)]
+
+
 # -- expiry_reminder --------------------------------------------------------
 def test_expiry_reminder_notifies_members_inside_the_window() -> None:
     soon = time.time() + 2 * 86400
@@ -889,7 +902,7 @@ def test_listing_returns_every_builtin_card() -> None:
         cards = client.get("/api/plugins?category=task", auth=ADMIN).json()
         ids = {c["id"] for c in cards}
         assert {"group_audit", "inactive_cleanup", "viewing_report",
-                "rankings_post", "expiry_reminder"} <= ids
+                "rankings_post", "rankings_weekly", "expiry_reminder"} <= ids
         assert all("fields" in c and "config" in c for c in cards)
 
 

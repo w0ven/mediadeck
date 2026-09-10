@@ -43,6 +43,25 @@ def _day_list(days: int, end: datetime | None = None) -> list[str]:
             for i in range(days - 1, -1, -1)]
 
 
+def ranking_bounds(days: int, *, now: float | None = None) -> tuple[float, float]:
+    """Complete local calendar days ending at today's midnight.
+
+    days=1 is yesterday 00:00–today 00:00, not a rolling 24 hours.
+    days=7 is the seven complete days before today.
+    """
+    days = max(1, min(int(days or 1), MAX_DAYS))
+    local = datetime.fromtimestamp(time.time() if now is None else float(now))
+    today = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (today - timedelta(days=days)).timestamp(), today.timestamp()
+
+
+def ranking_stamp(days: int, *, now: float | None = None) -> str:
+    since, until = ranking_bounds(days, now=now)
+    start = datetime.fromtimestamp(since).strftime("%Y-%m-%d")
+    end = datetime.fromtimestamp(max(since, until - 1)).strftime("%Y-%m-%d")
+    return end if days <= 1 else f"{start} ~ {end}"
+
+
 def legacy_watch_fingerprint(rows: list[dict[str, Any]]) -> str:
     records = sorted((str(r['event_id']), str(r['emby_user_id']), int(r['seconds']),
                       int(r['started_at']), int(r['ended_at'])) for r in rows)
@@ -289,30 +308,42 @@ class StatsService:
         rows = self._db.query("SELECT u.emby_user_id,MAX(0,SUM(u.bytes)-COALESCE(c.credit_bytes,0)) AS bytes FROM measured_usage_monthly u LEFT JOIN measured_credits c ON c.emby_user_id=u.emby_user_id AND c.month=u.month WHERE u.month=? AND u.emby_user_id<>'' GROUP BY u.emby_user_id", (month,))
         return {'period': month, 'by_user': {r['emby_user_id']: int(r['bytes']) for r in rows}}
 
-    def top_users(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
+    def top_users(self, days: int = 30, limit: int = 20, *,
+                  calendar: bool = False, now: float | None = None) -> list[dict[str, Any]]:
         values = self.measured_month()
-        rows = self.top_watchers(hours=max(1,min(days,MAX_DAYS))*24, limit=200)
+        days = max(1, min(int(days or 1), MAX_DAYS))
+        if calendar:
+            since, until = ranking_bounds(days, now=now)
+            rows = self.top_watchers(hours=days * 24, limit=200, since=since, until=until)
+        else:
+            rows = self.top_watchers(hours=days * 24, limit=200)
         for row in rows:
             row['bytes'] = values['by_user'].get(row['user_id'])
             row['traffic_period'] = values['period']
         return rows[:max(1,min(limit,200))]
 
-    def top_watchers(self, hours: int = 24, limit: int = 10) -> list[dict[str, Any]]:
-        """Rolling watch-time ranking from play_events, not calendar days or bytes."""
+    def top_watchers(self, hours: int = 24, limit: int = 10, *,
+                     since: float | None = None, until: float | None = None) -> list[dict[str, Any]]:
+        """Watch-time ranking from play_events, not bytes.
+
+        Default is a rolling window. Pass since/until for a closed calendar range.
+        """
         try:
             hours = int(hours)
         except (TypeError, ValueError):
             hours = 24
         hours = max(1, min(hours, 24 * MAX_DAYS))
         now = time.time()
-        since = now - hours * 3600
-        windows = self.watch_windows(since, now)
+        if since is None or until is None:
+            until = now
+            since = now - hours * 3600
+        windows = self.watch_windows(since, until)
         counts = {r['emby_user_id']: int(r['n']) for r in self._db.query(
             'SELECT emby_user_id,COUNT(*) AS n FROM ('
             'SELECT emby_user_id FROM play_events WHERE started_at>=? AND started_at<? '
             'UNION ALL SELECT emby_user_id FROM watch_legacy_events '
             'WHERE started_at>=? AND started_at<?) GROUP BY emby_user_id',
-            (since, now, since, now))}
+            (since, until, since, until))}
         rows = []
         for member in self._db.query('SELECT emby_user_id,username,group_id FROM members'):
             uid = member['emby_user_id']
@@ -326,24 +357,46 @@ class StatsService:
                          'plays': counts.get(uid, 0)})
         return sorted(rows, key=lambda r: (-r['seconds'], -r['plays'], r['user_id']))[:max(1,min(int(limit),200))]
 
-    def top_titles(self, days: int = 30, limit: int = 20) -> list[dict[str, Any]]:
+    def top_titles(self, days: int = 30, limit: int = 20, *,
+                   calendar: bool = False, now: float | None = None) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
-        since = int(time.time()) - days * 86400
+        if calendar:
+            since, until = ranking_bounds(days, now=now)
+            where, args = "started_at >= ? AND started_at < ?", (since, until)
+        else:
+            since = int(time.time() if now is None else now) - days * 86400
+            where, args = "started_at >= ?", (since,)
         rows = self._db.query(
             "SELECT item_name, series_name, item_type, COUNT(*) AS plays,"
             " COUNT(DISTINCT emby_user_id) AS viewers, SUM(seconds) AS secs,"
-            " SUM(bytes) AS bytes FROM play_events WHERE started_at >= ?"
+            " SUM(bytes) AS bytes, MAX(item_id) AS item_id FROM play_events WHERE " + where +
             " GROUP BY COALESCE(NULLIF(series_name,''), item_name)"
             " ORDER BY plays DESC, secs DESC LIMIT ?",
-            (since, max(1, min(limit, 200))))
+            (*args, max(1, min(limit, 200))))
         return [{
             "title": r["series_name"] or r["item_name"],
             "type": r["item_type"],
+            "item_id": str(r["item_id"] or ""),
             "plays": int(r["plays"] or 0),
             "viewers": int(r["viewers"] or 0),
             "hours": round(int(r["secs"] or 0) / 3600, 1),
             "bytes": int(r["bytes"] or 0),
         } for r in rows]
+
+    def top_titles_split(self, days: int = 1, limit: int = 10, *,
+                          calendar: bool = False, now: float | None = None
+                          ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Movie vs series heat, using the same play_events grouping as top_titles."""
+        movies: list[dict[str, Any]] = []
+        shows: list[dict[str, Any]] = []
+        for row in self.top_titles(days=days, limit=max(limit * 4, 40),
+                                   calendar=calendar, now=now):
+            kind = str(row.get("type") or "").lower()
+            bucket = movies if kind == "movie" else shows
+            if len(bucket) >= limit:
+                continue
+            bucket.append(row)
+        return movies, shows
 
     def client_breakdown(self, days: int = 30) -> list[dict[str, Any]]:
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400

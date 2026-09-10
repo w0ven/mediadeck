@@ -528,6 +528,33 @@ class LiveEmby:
                 })
             return out
 
+    async def item_primary_image(self, item_id: str) -> bytes | None:
+        """Primary poster bytes for a ranking card. Best-effort, never raises."""
+        item_id = str(item_id or "").strip()
+        if not item_id:
+            return None
+        base, headers, timeout, verify = self._conn()
+        try:
+            async with self._client(min(timeout, 8), verify) as client:
+                info = await client.get(
+                    f"{base}/emby/Items", headers=headers,
+                    params={"Ids": item_id, "Limit": "1", "Fields": "SeriesId"})
+                poster_id = item_id
+                if info.status_code == 200:
+                    items = (info.json() or {}).get("Items") or []
+                    if items:
+                        poster_id = str(items[0].get("SeriesId") or items[0].get("Id") or item_id)
+                for candidate in (poster_id, item_id):
+                    r = await client.get(
+                        f"{base}/emby/Items/{candidate}/Images/Primary",
+                        headers=headers, params={"maxWidth": "420", "quality": "80"})
+                    ctype = str(r.headers.get("content-type") or "")
+                    if r.status_code == 200 and r.content and ctype.startswith("image/"):
+                        return r.content
+        except (httpx.HTTPError, ValueError, EmbyNotConfigured):
+            return None
+        return None
+
 
     # -- intake observability ------------------------------------------------
     # Three read-only calls behind the intake page. They are separate from the

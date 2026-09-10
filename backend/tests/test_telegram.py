@@ -529,21 +529,32 @@ def test_a_request_cannot_be_reviewed_twice() -> None:
 # -- rankings ---------------------------------------------------------------
 
 class _FakeStats:
-    def top_users(self, days=30, limit=20):
+    def top_users(self, days=30, limit=20, **_kw):
         return [{"username": "alice", "hours": 12.5, "plays": 30, "bytes": 1},
                 {"username": "bob", "hours": 8.0, "plays": 12, "bytes": 1}]
 
-    def top_titles(self, days=30, limit=20):
+    def top_titles(self, days=30, limit=20, **_kw):
         return [{"title": "Some Show", "plays": 40, "hours": 20.0,
-                 "viewers": 5, "type": "Series"}]
+                 "viewers": 5, "type": "Series", "item_id": "s1"},
+                {"title": "A Film", "plays": 12, "hours": 8.0,
+                 "viewers": 3, "type": "Movie", "item_id": "m1"}]
+
+    def top_titles_split(self, days=1, limit=10, **_kw):
+        rows = self.top_titles(days=days, limit=limit * 4)
+        movies = [r for r in rows if str(r.get("type") or "").lower() == "movie"][:limit]
+        shows = [r for r in rows if str(r.get("type") or "").lower() != "movie"][:limit]
+        return movies, shows
 
 
 def test_rankings_list_both_viewers_and_titles() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_FakeStats())
     text = bot._rankings_text(1)
-    assert "alice" in text and "12.5" in text
+    assert "播放日榜" in text
+    assert "alice" in text
     assert "Some Show" in text and "40" in text
+    assert "A Film" in text
+    assert "▎电影" in text and "▎电视剧" in text
 
 
 def test_rankings_say_so_when_there_is_nothing_yet() -> None:
@@ -1191,22 +1202,36 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
     class _FakeScheduler:
         def snapshot(self):
             return [{"name": "hk1", "utilisation": 0.25, "ok": True,
-                     "enabled": True},
+                     "enabled": True, "active_streams": 2},
                     {"name": "ca1", "utilisation": 0.95, "ok": True,
-                     "enabled": True},
+                     "enabled": True, "active_streams": 3},
                     {"name": "old", "utilisation": 0.0, "ok": True,
-                     "enabled": False}]
+                     "enabled": False, "active_streams": 9}]
 
     bot = _points_bot(scheduler=_FakeScheduler())
     text = asyncio.run(bot._nodes_text())
     assert "hk1" in text and "25%" in text
     assert "ca1" in text and "95%" in text
     assert "维护中" in text
+    assert "当前在线：<b>5</b> 路播放" in text
+    assert "2 路" in text and "3 路" in text
+    assert "9 路" in text
+
+
+def test_line_page_does_not_keep_account_card_buttons() -> None:
+    bot = _bot()
+    actions = _actions(bot.nodes_menu())
+    assert actions == {"me_nodes", "home"}
+    assert "resetpw" not in actions and "me_status" not in actions
+    assert "devices" not in actions
 
 
 def test_the_ranking_gains_a_points_section() -> None:
-    bot = _points_bot(points=_FakePoints())
-    assert "积分排行" in bot._rankings_text(1)
+    bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
+                      _FakeMembers(), stats=_FakeStats(), points=_FakePoints())
+    text = bot._rankings_text(1)
+    assert "播放日榜" in text and "alice" in text
+    assert "▎电影" in text
 
 
 # -- onboarding: deep links, pasted codes, quieter menus ---------------------
@@ -1453,13 +1478,71 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     assert "已登记设备：1 / 3" in text
 
 
+def test_broadcast_rankings_sends_poster_then_overflow_text(monkeypatch) -> None:
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED},
+                      _FakeMembers(), stats=_FakeStats())
+    calls: list[tuple] = []
+
+    async def fake_multipart(method, fields, files, timeout=40):
+        calls.append(("multipart", method, fields["caption"], files["photo"][0]))
+        return {"message_id": 1}
+
+    async def fake_send(chat, text, keyboard=None):
+        calls.append(("send", chat, text))
+        return True
+
+    bot._call_multipart = fake_multipart  # type: ignore[assignment]
+    bot.send = fake_send  # type: ignore[assignment]
+    monkeypatch.setattr(
+        TelegramBot, "_split_bulletin",
+        staticmethod(lambda text, limit=24: [text[:24], text[24:]]))
+    assert asyncio.run(bot.broadcast_rankings("@board", 1)) is True
+    assert calls[0][0] == "multipart" and calls[0][1] == "sendPhoto"
+    assert str(calls[0][2]).startswith("🏆 <b>播放日榜</b>")
+    assert calls[0][3] == "ranks.jpg"
+    assert [c[0] for c in calls[1:]] == ["send"]
+
+
+def test_broadcast_rankings_falls_back_to_text_without_poster() -> None:
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED},
+                      _FakeMembers(), stats=_FakeStats())
+    sent: list[str] = []
+
+    async def fake_poster(days):
+        return None
+
+    async def fake_send(chat, text, keyboard=None):
+        sent.append(text)
+        return True
+
+    bot._rankings_poster = fake_poster  # type: ignore[assignment]
+    bot.send = fake_send  # type: ignore[assignment]
+    assert asyncio.run(bot.broadcast_rankings("@board", 1)) is True
+    assert sent and "播放日榜" in sent[0]
+
+
 def test_rankings_offer_today_and_thirty_days() -> None:
     bot = _bot()
     keys = bot._rankings_keyboard(1, None)
     actions = {b.get("callback_data") for row in keys for b in row}
     assert {"top:1", "top:30", "home"} <= actions
-    assert "今日观看排行" in bot._rankings_text(1)
-    assert "近 30 天观看排行" in bot._rankings_text(30)
+    assert "播放日榜" in bot._rankings_text(1)
+    assert "播放周榜" in bot._rankings_text(7)
+
+
+def test_member_rankings_use_daily_weekly_watch_and_heat() -> None:
+    bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
+                      _FakeMembers(), stats=_FakeStats())
+    keys = bot._watch_rankings_keyboard(24)
+    actions = {b.get("callback_data") for row in keys for b in row}
+    assert {"rank:24", "rank:168", "heat:1", "heat:7", "points_rank", "home"} <= actions
+    assert "resetpw" not in actions
+    assert "今日观影时长" in bot._watch_rankings_text(24)
+    assert "本周观影时长" in bot._watch_rankings_text(168)
+    heat = bot._heat_rankings_text(1)
+    assert "今日热度排行" in heat
+    assert "▎电影" in heat and "A Film" in heat
+    assert "▎电视剧" in heat and "Some Show" in heat
 
 
 # -- response latency -------------------------------------------------------
