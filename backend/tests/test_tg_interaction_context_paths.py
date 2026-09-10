@@ -329,7 +329,11 @@ def test_private_return_to_parent_cancels_hidden_input_state(env, kind, back):
     async def run():
         mid = await command(env, '/me', chat=VIEWER, user=VIEWER)
         await click(env, kind, mid, chat=VIEWER, user=VIEWER)
-        assert env.bot._pending.get(str(VIEWER))
+        if kind == 'req_new':
+            assert env.db.one('SELECT * FROM request_inputs WHERE chat_id=?', (str(VIEWER),))
+        else:
+            assert env.bot._pending.get(str(VIEWER))
         await click(env, back, mid, chat=VIEWER, user=VIEWER)
         assert env.bot._pending.get(str(VIEWER)) is None
+        assert not env.db.one('SELECT * FROM request_inputs WHERE chat_id=?', (str(VIEWER),))
     asyncio.run(run())

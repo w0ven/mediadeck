@@ -106,10 +106,12 @@ def test_explicit_tmdb_type_not_silently_replaced_on_lookup_miss(bot):
     class Metadata:
         async def resolve(self, kind, ident):
             return 'tv', {'title': 'Different work', 'year': 2001}
+    from app.modules.requests import RequestService
     bot._tmdb = Metadata()
-    asyncio.run(bot._request_pick_title(12, {}, 'https://www.themoviedb.org/movie/101'))
-    assert bot._pending['12'][2]['media_type'] == 'movie'
-    assert 'Different work' not in str(bot.calls)
+    service = RequestService(bot._db, bot._members, bot._groups, bot._tmdb)
+    row = asyncio.run(service.create('u1', 'movie', 101, confirmed_type=True))
+    assert row['media_type'] == 'movie'
+    assert 'Different work' not in row['display_title']
 
 
 def test_bot_identity_change_resets_poll_offset(bot):

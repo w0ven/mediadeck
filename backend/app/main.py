@@ -358,7 +358,7 @@ async def _startup() -> None:
     app.state.tmdb = TmdbClient(
         lambda: app.state.settings_service.integration_config())
     app.state.requests = RequestService(
-        app.state.db, app.state.members, app.state.groups, app.state.tmdb)
+        app.state.db, app.state.members, app.state.groups, app.state.tmdb, app.state.emby)
     # Rides along with the sampler: it already holds the only live view of who
     # is playing from where, so detection costs no extra Emby calls.
     app.state.sharing = SharingDetector(app.state.db)
@@ -2889,9 +2889,13 @@ async def shop_orders(user_id: str | None = None,
 
 # ---- media requests ---------------------------------------------------------
 @app.get("/api/requests", dependencies=[Depends(_auth)])
-async def requests_list(status: str | None = None,
-                        limit: int = 100) -> list[dict[str, Any]]:
-    return app.state.requests.list(status=parse_status(status), limit=limit)
+async def requests_list(status: str | None = None, limit: int = 100, offset: int = 0,
+                        media_type: str | None = None, search: str = '') -> list[dict[str, Any]]:
+    try:
+        return app.state.requests.list(status=parse_status(status), limit=limit, offset=offset,
+                                       media_type=media_type, search=search)
+    except (RequestError, ConfigError) as exc:
+        raise HTTPException(400, str(exc)) from None
 
 
 @app.get("/api/requests/stats", dependencies=[Depends(_auth)])
@@ -2899,52 +2903,100 @@ async def requests_stats() -> dict[str, Any]:
     return app.state.requests.stats()
 
 
+@app.get("/api/requests/{request_id}", dependencies=[Depends(_auth)])
+async def requests_detail(request_id: int, offset: int = 0) -> dict[str, Any]:
+    row = app.state.requests.get(request_id)
+    if not row:
+        raise HTTPException(404, '求片记录不存在')
+    return dict(row, events=app.state.requests.events(request_id, internal=True, limit=21, offset=offset),
+                notifications=app.state.requests.notification_status(request_id))
+
+
 @app.post("/api/requests/{request_id}/claim", dependencies=[Depends(_auth)])
-async def requests_claim(request_id: int, payload: dict[str, Any] = Body(default=None),  # noqa: B008
-                         user: str = Depends(_auth)) -> dict[str, Any]:
-    """Take a request from the panel.
-
-    A lost race is a 200 with ok=false, not an error: somebody else claiming
-    first is a normal outcome the operator needs to *read*, and an HTTP error
-    would look like the panel is broken.
-    """
-    holder = str((payload or {}).get("user_id") or user)
-    try:
-        result = app.state.requests.claim(request_id, holder)
-    except RequestError as exc:
-        raise HTTPException(404, str(exc)) from None
-    if result.get("ok"):
-        await _notify_request_claimed(request_id, holder)
-    return result
-
-
 @app.post("/api/requests/{request_id}/resolve", dependencies=[Depends(_auth)])
-async def requests_resolve(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
-                           user: str = Depends(_auth)) -> dict[str, Any]:
-    request = app.state.requests.get(request_id)
-    if not request:
-        raise HTTPException(404, "unknown request")
-    holder = str(payload.get("user_id") or request.get("claimed_by") or user)
-    done = bool(payload.get("done"))
-    note = str(payload.get("note") or "")
+async def requests_legacy_disabled(request_id: int) -> dict[str, Any]:
+    raise HTTPException(410, '旧接单/二次处理接口已停用，请刷新后直接接受或拒绝待处理请求')
+
+
+def _request_revision(payload: dict[str, Any]) -> int:
+    revision = payload.get('revision')
+    if type(revision) is not int or revision < 1:
+        raise HTTPException(400, '需要当前工单 revision，请刷新')
+    return revision
+
+
+@app.post("/api/requests/{request_id}/accept", dependencies=[Depends(_auth)])
+async def requests_accept(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
+                          user: str = Depends(_auth)) -> dict[str, Any]:
     try:
-        # Panel operators are already authenticated as admins, so they may
-        # close a request an uploader is sitting on.
-        result = app.state.requests.resolve(request_id, holder, done=done,
-                                            note=note, is_admin=True)
+        result = app.state.requests.finish(request_id, user, 'accepted',
+                    revision=_request_revision(payload), panel_admin=True)
     except RequestError as exc:
-        raise HTTPException(400, str(exc)) from None
-    await _notify_request_resolved(result["request"])
+        raise HTTPException(409, str(exc)) from None
+    await _notify_request_resolved(result['request'])
     return result
 
 
-async def _notify_request_claimed(request_id: int, holder: str) -> None:
-    """Best-effort: a Telegram outage must not fail the operator's action."""
-    with contextlib.suppress(Exception):
-        await app.state.telegram.announce_request_claimed(request_id, holder)
+@app.post("/api/requests/{request_id}/reject", dependencies=[Depends(_auth)])
+async def requests_reject(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
+                          user: str = Depends(_auth)) -> dict[str, Any]:
+    try:
+        result = app.state.requests.finish(request_id, user, 'rejected', note=str(payload.get('note') or ''),
+                    revision=_request_revision(payload), panel_admin=True)
+    except RequestError as exc:
+        raise HTTPException(409, str(exc)) from None
+    await _notify_request_resolved(result['request'])
+    return result
+
+
+@app.post("/api/requests/{request_id}/messages", dependencies=[Depends(_auth)])
+async def requests_message(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    key = str(payload.get('key') or '')
+    if not key or len(key) > 100 or type(payload.get('internal', False)) is not bool:
+        raise HTTPException(400, '需要消息幂等 key 和布尔 internal')
+    try:
+        row = app.state.requests.message(request_id, user, str(payload.get('body') or ''),
+            staff=True, internal=payload.get('internal', False), revision=_request_revision(payload),
+            key=f'web:{request_id}:{user}:{key}', panel_admin=True)
+    except RequestError as exc:
+        raise HTTPException(409, str(exc)) from None
+    await _notify_request_resolved(row)
+    return row
+
+
+@app.post("/api/requests/{request_id}/correct", dependencies=[Depends(_auth)])
+async def requests_correct(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    try:
+        row = app.state.requests.correct(request_id, user, str(payload.get('status') or ''),
+                str(payload.get('reason') or ''), _request_revision(payload), panel_admin=True)
+    except RequestError as exc:
+        raise HTTPException(409, str(exc)) from None
+    await _notify_request_resolved(row)
+    return row
+
+
+@app.post("/api/requests/{request_id}/refund", dependencies=[Depends(_auth)])
+async def requests_refund(request_id: int, payload: dict[str, Any] = Body(...),  # noqa: B008
+                          user: str = Depends(_auth)) -> dict[str, Any]:
+    try:
+        return app.state.requests.refund(request_id, user, str(payload.get('reason') or ''), panel_admin=True)
+    except RequestError as exc:
+        raise HTTPException(409, str(exc)) from None
+
+
+@app.post("/api/requests/{request_id}/notifications/retry", dependencies=[Depends(_auth)])
+async def requests_retry(request_id: int) -> dict[str, Any]:
+    if not app.state.requests.get(request_id):
+        raise HTTPException(404, '求片记录不存在')
+    app.state.requests.retry_notifications(request_id)
+    await _notify_request_resolved(app.state.requests.get(request_id))
+    return {'ok': True, 'notifications': app.state.requests.notification_status(request_id)}
 
 
 async def _notify_request_resolved(request: dict[str, Any]) -> None:
+    # The durable outbox remains pending when transport fails; no repeated mutation.
     with contextlib.suppress(Exception):
         await app.state.telegram.notify_request_resolved(request)
 

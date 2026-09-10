@@ -150,7 +150,7 @@ class FakeRequests:
 
     def __init__(self, stats: dict[str, Any] | None = None,
                  uploaders: list[dict[str, Any]] | None = None) -> None:
-        self._stats = stats or {"open": 2, "claimed": 1, "done": 5,
+        self._stats = stats or {"open": 2, "accepted": 1, "done": 5,
                                 "rejected": 0, "month_total": 8}
         self._uploaders = uploaders if uploaders is not None else [
             {"emby_user_id": "up1", "username": "bob", "tg_user_id": "801"},
@@ -789,10 +789,10 @@ def test_request_digest_tells_every_uploader_what_is_waiting() -> None:
 
     summary = asyncio.run(plugin.run({"hour": 9, "only_if_open": True}))
 
-    assert summary["待接单"] == 2 and summary["处理中"] == 1
+    assert summary["待处理"] == 2 and summary["已接受"] == 1
     assert summary["已通知"] == 2
     assert {chat for chat, _ in bot.notified} == {"801", "802"}
-    assert "待接单" in bot.notified[0][1] and "/req" in bot.notified[0][1]
+    assert "待处理" in bot.notified[0][1] and "/uploader" in bot.notified[0][1]
 
 
 def test_request_digest_stays_quiet_when_the_queue_is_empty() -> None:
@@ -801,7 +801,7 @@ def test_request_digest_stays_quiet_when_the_queue_is_empty() -> None:
     bot = FakeBot()
     plugin = RequestDigestPlugin(make_ctx(
         telegram=bot,
-        requests=FakeRequests({"open": 0, "claimed": 3, "month_total": 3})))
+        requests=FakeRequests({"open": 0, "accepted": 3, "month_total": 3})))
 
     summary = asyncio.run(plugin.run({"hour": 9, "only_if_open": True}))
 
@@ -813,7 +813,7 @@ def test_request_digest_can_be_told_to_report_even_when_idle() -> None:
     bot = FakeBot()
     plugin = RequestDigestPlugin(make_ctx(
         telegram=bot,
-        requests=FakeRequests({"open": 0, "claimed": 0, "month_total": 0})))
+        requests=FakeRequests({"open": 0, "accepted": 0, "month_total": 0})))
 
     summary = asyncio.run(plugin.run({"hour": 9, "only_if_open": False}))
 

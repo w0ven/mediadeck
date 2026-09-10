@@ -249,8 +249,7 @@ CREATE TABLE IF NOT EXISTS request_notices (
 );
 CREATE INDEX IF NOT EXISTS idx_mreq_notice ON request_notices(request_id);
 -- The same title requested twice while still open is one request, not two.
-CREATE UNIQUE INDEX IF NOT EXISTS idx_mreq_open_title
-    ON media_requests(tmdb_id, media_type) WHERE status IN ('open', 'claimed');
+-- Request-center demand index is installed after additive column migration.
 
 -- Rolled up per user per day. Sampling writes here continuously, so it is kept
 -- narrow and indexed for the two questions actually asked: one user's history,
@@ -687,6 +686,8 @@ class Database:
                 "members", "request_period", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column(
                 "groups", "request_quota", "INTEGER NOT NULL DEFAULT 3")
+            from app.modules.request_schema import migrate_requests
+            migrate_requests(self)
             # v0.28: when the Emby account behind a member row disappeared.
             # A separate column rather than a status: the billing state machine
             # describes what the operator owes this member, while this records

@@ -1726,116 +1726,101 @@ async function deleteShopItem(id, name) {
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 
-/* ---------- 求片 ----------
-   The operator's view of the same queue the uploaders see in Telegram. It
-   exists because the bot fan-out only reaches uploaders who linked a chat,
-   and somebody has to be able to see and close a request when nobody did. */
+/* ---------- 求片中心：接受即终结，后续由上片员手动安排下载 ---------- */
 const REQUEST_STATUS_TABS = [
-  { id: 'active', label: '未处理' },
-  { id: 'open', label: '待接单' },
-  { id: 'claimed', label: '处理中' },
-  { id: 'done', label: '已处理' },
-  { id: 'rejected', label: '已拒绝' },
-  { id: '', label: '全部' },
+  {id:'open',label:'待处理'}, {id:'accepted',label:'已接受'},
+  {id:'rejected',label:'已拒绝'}, {id:'cancelled',label:'已取消'}, {id:'',label:'全部'},
 ];
-const requestsView = { status: 'active' };
-
+const requestsView = {status:'open', type:'', search:'', page:0, selected:null, eventPage:0};
+const requestRows = new Map();
 function requestStatusTag(row) {
-  const cls = ({ open: 'warn', claimed: 'idle', done: 'ok',
-    rejected: 'bad' })[row.status] || 'idle';
-  return `<span class="tag ${cls}">${esc(row.status_label || row.status)}</span>`;
+  return `<span class="tag ${({open:'warn',accepted:'ok',rejected:'bad',cancelled:'idle'})[row.status] || 'idle'}">${esc(row.status_label || row.status)}</span>`;
 }
 function requestPoster(row) {
   if (!row.poster_path) return '<span class="muted">—</span>';
-  const src = String(row.poster_path).startsWith('http')
-    ? row.poster_path : `https://image.tmdb.org/t/p/w92${row.poster_path}`;
-  return `<img src="${esc(src)}" alt="" loading="lazy"
-    style="width:34px;height:51px;object-fit:cover;border-radius:3px">`;
+  const src = String(row.poster_path).startsWith('https://') ? row.poster_path : `https://image.tmdb.org/t/p/w92${row.poster_path}`;
+  return `<img src="${esc(src)}" alt="海报" loading="lazy" style="width:42px;height:63px;object-fit:cover;border-radius:4px">`;
 }
 function requestActions(row) {
-  if (row.status === 'open') {
-    return `<button class="btn sm" onclick="claimRequest(${Number(row.id)})">接单</button>`;
-  }
-  if (row.status === 'claimed') {
-    return `<button class="btn sm" onclick="resolveRequest(${Number(row.id)},1)">已处理</button>
-      <button class="btn sm danger" onclick="resolveRequest(${Number(row.id)},0)">拒绝</button>`;
-  }
-  return '<span class="muted">—</span>';
+  const id = Number(row.id);
+  return (row.status === 'open' ? `<button class="btn sm primary" onclick="requestAction(${id},'accept')">接受请求</button>
+    <button class="btn sm danger" onclick="requestAction(${id},'reject')">拒绝</button>` : '') +
+    ` <button class="btn sm" onclick="openRequest(${id})">详情</button>`;
 }
 PAGES.requests = async (context = pageContext('requests')) => {
   $('#view').innerHTML = pageLoading();
-  const query = requestsView.status ? `?status=${encodeURIComponent(requestsView.status)}` : '';
-  const [rows, stats] = await Promise.all([
-    api(`/api/requests${query}`).catch(() => null),
-    api('/api/requests/stats'),
-  ]);
+  if (requestsView.selected) return renderRequestDetail(context);
+  const q = new URLSearchParams({limit:'11',offset:String(requestsView.page*10),search:requestsView.search});
+  if (requestsView.status) q.set('status', requestsView.status);
+  if (requestsView.type) q.set('media_type', requestsView.type);
+  const [rows, stats] = await Promise.all([api(`/api/requests?${q}`).catch(()=>null), api('/api/requests/stats')]);
   if (!context.isCurrent()) return;
   if (!rows) { $('#view').innerHTML = pageError('无法读取求片列表'); return; }
-
-  const tabs = REQUEST_STATUS_TABS.map((t) =>
-    `<button class="btn ${t.id === requestsView.status ? 'primary' : ''}"
-       onclick="switchRequestStatus('${t.id}')">${esc(t.label)}</button>`).join('');
-
-  $('#view').innerHTML = `
-    <div class="help">
-      成员在机器人里发 TMDB 链接求片，<b>每条求片会单独发给每个已关联 Telegram 的上片员</b>，
-      谁先点「接单」谁负责，其他人的按钮会自动收回。
-      这里可以代为接单或关闭；关闭后求片人会收到通知。
-      <b>没有配置 TMDB Key 也能用</b>，只是显示编号而不是片名。
-    </div>
-    <div class="stat-grid">
-      ${stat('🕓', stats.open || 0, '待接单', '还没有人认领')}
-      ${stat('🔧', stats.claimed || 0, '处理中', '已有上片员接单')}
-      ${stat('✅', stats.done || 0, '已处理', '累计')}
-      ${stat('📅', stats.month_total || 0, '本月求片', stats.period || '')}
-    </div>
-    <div class="toolbar" style="margin-bottom:14px">${tabs}</div>
-    ${tableCard('求片列表', `${rows.length} 条`,
-    ['编号', '海报', '片名', '类型', '求片人', '状态', '接单人', '时间', ''],
-    rows.map((r) => `<tr>
-        <td>#${esc(r.id)}</td>
-        <td>${requestPoster(r)}</td>
-        <td><div class="u-name">${esc(r.display_title)}</div>
-          <div class="u-sub muted">TMDB ${esc(r.tmdb_id)}${r.note ? ' · ' + esc(r.note) : ''}</div>
-          ${r.result_note ? `<div class="u-sub muted">结果：${esc(r.result_note)}</div>` : ''}</td>
-        <td>${esc(r.media_label || '-')}</td>
-        <td>${esc(r.username || r.emby_user_id || '-')}</td>
-        <td>${requestStatusTag(r)}</td>
-        <td>${r.claimed_by_name ? esc(r.claimed_by_name) : '<span class="muted">—</span>'}</td>
-        <td class="muted">${esc(fmtAgeTs(r.created_at))}</td>
-        <td class="row-actions">${requestActions(r)}</td>
-      </tr>`).join(''))}`;
+  rows.forEach(r=>requestRows.set(Number(r.id),r));
+  $('#view').innerHTML = `<div class="help">提交为<b>待处理</b>；上片员点<b>接受请求</b>即终结，之后手动安排下载。
+    不自动下载、不检查入库。询问用户仍待处理；拒绝理由选填，普通拒绝/撤回不自动退额度。Bot 私聊使用 /requests 或 /uploader。</div>
+    <div class="stat-grid">${stat('🕓',stats.open||0,'待处理','可直接接受或拒绝')}${stat('✅',stats.accepted||0,'已接受','不代表已下载或入库')}${stat('❌',stats.rejected||0,'已拒绝','累计')}${stat('📅',stats.month_total||0,'本月求片',stats.period||'')}</div>
+    <div class="toolbar">${REQUEST_STATUS_TABS.map(t=>`<button class="btn ${t.id===requestsView.status?'primary':''}" onclick="switchRequestStatus('${t.id}')">${esc(t.label)}</button>`).join('')}</div>
+    <form class="toolbar" onsubmit="event.preventDefault();filterRequests()" style="margin:14px 0;flex-wrap:wrap">
+      <label>类型 <select id="request-type"><option value="">电影与剧集</option><option value="movie" ${requestsView.type==='movie'?'selected':''}>电影</option><option value="tv" ${requestsView.type==='tv'?'selected':''}>剧集</option></select></label>
+      <input id="request-search" aria-label="搜索工单" placeholder="片名 / TMDB编号 / 工单号" value="${esc(requestsView.search)}"><button class="btn" type="submit">搜索 / 筛选</button>
+    </form>
+    ${tableCard('求片列表',`第 ${requestsView.page+1} 页`,['编号','海报','片名 / 需求','类型','求片人','状态','操作人','时间','操作'],rows.slice(0,10).map(r=>`<tr>
+    <td>#${Number(r.id)}</td><td>${requestPoster(r)}</td><td><div class="u-name">${esc(r.display_title)}</div><div class="u-sub muted" style="white-space:pre-line">${esc(r.demand_text || '')}</div>${r.note?`<div class="u-sub">备注：${esc(r.note)}</div>`:''}${r.status==='rejected'&&r.result_note?`<div class="u-sub">理由：${esc(r.result_note)}</div>`:''}</td>
+    <td>${esc(r.media_label)}</td><td>${esc(r.username)}</td><td>${requestStatusTag(r)}</td><td>${esc(r.claimed_by_name || '—')}</td><td>${esc(fmtAgeTs(r.created_at))}</td><td class="row-actions">${requestActions(r)}</td></tr>`).join(''))}
+    <div class="toolbar"><button class="btn" onclick="pageRequests(-1)" ${requestsView.page===0?'disabled':''}>上一页</button><span>第 ${requestsView.page+1} 页</span><button class="btn" onclick="pageRequests(1)" ${rows.length<=10?'disabled':''}>下一页</button></div>`;
 };
-function switchRequestStatus(id) {
-  requestsView.status = id;
-  renderPage('requests');
+function switchRequestStatus(status) { Object.assign(requestsView,{status,page:0,selected:null}); renderPage('requests'); }
+function filterRequests() { Object.assign(requestsView,{type:$('#request-type').value,search:$('#request-search').value.trim(),page:0}); renderPage('requests'); }
+function pageRequests(delta) { requestsView.page=Math.max(0,requestsView.page+delta); renderPage('requests'); }
+function openRequest(id) { requestsView.selected=id; requestsView.eventPage=0; renderPage('requests'); }
+function requestEventPage(delta) { requestsView.eventPage=Math.max(0,requestsView.eventPage+delta); renderPage('requests'); }
+async function renderRequestDetail(context) {
+  const row = await api(`/api/requests/${Number(requestsView.selected)}?offset=${requestsView.eventPage*20}`).catch(()=>null);
+  if (!context.isCurrent()) return;
+  if (!row) { $('#view').innerHTML=pageError('工单不存在或读取失败'); return; }
+  const id=Number(row.id); requestRows.set(id,row);
+  const eventLabel = {created:'提交',modified:'修改需求',accepted:'已接受',rejected:'已拒绝',cancelled:'已取消',question:'上片员询问',reply:'用户回复',internal:'内部备注',correction:'管理员纠错',refund:'额度退回'};
+  $('#view').innerHTML = `<div class="toolbar"><button class="btn" onclick="openRequest(null)">◀ 返回列表</button><button class="btn" onclick="openRequest(${id})">刷新</button></div>
+    <div class="card"><h2>工单 #${id} · ${esc(row.display_title)} ${requestStatusTag(row)}</h2><p>${requestPoster(row)} ${esc(row.media_label)} · <a href="https://www.themoviedb.org/${esc(row.media_type)}/${Number(row.tmdb_id)}" target="_blank" rel="noopener">TMDB 详情 ↗</a> · 求片人 ${esc(row.username)}</p><p class="muted">${esc(row.original_title||'')}</p><p>${esc((row.overview||'').slice(0,250))}</p>
+    <p style="white-space:pre-line">${esc(row.demand_text)}\n备注：${esc(row.note||'无要求')}</p>
+    ${row.status==='accepted'?'<div class="help">上片员已接受你的请求，将安排下载，请耐心等待下载完成并入库</div>':''}
+    ${row.status==='rejected'&&row.result_note?`<p>拒绝理由：${esc(row.result_note)}</p>`:''}
+    ${row.legacy_status?`<p class="muted">历史状态 ${esc(row.legacy_status)} 已兼容为已接受；不表示已上架。</p>`:''}
+    <div class="toolbar" style="flex-wrap:wrap">${requestActions(row)}${row.status==='open'?`<button class="btn" onclick="requestAction(${id},'ask')">询问用户</button><button class="btn" onclick="requestAction(${id},'internal')">内部备注</button>`:''}
+    <button class="btn" onclick="requestAction(${id},'correct')">管理员纠错</button><button class="btn" onclick="requestAction(${id},'refund')" ${row.refund_at?'disabled':''}>${row.refund_at?'额度已退回':'人工退回额度'}</button><button class="btn" onclick="requestAction(${id},'retry')">重试失败通知</button></div></div>
+    <div class="card"><h3>沟通 / 操作记录（🔒 仅管理可见的记录不会发给用户）</h3>${(row.events||[]).slice(0,20).map(e=>`<div style="border-bottom:1px solid var(--border);padding:12px 0"><b>${e.internal?'🔒 ':''}${esc(eventLabel[e.kind]||e.kind)}</b> · ${esc(e.actor)} · ${esc(fmtAgeTs(e.created_at))}<p style="white-space:pre-wrap">${esc(e.body||'（无附言）')}</p></div>`).join('')}
+    <button class="btn" onclick="requestEventPage(-1)" ${requestsView.eventPage===0?'disabled':''}>较新记录</button><button class="btn" onclick="requestEventPage(1)" ${(row.events||[]).length<=20?'disabled':''}>较早记录</button></div>
+    <div class="card"><h3>通知投递</h3>${(row.notifications||[]).map(n=>`<p>#${n.id} ${esc(n.kind)} · ${esc(({sent:'已送达',pending:'待重试',sending:'发送中'})[n.state]||n.state)} · 尝试 ${Number(n.attempts)} 次 ${esc(n.error||'')}</p>`).join('')||'暂无通知'}</div>`;
 }
-async function claimRequest(id) {
-  const actionContext = pageContext('requests');
+const requestBusy = new Set();
+async function requestAction(id, action) {
+  if (requestBusy.has(id)) return;
+  const row=requestRows.get(Number(id)); if (!row) return;
+  const ctx=pageContext('requests'); let endpoint=action, payload={revision:row.revision};
+  if (action==='reject') {
+    const note=await deckPrompt('拒绝理由（完全选填；留空直接拒绝，不会向用户编造理由）','');
+    if (note===null) return; payload.note=note;
+  } else if (action==='accept') {
+    if (!(await deckConfirm('接受请求即终结。之后由上片员手动安排下载；不会自动下载或检查入库。确认接受？'))) return;
+  } else if (action==='ask'||action==='internal') {
+    const body=await deckPrompt(action==='internal'?'内部备注（仅上片员/管理员可见）':'询问用户（工单仍待处理，消息通过 Bot 发送）','');
+    if (body===null) return;
+    endpoint='messages'; Object.assign(payload,{body,internal:action==='internal',key:crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`});
+  } else if (action==='correct') {
+    const status=await deckPrompt('纠正为 open / accepted / rejected / cancelled（不会自动退额度）',row.status);
+    if (status===null) return;
+    const reason=await deckPrompt('请填写纠错原因（仅管理记录；用户收到纠正后的状态通知）',''); if(reason===null)return;
+    Object.assign(payload,{status,reason});
+  } else if (action==='refund') {
+    const reason=await deckPrompt('人工退回一次月额度：仅原扣次月份有效，每单一次。请填写原因',''); if(reason===null)return;
+    payload.reason=reason;
+  } else if (action==='retry') endpoint='notifications/retry';
+  requestBusy.add(id);
   try {
-    const r = await api(`/api/requests/${Number(id)}/claim`, {
-      method: 'POST', body: JSON.stringify({}) });
-    /* A lost race is a normal outcome, not an error: somebody in Telegram
-       may have tapped 接单 while this page was open. */
-    toast(r && r.ok === false
-      ? `已被 ${r.claimed_by_name || '其他上片员'} 接单`
-      : '已接单');
-    renderPage('requests', false, false, actionContext);
-  } catch (e) { toast('失败: ' + e.message, 1); }
-}
-async function resolveRequest(id, done) {
-  const actionContext = pageContext('requests');
-  let note = '';
-  if (!done) {
-    note = await deckPrompt('无法处理的原因？会原样发给求片人。', '暂时找不到片源');
-    if (note === null) return;
-  } else if (!(await deckConfirm('标记为已处理？求片人会收到通知。'))) {
-    return;
-  }
-  try {
-    await api(`/api/requests/${Number(id)}/resolve`, {
-      method: 'POST', body: JSON.stringify({ done: !!done, note }) });
-    toast(done ? '已标记处理完成' : '已拒绝并通知求片人');
-    renderPage('requests', false, false, actionContext);
-  } catch (e) { toast('失败: ' + e.message, 1); }
+    await api(`/api/requests/${Number(id)}/${endpoint}`,{method:'POST',body:JSON.stringify(payload)});
+    toast(action==='accept'?'请求已接受，将由上片员手动安排下载':'操作已记录');
+    renderPage('requests',false,false,ctx);
+  } catch(e) {toast('未执行或未确认：'+e.message,1); renderPage('requests',false,false,ctx);}
+  finally {requestBusy.delete(id);}
 }
