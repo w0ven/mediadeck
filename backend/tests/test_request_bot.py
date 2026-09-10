@@ -106,42 +106,72 @@ def body(bot,chat='900'):
 
 def submit(bot,chat='900',kind='movie',tmdb=550):
     message(bot,'/requests',chat);tap(bot,'new',chat);message(bot,f'https://www.themoviedb.org/{kind}/{tmdb}',chat)
-    tap(bot,'scope:movie' if kind=='movie' else 'scope:series',chat);tap(bot,'preview',chat)
     if any('submit' in json.loads(c['actions']) for c in cards(bot,chat)): tap(bot,'submit',chat)
     else: tap(bot,'follow',chat)
     return bot.service.list()[0]
 
 
-def test_end_to_end_real_poster_full_confirmation_and_single_debit(bot):
+def test_movie_search_select_confirm_has_no_requirements_step(bot):
     message(bot,'/requests');tap(bot,'new');message(bot,'Fight Club')
     assert any(m=='editMessageMedia' and p['media']['media'].endswith('/poster.jpg') for m,p in bot.transport.calls)
-    assert '海报：http' not in body(bot)
     original=cards(bot)[0]['message_id']
     tap(bot,'candidate:1');assert cards(bot)[0]['message_id']==original
-    assert '候选 2' in body(bot)
     tap(bot,'searchtype:movie');tap(bot,'year');message(bot,'1999');tap(bot,'pick')
-    assert '媒体库已有' in body(bot)
-    assert any(b.get('url','').startswith('https://emby.invalid') for r in bot.transport.messages[('900',cards(bot)[0]['message_id'])]['reply_markup']['inline_keyboard'] for b in r)
-    tap(bot,'scope:version');message(bot,'导演剪辑版');tap(bot,'option:quality');message(bot,'4K')
-    tap(bot,'option:subtitle');message(bot,'简中');tap(bot,'option:audio');message(bot,'原声');tap(bot,'option:note');message(bot,'谢谢上片员')
+    assert cards(bot)[0]['message_id']==original
     assert bot.service.used('u1')==0
-    tap(bot,'preview')
     text=body(bot)
-    for expected in ('导演剪辑版','4K','简中','原声','谢谢上片员','扣 1 次'): assert expected in text
+    for expected in ('搏击俱乐部','1999','电影','扣 1 次','媒体库已有'): assert expected in text
+    for removed in ('可选要求','清晰度','字幕','配音','备注','重选需求'): assert removed not in text
+    assert set(json.loads(cards(bot)[0]['actions']))=={'submit','new','home'}
     old=tap(bot,'submit');tap(bot,'submit',card=old)
     row=bot.service.list()[0]
     assert row['status']=='open' and bot.service.used('u1')==1
-    assert row['demand']['version']=='导演剪辑版'
-    assert all('accept' in json.loads(card_with(bot,'accept',chat)['actions']) for chat in ('801','802'))
+    assert row['demand']['scope']=='movie' and row['demand']['version']==''
+    assert all(card_with(bot,'accept',chat) for chat in ('801','802'))
 
 
-def test_bare_numeric_id_requires_type_and_tv_seasons_episodes(bot):
+def test_bare_id_requires_type_tv_defaults_to_all_seasons_then_submit(bot):
     message(bot,'/requests');tap(bot,'new');message(bot,'1396')
     assert '明确选择类型' in body(bot) and not bot.service.list()
-    tap(bot,'type:tv');tap(bot,'scope:episodes');message(bot,'1');message(bot,'1-3,5')
-    tap(bot,'preview');tap(bot,'submit')
+    original=cards(bot)[0]['message_id'];tap(bot,'type:tv')
+    assert '全部季' in body(bot)
+    assert cards(bot)[0]['message_id']==original
+    buttons=bot.transport.messages[('900',original)]['reply_markup']['inline_keyboard']
+    assert any(b['text']=='☑ 全部季' for row in buttons for b in row)
+    tap(bot,'submit')
     row=bot.service.list()[0]
-    assert row['media_type']=='tv' and row['demand']['seasons']==[1] and row['demand']['episodes']==[1,2,3,5]
+    assert row['media_type']=='tv' and row['demand']['scope']=='series'
+    assert row['demand']['seasons']==[] and row['demand']['episodes']==[]
+
+
+def test_tv_season_text_updates_same_confirmation_card_with_retry_and_return(bot):
+    message(bot,'/requests');tap(bot,'new');message(bot,'https://www.themoviedb.org/tv/1396')
+    original=cards(bot)[0]['message_id'];old=card_with(bot,'submit')
+    tap(bot,'selectseasons')
+    assert 'submit' not in json.loads(cards(bot)[0]['actions'])
+    tap(bot,'submit',card=old)
+    assert not bot.service.list()
+    # An invalid old button must not borrow the active card or its input.
+    message(bot,'1,3,5-7',reply=original)
+    assert cards(bot)[0]['message_id']==original and '第1、3、5-7季' in body(bot)
+    tap(bot,'selectseasons');message(bot,'-2')
+    assert cards(bot)[0]['message_id']==original and '⚠' in body(bot)
+    assert bot.db.one("SELECT * FROM request_inputs WHERE chat_id='900'")
+    message(bot,'1,3,7-5')
+    assert '⚠' in body(bot) and not bot.service.list()
+    message(bot,'7,5-7,3,1')
+    assert '第1、3、5-7季' in body(bot) and 'submit' in json.loads(cards(bot)[0]['actions'])
+    tap(bot,'selectseasons');tap(bot,'preview')
+    assert '第1、3、5-7季' in body(bot)
+    tap(bot,'allseasons');assert '全部季' in body(bot)
+    tap(bot,'selectseasons');bot=bot.reboot();message(bot,'1,3,5-7')
+    assert cards(bot)[0]['message_id']==original and bot.service.used('u1')==0
+    bot=bot.reboot();tap(bot,'submit')
+    row=bot.service.list()[0]
+    assert row['demand']['scope']=='season' and row['demand']['seasons']==[1,3,5,6,7]
+    assert row['demand']['episodes']==[] and bot.service.used('u1')==1
+    caption=[p['caption'] for m,p in bot.transport.calls if m=='sendPhoto' and str(p['chat_id'])=='801'][-1]
+    assert '第1、3、5-7季' in caption
 
 
 def test_uploader_is_independent_accept_final_all_cards_retired_followers_once(bot):
@@ -162,9 +192,11 @@ def test_uploader_is_independent_accept_final_all_cards_retired_followers_once(b
 @pytest.mark.parametrize('reason',['','暂无片源'])
 def test_rejection_reason_optional_no_fabricated_reason(bot,reason):
     row=submit(bot);tap(bot,'reject','801')
+    assert set(json.loads(cards(bot,'801')[0]['actions']))=={'rejectok','reason:custom','view:1'}
     if reason:
         tap(bot,'reason:custom','801');message(bot,reason,'801')
-    tap(bot,'rejectok','801')
+    else:
+        tap(bot,'rejectok','801')
     assert bot.service.get(row['id'])['status']=='rejected'
     assert bot.service.get(row['id'])['result_note']==reason
     notice=[p['text'] for m,p in bot.transport.calls if m=='sendMessage' and str(p['chat_id'])=='900' and '已拒绝' in p.get('text','')][-1]
@@ -186,8 +218,8 @@ def test_question_reply_internal_edit_cancel_and_message_ownership(bot):
     message(bot,'/uploader','801');tap(bot,'view:1','801');tap(bot,'internal','801');message(bot,'内部片源位置','801')
     assert '内部片源位置' not in json.dumps(bot.service.events(1),ensure_ascii=False)
     assert not any('内部片源位置' in p.get('text','') and str(p.get('chat_id'))=='900' for m,p in bot.transport.calls)
-    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'modify');tap(bot,'option:note');message(bot,'补充备注');tap(bot,'preview');tap(bot,'save')
-    assert bot.service.get(1)['note']=='补充备注'
+    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'reply');message(bot,'补充备注')
+    assert any(e['body']=='补充备注' for e in bot.service.events(1))
     tap(bot,'cancel');tap(bot,'cancelok');assert bot.service.get(1)['status']=='cancelled'
 
 
@@ -197,7 +229,7 @@ def test_restart_recovers_lists_bound_input_and_draft_without_recharging(bot):
     bot=bot.reboot();message(bot,'重启后继续询问','801')
     assert bot.service.get(row['id'])['status']=='open'
     assert any(e['body']=='重启后继续询问' for e in bot.service.events(1))
-    message(bot,'/requests');tap(bot,'new');message(bot,'552');tap(bot,'type:movie');tap(bot,'scope:movie');tap(bot,'preview')
+    message(bot,'/requests');tap(bot,'new');message(bot,'552');tap(bot,'type:movie')
     bot=bot.reboot();tap(bot,'submit')
     assert bot.service.used('u1')==2 and len(bot.service.list())==2
 
@@ -253,14 +285,14 @@ def test_uploader_notifications_are_recognizable_poster_cards_and_fallback(bot):
     photos=[p for method,p in bot.transport.calls if method=='sendPhoto' and str(p['chat_id'])=='801']
     assert len(photos)==1
     assert photos[0]['photo'].endswith('/poster.jpg')
-    for text in ('测试剧集','1999','剧集','Fight Club','本次需求','清晰度','字幕','备注','本地模拟简介'):
+    for text in ('测试剧集','1999','剧集','Fight Club','全部季','本地模拟简介'):
         assert text in photos[0]['caption']
     assert 'https://image.tmdb.org' not in photos[0]['caption']
     actions={b.get('callback_data','').rsplit(':',1)[-1] for r in photos[0]['reply_markup']['inline_keyboard'] for b in r}
     assert {'accept','reject','ask','full'} <= actions
     assert any(b.get('url','').startswith('https://www.themoviedb.org/tv/') for r in photos[0]['reply_markup']['inline_keyboard'] for b in r)
     message(bot,'/uploader','801')
-    assert all(text in body(bot,'801') for text in ('测试剧集','1999','剧集','全剧'))
+    assert all(text in body(bot,'801') for text in ('测试剧集','1999','剧集','全部季'))
     # Media failure falls back to a usable text card, with all business actions.
     bot.transport.fail.update({'sendPhoto','editMessageMedia'})
     message(bot,'/uploader','802');tap(bot,'view:1','802')
@@ -269,7 +301,7 @@ def test_uploader_notifications_are_recognizable_poster_cards_and_fallback(bot):
 
 
 def test_cancelled_draft_capability_stays_invalid_after_restart(bot):
-    message(bot,'/requests');tap(bot,'new');message(bot,'550');tap(bot,'type:movie');tap(bot,'scope:movie');tap(bot,'preview')
+    message(bot,'/requests');tap(bot,'new');message(bot,'550');tap(bot,'type:movie')
     old=card_with(bot,'submit');message(bot,'/cancel');bot=bot.reboot();tap(bot,'submit',card=old)
     assert not bot.service.list() and bot.service.used('u1')==0
 
@@ -280,3 +312,67 @@ def test_metadata_failure_keeps_type_id_and_explicit_unknown_title(bot):
     assert row['tmdb_id']==999
     texts=[p.get('text','') for method,p in bot.transport.calls if method=='sendMessage' and str(p['chat_id'])=='801']
     assert texts and '暂未获取片名' in texts[-1] and '电影' in texts[-1] and '999' in texts[-1]
+
+
+def test_existing_season_request_can_follow_and_accepted_history_stays_visible(bot):
+    row=run(bot.service.create('u1','tv',1396,demand={'scope':'season','seasons':[1,3,5,6,7]}))
+    message(bot,'/requests','901');tap(bot,'new','901');message(bot,'https://www.themoviedb.org/tv/1396','901')
+    tap(bot,'selectseasons','901');message(bot,'1,3,5-7','901')
+    assert 'follow' in json.loads(cards(bot,'901')[0]['actions'])
+    assert 'submit' not in json.loads(cards(bot,'901')[0]['actions'])
+    tap(bot,'follow','901');assert bot.service.used('u2')==0
+    assert bot.service.list(user_id='u2',followed=True)[0]['id']==row['id']
+    bot.service.finish(row['id'],'up1','accepted')
+    message(bot,'/requests','901');tap(bot,'new','901');message(bot,'https://www.themoviedb.org/tv/1396','901')
+    assert '已有接受历史' in body(bot,'901') and '等待下载完成并入库' in body(bot,'901')
+    tap(bot,'selectseasons','901');message(bot,'1,3,5-7','901')
+    assert '已接受' in body(bot,'901')
+    assert 'submit' not in json.loads(cards(bot,'901')[0]['actions'])
+
+
+def test_historical_requirements_survive_details_and_old_edit_buttons(bot):
+    demand={'scope':'episodes','seasons':[2],'episodes':[1,3],'version':'旧版本说明',
+            'quality':'4K','subtitle':'简中','audio':'国语'}
+    row=run(bot.service.create('u1','tv',1396,note='旧备注不能丢',demand=demand))
+    before=bot.service.get(row['id'])
+    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'full')
+    for value in ('季：2','集：1,3','旧版本说明','4K','简中','国语','旧备注不能丢'):
+        assert value in body(bot)
+    member=bot.members.get('u1');mid=cards(bot)[0]['message_id']
+    # Simulate a persisted pre-upgrade editor, including a hidden attempted edit.
+    p={'draft':True,'editing':row['id'],'revision':row['revision'],'media_type':'tv',
+       'tmdb_id':1396,'demand':dict(demand,quality='1080p'),'note':'未确认修改'}
+    run(bot._rq_render('900',mid,member,'旧编辑器',[[('确认修改','save')]],p,rid=row['id'],revision=1))
+    bot=bot.reboot();tap(bot,'save')
+    assert bot.service.get(row['id'])==before
+    assert '原工单要求未更改' in body(bot) and '旧备注不能丢' in body(bot)
+    assert 'modify' not in json.loads(cards(bot)[0]['actions'])
+    assert 'save' not in json.loads(cards(bot)[0]['actions'])
+
+
+def test_old_unsubmitted_draft_requires_new_confirmation_not_silent_submit(bot):
+    message(bot,'/requests');tap(bot,'new');message(bot,'https://www.themoviedb.org/movie/550')
+    card=cards(bot)[0];p=json.loads(card['payload']);p.pop('simple')
+    p['demand'].update(scope='version',version='旧草稿版本',quality='4K')
+    bot.db.execute('UPDATE request_cards SET payload=? WHERE token=?',(json.dumps(p),card['token']))
+    bot=bot.reboot();tap(bot,'submit',card=card)
+    assert not bot.service.list() and bot.service.used('u1')==0
+    assert '本次尚未提交' in body(bot)
+    assert 'scope:movie' not in json.loads(cards(bot)[0]['actions'])
+    tap(bot,'submit');assert bot.service.used('u1')==1
+    assert bot.service.get(1)['demand']['scope']=='movie'
+
+
+def test_rejection_input_retains_role_revision_and_single_execution_guards(bot):
+    submit(bot);tap(bot,'reject','801');tap(bot,'reason:custom','801')
+    assert '发送后立即拒绝' in body(bot,'801')
+    old=cards(bot,'801')[0]
+    bot.members.set_roles('up1',[],actor='test');message(bot,'不应拒绝','801')
+    assert bot.service.get(1)['status']=='open'
+    bot.members.set_roles('up1',['uploader'],actor='test')
+    tap(bot,'accept','802');message(bot,'迟到的拒绝理由','801')
+    assert bot.service.get(1)['status']=='accepted'
+    assert bot.service.get(1)['result_note']==''
+    assert len([e for e in bot.service.events(1) if e['kind'] in ('accepted','rejected')])==1
+    tap(bot,'rejectok','801',card=old)
+    assert bot.service.get(1)['status']=='accepted'

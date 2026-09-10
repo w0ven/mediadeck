@@ -11,9 +11,9 @@ from app.modules.requests import (
     ACCEPT_NOTICE,
     STATUS_LABELS,
     RequestError,
-    demand_text,
     display_title,
     normalize_demand,
+    number_ranges,
     numbers,
 )
 from app.modules.tmdb import parse_link, poster_url
@@ -269,7 +269,12 @@ class RequestBotMixin:
         ]
         keys = []
         for row in rows[:5]:
-            summary = " · ".join(row["demand_text"].splitlines()[:3])[:100]
+            lines = [
+                line for line in row["demand_text"].splitlines() if not line.endswith("：无要求")
+            ]
+            summary = " · ".join(lines[:3])[:100]
+            if row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):
+                summary = self._rq_season_label(row["demand"])
             text.append(
                 f"#{row['id']} {escape(row['display_title'])} · {row['media_label']} · {row['status_label']}\n{escape(summary)}"
                 + (f" · {escape(row['username'])}" if mode == "staff" else "")
@@ -361,19 +366,25 @@ class RequestBotMixin:
         lookup = getattr(self._tmdb, "lookup_request", getattr(self._tmdb, "lookup", None))
         meta = await lookup(p["media_type"], p["tmdb_id"]) if lookup else None
         p["meta"] = meta or p.get("meta") or {}
-        p.update(draft=True, demand={}, note="", create_key=secrets.token_hex(16))
+        p.update(
+            draft=True,
+            simple=True,
+            demand=normalize_demand(p["media_type"], {}),
+            note="",
+            create_key=secrets.token_hex(16),
+        )
         p["library"] = await self._requests.library_hint(
             p["media_type"], p["tmdb_id"], member["emby_user_id"]
         )
         p["history"] = self._requests.history(p["media_type"], p["tmdb_id"])
-        await self._rq_scope(chat, mid, member, p)
+        await self._rq_preview(chat, mid, member, p)
 
     def _rq_library(self, hint):
         if not hint.get("available"):
             return "⚠ 媒体库查询失败/未配置，未知是否已有；仍可提交。", []
         if not hint.get("items"):
             return "媒体库暂未查到匹配内容（仅本次辅助查询）。", []
-        lines, links = ["📚 媒体库已有匹配内容，仍可补集/补版本："], []
+        lines, links = ["📚 媒体库已有匹配内容，可先打开详情查看："], []
         for item in hint["items"][:3]:
             label = str(item.get("name") or item.get("id"))
             eps = item.get("episodes") or []
@@ -387,97 +398,92 @@ class RequestBotMixin:
                 links.append([{"text": "打开媒体库详情 · " + label[:30], "url": item["url"]}])
         return "\n".join(lines), links
 
-    async def _rq_scope(self, chat, mid, member, p):
-        meta = dict(p.get("meta") or {}, tmdb_id=p["tmdb_id"])
-        hint, links = self._rq_library(p.get("library") or {})
-        body = f"🎬 <b>{escape(display_title(meta))}</b>\n类型：{'电影' if p['media_type'] == 'movie' else '剧集'} · TMDB {p['tmdb_id']}\n\n{hint}"
+    async def _rq_legacy_draft(self, chat, mid, member, p):
+        """Never execute a pre-simplification draft under a different meaning."""
+        if p.get("editing"):
+            return await self._rq_detail(
+                chat,
+                mid,
+                member,
+                int(p["editing"]),
+                full=True,
+                prefix="要求编辑已简化，原工单要求未更改；可通过补充 / 回复说明。",
+            )
+        p.update(simple=True, demand=normalize_demand(p["media_type"], {}), note="")
+        return await self._rq_preview(
+            chat, mid, member, p, notice="流程已简化，本次尚未提交；请按当前影片和季范围重新确认。"
+        )
+
+    @staticmethod
+    def _rq_season_label(demand):
+        if demand.get("scope") == "series":
+            return "全部季"
+        return "第" + number_ranges(demand.get("seasons") or []).replace(",", "、") + "季"
+
+    async def _rq_preview(self, chat, mid, member, p, *, entering_seasons=False, notice=""):
+        p["demand"] = normalize_demand(p["media_type"], p["demand"])
+        meta = dict(p.get("meta") or {}, tmdb_id=p["tmdb_id"], media_type=p["media_type"])
+        body = (
+            f"🎬 <b>确认求片</b>\n{escape(display_title(meta))}\n"
+            f"{'电影' if p['media_type'] == 'movie' else '剧集'}"
+        )
+        if p["media_type"] == "tv":
+            body += "\n季范围：" + self._rq_season_label(p["demand"])
         if p.get("history"):
             body += (
                 "\n\n已有接受历史（"
                 + ",".join("#" + str(r["id"]) for r in p["history"])
-                + "），请等待入库；可提不同缺集/版本需求。"
+                + "），请耐心等待下载完成并入库。"
             )
-        seasons = (p.get("meta") or {}).get("seasons") or []
-        if seasons:
-            body += "\nTMDB 季信息：" + "、".join(
-                f"S{s['season_number']}({s['episode_count']}集)" for s in seasons[:12]
+        hint, links = self._rq_library(p.get("library") or {})
+        body += "\n\n" + hint
+        keys = []
+        if entering_seasons:
+            body += (
+                "\n\n请发送季号，例如 1,3,5-7（第 0 季为特别篇）。收到后会更新本卡，直接确认提交。"
             )
-        body += "\n\n请选择本次需求："
-        keys = (
-            [[button("电影整片", "scope:movie"), button("补版本", "scope:version")]]
-            if p["media_type"] == "movie"
-            else [
-                [button("全剧", "scope:series"), button("指定季", "scope:season")],
-                [button("指定集", "scope:episodes"), button("补版本", "scope:version")],
-            ]
-        )
+        else:
+            same = self._requests.same_demand(p["media_type"], p["tmdb_id"], p["demand"])
+            if same and same["status"] == "open":
+                p["same"] = same["id"]
+                if same["emby_user_id"] == member["emby_user_id"]:
+                    keys.append(
+                        [button(f"查看我的原单 #{same['id']}（不扣次）", f"view:{same['id']}")]
+                    )
+                else:
+                    keys.append([button(f"关注原单 #{same['id']}（不扣次）", "follow")])
+                body += f"\n\n已有相同求片 #{same['id']}，不重复创建、不扣次数。"
+            elif same:
+                body += f"\n\n相同求片 #{same['id']} 已接受，请耐心等待下载完成并入库。"
+            else:
+                left = self._requests.remaining(member["emby_user_id"])
+                body += f"\n\n确认求片扣 1 次；本月剩余 {'不限' if left is None else left}。提交后为待处理。"
+                keys.append([button("确认求片（扣 1 次）", "submit")])
+        if p["media_type"] == "tv":
+            checked = "☑ " if p["demand"]["scope"] == "series" else "☐ "
+            keys.append(
+                [
+                    button(checked + "全部季", "allseasons"),
+                    button(
+                        "修改指定季" if p["demand"]["scope"] == "season" else "指定季",
+                        "selectseasons",
+                    ),
+                ]
+            )
+        if entering_seasons:
+            keys.append([button("返回确认卡", "preview")])
+        if notice:
+            body += "\n\n" + escape(notice)
+        keys += links + [[button("重新选片", "new"), button("求片中心", "home")]]
         return await self._rq_render(
             chat,
             mid,
             member,
             body,
-            keys + links + [[button("求片中心", "home")]],
+            keys,
             p,
             photo=poster_url(meta.get("poster_path", "")),
-        )
-
-    async def _rq_options(self, chat, mid, member, p):
-        p["demand"] = normalize_demand(p["media_type"], p["demand"])
-        body = (
-            "📝 <b>可选要求</b>\n\n"
-            + escape(demand_text(p["demand"]))
-            + "\n备注："
-            + escape(p.get("note") or "无要求")
-            + "\n\n默认无要求，无需逐项填写。"
-        )
-        keys = [
-            [
-                button("清晰度", "option:quality"),
-                button("字幕", "option:subtitle"),
-                button("配音", "option:audio"),
-            ],
-            [button("备注", "option:note"), button("重选需求", "rescope")],
-            [button("下一步：完整确认", "preview")],
-            [button("求片中心", "home")],
-        ]
-        await self._rq_render(chat, mid, member, body, keys, p)
-
-    async def _rq_preview(self, chat, mid, member, p):
-        p["demand"] = normalize_demand(p["media_type"], p["demand"])
-        meta = dict(p.get("meta") or {}, tmdb_id=p["tmdb_id"])
-        body = (
-            f"✅ <b>确认{'修改' if p.get('editing') else '提交'}</b>\n{escape(display_title(meta))}\n"
-            f"{'电影' if p['media_type'] == 'movie' else '剧集'} · TMDB {p['tmdb_id']}\n\n"
-            + escape(demand_text(p["demand"]))
-            + "\n备注："
-            + escape(p.get("note") or "无要求")
-        )
-        same = self._requests.same_demand(p["media_type"], p["tmdb_id"], p["demand"])
-        if p.get("editing"):
-            keys = [[button("确认修改（不扣次）", "save")]]
-            body += "\n\n修改不扣次，仅待处理时可修改。"
-        elif same and same["status"] == "open":
-            p["same"] = same["id"]
-            keys = [[button(f"关注原单 #{same['id']}（不扣次）", "follow")]]
-            body += f"\n\n同需求已有待处理 #{same['id']}，不重复创建；关注者不能修改原单。"
-        elif same:
-            keys = []
-            body += (
-                f"\n\n同需求 #{same['id']} 已接受，请耐心等待下载完成并入库；可返回修改为不同需求。"
-            )
-        else:
-            left = self._requests.remaining(member["emby_user_id"])
-            body += f"\n\n确认建单扣 1 次；本月剩余 {'不限' if left is None else left}。提交后为待处理。"
-            keys = [[button("确认提交（扣 1 次）", "submit")]]
-        await self._rq_render(
-            chat,
-            mid,
-            member,
-            body,
-            keys + [[button("返回修改要求", "options"), button("求片中心", "home")]],
-            p,
-            rid=p.get("editing"),
-            revision=p.get("revision"),
+            input_kind="simple_seasons" if entering_seasons else None,
         )
 
     async def _rq_detail(self, chat, mid, member, rid, *, prefix="", thread=None, full=False):
@@ -526,15 +532,23 @@ class RequestBotMixin:
                 else "\n".join(
                     line if len(line) <= 70 else line[:67] + "…"
                     for line in row["demand_text"].splitlines()
+                    if not line.endswith("：无要求")
                 )
             )
-            note = row["note"] or "无要求"
+            if row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):
+                demand = "季范围：" + self._rq_season_label(row["demand"]) + "\n" + demand
+            note = row["note"]
             if not full and len(note) > 150:
                 note = note[:147] + "…（完整需求见详情）"
-            body += "<b>本次需求</b>\n" + escape(demand) + "\n备注：" + escape(note)
+            body += escape(demand)
+            if note:
+                body += "\n备注：" + escape(note)
             if row.get("overview") and not full:
                 body += "\n\n" + escape(row["overview"][:120])
-            keys.append([button("完整需求 / 详情", "full")])
+            if not full:
+                keys.append([button("详情", "full")])
+            else:
+                keys.append([button("返回工单", f"view:{rid}")])
             if staff:
                 body += "\n求片人：" + escape(row["username"])
             if row["status"] == "accepted":
@@ -546,14 +560,17 @@ class RequestBotMixin:
             keys.append([button("沟通 / 操作记录", "thread:0")])
             if row["status"] == "open":
                 if staff:
-                    keys += [
-                        [button("✅ 接受请求", "accept"), button("拒绝请求", "reject")],
-                        [button("询问用户", "ask"), button("🔒 内部备注", "internal")],
-                    ]
+                    keys = [
+                        [
+                            button("✅ 接受请求", "accept"),
+                            button("拒绝请求", "reject"),
+                            button("询问用户", "ask"),
+                        ]
+                    ] + keys
+                    keys.append([button("🔒 内部备注", "internal")])
                 if own:
                     keys += [
-                        [button("修改需求", "modify"), button("补充 / 回复", "reply")],
-                        [button("撤回求片", "cancel")],
+                        [button("补充 / 回复", "reply"), button("撤回求片", "cancel")],
                     ]
             if "admin" in (member.get("roles") or []):
                 keys.append(
@@ -567,7 +584,6 @@ class RequestBotMixin:
                         "◀ 工作台" if staff else "◀ 我的求片",
                         "list:staff" if staff else "list:mine",
                     ),
-                    button("求片中心", "home"),
                 ]
             )
         keys.append(
@@ -598,7 +614,20 @@ class RequestBotMixin:
             mid,
             member,
             body + "\n\n发送 /cancel 放弃本次输入。",
-            keys or [[button("求片中心", "home")]],
+            keys
+            or (
+                [
+                    [
+                        button("返回详情", f"view:{rid}"),
+                        button(
+                            "工作台" if self._rq_staff(member) else "我的求片",
+                            "list:staff" if self._rq_staff(member) else "list:mine",
+                        ),
+                    ]
+                ]
+                if rid
+                else [[button("求片中心", "home")]]
+            ),
             p,
             input_kind=kind,
             rid=rid,
@@ -701,51 +730,21 @@ class RequestBotMixin:
         if cmd == "type":
             p["media_type"] = arg
             return await self._rq_selected(chat, mid, member, p)
-        if cmd == "rescope":
-            return await self._rq_scope(chat, mid, member, p)
-        if cmd == "scope":
-            p["demand"] = {"scope": arg}
-            if arg in ("season", "episodes"):
-                return await self._rq_prompt(
-                    chat,
-                    mid,
-                    member,
-                    p,
-                    "seasons",
-                    "请发送季数，例如 1 或 1,3-5。指定集时只选一季。",
-                )
-            if arg == "version":
-                return await self._rq_prompt(
-                    chat,
-                    mid,
-                    member,
-                    p,
-                    "version",
-                    "请说明需要补的版本，例如 导演剪辑版 / 4K 修复版。",
-                )
-            return await self._rq_options(chat, mid, member, p)
-        if cmd == "option":
-            p["field"] = arg
-            return await self._rq_prompt(
-                chat,
-                mid,
-                member,
-                p,
-                "option",
-                {
-                    "quality": "发送清晰度要求，如 1080p / 4K",
-                    "subtitle": "发送字幕要求，如 简中 / 双语",
-                    "audio": "发送配音要求，如 原声 / 国语",
-                    "note": "发送备注（最多 500 字）",
-                }[arg]
-                + "；发送 - 表示无要求。",
-                [[button("不填写，返回", "options")]],
+        if cmd in ("rescope", "scope", "option", "options", "save"):
+            return await self._rq_legacy_draft(chat, mid, member, p)
+        if cmd in ("allseasons", "selectseasons", "preview"):
+            if not p.get("simple"):
+                return await self._rq_legacy_draft(chat, mid, member, p)
+            if cmd != "preview" and p["media_type"] != "tv":
+                raise RequestError("只有剧集可选择季范围")
+            if cmd == "allseasons":
+                p["demand"] = normalize_demand("tv", {})
+            return await self._rq_preview(
+                chat, mid, member, p, entering_seasons=cmd == "selectseasons"
             )
-        if cmd == "options":
-            return await self._rq_options(chat, mid, member, p)
-        if cmd == "preview":
-            return await self._rq_preview(chat, mid, member, p)
         if cmd == "submit":
+            if not p.get("simple"):
+                return await self._rq_legacy_draft(chat, mid, member, p)
             row = await self._requests.create(
                 uid,
                 p["media_type"],
@@ -764,12 +763,6 @@ class RequestBotMixin:
                 if row.get("created")
                 else "已有同需求，未重复创建/扣次。",
             )
-            return await self.flush_request_notifications()
-        if cmd == "save":
-            row = self._requests.modify(
-                p["editing"], uid, p["demand"], p.get("note", ""), p["revision"]
-            )
-            await self._rq_detail(chat, mid, member, row["id"], prefix="修改已保存，未扣次。")
             return await self.flush_request_notifications()
         if cmd == "follow":
             row = self._requests.follow(p["same"], uid)
@@ -836,34 +829,27 @@ class RequestBotMixin:
                 member,
                 f"拒绝工单 #{rid}\n理由完全选填。不填就不向用户显示理由。普通拒绝不自动退回额度。",
                 [
-                    [button("直接确认拒绝（无理由）", "rejectok")],
-                    [button("暂未找到片源", "reason:source"), button("暂不收录", "reason:policy")],
-                    [button("自定义理由", "reason:custom"), button("返回详情", f"view:{rid}")],
+                    [button("直接拒绝（无理由）", "rejectok"), button("填写理由", "reason:custom")],
+                    [button("返回详情", f"view:{rid}")],
                 ],
                 p,
                 rid=rid,
                 revision=row["revision"],
             )
         if cmd == "reason":
-            if arg == "custom":
-                return await self._rq_prompt(
-                    chat,
-                    mid,
-                    member,
-                    p,
-                    "reason",
-                    f"工单 #{rid}：发送选填拒绝理由（500 字内）。",
-                    rid=rid,
-                    revision=row["revision"],
-                )
-            p["reason"] = "暂未找到片源" if arg == "source" else "暂不收录"
-            return await self._rq_render(
+            # Old quick-reason callbacks also return to the current explicit input;
+            # never execute a legacy confirmation with a newly inferred reason.
+            p["reject_on_text"] = True
+            return await self._rq_prompt(
                 chat,
                 mid,
                 member,
-                f"拒绝工单 #{rid}\n理由：{p['reason']}",
-                [[button("确认拒绝", "rejectok"), button("返回详情", f"view:{rid}")]],
                 p,
+                "reason",
+                f"工单 #{rid}：请发送拒绝理由（1–500 字）。发送后立即拒绝，无需再次确认。",
+                keys=[
+                    [button("直接拒绝（无理由）", "rejectok"), button("返回详情", f"view:{rid}")]
+                ],
                 rid=rid,
                 revision=row["revision"],
             )
@@ -888,17 +874,14 @@ class RequestBotMixin:
         if cmd in ("modify", "cancel") and row["emby_user_id"] != uid:
             raise RequestError("只能修改/撤回自己的工单")
         if cmd == "modify":
-            p = {
-                "draft": True,
-                "editing": rid,
-                "revision": row["revision"],
-                "media_type": row["media_type"],
-                "tmdb_id": row["tmdb_id"],
-                "meta": row,
-                "demand": row["demand"],
-                "note": row["note"],
-            }
-            return await self._rq_options(chat, mid, member, p)
+            return await self._rq_detail(
+                chat,
+                mid,
+                member,
+                rid,
+                full=True,
+                prefix="要求编辑已简化，原要求未更改；可通过补充 / 回复说明。",
+            )
         if cmd == "cancel":
             return await self._rq_render(
                 chat,
@@ -971,34 +954,22 @@ class RequestBotMixin:
                     raise RequestError("请输入有效四位年份")
                 p.update(year=int(text), page=1)
                 await self._rq_candidates(chat, mid, member, p, fetch=True)
-            elif kind == "seasons":
-                p["demand"]["seasons"] = numbers(text)
-                if not p["demand"]["seasons"]:
-                    raise RequestError("请填写季数")
-                if p["demand"]["scope"] == "episodes":
-                    if len(p["demand"]["seasons"]) != 1:
-                        raise RequestError("指定集请只选择一季")
-                    await self._rq_prompt(
-                        chat, mid, member, p, "episodes", "发送集数，例如 1-3,5。"
+            elif kind == "simple_seasons":
+                try:
+                    seasons = numbers(text)
+                    if not seasons:
+                        raise RequestError("请填写季号，例如 1,3,5-7")
+                    p["demand"] = normalize_demand("tv", {"scope": "season", "seasons": seasons})
+                except RequestError as exc:
+                    await self._rq_preview(
+                        chat, mid, member, p, entering_seasons=True, notice="⚠ " + str(exc)
                     )
-                else:
-                    await self._rq_options(chat, mid, member, p)
-            elif kind == "episodes":
-                p["demand"]["episodes"] = numbers(text)
-                await self._rq_options(chat, mid, member, p)
-            elif kind == "version":
-                p["demand"]["version"] = text
-                await self._rq_options(chat, mid, member, p)
-            elif kind == "option":
-                field = p["field"]
-                value = "" if text in ("-", "无要求", "跳过") else text
-                if len(value) > (500 if field == "note" else 100):
-                    raise RequestError("输入过长，请缩短")
-                if field == "note":
-                    p["note"] = value
-                else:
-                    p["demand"][field] = value
-                await self._rq_options(chat, mid, member, p)
+                    return True
+                await self._rq_preview(chat, mid, member, p)
+            elif kind in ("seasons", "episodes", "version", "option"):
+                # Persisted old input may survive an upgrade. Do not interpret it
+                # as a new submit, or overwrite requirements on an existing ticket.
+                await self._rq_legacy_draft(chat, mid, member, p)
             else:
                 rid = card["request_id"]
                 if kind in ("ask", "reply", "internal"):
@@ -1012,19 +983,38 @@ class RequestBotMixin:
                         key="input:" + card["token"],
                     )
                 elif kind == "reason":
-                    if len(text) > 500:
-                        raise RequestError("理由最多 500 字")
-                    p["reason"] = text
-                    await self._rq_render(
-                        chat,
-                        mid,
-                        member,
-                        f"拒绝工单 #{rid}\n理由：{escape(text)}",
-                        [[button("确认拒绝", "rejectok"), button("返回详情", f"view:{rid}")]],
-                        p,
-                        rid=rid,
+                    if not text.strip() or len(text) > 500:
+                        raise RequestError("理由须为 1–500 字")
+                    if not p.get("reject_on_text"):
+                        # An old input promised another confirmation. Honor that
+                        # promise once, instead of silently rejecting after upgrade.
+                        p["reason"] = text
+                        await self._rq_render(
+                            chat,
+                            mid,
+                            member,
+                            f"拒绝工单 #{rid}\n理由：{escape(text)}",
+                            [
+                                [
+                                    button("按此理由拒绝", "rejectok"),
+                                    button("返回详情", f"view:{rid}"),
+                                ]
+                            ],
+                            p,
+                            rid=rid,
+                            revision=card["revision"],
+                        )
+                        return True
+                    self._requests.finish(
+                        rid,
+                        member["emby_user_id"],
+                        "rejected",
+                        note=text,
                         revision=card["revision"],
                     )
+                    self._rq_clear_input(chat)
+                    await self._rq_detail(chat, mid, member, rid)
+                    await self.flush_request_notifications()
                     return True
                 elif kind == "correct":
                     status, _, reason = text.partition(" ")
