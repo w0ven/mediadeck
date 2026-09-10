@@ -13,7 +13,7 @@ one reviewed operation: moving an existing account to a different Telegram.
 Old account claiming is retired. Reassignment requires password verification
 in private plus an administrator's approval in the configured group.
 
-Registration passwords are generated. Passwords supplied for reassignment
+Registration and reset passwords may be generated or privately chosen. Passwords supplied for reassignment
 verification are never echoed, logged or persisted; input messages are removed.
 
 Polling, not webhooks. A webhook needs a public HTTPS route into the panel;
@@ -38,6 +38,7 @@ from typing import Any
 import httpx
 
 from app.core.errors import ConfigError, ConflictError
+from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_rebinding import RebindBotMixin
 from app.modules.bot_requests import RequestBotMixin
 from app.modules.bot_views import (
@@ -140,7 +141,7 @@ def _public_error(exc: Exception) -> str:
 
 
 def generate_password(length: int = 12) -> str:
-    """Passwords are issued, not chosen: registration never asks a member to choose one."""
+    """Existing random-password strength, generated only after an explicit choice."""
     pool = string.ascii_letters + string.digits
     return "".join(secrets.choice(pool) for _ in range(length))
 
@@ -214,7 +215,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(RequestBotMixin, RebindBotMixin):
+class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -1244,7 +1245,7 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
         "🆕 <b>注册账号</b>\n\n请直接发送你想要的用户名：\n\n"
         "· 3–20 个字符，字母开头\n"
         "· 只能用字母、数字和下划线\n\n"
-        "<i>密码由系统生成，不需要你输入。10 分钟内有效。</i>")
+        "<i>下一步可选择随机生成或自定义密码，最后确认后才创建账号。10 分钟内有效。</i>")
 
     def _credential_prompt(self) -> str:
         cfg = self._cfg()
@@ -1338,12 +1339,14 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
 
     async def _finish_registration(self, chat_id: Any, tg_user_id: str,
                                    tg_username: str, username: str,
-                                   admission: Any = None) -> None:
+                                   admission: Any = None, *, password: str | None = None) -> None:
+        if str(chat_id) != str(tg_user_id) or str(chat_id).startswith("-"):
+            return  # credentials and account creation are always private and recipient-bound
         # Chats run concurrently, but the last slot and a single-use invitation
         # must not be promised twice. No SQLite transaction crosses an await.
         async with self._registration_lock:
             await self._finish_registration_locked(
-                chat_id, tg_user_id, tg_username, username, admission)
+                chat_id, tg_user_id, tg_username, username, admission, password=password)
 
     def _fresh_admission(self, tg_id: str, admission: Any) -> Any:
         if self._member_for_chat(tg_id):
@@ -1372,7 +1375,7 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
 
     async def _finish_registration_locked(self, chat_id: Any, tg_user_id: str,
                                           tg_username: str, username: str,
-                                          admission: Any) -> None:
+                                          admission: Any, *, password: str | None = None) -> None:
         username = username.strip()
         if not USERNAME_RE.match(username):
             await self._show(chat_id, '❌ 用户名不符合要求：3–20 字符、字母开头、只含字母数字下划线。\n请重新发送一个。', BACK_HOME)
@@ -1387,7 +1390,8 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
             await self._show(chat_id, escape(str(exc)), self.guest_menu())
             return
         await self._show(chat_id, '⏳ 正在创建账号…', BACK_HOME)
-        password = generate_password()
+        password = generate_password() if password is None else password
+        validate_password(password)
         created = None
         # If shutdown cancels creation, settle the in-flight operation so the
         # returned ID can be cleaned up rather than becoming a passwordless orphan.
@@ -1471,7 +1475,7 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
         server = str(cfg.get('emby_public_url') or '').strip()
         expires = (member or {}).get('expires_at_effective', (member or {}).get('expires_at'))
         lines = ['✅ <b>注册成功</b>\n', f'用户名：<code>{username}</code>',
-                 f'密码：<code>{password}</code>']
+                 f'密码：<pre>{escape(password)}</pre>']
         if server:
             lines.append('服务器：' + escape(server))
         lines.append('有效期：' + _fmt_expiry(expires))
@@ -3557,7 +3561,9 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
                     and self._group_chat_allowed(message.get('chat') or {})):
                 await self.send(chat_id, '⛔ 无法核实匿名管理身份，请使用本人账号发送 /kk。')
             return
-        if self._addressed_to_other_bot(text):
+        custom_password = (self._private_chat(message) and self._password_custom_waiting(chat_id)
+                           and not self._password_navigation(str(message.get("text") or "")))
+        if not custom_password and self._addressed_to_other_bot(text):
             return
         in_group = not self._private_chat(message)
         if in_group and not self._group_chat_allowed(message.get("chat") or {}):
@@ -3580,6 +3586,12 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
         waiting = self._pending.get(self._pkey(chat_id))
         business_input = not in_group or text.startswith('/') or bool(
             waiting and reply and waiting[2].get('message_id') == reply)
+        raw_password = str(message.get("text") or "")
+        if (not in_group and self._password_custom_waiting(chat_id)
+                and not self._password_navigation(raw_password)):
+            if await self.membership.gate(chat_id, tg_user_id):
+                await self._password_flow_text(chat_id, tg_user_id, raw_password, message)
+            return
         claim = None
         if not in_group:
             parts = text.split()
@@ -3667,7 +3679,7 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
                 await self._submit_credential(chat_id, tg_user_id, text)
                 return
             if kind == "username":
-                await self._finish_registration(
+                await self._registration_password_start(
                     chat_id, tg_user_id, tg_username, text,
                     admission=extra.get("admission"))
                 return
@@ -3871,6 +3883,9 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
                 current_mid = self._panel.get(self._pkey(chat_id), message_id)
                 if not in_group and await self._resume_gift_claim(chat_id, current_mid, tg_user_id):
                     return
+                waiting_password = self._pending.get(self._pkey(chat_id))
+                if waiting_password and waiting_password[0].startswith('password_'):
+                    self._pending.pop(self._pkey(chat_id), None)
                 await self._show_home(chat_id, tg_user_id, tg_name)
                 return
             if data in ('home', 'panel_close', 'register', 'personal_home'):
@@ -3945,9 +3960,13 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
-        if (waiting and ((waiting[0] == "password_reset" and not data.startswith("resetpw_ok:"))
+        if (waiting and ((waiting[0].startswith("password_") and not data.startswith("pw:"))
                          or (waiting[0] == 'shop_confirm' and not data.startswith('buyok:')))):
             self._pending.pop(self._pkey(chat_id), None)
+        if data.startswith("pw:"):
+            if not in_group:
+                await self._password_flow_callback(data, chat_id, message_id, tg_user_id)
+            return
 
         if data == "register":
             await self._start_registration(chat_id, tg_user_id)
@@ -4215,61 +4234,6 @@ class TelegramBot(RequestBotMixin, RebindBotMixin):
         if data == "resetpw" or data.startswith("resetpw_ok:"):
             await self._password_reset(chat_id, message_id, member, data)
             return
-
-    async def _password_reset(self, chat_id: Any, message_id: int,
-                              member: dict[str, Any], data: str) -> None:
-        user_id = str(member.get("emby_user_id") or "")
-        if self._emby is None:
-            await self._edit(chat_id, message_id, "后台未连接 Emby，暂时无法重置。",
-                             self.info_menu())
-            return
-        if data == "resetpw":
-            nonce = secrets.token_hex(6)
-            self._pending[self._pkey(chat_id)] = (
-                "password_reset", time.time() + 120,
-                {"user_id": user_id, "message_id": message_id, "nonce": nonce})
-            await self._edit(
-                chat_id, message_id,
-                "🔐 <b>确认重置密码？</b>\n\n"
-                "确认后会生成随机新密码，旧密码立即失效。\n"
-                "你需要在客户端重新填写密码；账号权益不会改变。\n\n"
-                "<i>新密码只在这里显示，请保存后再离开。</i>",
-                [[{"text": "确认重置", "callback_data": f"resetpw_ok:{nonce}"},
-                  {"text": "取消", "callback_data": "me"}]])
-            return
-        waiting = self._pending.get(self._pkey(chat_id))
-        extra = waiting[2] if waiting else {}
-        if (not waiting or waiting[0] != "password_reset" or waiting[1] < time.time()
-                or extra.get("user_id") != user_id
-                or extra.get("message_id") != message_id
-                or data != f"resetpw_ok:{extra.get('nonce')}"):
-            # Do not overwrite a successful password result on a double tap.
-            return
-        self._pending.pop(self._pkey(chat_id), None)  # single-use, consumed before I/O
-        password = generate_password()
-        ok = False
-        with contextlib.suppress(Exception):
-            ok = await self._emby.set_user_password(user_id, password)
-        cache_notice = ''
-        if ok and self._on_password_changed is not None:
-            try:
-                self._on_password_changed()  # no password or token crosses this callback
-            except Exception:  # noqa: BLE001 - password changed; never pretend rollback
-                cache_notice = '\n⚠ 密码已更改，面板会话缓存失效未确认，请联系管理员。'
-        if hasattr(self._members, "audit"):
-            self._members.audit(f"tg:{chat_id}", "member.password_reset", user_id,
-                                "success" if ok else "failed", ok=bool(ok))
-        current = self._member_for_chat(_ACTOR.get() or str(chat_id))
-        if not current or str(current.get('emby_user_id')) != user_id:
-            await self._edit(chat_id, message_id,
-                '绑定已变化，未展示新密码；请当前绑定的 Telegram 重新发起重置。', BACK_HOME)
-            return
-        await self._edit(
-            chat_id, message_id,
-            (f"🔑 <b>新密码</b>\n\n<code>{password}</code>\n\n"
-             "<i>请先保存。返回菜单后不会再次显示。</i>" + cache_notice) if ok
-            else "❌ 重置失败，请稍后重试或联系管理员。",
-            self.info_menu())
 
     # -- polling loop ---------------------------------------------------------
 

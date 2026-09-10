@@ -5,7 +5,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-from test_tg_group_gift import TARGET, grant, issue
+from test_tg_group_gift import TARGET, confirm_registration_password, grant, issue
 from test_tg_interaction_context import ADMIN, GROUP, VIEWER, click, command
 from test_tg_interaction_context import env as context_env  # noqa: F401
 
@@ -40,7 +40,8 @@ def restart_bot(e):
 
 async def register(e, username='ReceiptMember'):
     await command(e, '/start ' + grant(e)['gift_code'], chat=TARGET, user=TARGET)
-    return await command(e, username, chat=TARGET, user=TARGET)
+    await command(e, username, chat=TARGET, user=TARGET)
+    return await confirm_registration_password(e)
 
 
 @pytest.mark.parametrize('topic', [None, 77])
@@ -122,6 +123,7 @@ def test_registration_failure_never_stages_or_publishes_receipt(env, monkeypatch
         else:
             monkeypatch.setattr(env.bot._registration, 'consume', lambda *a, **kw: False)
         await command(env, 'FailedReceipt', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         assert not env.members.find_by_telegram(str(TARGET))
         assert not grant(env)['used_at'] and not receipts(env) and not public_receipts(env)
     asyncio.run(run())
