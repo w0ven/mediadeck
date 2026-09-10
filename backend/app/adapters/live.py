@@ -528,6 +528,46 @@ class LiveEmby:
                 })
             return out
 
+    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None) -> list[dict[str, Any]]:
+        """Read-only advisory lookup, scoped to the requester's accessible library."""
+        from urllib.parse import quote
+        base, headers, timeout, verify = self._conn()
+        params = {'Recursive': 'true', 'IncludeItemTypes': 'Movie' if media_type == 'movie' else 'Series',
+                  'AnyProviderIdEquals': f'tmdb.{int(tmdb_id)}', 'Fields': 'ProviderIds', 'Limit': '20'}
+        if user_id:
+            params['UserId'] = str(user_id)
+        async with self._client(timeout, verify) as client:
+            response = self._check(await client.get(f'{base}/emby/Items', headers=headers, params=params))
+            response.raise_for_status()
+            data = response.json()
+            if not isinstance(data, dict) or not isinstance(data.get('Items'), list):
+                raise UpstreamError('媒体库返回了不完整的查询结果')
+            out = []
+            for item in data['Items']:
+                provider_ids = item.get('ProviderIds') or {}
+                provider_id = provider_ids.get('Tmdb', provider_ids.get('tmdb'))
+                if provider_id is None:
+                    raise UpstreamError('媒体库结果缺少 TMDB 标识，无法确认已有内容')
+                if str(provider_id) != str(tmdb_id):
+                    continue
+                row = {'id': str(item['Id']), 'name': str(item.get('Name') or ''),
+                       'url': f"{base}/web/index.html#!/item?id={quote(str(item['Id']), safe='')}", 'episodes': []}
+                if media_type == 'tv':
+                    ep_params = {'ParentId': str(item['Id']), 'Recursive': 'true',
+                                 'IncludeItemTypes': 'Episode', 'Fields': 'ParentIndexNumber,IndexNumber', 'Limit': '500'}
+                    if user_id:
+                        ep_params['UserId'] = str(user_id)
+                    ep = self._check(await client.get(f'{base}/emby/Items', headers=headers, params=ep_params))
+                    ep.raise_for_status()
+                    data = ep.json()
+                    if not isinstance(data, dict) or not isinstance(data.get('Items'), list):
+                        raise UpstreamError('剧集查询未返回完整结果')
+                    row['episodes'] = [{'season': e.get('ParentIndexNumber'), 'episode': e.get('IndexNumber')}
+                                       for e in data['Items']]
+                    row['partial'] = int(data.get('TotalRecordCount') or 0) > len(row['episodes'])
+                out.append(row)
+        return out
+
     async def item_primary_image(self, item_id: str) -> bytes | None:
         """Primary poster bytes for a ranking card. Best-effort, never raises."""
         item_id = str(item_id or "").strip()

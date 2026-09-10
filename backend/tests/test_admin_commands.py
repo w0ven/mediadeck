@@ -96,6 +96,11 @@ def bot(tmp_path):
     async def fake_call(method, payload=None, timeout=20):
         return True  # acknowledgements/menu retirement never contact Telegram
 
+    async def fake_send_message(chat, text, keyboard=None):
+        await fake_send(chat, text, keyboard)
+        return instance.next_mid
+
+    instance.send_message = fake_send_message
     instance._call = fake_call
     instance.send = fake_send
     instance._edit = fake_edit
@@ -148,7 +153,9 @@ def test_a_non_admin_is_refused_every_command(bot, command) -> None:
     """A linked member without the role has no more power than a stranger."""
     reply = _run(bot, command, chat=PLAIN_CHAT, username="alice_tg")
     assert "管理员命令" not in reply
-    if command == "/help":
+    if command == "/req":
+        assert "不是上片员" in reply
+    elif command == "/help":
         assert "使用说明" in reply
     else:
         # Ordinary members are pointed at the buttons, not told they lack power.
@@ -522,7 +529,7 @@ def test_auth_without_an_id_explains_the_syntax(bot) -> None:
 def test_req_lists_outstanding_requests(bot) -> None:
     asyncio.run(bot.requests.create("u1", "movie", 550))
     reply = _run(bot, "/req")
-    assert "#1" in reply and "待接单" in reply
+    assert "#1" in reply and "待处理" in reply
     assert "alice" in reply
 
 
@@ -530,21 +537,21 @@ def test_req_filters_by_status(bot) -> None:
     first = asyncio.run(bot.requests.create("u1", "movie", 550))
     asyncio.run(bot.requests.create("u1", "movie", 551))
     bot.members.set_roles("admin1", ["admin", "uploader"], actor="test")
-    bot.requests.claim(first["id"], "admin1")
+    bot.requests.finish(first["id"], "admin1", "accepted")
 
     assert "#1" not in _run(bot, "/req open")
-    claimed = _run(bot, "/req claimed")
+    claimed = _run(bot, "/req accepted")
     assert "#1" in claimed and "#2" not in claimed
 
 
 def test_req_says_so_when_there_is_nothing(bot) -> None:
-    assert "没有符合条件" in _run(bot, "/req")
+    assert "暂无符合条件" in _run(bot, "/req")
 
 
 def test_req_reports_the_totals(bot) -> None:
     asyncio.run(bot.requests.create("u1", "movie", 550))
     reply = _run(bot, "/req")
-    assert "待接单 1" in reply and "本月 1" in reply
+    assert "待处理" in reply and "#1" in reply
 
 
 # -- audit -------------------------------------------------------------------

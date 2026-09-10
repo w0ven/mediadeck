@@ -198,6 +198,9 @@ class MockEmby:
         ]
         return items[:max(1, limit)]
 
+    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None) -> list[dict[str, Any]]:
+        return []
+
     # -- intake observability ------------------------------------------------
     async def scheduled_tasks(self) -> list[dict[str, Any]]:
         return [

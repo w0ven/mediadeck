@@ -43,10 +43,10 @@ def _client(api_creds: str = FAKE_CREDS, language: str = "zh-CN") -> TmdbClient:
     # Trailing query strings and surrounding chatter must not defeat it.
     ("https://www.themoviedb.org/movie/424?language=zh", ("movie", 424)),
     ("求这个 https://www.themoviedb.org/movie/424 谢谢", ("movie", 424)),
-    # A bare id has no type; movie is tried first and tv is the fallback.
-    ("12345", ("movie", 12345)),
-    ("#12345", ("movie", 12345)),
-    ("  550  ", ("movie", 550)),
+    # A bare id requires explicit type selection; never guess.
+    ("12345", ("", 12345)),
+    ("#12345", ("", 12345)),
+    ("  550  ", ("", 550)),
 ])
 def test_a_link_or_an_id_resolves_to_a_type_and_a_number(text, expected) -> None:
     assert parse_link(text) == expected
@@ -122,7 +122,7 @@ def test_a_film_yields_title_year_poster_and_overview() -> None:
 
     found = asyncio.run(client.lookup("movie", 550))
     assert found == {"title": "搏击俱乐部", "year": 1999,
-                     "poster_path": "/poster.jpg", "overview": "简介"}
+                     "poster_path": "/poster.jpg", "overview": "简介", "original_title": "", "seasons": []}
 
 
 def test_a_series_reads_the_fields_tmdb_names_differently() -> None:
@@ -262,3 +262,34 @@ def test_resolve_keeps_the_asked_type_when_neither_matches() -> None:
     _stub(client, {})
     media_type, meta = asyncio.run(client.resolve("tv", 31337))
     assert media_type == "tv" and meta is None
+
+
+def test_request_lookup_prefers_chinese_and_keeps_original_name():
+    client=_client(language='en-US')
+    seen=_stub(client,{('movie',550):{'title':'搏击俱乐部','original_title':'Fight Club'}})
+    result=asyncio.run(client.lookup_request('movie',550))
+    assert result['title']=='搏击俱乐部' and result['original_title']=='Fight Club'
+    assert seen[0][-1]=='zh-CN'
+
+
+def test_search_paginates_filters_and_reports_unavailable(monkeypatch):
+    import httpx
+    original=httpx.AsyncClient
+    calls=[]
+    def handler(request):
+        calls.append(request)
+        if request.url.params.get('query')=='fail':
+            return httpx.Response(503)
+        return httpx.Response(200,json={'total_pages':3,'results':[
+            {'id':10,'title':'中文标题','original_title':'Original','release_date':'1999-01-01','poster_path':'/p.jpg'}]})
+    monkeypatch.setattr(httpx,'AsyncClient',lambda **kw:original(transport=httpx.MockTransport(handler),**kw))
+    result=asyncio.run(_client().search('Original',page=2,media_type='movie',year=1999))
+    assert result['available'] and result['page']==2 and result['total_pages']==3
+    assert result['results'][0]['tmdb_id']==10
+    assert calls[0].url.path=='/3/search/movie'
+    assert calls[0].url.params['primary_release_year']=='1999'
+    assert calls[0].url.params['language']=='zh-CN'
+    assert asyncio.run(_client().search('fail'))['available'] is False
+    before=len(calls)
+    assert asyncio.run(_client('').search('No key'))['available'] is False
+    assert len(calls)==before

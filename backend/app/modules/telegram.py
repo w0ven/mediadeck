@@ -39,6 +39,7 @@ import httpx
 
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_rebinding import RebindBotMixin
+from app.modules.bot_requests import RequestBotMixin
 from app.modules.bot_views import (
     bandwidth_lines,
     duration,
@@ -55,7 +56,6 @@ from app.modules.requests import RequestError
 from app.modules.settings import parse_group_interaction_chats
 from app.modules.shop import ShopError
 from app.modules.stats import ranking_stamp
-from app.modules.tmdb import parse_link, poster_url
 
 API_ROOT = "https://api.telegram.org"
 
@@ -94,20 +94,20 @@ REQUEST_KINDS = ("rebind",)
 
 # Status marks for the member's own request list.
 REQUEST_STATUS_ICONS = {
-    "open": "🕓", "claimed": "🔧", "done": "✅", "rejected": "❌",
+    "open": "🕓", "accepted": "✅", "rejected": "❌", "cancelled": "↩",
 }
 
 # Callbacks whose handler sends its own answerCallbackQuery, because it has
 # something to say. Everything else is acked immediately.
 SELF_ANSWERING_CALLBACKS = (
-    "req_claim:", "req_done:", "req_fail:", "tg_rebind_review:", "urank:", "urank_close")
+    "rq:", "req_claim:", "req_done:", "req_fail:", "tg_rebind_review:", "urank:", "urank_close")
 
 ADMIN_HELP = """🛠 <b>管理员命令</b>
 
 <b>查询</b>
 <code>/kk TG数字ID或用户名</code> 查看账号；未注册可赠送开号
 <code>/manage</code> 打开管理菜单
-<code>/req [open|claimed]</code> 最近 10 条求片
+<code>/uploader</code> 或 <code>/req</code> 上片员求片工作台（接受即终结）
 
 <b>用户组</b>
 <code>/prouser TG数字ID或账号名</code> 直接授予白名单（亦可回复消息；保留账号状态）
@@ -214,7 +214,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(RebindBotMixin):
+class TelegramBot(RequestBotMixin, RebindBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -1026,6 +1026,8 @@ class TelegramBot(RebindBotMixin):
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
+        if self._rq_staff(member):
+            rows.append([{"text": "📥 上片员工作台", "callback_data": "request_uploader"}])
         if self.is_admin(member):
             rows.append([{"text": "🛠 管理", "callback_data": "admin"}])
         return rows
@@ -2107,335 +2109,6 @@ class TelegramBot(RebindBotMixin):
             rest = rest[cut:].lstrip("\n")
         return parts or [""]
 
-    # -- media requests -------------------------------------------------------
-
-    def _requests_ready(self) -> bool:
-        return self._requests is not None
-
-    @staticmethod
-    def _remaining_text(left: int | None) -> str:
-        return "不限" if left is None else f"{left} 次"
-
-    async def _request_start(self, chat_id: Any, message_id: int,
-                             member: dict[str, Any]) -> None:
-        """Show the allowance, then wait for a link.
-
-        The remaining count is shown *before* asking rather than after they
-        have gone and found a link: being told the quota is spent only once
-        the work is done is the annoying version of this feature.
-        """
-        if not self._requests_ready():
-            await self._edit(chat_id, message_id, "求片功能暂未开启。",
-                             self.member_menu())
-            return
-        user_id = str(member.get("emby_user_id"))
-        left = self._requests.remaining(user_id)
-        if left is not None and left <= 0:
-            await self._edit(
-                chat_id, message_id,
-                "🎬 <b>求片</b>\n\n本月的求片次数已经用完了，下个月 1 号恢复。",
-                self.member_menu())
-            return
-        self._pending[self._pkey(chat_id)] = ("request_link", time.time() + PENDING_TTL, {})
-        await self._edit(
-            chat_id, message_id,
-            "🎬 <b>求片</b>\n\n"
-            f"本月还可以求 <b>{self._remaining_text(left)}</b>。\n\n"
-            "请发送 <b>TMDB 链接或编号</b>，例如：\n"
-            "<code>https://www.themoviedb.org/movie/550</code>\n"
-            "<code>550</code>\n\n"
-            "<i>在 themoviedb.org 搜到片子后，直接复制地址栏链接即可。</i>",
-            BACK_HOME)
-
-    async def _request_pick_title(self, chat_id: Any, member: dict[str, Any],
-                                  text: str) -> None:
-        """Resolve what they sent and ask them to confirm the actual title.
-
-        The confirmation exists because a wrong id is invisible otherwise: the
-        member would find out an uploader spent an evening on the wrong film.
-        """
-        parsed = parse_link(text) if parse_link else None
-        if not parsed:
-            await self._show(
-                chat_id,
-                "❌ 没能识别这个链接。\n\n"
-                "请发送 TMDB 的链接或纯数字编号，例如：\n"
-                "<code>https://www.themoviedb.org/movie/550</code>\n"
-                "<code>550</code>\n\n"
-                "<i>发送 /start 可取消。</i>",
-                BACK_HOME)
-            return
-
-        media_type, tmdb_id = parsed
-        meta = None
-        if self._tmdb is not None:
-            resolved_type, meta = await self._tmdb.resolve(media_type, tmdb_id)
-            # Only a bare number is ambiguous. An explicit /movie/ URL must
-            # not turn into an unrelated TV work sharing its numeric ID.
-            if re.fullmatch(r'#?\d+', text.strip()) or resolved_type == media_type:
-                media_type = resolved_type
-            else:
-                meta = None
-
-        extra = {"media_type": media_type, "tmdb_id": tmdb_id}
-        self._pending[self._pkey(chat_id)] = (
-            "request_confirm", time.time() + PENDING_TTL, extra)
-        keyboard = [[{"text": "✅ 确认求片", "callback_data": "req_ok"},
-                     {"text": "✖ 取消", "callback_data": "home"}]]
-
-        if meta:
-            year = meta.get("year")
-            poster = poster_url(str(meta.get("poster_path") or ""))
-            caption = (
-                "🎬 <b>确认求片</b>\n\n"
-                f"<b>{escape(str(meta.get('title') or tmdb_id))}</b>"
-                f"{f' ({year})' if year else ''}\n"
-                f"类型：{'剧集' if media_type == 'tv' else '电影'}\n"
-                f"TMDB：<code>{tmdb_id}</code>\n")
-            if poster:
-                caption += f"海报：{poster}\n"
-            caption += "\n确认要求这部片子吗？"
-            await self._show(chat_id, caption, keyboard)
-            return
-
-        # No key, or TMDB had no answer. The id is still valid, so the request
-        # proceeds under a placeholder rather than being refused.
-        await self._show(
-            chat_id,
-            "🎬 <b>确认求片</b>\n\n"
-            f"TMDB 编号：<code>{tmdb_id}</code>\n"
-            f"类型：{'剧集' if media_type == 'tv' else '电影'}\n\n"
-            "<i>暂时查不到片名，上片员会按编号处理。</i>\n\n"
-            "确认要求这部片子吗？",
-            keyboard)
-
-    async def _request_submit(self, chat_id: Any, message_id: int,
-                              member: dict[str, Any]) -> None:
-        waiting = self._pending.pop(self._pkey(chat_id), None)
-        if not waiting or waiting[0] != "request_confirm":
-            await self._edit(chat_id, message_id, "这条求片会话已经过期了，请重新开始。",
-                             self._with_admin_row(self.member_menu(), member))
-            return
-        extra = waiting[2]
-        user_id = str(member.get("emby_user_id"))
-        try:
-            request = await self._requests.create(
-                user_id, extra.get("media_type", "movie"),
-                int(extra.get("tmdb_id") or 0), confirmed_type=True)
-        except RequestError as exc:
-            await self._show(chat_id, f"❌ {_public_error(exc)}",
-                             self._with_admin_row(self.member_menu(), member))
-            return
-
-        left = self._requests.remaining(user_id)
-        await self._show(
-            chat_id,
-            "✅ <b>已提交</b>\n\n"
-            f"编号 <b>#{request['id']}</b> · {escape(str(request['display_title']))}\n"
-            f"本月还可以求 {self._remaining_text(left)}。\n\n"
-            "上片员处理后会通知你。",
-            self._with_admin_row(self.member_menu(), member))
-        await self.announce_request(request)
-
-    async def _my_requests(self, chat_id: Any, message_id: int,
-                           member: dict[str, Any]) -> None:
-        if not self._requests_ready():
-            await self._edit(chat_id, message_id, "求片功能暂未开启。",
-                             self.info_menu())
-            return
-        user_id = str(member.get("emby_user_id"))
-        rows = self._requests.for_user(user_id, limit=5)
-        left = self._requests.remaining(user_id)
-        if not rows:
-            body = ("📋 <b>我的求片</b>\n\n还没有求过片。\n\n"
-                    f"本月可求 {self._remaining_text(left)}。")
-        else:
-            lines = ["📋 <b>我的求片</b>\n"]
-            for row in rows:
-                mark = REQUEST_STATUS_ICONS.get(str(row.get("status")), "·")
-                lines.append(
-                    f"{mark} #{row['id']} {escape(str(row['display_title']))} · "
-                    f"{row['status_label']}")
-                note = str(row.get("result_note") or "")
-                if note and row.get("status") == "rejected":
-                    lines.append(f"    <i>{escape(str(note))}</i>")
-            lines.append(f"\n本月还可以求 {self._remaining_text(left)}。")
-            body = "\n".join(lines)
-        await self._edit(chat_id, message_id, body, self.info_menu())
-
-    # -- uploader fan-out ----------------------------------------------------
-
-    async def announce_request(self, request: dict[str, Any]) -> int:
-        """Tell every reachable uploader, and remember which message is whose.
-
-        One message each rather than one group post: the claim button has to
-        be taken back from the people who did not win, and that is only
-        possible per chat.
-        """
-        if not self._requests_ready() or not self.enabled:
-            return 0
-        request_id = int(request.get("id") or 0)
-        keyboard = [[{"text": "✋ 接单",
-                      "callback_data": f"req_claim:{request_id}"}]]
-        body = (
-            f"🎬 <b>新求片 #{request_id}</b>\n\n"
-            f"{escape(str(request.get('display_title') or ''))}\n"
-            f"类型：{request.get('media_label') or '-'}\n"
-            f"TMDB：<code>{request.get('tmdb_id')}</code>\n"
-            f"求片人：{escape(str(request.get('username') or '-'))}")
-        note = str(request.get("note") or "")
-        if note:
-            body += f"\n备注：{escape(str(note))}"
-
-        sent = 0
-        for uploader in self._requests.uploaders():
-            chat_id = str(uploader.get("tg_user_id") or "")
-            if not chat_id:
-                continue
-            message_id = await self.send_message(chat_id, body, keyboard)
-            if message_id is None:
-                continue
-            self._requests.record_notice(request_id, chat_id, int(message_id))
-            sent += 1
-        return sent
-
-    async def _request_claim(self, chat_id: Any, message_id: int,
-                             callback_id: str, member: dict[str, Any],
-                             request_id: int) -> None:
-        """One uploader takes the job; everyone else loses the button."""
-        if not self._requests_ready():
-            return
-        if not member:
-            await self._answer_callback(callback_id, "这个 Telegram 还没有账号")
-            return
-        roles = member.get("roles") or []
-        if "uploader" not in roles and "admin" not in roles:
-            await self._answer_callback(callback_id, "你不是上片员")
-            return
-
-        user_id = str(member.get("emby_user_id"))
-        try:
-            result = self._requests.claim(request_id, user_id)
-        except RequestError as exc:
-            await self._answer_callback(callback_id, str(exc))
-            return
-
-        if not result.get("ok"):
-            holder = result.get("claimed_by_name") or "其他上片员"
-            await self._answer_callback(callback_id, f"已被 {escape(str(holder))} 接单")
-            await self._retract_notices(request_id, holder,
-                                        skip_chat=str(chat_id))
-            return
-
-        await self._answer_callback(callback_id, "接单成功")
-        request = result["request"]
-        await self._edit(
-            chat_id, message_id,
-            f"✋ <b>已接单 #{request_id}</b>\n\n"
-            f"{escape(str(request.get('display_title') or ''))}\n"
-            f"TMDB：<code>{request.get('tmdb_id')}</code>\n"
-            f"求片人：{escape(str(request.get('username') or '-'))}\n\n"
-            "处理完成后点下方按钮。",
-            [[{"text": "✅ 已处理", "callback_data": f"req_done:{request_id}"},
-              {"text": "❌ 无法处理", "callback_data": f"req_fail:{request_id}"}]])
-        await self._retract_notices(
-            request_id, str(member.get("username") or "上片员"),
-            skip_chat=str(chat_id))
-
-    async def _retract_notices(self, request_id: int, holder: str,
-                               skip_chat: str = "") -> int:
-        """Strip the claim button from every other uploader's message.
-
-        Leaving a live button on a job that is gone is how two people end up
-        downloading the same title.
-        """
-        if not self._requests_ready():
-            return 0
-        edited = 0
-        for notice in self._requests.notices(request_id):
-            chat_id = str(notice.get("tg_user_id") or "")
-            if not chat_id or chat_id == str(skip_chat):
-                continue
-            await self._edit(
-                chat_id, int(notice.get("message_id") or 0),
-                f"🎬 <b>求片 #{request_id}</b>\n\n已由 {escape(str(holder))} 接单。")
-            edited += 1
-        return edited
-
-    async def announce_request_claimed(self, request_id: int,
-                                       holder_id: str) -> int:
-        """Panel-side claim: take the button back from every uploader chat."""
-        if not self._requests_ready():
-            return 0
-        holder = self._members.get(str(holder_id)) or {}
-        name = str(holder.get("username") or "管理员")
-        return await self._retract_notices(request_id, name)
-
-    async def _request_resolve(self, chat_id: Any, message_id: int,
-                               callback_id: str, member: dict[str, Any],
-                               request_id: int, done: bool) -> None:
-        if not self._requests_ready():
-            return
-        if not done:
-            await self._answer_callback(callback_id)
-            # A refusal without a reason is worse than no answer: the member
-            # cannot tell whether to ask again differently.
-            self._pending[self._pkey(chat_id)] = (
-                "request_reason", time.time() + PENDING_TTL,
-                {"request_id": request_id})
-            await self._edit(
-                chat_id, message_id,
-                f"❌ <b>无法处理 #{request_id}</b>\n\n请发送一句原因，会转达给求片人。")
-            return
-        try:
-            result = self._requests.resolve(
-                request_id, str(member.get("emby_user_id")), done=True)
-        except RequestError as exc:
-            await self._answer_callback(callback_id, str(exc))
-            return
-        await self._answer_callback(callback_id, "已标记完成")
-        request = result["request"]
-        await self._edit(
-            chat_id, message_id,
-            f"✅ <b>已完成 #{request_id}</b>\n\n{escape(str(request.get('display_title') or ''))}")
-        await self.notify_request_resolved(request)
-
-    async def _request_reason(self, chat_id: Any, member: dict[str, Any],
-                              extra: dict[str, Any], text: str) -> None:
-        self._pending.pop(self._pkey(chat_id), None)
-        request_id = int(extra.get("request_id") or 0)
-        try:
-            result = self._requests.resolve(
-                request_id, str(member.get("emby_user_id")), done=False,
-                note=text)
-        except RequestError as exc:
-            await self.send(chat_id, f"❌ {_public_error(exc)}", self.member_menu())
-            return
-        request = result["request"]
-        await self.send(
-            chat_id,
-            f"已标记 #{request_id} 为无法处理，原因已转达求片人。",
-            self.member_menu())
-        await self.notify_request_resolved(request)
-
-    async def notify_request_resolved(self, request: dict[str, Any]) -> bool:
-        """Tell the member what happened to the title they asked for."""
-        chat_id = str(request.get("tg_user_id") or "")
-        if not chat_id or not self.enabled:
-            return False
-        title = request.get("display_title") or f"#{request.get('tmdb_id')}"
-        if str(request.get("status")) == "done":
-            body = (f"✅ <b>求片已处理</b>\n\n你求的《{escape(str(title))}》已经处理好了，"
-                    "请耐心等待入库。")
-            note = str(request.get("result_note") or "")
-            if note:
-                body += f"\n\n<i>{escape(str(note))}</i>"
-        else:
-            reason = str(request.get("result_note") or "暂时无法处理")
-            body = (f"❌ <b>求片无法处理</b>\n\n你求的《{escape(str(title))}》暂时没能处理。\n\n"
-                    f"原因：{escape(str(reason))}")
-        return await self.send(chat_id, body)
-
     # -- admin commands -------------------------------------------------------
 
     def is_admin(self, member: dict[str, Any] | None) -> bool:
@@ -3097,6 +2770,7 @@ class TelegramBot(RebindBotMixin):
             previous['pending'] = None
         old_panel = self._panel.pop(key, None)
         self._pending.pop(key, None)
+        self._rq_abandon(chat_id)
         for claim_key, claim in list(self._gift_claims.items()):
             if claim_key[0] == str(chat_id) and claim[1] == tg_user_id:
                 self._gift_claims.pop(claim_key, None)
@@ -3137,6 +2811,28 @@ class TelegramBot(RebindBotMixin):
         # better: with no _cmd_start they were told the command was unknown.
         # A payload on /start is an invite or a card; /start itself cancels
         # whatever conversation was in flight.
+        if command in ('requests', 'request', 'req', 'uploader') or (command == 'start' and args and (args[0] in ('requests', 'uploader') or args[0].startswith('request_'))):
+            payload = args[0] if command == 'start' else command
+            if in_group:
+                link = self._private_link('requests')
+                await self._show(chat_id, '求片请在私聊完成。', [[{'text':'打开求片中心', 'url':link}]] if link else None)
+                return
+            if not member or not self._requests_ready():
+                await self._show(chat_id, '当前 Telegram 未绑定账号或求片未开启。', BACK_HOME)
+                return
+            if payload in ('uploader', 'req'):
+                if not self._rq_staff(member):
+                    await self._show(chat_id, '你不是上片员。', BACK_HOME)
+                    return
+                await self._rq_list(chat_id, None, member, {'mode':'staff', 'status':args[0] if command != 'start' and args and args[0] in ('open','accepted','rejected','cancelled') else 'open', 'page':0})
+            elif payload.startswith('request_') and payload[8:].isdigit():
+                try:
+                    await self._rq_detail(chat_id, None, member, int(payload[8:]))
+                except RequestError as exc:
+                    await self._show(chat_id, escape(str(exc)), BACK_HOME)
+            else:
+                await self._rq_home(chat_id, None, member)
+            return
         if command == "start":
             payload = args[0] if args else ""
             if not in_group and payload == 'account':
@@ -3667,33 +3363,6 @@ class TelegramBot(RebindBotMixin):
             chat_id,
             f"✅ 已授权 <code>{args[0]}</code>，该 Telegram 现在可以直接注册。")
 
-    async def _cmd_req(self, chat_id: Any, actor: str,
-                       args: list[str]) -> None:
-        if not self._requests_ready():
-            await self._show(chat_id, "求片功能暂未开启。")
-            return
-        wanted = args[0].lower() if args else "active"
-        if wanted not in ("open", "claimed", "active"):
-            wanted = "active"
-        rows = self._requests.list(status=wanted, limit=10)
-        if not rows:
-            await self._show(chat_id, "📋 当前没有符合条件的求片。",
-                             self.admin_menu() if self._panel.get(self._pkey(chat_id)) else None)
-            return
-        stats = self._requests.stats()
-        lines = [f"📋 <b>求片（{wanted}）</b>\n"]
-        for row in rows:
-            holder = row.get("claimed_by_name")
-            lines.append(
-                f"#{row['id']} {escape(str(row['display_title']))} · {row['status_label']}"
-                + (f" · {escape(str(holder))}" if holder else "")
-                + f"\n    求片人 {escape(str(row.get('username') or '-'))}")
-        lines.append(
-            f"\n待接单 {stats['open']} · 处理中 {stats['claimed']} · "
-            f"本月 {stats['month_total']}")
-        await self._show(chat_id, "\n".join(lines),
-                         self.admin_menu() if self._panel.get(self._pkey(chat_id)) else None)
-
     # -- destructive confirmations -------------------------------------------
 
     async def _admin_confirm(self, chat_id: Any, message_id: int,
@@ -3969,6 +3638,9 @@ class TelegramBot(RebindBotMixin):
                                     tg_user_id: str, tg_username: str, tg_name: str,
                                     text: str, in_group: bool) -> None:
         self._sweep_pending()
+        if (not in_group and self._requests_ready()
+                and await self._rq_text(chat_id, self._member_for_chat(tg_user_id), text, message)):
+            return
         waiting = self._pending.get(self._pkey(chat_id))
         if waiting and waiting[0] == "admin_find" and message.get("forward_origin"):
             origin = message["forward_origin"]
@@ -4010,18 +3682,6 @@ class TelegramBot(RebindBotMixin):
                     await self._transfer_pick_target(chat_id, member, text)
                 else:
                     await self._transfer_pick_amount(chat_id, member, extra, text)
-                return
-            if kind in ("request_link", "request_reason"):
-                member = self._member_for_chat(tg_user_id)
-                if not member:
-                    self._pending.pop(self._pkey(chat_id), None)
-                    await self.send(chat_id, "这个 Telegram 还没有账号。",
-                                    self.guest_menu())
-                    return
-                if kind == "request_link":
-                    await self._request_pick_title(chat_id, member, text)
-                else:
-                    await self._request_reason(chat_id, member, extra, text)
                 return
             if kind in ("admin_find", "admin_renew_days", "admin_score_delta",
                         "admin_code", "admin_auth"):
@@ -4283,6 +3943,7 @@ class TelegramBot(RebindBotMixin):
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
                     'me_status', 'me_points', 'me_nodes', 'devices', 'expiry'):
             self._pending.pop(self._pkey(chat_id), None)
+            self._rq_abandon(chat_id)
             waiting = None
         if (waiting and ((waiting[0] == "password_reset" and not data.startswith("resetpw_ok:"))
                          or (waiting[0] == 'shop_confirm' and not data.startswith('buyok:')))):
@@ -4490,29 +4151,29 @@ class TelegramBot(RebindBotMixin):
         if data == "orders":
             await self._orders_view(chat_id, message_id, member)
             return
-        if data == "request_center":
-            await self._edit(chat_id, message_id, "🎬 <b>求片中心</b>\n\n提交想看的影片，或查看已有求片进度。", [
-                [{"text": "➕ 发起求片", "callback_data": "req_new"},
-                 {"text": "📋 我的求片", "callback_data": "my_requests"}], *BACK_HOME])
+        if data.startswith("rq:"):
+            if not in_group:
+                await self._rq_callback(data, chat_id, message_id, callback_id, member)
+            return
+        if data in ("request_center", "request_uploader"):
+            if data == "request_uploader":
+                if not self._rq_staff(member):
+                    await self._edit(chat_id, message_id, "你不是上片员。")
+                    return
+                await self._rq_list(chat_id, message_id, member, {'mode':'staff', 'status':'open', 'page':0})
+            else:
+                await self._rq_home(chat_id, message_id, member)
             return
         if data == "req_new":
             await self._request_start(chat_id, message_id, member)
             return
-        if data == "req_ok":
-            await self._request_submit(chat_id, message_id, member)
-            return
         if data == "my_requests":
             await self._my_requests(chat_id, message_id, member)
             return
-        if data.startswith("req_claim:"):
-            await self._request_claim(
-                chat_id, message_id, callback_id, member,
-                _as_request_id(data))
-            return
-        if data.startswith(("req_done:", "req_fail:")):
-            await self._request_resolve(
-                chat_id, message_id, callback_id, member,
-                _as_request_id(data), done=data.startswith("req_done:"))
+        if data == "req_ok" or data.startswith(("req_claim:", "req_done:", "req_fail:")):
+            if data != "req_ok":
+                await self._answer_callback(callback_id, "旧版求片按钮已停用，请重新打开工作台。")
+            await self._edit(chat_id, message_id, "旧版求片按钮已停用，请重新打开求片中心。", [[{"text":"求片中心", "callback_data":"request_center"}]])
             return
         if data == "expiry":
             expires = member.get("expires_at_effective", member.get("expires_at"))
@@ -4688,6 +4349,7 @@ class TelegramBot(RebindBotMixin):
                 continue
             try:
                 await self._ensure_identity()
+                await self.flush_request_notifications(limit=20)
                 await self._poll_once()
                 backoff = 1.0
             except asyncio.CancelledError:

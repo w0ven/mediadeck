@@ -25,7 +25,7 @@ const NAV = [
   ]},
   { group: '内容', icon: '▤', items: [
     { id: 'library', icon: '▤', label: '媒体库', sub: '媒体库分布与条目统计' },
-    { id: 'requests', icon: '🎬', label: '求片', sub: '成员求片、上片员接单与处理结果' },
+    { id: 'requests', icon: '🎬', label: '求片', sub: '待处理请求、接受/拒绝与工单沟通' },
     { id: 'imports', icon: '⇪', label: '网盘上片', sub: '网盘链接与云盘目录导入' },
     { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看完扫描、刷新、通知、上传与拉取' },
   ]},
