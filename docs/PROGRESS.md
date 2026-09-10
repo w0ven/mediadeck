@@ -4,6 +4,26 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — ranking posters, line-page buttons and scheduled daily/weekly boards
+
+- Bot 「播放线路」 no longer keeps the previous account-card buttons. The page
+  now has refresh and home only, plus current online play count. Disabled or
+  maintenance nodes are excluded from the total and still show their own stream
+  count beside load.
+- Scheduled ranking posts follow the embyboss bulletin, not an in-chat window
+  switch. The existing daily plugin now posts watch time plus movie/TV heat.
+  A new weekly plugin posts the same shape on Sunday and stays default off.
+- Daily/weekly boards use complete local calendar days ending at midnight:
+  days=1 is yesterday, not a rolling 24 hours. Manual “send yesterday” uses
+  that same window.
+- The bulletin is a JPEG poster (Pillow, local CJK fonts) with five movie and
+  five series tiles. Covers are fetched best-effort from Emby; missing or
+  broken images become named tiles. Telegram sendPhoto carries the first
+  caption chunk; overflow is extra text. Poster failure falls back to text.
+- Local suite: **1898 passed, 56 skipped**. Pillow is a new backend dependency.
+
+---
+
 ## 2026-09-10 — group gift registration receipt and new-account traffic copy
 
 - Group gifts now persist origin chat/message/topic on the qualification. After

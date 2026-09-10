@@ -53,6 +53,7 @@ from app.modules.rebinding import RebindingService
 from app.modules.requests import RequestError
 from app.modules.settings import parse_group_interaction_chats
 from app.modules.shop import ShopError
+from app.modules.stats import ranking_stamp
 from app.modules.tmdb import parse_link, poster_url
 
 API_ROOT = "https://api.telegram.org"
@@ -398,6 +399,35 @@ class TelegramBot(RebindBotMixin):
         if not body.get("ok"):
             from app.modules.member_ops import redact
             self._record_call_error(redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
+            return None
+        self._record_call_error('')
+        return body.get("result")
+
+    async def _call_multipart(self, method: str, fields: dict[str, Any],
+                               files: dict[str, tuple[str, bytes, str]],
+                               timeout: float = 40) -> Any:
+        _CALL_ERROR.set('')
+        auth_part = self._token()
+        if not auth_part:
+            return None
+        client = await self._client()
+        if client is None:
+            return None
+        url = f"{API_ROOT}/bot{auth_part}/{method}"
+        payload = dict(fields)
+        chat_id = payload.get("chat_id")
+        thread = _THREAD.get() if chat_id is not None and self._in_bound_chat(chat_id) else None
+        if thread:
+            payload["message_thread_id"] = thread
+        try:
+            r = await client.post(url, data=payload, files=files, timeout=timeout)
+            body = r.json()
+        except Exception as exc:  # noqa: BLE001 - token lives in the URL
+            self._record_call_error(f"{type(exc).__name__}: 请求失败")
+            return None
+        if not isinstance(body, dict) or not body.get("ok"):
+            from app.modules.member_ops import redact
+            self._record_call_error(redact(str((body or {}).get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
         self._record_call_error('')
         return body.get("result")
@@ -1007,6 +1037,14 @@ class TelegramBot(RebindBotMixin):
              {'text': '◀ 功能首页', 'callback_data': 'home'}],
         ]
 
+    @staticmethod
+    def nodes_menu() -> list[list[dict[str, str]]]:
+        """Line page is not the account card; keep only refresh and home."""
+        return [
+            [{"text": "🔄 刷新线路", "callback_data": "me_nodes"}],
+            [{"text": "◀ 功能首页", "callback_data": "home"}],
+        ]
+
     def bag_menu(self) -> list[list[dict[str, str]]]:
         """What the member owns or can spend; don't advertise disabled plugins."""
         extra = []
@@ -1569,17 +1607,31 @@ class TelegramBot(RebindBotMixin):
             f"当前余额：<b>{result.get('balance')}</b>",
             self.member_menu())
 
-    def _load_lines(self) -> list[str]:
-        """Node utilisation, shown as a percentage rather than stream counts.
-
-        Capacity is an operator concept, and '3 streams' means nothing without
-        it. Internal node names stay here: member-facing addresses belong in
-        the configured playback-line list.
-        """
+    def _node_snapshot(self) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
         with contextlib.suppress(Exception):
             if self._scheduler is not None:
-                nodes = self._scheduler.snapshot()
+                nodes = list(self._scheduler.snapshot() or [])
+        return nodes
+
+    def _online_plays(self, nodes: list[dict[str, Any]] | None = None) -> int | None:
+        total = 0
+        known = False
+        for node in nodes if nodes is not None else self._node_snapshot():
+            if node.get("active_streams") is None:
+                continue
+            known = True
+            if node.get("enabled", True) and not node.get("manually_disabled"):
+                total += max(0, int(node.get("active_streams") or 0))
+        return total if known else None
+
+    def _load_lines(self) -> list[str]:
+        """Node utilisation plus live play counts.
+
+        Internal node names stay here: member-facing addresses belong in
+        the configured playback-line list.
+        """
+        nodes = self._node_snapshot()
         if not nodes:
             return ["暂无节点水位。"]
         rows = []
@@ -1595,7 +1647,10 @@ class TelegramBot(RebindBotMixin):
                 mark = f"🟡 {percent}%"
             else:
                 mark = f"🟢 {percent}%"
-            rows.append(f"{escape(str(node.get('name') or '-'))} · {mark}")
+            line = f"{escape(str(node.get('name') or '-'))} · {mark}"
+            if node.get("active_streams") is not None:
+                line += f" · {max(0, int(node['active_streams']))} 路"
+            rows.append(line)
         rows.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
         return rows
 
@@ -1628,8 +1683,12 @@ class TelegramBot(RebindBotMixin):
         if note:
             parts.append(escape(note).replace("\n", "\n"))
             parts.append("")
+        online = self._online_plays()
+        if online is not None:
+            parts.append(f"当前在线：<b>{online}</b> 路播放")
+            parts.append("")
         if show_load:
-            if custom or str(cfg.get("emby_public_url") or "").strip():
+            if custom or str(cfg.get("emby_public_url") or "").strip() or online is not None:
                 parts.append("节点水位")
             parts.extend(self._load_lines())
         text = "\n".join(parts).strip()
@@ -1912,48 +1971,72 @@ class TelegramBot(RebindBotMixin):
         ]
 
     def _rankings_text(self, days: int = 1) -> str:
-        window = "今日" if days <= 1 else "近 30 天"
-        lines = [f"🏆 <b>{window}观看排行</b>\n"]
-        # Watch rankings and the points ranking come from different services,
-        # so one being unavailable must not hide the other: a panel with no
-        # playback stats still has a points economy worth showing.
+        """Scheduled group post: watch time plus movie/episode heat.
+
+        This is the embyboss-style daily/weekly bulletin, not the in-chat
+        ranking menu. Points stay on the member ranking page. days=1 is
+        yesterday's complete local calendar day, not a rolling 24 hours.
+        """
+        days = max(1, int(days or 1))
+        stamp = ranking_stamp(days)
+        if days <= 1:
+            title = "播放日榜"
+        elif days <= 7:
+            title = "播放周榜"
+        else:
+            title = f"近 {days} 天播放榜"
+        lines = [f"🏆 <b>{title}</b>  {stamp}\n"]
         if self._stats is not None:
             with contextlib.suppress(Exception):
-                users = self._stats.top_users(days=days, limit=5)
+                users = self._stats.top_users(days=days, limit=10, calendar=True)
                 if users:
-                    lines.append("<b>观看时长</b>")
+                    lines.append("<b>⏱ 观影时长</b>")
                     for i, u in enumerate(users, 1):
-                        hours = u.get("hours") or 0
-                        plays = u.get("plays") or 0
                         lines.append(
-                            f"{i}. {escape(str(u['username']))} · {hours} 小时 · {plays} 次")
+                            f"{i}. {escape(str(u.get('username') or '—'))} · "
+                            f"{duration(int((u.get('hours') or 0) * 3600))}")
                     lines.append("")
+            movies: list[dict[str, Any]] = []
+            shows: list[dict[str, Any]] = []
             with contextlib.suppress(Exception):
-                titles = self._stats.top_titles(days=days, limit=5)
-                if titles:
-                    lines.append("<b>热门影片</b>")
-                    for i, t in enumerate(titles, 1):
-                        lines.append(
-                            f"{i}. {escape(str(t['title']))} · {t['plays']} 次 · "
-                            f"{t['hours']} 小时")
-                    lines.append("")
-        # Points are a different kind of ranking -- earned rather than watched
-        # -- so it is a separate section, and it is only shown once someone has
-        # actually earned something.
-        if self._points is not None:
-            with contextlib.suppress(Exception):
-                rich = self._points.top(limit=5)
-                if rich:
-                    lines.append("<b>积分排行</b>")
-                    for i, r in enumerate(rich, 1):
-                        lines.append(
-                            f"{i}. {escape(str(r.get('username') or '-'))} · "
-                            f"{int(r.get('balance') or 0)} 分")
+                movies, shows = self._stats.top_titles_split(
+                    days=days, limit=10, calendar=True)
+            if movies:
+                lines.append("<b>▎电影</b>")
+                for i, row in enumerate(movies, 1):
+                    lines.append(
+                        f"{i}. {escape(str(row.get('title') or '—'))}\n"
+                        f"播放次数: {int(row.get('plays') or 0)}  时长: "
+                        f"{duration(int((row.get('hours') or 0) * 3600))}")
+                lines.append("")
+            if shows:
+                lines.append("<b>▎电视剧</b>")
+                for i, row in enumerate(shows, 1):
+                    lines.append(
+                        f"{i}. {escape(str(row.get('title') or '—'))}\n"
+                        f"播放次数: {int(row.get('plays') or 0)}  时长: "
+                        f"{duration(int((row.get('hours') or 0) * 3600))}")
+                lines.append("")
         while lines and not lines[-1]:
             lines.pop()
         if len(lines) == 1:
             lines.append("暂时还没有排行数据。")
         return "\n".join(lines)
+
+    @staticmethod
+    def _split_bulletin(text: str, limit: int = 1000) -> list[str]:
+        rest = text or ""
+        parts: list[str] = []
+        while rest:
+            if len(rest) <= limit:
+                parts.append(rest)
+                break
+            cut = rest.rfind("\n", 0, limit)
+            if cut < limit // 2:
+                cut = limit
+            parts.append(rest[:cut].rstrip())
+            rest = rest[cut:].lstrip("\n")
+        return parts or [""]
 
     # -- media requests -------------------------------------------------------
 
@@ -2840,10 +2923,14 @@ class TelegramBot(RebindBotMixin):
         self._in_flight.add(task)
         task.add_done_callback(self._in_flight.discard)
 
+    @staticmethod
+    def _rank_hours(hours: int) -> int:
+        return 168 if int(hours) >= 48 else 24
+
     def _watch_rankings_text(self, hours: int = 24) -> str:
-        hours = 720 if int(hours) >= 168 else 24
-        window = "近 24 小时" if hours <= 24 else "近 30 天"
-        lines = [f"🏆 <b>{window}观看时长榜</b>\n"]
+        hours = self._rank_hours(hours)
+        window = "今日" if hours <= 24 else "本周"
+        lines = [f"🏆 <b>{window}观影时长</b>\n"]
         rows: list[dict[str, Any]] = []
         if self._stats is not None:
             with contextlib.suppress(Exception):
@@ -2857,15 +2944,50 @@ class TelegramBot(RebindBotMixin):
                 + ('（已确认，部分跨界历史无法拆分）' if row.get('incomplete') else ''))
         return "\n".join(lines)
 
-    def _watch_rankings_keyboard(self, hours: int) -> list[list[dict[str, str]]]:
-        hours = 720 if int(hours) >= 168 else 24
-        day = "● 近 24 小时" if hours <= 24 else "近 24 小时"
-        month = "● 近 30 天" if hours > 24 else "近 30 天"
-        rows = [[{"text": day, "callback_data": "rank:24"},
-                 {"text": month, "callback_data": "rank:720"}]]
+    def _heat_rankings_text(self, days: int = 1) -> str:
+        days = 7 if int(days) >= 3 else 1
+        window = "今日" if days <= 1 else "本周"
+        lines = [f"🎞 <b>{window}热度排行</b>\n"]
+        movies: list[dict[str, Any]] = []
+        shows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                movies, shows = self._stats.top_titles_split(days=days, limit=10)
+        if not movies and not shows:
+            lines.append("暂时还没有排行数据。")
+            return "\n".join(lines)
+        if movies:
+            lines.append("<b>▎电影</b>")
+            for i, row in enumerate(movies, 1):
+                lines.append(
+                    f"{i}. {escape(str(row.get('title') or '—'))} · {int(row.get('plays') or 0)} 次 · "
+                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+            lines.append("")
+        if shows:
+            lines.append("<b>▎电视剧</b>")
+            for i, row in enumerate(shows, 1):
+                lines.append(
+                    f"{i}. {escape(str(row.get('title') or '—'))} · {int(row.get('plays') or 0)} 次 · "
+                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+        while lines and not lines[-1]:
+            lines.pop()
+        return "\n".join(lines)
+
+    def _watch_rankings_keyboard(self, hours: int, *, heat: bool = False
+                                  ) -> list[list[dict[str, str]]]:
+        hours = self._rank_hours(hours)
+        day = "● 今日观影" if hours <= 24 and not heat else "今日观影"
+        week = "● 本周观影" if hours > 24 and not heat else "本周观影"
+        heat_day = "● 今日热度" if heat and hours <= 24 else "今日热度"
+        heat_week = "● 本周热度" if heat and hours > 24 else "本周热度"
+        rows = [
+            [{"text": day, "callback_data": "rank:24"},
+             {"text": week, "callback_data": "rank:168"}],
+            [{"text": heat_day, "callback_data": "heat:1"},
+             {"text": heat_week, "callback_data": "heat:7"}],
+        ]
         if not _GROUP.get():
-            rows += [[{"text": "💰 积分榜", "callback_data": "points_rank"},
-                      {"text": "🎞 热门影片", "callback_data": "titles_rank"}]]
+            rows.append([{"text": "💰 积分榜", "callback_data": "points_rank"}])
             rows += BACK_HOME
         return rows
 
@@ -2977,8 +3099,8 @@ class TelegramBot(RebindBotMixin):
             return
         if command == "rank":
             hours = 24
-            if args and args[0] in ("30", "720"):
-                hours = 720
+            if args and args[0] in ("7", "168", "30", "720"):
+                hours = 168
             await self._show(chat_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
             return
@@ -3865,7 +3987,7 @@ class TelegramBot(RebindBotMixin):
                               'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_renew', 'admin_score', 'admin_usage',
                               'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift')
-            public = public or data.startswith(('admin_gift_ok:', 'rank:', 'top:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
+            public = public or data.startswith(('admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
                 await self._answer_callback(callback_id, '请使用卡片上的私聊入口继续此操作。')
                 return
@@ -4060,22 +4182,28 @@ class TelegramBot(RebindBotMixin):
             if data.startswith("top:"):
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
-                    days = 30 if int(tail) >= 30 else 1
-            hours = 720 if days >= 30 else 24
+                    days = 7 if int(tail) >= 3 else 1
+            hours = 168 if days >= 3 else 24
             await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
+            return
+        if data.startswith("heat:"):
+            tail = data.split(":", 1)[1]
+            days = 7 if tail.isdigit() and int(tail) >= 3 else 1
+            hours = 168 if days >= 3 else 24
+            await self._edit(chat_id, message_id, self._heat_rankings_text(days),
+                             self._watch_rankings_keyboard(hours, heat=True))
             return
         if data in ('points_rank', 'titles_rank'):
             if in_group:
                 return
-            lines = ['💰 <b>积分榜</b>\n'] if data == 'points_rank' else ['🎞 <b>近30天热门影片</b>\n']
-            rows = []
-            if data == 'points_rank' and self._points:
-                rows = self._points.top(limit=10)
-                lines += [f"{i}. {escape(str(r.get('username') or '—'))} · {int(r.get('balance') or 0)} 分" for i, r in enumerate(rows, 1)]
-            if data == 'titles_rank' and self._stats:
-                rows = self._stats.top_titles(days=30, limit=10)
-                lines += [f"{i}. {escape(str(r.get('title') or '—'))} · {r.get('plays', 0)} 次" for i, r in enumerate(rows, 1)]
+            if data == 'titles_rank':
+                await self._edit(chat_id, message_id, self._heat_rankings_text(7),
+                                 self._watch_rankings_keyboard(168, heat=True))
+                return
+            lines = ['💰 <b>积分榜</b>\n']
+            rows = self._points.top(limit=10) if self._points else []
+            lines += [f"{i}. {escape(str(r.get('username') or '—'))} · {int(r.get('balance') or 0)} 分" for i, r in enumerate(rows, 1)]
             if not rows:
                 lines += ['暂无排行数据。']
             await self._edit(chat_id, message_id, '\n'.join(lines), [[{'text':'◀ 返回观看榜','callback_data':'rank'}]])
@@ -4085,7 +4213,7 @@ class TelegramBot(RebindBotMixin):
             if data.startswith("rank:"):
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
-                    hours = 720 if int(tail) >= 168 else 24
+                    hours = 168 if int(tail) >= 48 else 24
             await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
             return
@@ -4118,7 +4246,7 @@ class TelegramBot(RebindBotMixin):
             return
         if data == "me_nodes":
             await self._edit(chat_id, message_id, await self._nodes_text(),
-                             self.info_menu())
+                             self.nodes_menu())
             return
         if data == "bag":
             await self._edit(
@@ -4404,10 +4532,56 @@ class TelegramBot(RebindBotMixin):
         return sent
 
     async def broadcast_rankings(self, chat_id: str, days: int = 1) -> bool:
-        """Daily ranking post, for a group or channel."""
+        """Scheduled group bulletin with poster when covers can be drawn."""
         if not chat_id or not self.enabled:
             return False
-        return await self.send(chat_id, self._rankings_text(days))
+        caption = self._rankings_text(days)
+        photo = await self._rankings_poster(days)
+        parts = self._split_bulletin(caption)
+        if photo:
+            result = await self._call_multipart(
+                "sendPhoto",
+                {"chat_id": str(chat_id), "caption": parts[0], "parse_mode": "HTML"},
+                {"photo": ("ranks.jpg", photo, "image/jpeg")})
+            if result is not None:
+                rest_ok = True
+                for extra in parts[1:]:
+                    rest_ok = await self.send(chat_id, extra) and rest_ok
+                return rest_ok
+        sent = True
+        for part in parts:
+            sent = await self.send(chat_id, part) and sent
+        return sent
+
+    async def _rankings_poster(self, days: int) -> bytes | None:
+        if self._stats is None:
+            return None
+        days = max(1, int(days or 1))
+        try:
+            movies, shows = self._stats.top_titles_split(
+                days=days, limit=5, calendar=True)
+        except Exception:  # noqa: BLE001 - poster is optional
+            return None
+        if not movies and not shows:
+            return None
+        covers: dict[str, bytes] = {}
+        fetch = getattr(self._emby, "item_primary_image", None)
+        if callable(fetch):
+            for row in [*movies, *shows]:
+                item_id = str(row.get("item_id") or "")
+                if not item_id or item_id in covers:
+                    continue
+                with contextlib.suppress(Exception):
+                    blob = await fetch(item_id)
+                    if blob:
+                        covers[item_id] = blob
+        from app.modules.rank_poster import render_rank_poster
+        try:
+            return render_rank_poster(
+                movies, shows, weekly=days >= 3,
+                covers=covers, when=ranking_stamp(days))
+        except Exception:  # noqa: BLE001 - fall back to text bulletin
+            return None
 
     async def audit_group_membership(self) -> dict[str, Any]:
         """Which linked members have left the required group.

@@ -461,18 +461,17 @@ def _fmt_bytes(n: int) -> str:
 # 4. Rankings post
 # ---------------------------------------------------------------------------
 class RankingsPostPlugin(Plugin):
-    """The daily leaderboard, posted to a group or channel.
+    """Daily group bulletin: watch time plus movie/episode heat.
 
-    Migrated out of ``telegram_notify_loop``. The target chat now lives on this
-    card rather than in the Telegram settings, so there is exactly one switch
-    controlling whether it posts -- two switches in two places is how a job
-    ends up posting twice or not at all.
+    This is the scheduled post, not the in-chat ranking menu. Existing cards
+    keep posting to the same chat; the body now matches the daily EmbyBoss
+    leaderboard rather than a 30-day mixed list.
     """
 
     spec = Spec(
         id="rankings_post",
-        name="排行推送",
-        description="每天把观看排行发到指定群组或频道。",
+        name="日榜推送",
+        description="每天固定把观影时长和电影/剧集热度发到指定群组或频道。",
         category="task",
         icon="🏆",
         hour=21,
@@ -482,7 +481,7 @@ class RankingsPostPlugin(Plugin):
             Field("hour", "推送时间", kind="int", default=21, min=0, max=23,
                   help="每天几点推送（0–23）"),
             Field("days", "统计范围", kind="int", default=1, min=1, max=30,
-                  help="统计最近几天，1 = 当天"),
+                  help="日榜默认 1 天；保留此字段以免旧配置丢失"),
         ],
     )
 
@@ -495,6 +494,38 @@ class RankingsPostPlugin(Plugin):
         days = max(1, int(config.get("days") or 1))
         ok = await self.ctx.telegram.broadcast_rankings(chat, days=days)
         return {"ok": bool(ok), "推送目标": chat, "统计天数": days,
+                "结果": "已发送" if ok else "发送失败"}
+
+
+class RankingsWeeklyPlugin(Plugin):
+    """Sunday group bulletin covering the last seven days."""
+
+    spec = Spec(
+        id="rankings_weekly",
+        name="周榜推送",
+        description="每周日固定把观影时长和电影/剧集热度发到指定群组或频道。",
+        category="task",
+        icon="📅",
+        hour=21,
+        fields=[
+            Field("chat_id", "推送目标", kind="str", default="",
+                  help="@channel 或 -100xxxxxxxxxx；留空则不推送"),
+            Field("hour", "推送时间", kind="int", default=21, min=0, max=23,
+                  help="当天几点推送（0–23）"),
+        ],
+    )
+
+    def due_today(self, config: dict[str, Any], now: float) -> bool:
+        return time.localtime(now).tm_wday == 6  # Sunday, same as EmbyBoss weekrank
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        chat = str(config.get("chat_id") or "").strip()
+        if not chat:
+            return {"ok": False, "错误": "未填写推送目标"}
+        if not _telegram_ready(self.ctx):
+            return {"ok": False, "错误": "机器人未启用"}
+        ok = await self.ctx.telegram.broadcast_rankings(chat, days=7)
+        return {"ok": bool(ok), "推送目标": chat, "统计天数": 7,
                 "结果": "已发送" if ok else "发送失败"}
 
 
@@ -634,6 +665,7 @@ BUILTIN_PLUGINS = (
     InactiveCleanupPlugin,
     ViewingReportPlugin,
     RankingsPostPlugin,
+    RankingsWeeklyPlugin,
     ExpiryReminderPlugin,
     RequestDigestPlugin,
     *POINTS_PLUGINS,

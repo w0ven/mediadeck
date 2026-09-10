@@ -179,19 +179,18 @@ def test_group_rank_is_rolling_watch_time_not_calendar_today(bot):
     bot._stats = StatsService(bot.db)
     run(bot._handle_message(_msg("/rank", user=ALICE, username="alice_tg")))
     body = last_text(bot)
-    assert "近 24 小时" in body
+    assert "今日" in body
     assert "alice" in body and "2小时0分" in body
     assert "root" not in body
-    assert "今日" not in body
     mid = bot._panel[f"g:{GROUP}:0:{ALICE}"]
     run(bot._handle_callback(_cb("rank:720", user=ALICE, mid=mid)))
-    assert "近 30 天" in last_text(bot)
+    assert "本周" in last_text(bot)
     assert "root" in last_text(bot)
 
 
 def test_private_rank_and_myinfo_aliases_still_work(bot):
     run(bot._handle_command("900", ADMIN, "rootadmin", "/rank"))
-    assert "观看时长榜" in last_text(bot)
+    assert "今日观影时长" in last_text(bot)
     bot.calls.clear()
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)
