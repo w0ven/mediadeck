@@ -1,6 +1,8 @@
 """Malformed collectors and integrations must degrade, not fabricate healthy zeroes."""
 import asyncio
 import json
+import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -38,6 +40,37 @@ def test_snapshot_file_removed_between_read_and_stat_is_not_fatal(reader, monkey
 
     monkeypatch.setattr(Path, "read_text", remove_after_read)
     assert reader(str(path)).snapshot()["available"] is False
+
+
+def test_pipeline_reader_marks_file_mtime_stale_without_fabricating_data(tmp_path):
+    path = tmp_path / "snapshot.json"
+    path.write_text(json.dumps({
+        "generated_at": "2026-09-10T21:00:00+0800",
+        "queues": [{"name": "fallback-local", "items": 7, "bytes": 31}],
+        "fallback": {"items": 7, "bytes": 31},
+        "alerts": [{"level": "warn", "message": "file modification time > 12h"}],
+    }))
+    old = time.time() - 301
+    os.utime(path, (old, old))
+
+    result = PipelineReader(str(path)).snapshot()
+
+    assert result["available"] is True
+    assert result["stale"] is True
+    assert result["snapshot_age_seconds"] >= 300
+    assert result["data"]["fallback"] == {"items": 7, "bytes": 31}
+    assert "stuck" not in result["data"]["alerts"][0]["message"]
+
+
+def test_pipeline_reader_keeps_fresh_snapshot_current(tmp_path):
+    path = tmp_path / "snapshot.json"
+    path.write_text(json.dumps({"generated_at": "now", "queues": [], "alerts": []}))
+
+    result = PipelineReader(str(path)).snapshot()
+
+    assert result["available"] is True
+    assert result["stale"] is False
+    assert result["snapshot_age_seconds"] < 300
 
 
 @pytest.mark.asyncio
