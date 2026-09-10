@@ -1569,7 +1569,7 @@ def test_watch_rank_pages_show_telegram_handle_not_emby_name() -> None:
             return [
                 {"username": "emby_alice", "tg_username": "misakaioo",
                  "tg_user_id": "1001", "hours": 4, "seconds": 14400, "plays": 2,
-                 "group_id": "whitelist"},
+                 "group_id": "whitelist", "tg_display_name": "米砂糖"},
                 {"username": "emby_bob", "tg_username": "",
                  "tg_user_id": "1002", "hours": 3, "seconds": 10800, "plays": 1},
                 {"username": "emby_carol", "tg_username": "",
@@ -1591,13 +1591,42 @@ def test_watch_rank_pages_show_telegram_handle_not_emby_name() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_Named())
     page = bot._watch_rank_pages(1)[0]
-    assert "@misakaioo" in page and "tg://user?id=1001" in page
+    assert "米砂糖" in page and "tg://user?id=1001" in page
+    assert "@misakaioo" not in page
     assert "💠白名单" in page
     assert "emby_alice" not in page and "emby_bob" not in page and "emby_carol" not in page
     assert "Telegram用户" in page and "tg://user?id=1002" in page
     assert "未绑定" in page
     menu = bot._watch_rankings_text(24)
-    assert "@misakaioo" in menu and "emby_alice" not in menu
+    assert "米砂糖" in menu and "emby_alice" not in menu
+
+
+def test_watch_rank_pages_prefer_telegram_nickname_over_handle() -> None:
+    bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
+                      _FakeMembers(), stats=_FakeStats())
+    bot._tg_profiles["1001"] = {"display_name": "米砂糖", "username": "alice"}
+    page = bot._watch_rank_pages(1)[0]
+    assert "米砂糖" in page and "@alice" not in page
+
+
+def test_fill_watch_profiles_reads_telegram_chat_name() -> None:
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED,
+                               "group_interaction_chats": ["-1001"]},
+                      _FakeMembers(), stats=_FakeStats())
+
+    async def fake_call(method, payload=None, timeout=20):
+        if method == "getChat" and payload["chat_id"] == 1001:
+            return {"first_name": "米砂糖", "username": "misakaioo"}
+        if method in ("getChat", "getChatMember"):
+            return {}
+        raise AssertionError(method)
+
+    bot._call = fake_call  # type: ignore[assignment]
+    asyncio.run(bot._fill_watch_profiles(1, 1))
+    assert bot._tg_profiles["1001"]["display_name"] == "米砂糖"
+    assert bot._tg_profiles["1001"]["username"] == "misakaioo"
+    page = bot._watch_rank_pages(1)[0]
+    assert "米砂糖" in page
 
 
 def test_broadcast_watch_rank_sends_first_page_with_pager() -> None:

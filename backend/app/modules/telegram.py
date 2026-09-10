@@ -276,6 +276,7 @@ class TelegramBot(RebindBotMixin):
         # used to pay that twice, every time.
         self._http: httpx.AsyncClient | None = None
         self._http_token = ""
+        self._tg_profiles: dict[str, dict[str, str]] = {}
         self._http_loop: asyncio.AbstractEventLoop | None = None
         self._in_flight: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -2026,6 +2027,14 @@ class TelegramBot(RebindBotMixin):
         if self._stats is not None:
             with contextlib.suppress(Exception):
                 rows = self._stats.top_users(days=days, limit=5000, calendar=True)
+        for row in rows:
+            profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
+            if not profile:
+                continue
+            if profile.get("username") and not row.get("tg_username"):
+                row["tg_username"] = profile["username"]
+            if profile.get("display_name"):
+                row["tg_display_name"] = profile["display_name"]
         medals = ("🥇", "🥈", "🥉")
         pages: list[str] = []
         size = max(1, int(page_size or 10))
@@ -3993,6 +4002,7 @@ class TelegramBot(RebindBotMixin):
             except (ValueError, IndexError):
                 await self._answer_callback(callback_id, "页码无效。")
                 return
+            await self._fill_watch_profiles(days, page)
             pages = self._watch_rank_pages(days)
             if page < 1 or page > len(pages):
                 await self._answer_callback(callback_id, "没有这一页。")
@@ -4639,6 +4649,7 @@ class TelegramBot(RebindBotMixin):
         """Scheduled watch-time board: podium photo plus a numbered pager."""
         if not chat_id or not self.enabled:
             return False
+        await self._fill_watch_profiles(days, 1)
         pages = self._watch_rank_pages(days)
         keyboard = self._watch_rank_keyboard(1, len(pages), days)
         photo = await self._watch_rank_poster(days)
@@ -4665,6 +4676,56 @@ class TelegramBot(RebindBotMixin):
         if str(content_type or "").lower().startswith("image/"):
             return content
         return None
+
+    async def _tg_profile(self, tg_user_id: str) -> dict[str, str]:
+        if not str(tg_user_id).isdigit():
+            return {}
+        user: dict[str, Any] = {}
+        chat = await self._call("getChat", {"chat_id": int(tg_user_id)}, timeout=8)
+        if isinstance(chat, dict) and (chat.get("first_name") or chat.get("username")):
+            user = chat
+        if not user:
+            for chat_id in [*self._group_allowlist(),
+                            str(self._cfg().get("require_group") or "").strip()]:
+                if not chat_id:
+                    continue
+                member = await self._call(
+                    "getChatMember",
+                    {"chat_id": chat_id, "user_id": int(tg_user_id)}, timeout=8)
+                found = (member or {}).get("user") if isinstance(member, dict) else None
+                if isinstance(found, dict) and (found.get("first_name") or found.get("username")):
+                    user = found
+                    break
+        first = str(user.get("first_name") or "").strip()
+        last = str(user.get("last_name") or "").strip()
+        handle = str(user.get("username") or "").strip().lstrip("@")
+        display = " ".join(part for part in (first, last) if part)
+        return {"display_name": display, "username": handle}
+
+    async def _fill_watch_profiles(self, days: int, page: int, page_size: int = 10) -> None:
+        rows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                rows = self._stats.top_users(days=days, limit=5000, calendar=True)
+        size = max(1, int(page_size or 10))
+        start = max(0, (max(1, int(page or 1)) - 1) * size)
+        needed = rows[:10] if page <= 1 else []
+        needed.extend(rows[start:start + size])
+        seen: set[str] = set()
+        for row in needed:
+            tg_id = str(row.get("tg_user_id") or "")
+            if not tg_id or tg_id in seen or tg_id in self._tg_profiles:
+                continue
+            seen.add(tg_id)
+            with contextlib.suppress(Exception):
+                profile = await self._tg_profile(tg_id)
+                self._tg_profiles[tg_id] = profile
+                handle = str(profile.get("username") or "").strip()
+                if handle and self._db is not None:
+                    with contextlib.suppress(Exception):
+                        self._db.execute(
+                            "UPDATE members SET tg_username=? WHERE tg_user_id=? AND tg_username=''",
+                            (handle, tg_id))
 
     async def _tg_avatar_bytes(self, tg_user_id: str) -> bytes | None:
         if not str(tg_user_id).isdigit():
@@ -4700,9 +4761,17 @@ class TelegramBot(RebindBotMixin):
         rows: list[dict[str, Any]] = []
         if self._stats is not None:
             with contextlib.suppress(Exception):
-                rows = self._stats.top_users(days=days, limit=3, calendar=True)
+                rows = self._stats.top_users(days=days, limit=10, calendar=True)
         if not rows:
             return None
+        for row in rows:
+            profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
+            if not profile:
+                continue
+            if profile.get("username") and not row.get("tg_username"):
+                row["tg_username"] = profile["username"]
+            if profile.get("display_name"):
+                row["tg_display_name"] = profile["display_name"]
         avatars: dict[str, bytes] = {}
         for row in rows:
             tg_id = str(row.get("tg_user_id") or "")
@@ -4730,7 +4799,7 @@ class TelegramBot(RebindBotMixin):
             return covers
         try:
             movies, shows = self._stats.top_titles_split(
-                days=days, limit=5, calendar=True)
+                days=days, limit=10, calendar=True)
         except Exception:  # noqa: BLE001 - covers are optional
             return covers
         for row in [*movies, *shows]:
@@ -4749,7 +4818,7 @@ class TelegramBot(RebindBotMixin):
         days = max(1, int(days or 1))
         try:
             movies, shows = self._stats.top_titles_split(
-                days=days, limit=5, calendar=True)
+                days=days, limit=10, calendar=True)
         except Exception:  # noqa: BLE001 - poster is optional
             return None
         if not movies and not shows:

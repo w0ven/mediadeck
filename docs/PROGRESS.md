@@ -4,6 +4,16 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — fetch Telegram nicknames for watch ranks
+
+- Binding stored tg_user_id but left tg_username empty for most members, so the
+  board printed “Telegram用户”. Sending now calls getChat/getChatMember, shows
+  nickname first then @username, and writes the handle back when missing.
+- Heat posters list 10 movies and 10 shows; the watch poster lists ten people
+  on a taller 1080×1920 card without shrinking type.
+
+---
+
 ## 2026-09-10 — watch rank shows Telegram names, poster-wall background
 
 - Watch-time board and podium use Telegram `@handle`, never the Emby username.
