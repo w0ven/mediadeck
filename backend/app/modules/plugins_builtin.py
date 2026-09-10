@@ -64,6 +64,7 @@ class PluginContext:
     scheduler: Any = None
     # Media requests, for the digest card that nudges uploaders.
     requests: Any = None
+    tmdb: Any = None
     # -- intake pipeline observability ---------------------------------------
     # Injected wholesale rather than reached for: the collector's filesystem
     # reader and media-server client are the two seams the tests replace, and
@@ -503,12 +504,14 @@ class RankingsPostPlugin(Plugin):
         description="每天固定把电影/剧集热度海报发到指定群组或频道。",
         category="task",
         icon="🏆",
-        hour=21,
+        hour=0,
         fields=[
             Field("chat_id", "推送目标", kind="str", default="",
                   help="@channel 或 -100xxxxxxxxxx；留空则不推送"),
-            Field("hour", "推送时间", kind="int", default=21, min=0, max=23,
+            Field("hour", "推送时间", kind="int", default=0, min=0, max=23,
                   help="每天几点推送（0–23）"),
+            Field("minute", "推送分钟", kind="int", default=0, min=0, max=59,
+                  help="几点几分推送（0–59）"),
             Field("days", "统计范围", kind="int", default=1, min=1, max=30,
                   help="日榜默认 1 天；保留此字段以免旧配置丢失"),
         ],
@@ -567,12 +570,14 @@ class WatchRankPostPlugin(Plugin):
         description="每天固定把有观影时长的人全部发到指定群组，每页 10 人。",
         category="task",
         icon="⏱",
-        hour=23,
+        hour=0,
         fields=[
             Field("chat_id", "推送目标", kind="str", default="",
                   help="@channel 或 -100xxxxxxxxxx；留空则不推送"),
-            Field("hour", "推送时间", kind="int", default=23, min=0, max=23,
+            Field("hour", "推送时间", kind="int", default=0, min=0, max=23,
                   help="每天几点推送（0–23）"),
+            Field("minute", "推送分钟", kind="int", default=5, min=0, max=59,
+                  help="几点几分推送（0–59）"),
             Field("days", "统计范围", kind="int", default=1, min=1, max=30,
                   help="日榜默认 1 天，按完整自然日"),
         ],
@@ -752,6 +757,306 @@ class RequestDigestPlugin(Plugin):
                 "已接受": working, "已通知": sent}
 
 
+# ---------------------------------------------------------------------------
+# 10. Bot migration sweep (one-shot, Sept 2026)
+# ---------------------------------------------------------------------------
+# EmbyBoss bound members to the OLD bot (@colaembybot); MediaDeck talks through
+# a NEW bot (@cola_embybot). The migrated tg_id numbers are intact, but a bot
+# may only DM someone who pressed Start on IT, so personal DMs (viewing
+# reports) fail for whoever never started the new one. Per the operator's
+# dated order: warn via the old bot, and ~24h later prove migration by
+# actually DM-ing from the new one -- a delivered probe means the member
+# migrated (keep); an undeliverable probe means they never did (delete via the
+# same audited path the panel uses, after a last notice on the old bot).
+#
+# Admins/uploaders are reminded but never auto-deleted: a timer taking out an
+# operator account is the exact failure this file's no-deletion rule exists
+# to prevent, so staff remain a human decision.
+import asyncio  # noqa: E402 - sweep block needs sleeps between DMs
+
+NEW_BOT = "cola_embybot"
+OWNER_TG = "6425070392"
+
+WARN_TEXT = (
+    "📢 <b>重要通知：服务机器人已更换</b>\n\n"
+    "为继续接收观影报告等个人消息，请立刻在新机器人 @"
+    + NEW_BOT + " 的对话框里发送 /start 完成开启。\n\n"
+    "⚠️ <b>24 小时内未完成操作，您的账号将被删除，且无法恢复。</b>\n"
+    "（绑定群内功能不受影响；给新机器人发一条 /start 即可保留账号）")
+
+PROBE_TEXT = "✅ 迁移确认：你的账号绑定正常，这是一条来自新机器人的测试私信，无需任何操作。"
+
+DELETE_NOTICE = (
+    "⚠️ <b>账号已删除</b>\n\n"
+    "你在 24 小时提醒后仍未到新机器人 @" + NEW_BOT + " 发送 /start，"
+    "按提前告知的规则，你的账号现已删除，此操作无法恢复。\n\n"
+    "如需重新开通，请联系管理员。")
+
+
+class _OldBotClient:
+    """sendMessage-only client for the retired EmbyBoss bot.
+
+    The token lives in /root/deploy-secrets, never in settings or state: it
+    is a credential for a decommissioned bot kept solely so the operator's
+    migration warnings reach people on the channel they actually read.
+    """
+
+    TOKEN_PATH = "/root/deploy-secrets/oldbot.token"
+    API = "https://api.telegram.org"
+
+    def __init__(self) -> None:
+        self._token = ""
+        self._client: Any = None
+
+    def ready(self) -> bool:
+        if not self._token:
+            with contextlib.suppress(Exception):
+                self._token = open(self.TOKEN_PATH, encoding="utf-8").read().strip()
+        return bool(self._token)
+
+    async def _http(self) -> Any:
+        if self._client is None:
+            import httpx
+            self._client = httpx.AsyncClient(timeout=httpx.Timeout(20.0, connect=10.0))
+        return self._client
+
+    async def send(self, chat_id: int, text: str) -> bool:
+        if not self.ready():
+            return False
+        try:
+            client = await self._http()
+            r = await client.post(
+                f"{self.API}/bot{self._token}/sendMessage",
+                json={"chat_id": chat_id, "text": text,
+                      "parse_mode": "HTML", "disable_web_page_preview": True})
+            body = r.json()
+        except Exception:  # noqa: BLE001 - delivery result is what matters
+            return False
+        return bool(isinstance(body, dict) and body.get("ok"))
+
+
+class BotMigrationSweepPlugin(Plugin):
+    """Warn old-bot-only members, then delete the ones that never migrated."""
+
+    spec = Spec(
+        id="bot_migration_sweep",
+        name="Bot迁移清理（一次性）",
+        description="阶段一：用旧bot提醒未迁移用户去新bot发/start；约24小时后阶段二：新bot探测，仍未迁移者删除账号并发送删除通知。管理员/上传员仅提醒不自动删除。跑完请关闭本插件。",
+        category="task",
+        icon="🚚",
+        hour=1,
+        fields=[
+            Field("dry_run", "只演练不删除", kind="bool", default=True,
+                  help="阶段二只探测和列出将删名单，不真正删除；核对无误后关闭此项重跑"),
+            Field("hour", "执行时间", kind="int", default=1, min=0, max=23,
+                  help="每天几点执行（0–23）"),
+            Field("minute", "执行分钟", kind="int", default=0, min=0, max=59,
+                  help="几点几分执行（0–59）"),
+        ],
+    )
+
+    async def _targets(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for m in self.ctx.members.linked_telegram():
+            roles = [str(r) for r in (m.get("roles") or [])]
+            out.append({
+                "emby_user_id": str(m.get("emby_user_id") or ""),
+                "username": str(m.get("username") or ""),
+                "tg_user_id": str(m.get("tg_user_id") or ""),
+                "staff": "admin" in roles or "uploader" in roles,
+            })
+        return out
+
+    @staticmethod
+    def _names(rows: list[dict[str, Any]], flag: str = "staff") -> str:
+        return ", ".join(sorted(r["username"] for r in rows if r[flag])) or "无"
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        if not _telegram_ready(self.ctx):
+            return {"ok": False, "错误": "机器人未启用"}
+        old = _OldBotClient()
+        if not old.ready():
+            return {"ok": False, "错误": "旧bot token 未配置（/root/deploy-secrets/oldbot.token）"}
+        state = self.ctx.state(self.spec.id)
+        if state.get("completed"):
+            return {"ok": True, "阶段": "已完成", "说明": "本轮迁移清理已结束；如需重跑请先在插件页面清除状态"}
+        now = int(time.time())
+        targets = await self._targets()
+
+        # ---- Phase 1: warn through the old bot --------------------------
+        phase1_at = state.get("phase1_done_at")
+        if not phase1_at or now - int(phase1_at) < 20 * 3600:
+            warned: dict[str, Any] = state.setdefault("warned", {})
+            # Only the un-proven need the warning. A member who already got a
+            # personal DM from the new bot (the viewing-report delivery list)
+            # is migrated; scaring them with a deletion notice is noise.
+            known = set((self.ctx.state("viewing_report") or {}).get("sent") or [])
+            known |= set(state.get("known_migrated") or [])
+            sent_n = fail_n = 0
+            skipped_known = 0
+            failures: list[str] = []
+            for row in targets:
+                tg = row["tg_user_id"]
+                if not tg or tg in warned:
+                    continue
+                if row["emby_user_id"] in known:
+                    skipped_known += 1
+                    continue
+                if await old.send(int(tg), WARN_TEXT):
+                    warned[tg] = now
+                    sent_n += 1
+                else:
+                    fail_n += 1
+                    failures.append(row["username"])
+                await asyncio.sleep(0.5)
+            # Failures are excluded from `warned`, so phase 2 can never
+            # auto-delete someone the old bot never reached; a second warning
+            # attempt is pointless against a chat Telegram already refuses.
+            state["phase1_done_at"] = now
+            state["warned_count"] = len(warned)
+            self.ctx.set_state(self.spec.id, state)
+            summary = {"阶段": "阶段一·旧bot提醒", "提醒成功": sent_n,
+                       "提醒失败": fail_n, "已迁移免提醒": skipped_known,
+                       "管理员/上传员仅提醒": self._names(targets),
+                       "下一步": "约24小时后自动复核；仍未迁移者将被删除"}
+            if failures:
+                summary["失败名单"] = ", ".join(failures)
+            return {"ok": not failures, **summary}
+
+        # ---- Phase 2: probe from the new bot, delete the unreachable ----
+        warned = dict(state.get("warned") or {})
+        if not warned:
+            self.ctx.set_state(self.spec.id, {"completed": True})
+            return {"ok": True, "阶段": "阶段二·复核", "说明": "无待复核名单，已结束"}
+        dry = bool(config.get("dry_run", True))
+        kept = 0
+        deleted_list: list[str] = []
+        will_delete: list[str] = []
+        notice_fail: list[str] = []
+        failures = []
+        staff_unreach: list[str] = []
+        from app.modules.member_ops import execute_delete
+        for row in targets:
+            tg = row["tg_user_id"]
+            if not tg or tg not in warned:
+                continue
+            if await self.ctx.telegram.notify_member({"tg_user_id": tg}, PROBE_TEXT):
+                kept += 1
+                warned.pop(tg, None)
+                known_list = list(state.get("known_migrated") or [])
+                if row["emby_user_id"] not in known_list:
+                    known_list.append(row["emby_user_id"])
+                state["known_migrated"] = known_list
+                continue
+            if row["staff"]:
+                staff_unreach.append(row["username"])
+                continue
+            if dry:
+                will_delete.append(row["username"])
+                continue
+            if not await old.send(int(tg), DELETE_NOTICE):
+                notice_fail.append(row["username"])
+            try:
+                result = await execute_delete(
+                    self.ctx.members, self.ctx.emby, row["emby_user_id"],
+                    actor="bot_migration_sweep", cascade=False, delete_emby=True)
+            except Exception:  # noqa: BLE001 - keep sweeping, report at the end
+                result = {"errors": [{"error": "execute_delete 异常"}]}
+            if result.get("errors"):
+                failures.append(row["username"] + "(删除失败,未删)")
+            else:
+                deleted_list.append(row["username"])
+            await asyncio.sleep(0.4)
+        state["warned"] = warned
+        finished = not failures and not dry and not staff_unreach and not notice_fail
+        if finished:
+            self.ctx.set_state(self.spec.id, {"completed": True, "deleted": deleted_list})
+        else:
+            self.ctx.set_state(self.spec.id, state)
+        summary = {"阶段": "阶段二·复核", "已迁移保留": kept,
+                   "演练": dry,
+                   "管理员/上传员需人工": self._names(
+                       [{"username": n} for n in staff_unreach]) if staff_unreach else "无"}
+        if will_delete:
+            summary["演练·将删除"] = ", ".join(will_delete)
+        if deleted_list:
+            summary["已删除"] = ", ".join(deleted_list)
+        if notice_fail:
+            summary["删除通知失败"] = ", ".join(notice_fail)
+        if failures:
+            summary["删除失败"] = ", ".join(failures)
+        report_lines = ["🚚 <b>Bot迁移清理报告</b>"]
+        for k, v in summary.items():
+            report_lines.append(f"• {k}：{v}")
+        with contextlib.suppress(Exception):
+            await old.send(int(OWNER_TG), "\n".join(report_lines))
+        return {"ok": not failures, **summary}
+class RequestLibraryWatchPlugin(Plugin):
+    """Notify requesters when an accepted title lands in the library.
+
+    Acceptance does not change again, so this plugin is the only automatic
+    follow-up. Incremental rounds reverse-match one latest-items window;
+    a slower full scan covers titles that missed that window.
+    """
+
+    spec = Spec(
+        id="request_library_watch",
+        name="求片入库通知",
+        description="已接受的求片在媒体库出现后，私聊通知求片人和关注者。"
+                    "每 15 分钟用最近新增条目反查，每 6 小时全量精确核对。",
+        category="request",
+        icon="📥",
+        interval=900,
+    )
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        if self.ctx.requests is None:
+            return {"ok": False, "错误": "求片服务不可用"}
+        from app.modules.request_watch import FULL_SCAN_EVERY, poll_library_watches
+
+        now = time.time()
+        state = self.ctx.state(self.spec.id)
+        try:
+            last_full = float(state.get("last_full_scan") or 0)
+        except (TypeError, ValueError):
+            last_full = 0.0
+        full = now - last_full >= FULL_SCAN_EVERY
+        try:
+            summary = await poll_library_watches(
+                self.ctx.requests,
+                self.ctx.emby,
+                tmdb=self.ctx.tmdb,
+                now=int(now),
+                full=full,
+            )
+        except Exception:  # noqa: BLE001 - a plugin must never take the scheduler down
+            return {"ok": True, "结果": "本轮跳过"}
+        if full and not summary.get("skipped"):
+            self.ctx.set_state(self.spec.id, {"last_full_scan": now})
+        out = {
+            "ok": True,
+            "全量": int(full),
+            "核对": int(summary.get("checked") or 0),
+            "查询": int(summary.get("lookups") or 0),
+            "通知": int(summary.get("notified") or 0),
+            "过期": int(summary.get("expired") or 0),
+        }
+        if summary.get("skipped"):
+            out["结果"] = str(summary.get("结果") or "本轮跳过")
+        return out
+
+
+def ensure_request_library_watch(store: Any) -> None:
+    """Enable arrival notices once; later operator switches are left alone."""
+    if store is None:
+        return
+    plugins = dict(store.section("plugins") or {})
+    if "request_library_watch" in plugins:
+        return
+    plugins["request_library_watch"] = {"enabled": True, "config": {}}
+    store.set_section("plugins", plugins)
+
+
 BUILTIN_PLUGINS = (
     IntakePipelinePlugin,
     GroupAuditPlugin,
@@ -761,8 +1066,10 @@ BUILTIN_PLUGINS = (
     RankingsWeeklyPlugin,
     WatchRankPostPlugin,
     WatchRankWeeklyPlugin,
+    BotMigrationSweepPlugin,
     ExpiryReminderPlugin,
     RequestDigestPlugin,
+    RequestLibraryWatchPlugin,
     *POINTS_PLUGINS,
 )
 

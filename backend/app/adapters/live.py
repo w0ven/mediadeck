@@ -491,21 +491,28 @@ class LiveEmby:
                 })
             return out
 
-    async def latest_items(self, limit: int = 12) -> list[dict[str, Any]]:
+    async def latest_items(self, limit: int = 12, *, watch: bool = False) -> list[dict[str, Any]]:
         """Most recently added movies and series, for the dashboard wall.
 
         Deliberately asks for whole titles rather than episodes: a series that
         just gained twelve episodes would otherwise fill the entire wall with
         one show's artwork and bury everything else added that day.
+
+        ``watch=True`` is the request-library poller: keep items without
+        artwork, include ProviderIds so callers can reverse-match TMDB ids,
+        and allow a larger window. Dashboard callers stay on the default path.
         """
         base, headers, timeout, verify = self._conn()
+        fields = "ProductionYear,DateCreated"
+        if watch:
+            fields += ",ProviderIds"
         params = {
             "Recursive": "true",
-            "Limit": str(max(1, min(limit, 60))),
+            "Limit": str(max(1, min(limit, 100 if watch else 60))),
             "SortBy": "DateCreated",
             "SortOrder": "Descending",
             "IncludeItemTypes": "Movie,Series",
-            "Fields": "ProductionYear,DateCreated",
+            "Fields": fields,
             "ImageTypeLimit": "1",
             "EnableImageTypes": "Primary",
         }
@@ -517,15 +524,26 @@ class LiveEmby:
             for item in (r.json().get("Items") or []):
                 # An entry with no Primary tag has no artwork to show; keeping it
                 # would punch a grey hole in an otherwise dense grid.
-                if not (item.get("ImageTags") or {}).get("Primary"):
+                if not watch and not (item.get("ImageTags") or {}).get("Primary"):
                     continue
-                out.append({
+                row = {
                     "Id": item.get("Id"),
                     "Name": item.get("Name"),
                     "Type": item.get("Type"),
                     "ProductionYear": item.get("ProductionYear"),
                     "DateCreated": item.get("DateCreated"),
-                })
+                }
+                providers = item.get("ProviderIds") or {}
+                raw = providers.get("Tmdb", providers.get("tmdb"))
+                try:
+                    tmdb_id = int(raw)
+                except (TypeError, ValueError):
+                    tmdb_id = None
+                if tmdb_id and tmdb_id > 0:
+                    row["tmdb_id"] = tmdb_id
+                if watch:
+                    row["ProviderIds"] = providers
+                out.append(row)
             return out
 
     async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None) -> list[dict[str, Any]]:

@@ -484,6 +484,8 @@ class RequestService:
             self._event(c, rid, actor, status, str(note).strip() if status == "rejected" else "")
             row = self.get(rid)
             self._results(c, row)
+            if status == "accepted":
+                self._start_watch(c, rid)
         return {"ok": True, "request": row}
 
     def claim(self, *args, **kwargs):
@@ -623,6 +625,10 @@ class RequestService:
                 True,
             )
             self._results(c, self.get(rid), correction=True)
+            if status == "accepted":
+                self._start_watch(c, rid)
+            else:
+                self._stop_watch(c, rid)
         return self.get(rid)
 
     def refund(self, rid, actor, reason, *, panel_admin=False):
@@ -659,6 +665,101 @@ class RequestService:
                 "items": [],
                 "message": "媒体库查询失败/未配置，未知是否已有；仍可提交",
             }
+
+    def _start_watch(self, conn, rid, now=None):
+        now = int(now if now is not None else time.time())
+        conn.execute(
+            "INSERT INTO request_library_watch"
+            "(request_id,state,notified_stage,last_checked_at,created_at) "
+            "VALUES(?,?,?,?,?) "
+            "ON CONFLICT(request_id) DO UPDATE SET "
+            "state='pending', notified_stage='', last_checked_at=0, "
+            "created_at=excluded.created_at "
+            "WHERE request_library_watch.state NOT IN ('pending','partial')",
+            (int(rid), "pending", "", 0, now),
+        )
+
+    def _stop_watch(self, conn, rid):
+        conn.execute(
+            "UPDATE request_library_watch SET state='expired' "
+            "WHERE request_id=? AND state IN ('pending','partial')",
+            (int(rid),),
+        )
+
+    def active_watches(self):
+        return self._db.query(
+            "SELECT w.request_id, w.state, w.notified_stage, w.last_checked_at, "
+            "w.created_at, r.tmdb_id, r.media_type, r.demand_json, r.emby_user_id "
+            "FROM request_library_watch w "
+            "JOIN media_requests r ON r.id=w.request_id "
+            "WHERE w.state IN ('pending','partial') AND r.status='accepted'"
+        )
+
+    def touch_watch(self, rid, now=None):
+        now = int(now if now is not None else time.time())
+        self._db.execute(
+            "UPDATE request_library_watch SET last_checked_at=? "
+            "WHERE request_id=? AND state IN ('pending','partial')",
+            (now, int(rid)),
+        )
+
+    def expire_due_watches(self, now=None):
+        now = int(now if now is not None else time.time())
+        with self._transaction() as conn:
+            cur = conn.execute(
+                "UPDATE request_library_watch SET state='expired', last_checked_at=? "
+                "WHERE state IN ('pending','partial') AND created_at<=?",
+                (now, now - 10 * 86400),
+            )
+            return cur.rowcount
+
+    def apply_library_stage(self, rid, stage, now=None):
+        """Enqueue one library notice per recipient; same stage is ignored."""
+        if stage not in ("partial", "complete"):
+            return None
+        now = int(now if now is not None else time.time())
+        with self._transaction() as conn:
+            watch = conn.execute(
+                "SELECT * FROM request_library_watch WHERE request_id=?", (int(rid),)
+            ).fetchone()
+            row = conn.execute(
+                "SELECT * FROM media_requests WHERE id=?", (int(rid),)
+            ).fetchone()
+            if not watch or not row or row["status"] != "accepted":
+                return None
+            if watch["state"] not in ("pending", "partial"):
+                return None
+            already = watch["notified_stage"]
+            if already == "complete" or (
+                stage == "partial" and already in ("partial", "complete")
+            ):
+                conn.execute(
+                    "UPDATE request_library_watch SET last_checked_at=? WHERE request_id=?",
+                    (now, int(rid)),
+                )
+                return dict(watch)
+            state = "done" if stage == "complete" else "partial"
+            conn.execute(
+                "UPDATE request_library_watch SET state=?, notified_stage=?, last_checked_at=? "
+                "WHERE request_id=?",
+                (state, stage, now, int(rid)),
+            )
+            uids = {row["emby_user_id"]} | {
+                item[0]
+                for item in conn.execute(
+                    "SELECT user_id FROM request_followers WHERE request_id=?", (int(rid),)
+                )
+            }
+            for uid in uids:
+                self._queue(
+                    conn,
+                    int(rid),
+                    uid,
+                    "library",
+                    {"stage": stage},
+                    f"library:{int(rid)}:{stage}:{uid}",
+                )
+            return {"state": state, "notified_stage": stage}
 
     def uploaders(self):
         if self._members is None:

@@ -1208,6 +1208,12 @@ class RequestBotMixin:
                                     + "\n"
                                     + escape(payload["body"])
                                 )
+                            elif job["kind"] == "library":
+                                body += (
+                                    "你求的片子已有部分内容入库，可以先看。"
+                                    if payload.get("stage") == "partial"
+                                    else "你求的片子已入库，可以开始观看。"
+                                )
                             else:
                                 if payload.get("correction"):
                                     body += "管理员已纠正工单状态：\n"

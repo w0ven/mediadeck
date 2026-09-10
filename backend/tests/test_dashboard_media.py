@@ -101,6 +101,24 @@ def test_latest_asks_emby_for_whole_titles_only() -> None:
     assert seen["Limit"] == "9"
 
 
+def test_latest_watch_keeps_unartworked_items_and_reads_tmdb() -> None:
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(dict(request.url.params))
+        return httpx.Response(200, json={"Items": [
+            {"Id": "1", "Name": "Has art", "Type": "Movie",
+             "ImageTags": {"Primary": "abc"}, "ProviderIds": {"Tmdb": "11"}},
+            {"Id": "2", "Name": "No art", "Type": "Series", "ImageTags": {},
+             "ProviderIds": {"tmdb": "22"}},
+        ]})
+
+    items = asyncio.run(_live_emby(handler).latest_items(100, watch=True))
+    assert "ProviderIds" in seen["Fields"]
+    assert seen["Limit"] == "100"
+    assert [(i["Id"], i.get("tmdb_id")) for i in items] == [("1", 11), ("2", 22)]
+
+
 # -- session artwork + progress ---------------------------------------------
 
 def test_session_carries_artwork_id_and_progress() -> None:
