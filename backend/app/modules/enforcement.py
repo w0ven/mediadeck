@@ -179,10 +179,10 @@ class EnforcementService:
             diff = {k: v for k, v in want.items()
                     if _normalise(current.get(k)) != _normalise(v)}
             if not diff and not force:
-                if apply and fp != member.get("applied_fingerprint"):
-                    self._db.execute(
-                        "UPDATE members SET applied_fingerprint=?,applied_at=? "
-                        "WHERE emby_user_id=?", (fp, int(time.time()), uid))
+                # Observation is not a write receipt. A legacy account may
+                # already match without MediaDeck ever applying a policy.
+                # Only the confirmed apply_member_policy paths below record
+                # applied_fingerprint/applied_at, never this no-op branch.
                 continue
 
             planned.append({

@@ -123,6 +123,10 @@ def observe_one(member: dict[str, Any], emby_user: dict[str, Any] | None,
     last_err = redact(out.get("last_remote_error") or "")
     out["last_remote_error"] = last_err
     out["retryable"] = (last_ok == 0 or last_ok is False) and bool(last_action)
+    # A current observation and an historical write receipt are independent.
+    # Neither a matching remote policy nor a GET creates an apply timestamp.
+    out["sync_recorded"] = bool(out.get("applied_fingerprint"))
+    out["policy_matches"] = None
 
     if not emby_available:
         out["emby_status"] = "unknown"
@@ -138,28 +142,32 @@ def observe_one(member: dict[str, Any], emby_user: dict[str, Any] | None,
         out["sync_status"] = "emby_missing"
         return out
 
-    policy = emby_user.get("Policy") or {}
-    is_admin = bool(policy.get("IsAdministrator"))
+    policy = emby_user.get("Policy")
+    policy = policy if isinstance(policy, dict) else {}
     out["emby_status"] = "present"
-    out["emby_disabled"] = bool(policy.get("IsDisabled"))
-    out["emby_is_admin"] = is_admin
-    if is_admin:
+    out["emby_disabled"] = (bool(policy['IsDisabled'])
+                            if policy.get('IsDisabled') is not None else None)
+    out["emby_is_admin"] = (bool(policy['IsAdministrator'])
+                            if policy.get('IsAdministrator') is not None else None)
+    if out['emby_is_admin']:
         out["sync_status"] = "skipped_admin"
         return out
-    if last_ok == 0 or last_ok is False:
-        out["sync_status"] = "failed"
-        return out
-    if not out.get("applied_fingerprint"):
-        out["sync_status"] = "never_applied"
-        return out
     want = desired_policy(out)
-    drifted = any(
-        _normalise(policy.get(k)) != _normalise(want.get(k))
-        for k in MANAGED_KEYS if k in want)
-    if drifted or fingerprint(want) != out.get("applied_fingerprint"):
-        out["sync_status"] = "drift"
+    if any(k not in policy or policy[k] is None for k in want):
+        # Presence is known, but an absent/partial Policy cannot prove its
+        # effective limits, nor prove that the account is enabled.
+        out["sync_status"] = "unknown"
         return out
-    out["sync_status"] = "in_sync"
+    out["policy_matches"] = not any(
+        _normalise(policy[k]) != _normalise(want[k])
+        for k in MANAGED_KEYS if k in want)
+    if last_action == 'enforce' and (last_ok == 0 or last_ok is False):
+        out["sync_status"] = "failed"
+    elif out["policy_matches"]:
+        out["sync_status"] = ('in_sync' if fingerprint(want) == out.get('applied_fingerprint')
+                              else 'policy_match')
+    else:
+        out["sync_status"] = 'drift' if out['sync_recorded'] else 'never_applied'
     return out
 
 

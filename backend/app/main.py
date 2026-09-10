@@ -1930,9 +1930,12 @@ async def members_roles(user_id: str, payload: dict[str, Any] = Body(...),  # no
 
 @app.get("/api/members/{user_id}", dependencies=[Depends(_auth)])
 async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
-    detail = app.state.members.detail(user_id)
+    detail = await asyncio.to_thread(app.state.members.detail, user_id)
     if not detail:
         raise HTTPException(404, "unknown member")
+    emby_users, emby_error = await _member_emby_snapshot()
+    detail['member'] = member_ops.attach_observation(
+        [detail['member']], emby_users, emby_error=emby_error)[0]
     days = max(1, min(int(days or 30), 400))
     stats = app.state.stats.member_detail(user_id, days)
     series = stats.get("series") or []

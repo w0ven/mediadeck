@@ -196,24 +196,28 @@
     const emby = m.emby_status || 'unknown';
     const sync = m.sync_status || 'unknown';
     const embyLabel = ({
-      present: m.emby_disabled ? 'Emby 已禁用' : 'Emby 在线',
+      present: m.emby_disabled == null ? 'Emby 存在' : (m.emby_disabled ? 'Emby 已禁用' : 'Emby 在线'),
       missing: '账号缺失',
       unknown: 'Emby 未知',
     })[emby] || emby;
-    const embyCls = emby === 'present' && !m.emby_disabled ? 'ok'
+    const embyCls = emby === 'present' && m.emby_disabled === false ? 'ok'
       : emby === 'missing' ? 'bad' : 'idle';
     const syncLabel = ({
-      in_sync: '已同步', drift: '策略漂移', never_applied: '从未下发',
+      in_sync: '已同步', policy_match: '当前策略一致', drift: '策略漂移', never_applied: '无下发记录',
       failed: '同步失败', skipped_admin: '管理员跳过',
       emby_missing: '无法同步', unknown: '同步未知',
     })[sync] || sync;
-    const syncCls = sync === 'in_sync' ? 'ok'
+    const syncCls = ['in_sync', 'policy_match'].includes(sync) ? 'ok'
       : (sync === 'drift' || sync === 'failed' || sync === 'emby_missing') ? 'bad' : 'idle';
     const retry = m.retryable
       ? `<button class="btn sm" type="button" data-act="retry" data-id="${esc(m.emby_user_id)}">重试</button>`
       : '';
+    const history = m.sync_recorded === false && !['never_applied','skipped_admin'].includes(sync)
+      ? '<span class="tag idle">无下发记录</span>' : '';
+    const policy = ['never_applied','failed'].includes(sync) && m.policy_matches != null
+      ? `<span class="tag ${m.policy_matches ? 'ok' : 'bad'}">${m.policy_matches ? '当前策略一致' : '策略不一致'}</span>` : '';
     return `<div><span class="tag ${embyCls}">${esc(embyLabel)}</span>
-      <span class="tag ${syncCls}">${esc(syncLabel)}</span>${retry}</div>`;
+      <span class="tag ${syncCls}">${esc(syncLabel)}</span>${history}${policy}${retry}</div>`;
   }
 
   function measuredBytes(value) {
@@ -308,7 +312,7 @@
 
   function filterBar(params, groups) {
     const pick = (id, key, label, options, fallback = '') => `<label>${label} <select id="${id}" aria-label="${label}">${options.map(([value,text]) => `<option value="${value}" ${(params.get(key) || fallback) === value ? 'selected' : ''}>${text}</option>`).join('')}</select></label>`;
-    const labels = {active:'正常',expired:'已过期',exhausted:'额度用尽',suspended:'手动停用',pending:'待开通',present:'存在',missing:'缺失',unknown:'未知',in_sync:'已同步',drift:'策略漂移',failed:'失败',never_applied:'从未下发',emby_missing:'账号缺失'};
+    const labels = {active:'正常',expired:'已过期',exhausted:'额度用尽',suspended:'手动停用',pending:'待开通',present:'存在',missing:'缺失',unknown:'未知',in_sync:'已同步',policy_match:'当前策略一致',drift:'策略漂移',failed:'失败',never_applied:'无记录且策略不一致',emby_missing:'账号缺失'};
     const gopts = groups.map((g) =>
       `<option value="${esc(g.id)}" ${params.get('group_id') === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
     return `<div class="toolbar members-filters" id="members-filters" data-live-preserve>
@@ -328,7 +332,7 @@
       </select></label>
       <label>同步 <select id="m-sync" aria-label="同步状态">
         <option value="">全部</option>
-        ${['in_sync', 'drift', 'failed', 'never_applied', 'emby_missing'].map((s) =>
+        ${['in_sync', 'policy_match', 'drift', 'failed', 'never_applied', 'emby_missing'].map((s) =>
           `<option value="${s}" ${params.get('sync_status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
       ${pick('m-order','order','顺序',[['asc','升序'],['desc','降序']], 'asc')}
@@ -550,7 +554,21 @@
       if (wrap2) wrap2.scrollTop = scroll;
       const id = params.get('id');
       const host = $('#member-detail');
-      if (id && !(context.live && host && host.dataset.uid === id)) {
+      if (id && context.live && host && host.dataset.uid === id) {
+        // Refresh only the observation, not the drawer's form or focus.
+        // A detail deep-link can point outside the currently filtered page.
+        const summary = host.querySelector('#md-emby-status');
+        const detailVersion = ms.detailVersion;
+        if (summary) {
+          let member = (listing.members || []).find(m => m.emby_user_id === id);
+          if (!member) {
+            try { member = (await api(`/api/members/${encodeURIComponent(id)}?days=30`)).member; }
+            catch (_) { member = null; } // failed refresh must not leave an old green badge
+          }
+          if (!current() || detailVersion !== ms.detailVersion || host.dataset.uid !== id) return;
+          summary.innerHTML = embySyncCell(member || {});
+        }
+      } else if (id) {
         await fillDetail(id, params.get('tab') || 'overview');
       }
     } catch (e) {
@@ -608,7 +626,7 @@
           <dt>用户组</dt><dd>${groupBadge(m.group_id,m.group_name)}</dd>
           <dt>Telegram</dt><dd>${esc(m.tg_username ? '@'+m.tg_username : m.tg_user_id || '未绑定')}</dd>
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')}</dd>
-          <dt>Emby</dt><dd>${embySyncCell(m)}</dd>
+          <dt>Emby / 同步</dt><dd id="md-emby-status">${embySyncCell(m)}</dd>
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
