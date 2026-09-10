@@ -17,8 +17,8 @@
     active_streams: 1, egress_mbps: 8, utilisation: 0.1, pools: [], base_url: 'https://node.example',
     cache_dir: '/cache', cache_size: '1T', sign_secret_set: true, enrolled: true};
   let nodes = [node];
-  const snapshot = {available: true, snapshot_age_seconds: 1,
-    data: {queues: [], quota: [], alerts: [], mounts: [], tasks: []}};
+  let snapshot = {available: true, snapshot_age_seconds: 1, stale: false,
+    data: {generated_at: '2026-09-10T21:59:00+0800', queues: [], quota: [], alerts: [], mounts: [], tasks: []}};
   let delayDashboard = null;
   api = async (path) => {
     requests.push(path);
@@ -97,6 +97,15 @@
       assert(document.querySelector('#view .card') === card, page + ' replaced stable DOM');
       assert(requests.length === requestCount, page + ' refetched on live event');
     }
+
+    snapshot = {...snapshot, snapshot_age_seconds: 7200, stale: true,
+      data: {...snapshot.data, alerts: [{level:'warn', message:'file modification time > 12h'}]}};
+    go('pipeline'); await tick();
+    const staleText = document.querySelector('#view').textContent;
+    assert(staleText.includes('快照已过期'), 'stale pipeline status is not explicit');
+    assert(staleText.includes('历史采集') && staleText.includes('不代表当前状态'),
+      'stale pipeline values are not marked historical');
+    assert(staleText.includes('快照文件更新时间'), 'stale status does not identify file mtime basis');
 
     let received = 0;
     PAGES.members = async () => { document.getElementById('view').innerHTML = '<div id="custom-member-page">members</div>'; };

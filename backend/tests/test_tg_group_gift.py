@@ -38,6 +38,13 @@ async def issue(env, target=TARGET, user=ADMIN, chat=GROUP):
     return mid, action
 
 
+async def confirm_registration_password(env, target=TARGET):
+    for action in ('random', 'confirm'):
+        p = env.bot._pending[str(target)][2]
+        await click(env, f"pw:{p['nonce']}:{action}", p['message_id'], chat=target, user=target)
+    return env.bot._panel[str(target)]
+
+
 def setup_gate(env):
     env.cfg['membership_rules'] = {'targets': [{'chat_id': str(GROUP), 'enabled': True,
         'title': 'Local Group', 'type': 'supergroup', 'join_url': 'https://t.me/local_group',
@@ -87,6 +94,7 @@ def test_recipient_private_registers_once_with_saved_terms_and_binding(env):
         mid = await command(env, '/start ' + code, chat=TARGET, user=TARGET)
         assert '用户名' in env.tg.text(TARGET, mid) and not grant(env)['used_at']
         await command(env, 'GiftRecipient', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         member = env.members.find_by_telegram(str(TARGET))
         assert member and member['username'] == 'GiftRecipient' and member['group_id'] == 'standard'
         assert abs(member['expires_at'] - time.time() - 37 * 86400) < 10
@@ -246,6 +254,7 @@ def test_membership_recheck_resumes_same_gift_and_only_consumes_after_registrati
         assert resumed == mid and '用户名' in env.tg.text(TARGET, mid)
         assert not env.bot._gift_claims and not grant(env)['used_at']
         await command(env, 'JoinedGift', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         assert grant(env)['used_at'] and env.members.find_by_telegram(str(TARGET))
     asyncio.run(run())
 
@@ -304,10 +313,12 @@ def test_emby_create_failure_retains_gift_for_retry(env, monkeypatch):
         await command(env, '/start ' + code, chat=TARGET, user=TARGET)
         monkeypatch.setattr(env.bot._emby, 'create_user', fail)
         await command(env, 'FailedGift', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         assert not grant(env)['used_at'] and not env.members.find_by_telegram(str(TARGET))
         monkeypatch.setattr(env.bot._emby, 'create_user', original)
         await command(env, '/start ' + code, chat=TARGET, user=TARGET)
         await command(env, 'RetriedGift', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         assert grant(env)['used_at'] and env.members.find_by_telegram(str(TARGET))
     asyncio.run(run())
 
@@ -342,5 +353,6 @@ def test_username_interrupted_by_gate_restores_gift_not_username_side_effect(env
         assert '用户名' in env.tg.text(TARGET, mid)
         assert not grant(env)['used_at']
         await command(env, 'ReallyCreated', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
         assert env.members.find_by_telegram(str(TARGET))['username'] == 'ReallyCreated'
     asyncio.run(run())

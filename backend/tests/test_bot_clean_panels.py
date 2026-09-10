@@ -109,11 +109,13 @@ def test_buttons_and_show_keep_current_operation_message(bot):
 def test_password_requires_confirmation_and_double_tap_is_noop(bot):
     tap(bot, "resetpw")
     assert bot.password_changes == []
+    choice_nonce = bot._pending["901"][2]["nonce"]
+    tap(bot, f"pw:{choice_nonce}:random")
     nonce = bot._pending["901"][2]["nonce"]
-    tap(bot, f"resetpw_ok:{nonce}")
+    tap(bot, f"pw:{nonce}:confirm")
     assert len(bot.password_changes) == 1
     changes = len(bot.calls)
-    tap(bot, f"resetpw_ok:{nonce}")
+    tap(bot, f"pw:{nonce}:confirm")
     assert len(bot.password_changes) == 1
     assert bot.calls[changes:] == [("answerCallbackQuery", {"callback_query_id": "cb", "text": ""})]
     # Only ACK the replay: keep the successful password visible.
@@ -123,6 +125,8 @@ def test_password_requires_confirmation_and_double_tap_is_noop(bot):
 @pytest.mark.parametrize("interruption", ["cancel", "command", "expired", "wrong_message", "wrong_nonce"])
 def test_password_confirmation_is_bound_and_cancelable(bot, interruption):
     tap(bot, "resetpw")
+    choice_nonce = bot._pending["901"][2]["nonce"]
+    tap(bot, f"pw:{choice_nonce}:random")
     nonce = bot._pending["901"][2]["nonce"]
     mid = 77
     if interruption == "cancel":
@@ -136,7 +140,7 @@ def test_password_confirmation_is_bound_and_cancelable(bot, interruption):
         mid = 78
     else:
         nonce = "wrong"
-    tap(bot, f"resetpw_ok:{nonce}", mid=mid)
+    tap(bot, f"pw:{nonce}:confirm", mid=mid)
     assert bot.password_changes == []
 
 
@@ -264,13 +268,18 @@ def test_recipient_gift_link_registration_is_single_message_and_one_use(bot):
     assert bot._registration.get_grant("777")["used_at"] is None
     run(bot._handle_message({"chat": {"id": "777", "type": "private"},
                              "from": {"id": "777"}, "text": "newperson"}))
+    assert created == [] and bot._pending["777"][0] == "password_choice"
+    for action in ('random', 'confirm'):
+        p = bot._pending['777'][2]
+        tap(bot, f"pw:{p['nonce']}:{action}", chat='777', mid=p['message_id'])
     member = bot.members.find_by_telegram("777")
     assert created == ["newperson"]
     assert member["emby_user_id"] == "gifted1"
     assert member["register_via"] == "admin"
     assert abs(member["expires_at"] - time.time() - 30 * 86400) < 5
     assert bot._registration.get_grant("777")["used_at"]
-    assert [m for m, _ in bot.calls] == ["sendMessage", "editMessageText", "editMessageText"]
+    assert [m for m, _ in bot.calls].count("sendMessage") == 1
+    assert [m for m, _ in bot.calls].count("editMessageText") == 4
     assert all(p.get("message_id") == mid for m, p in bot.calls if m == "editMessageText")
     assert not bot._registration.resolve("777", grant["gift_code"]).allowed
 

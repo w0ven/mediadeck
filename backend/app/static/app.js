@@ -817,12 +817,23 @@ function paintPipeline(p, context) {
   if (!p.available) { renderView(`<div class="card"><div class="empty">管线快照不可用</div></div>`, context); return; }
   const d = p.data, f = d.fallback || {};
   const pct = f.capacity_bytes ? Math.round((f.bytes / f.capacity_bytes) * 100) : 0;
+  const stale = Boolean(p.stale);
+  const age = Number(p.snapshot_age_seconds);
+  const fileAge = Number.isFinite(age) ? fmtAge(age) : '未知时间';
+  const generated = d.generated_at
+    ? `<span class="muted">采集时间 ${esc(d.generated_at)}</span>` : '';
+  const freshness = stale
+    ? card('快照已过期', `快照文件更新时间 ${fileAge} 前`,
+      `<div class="card-body"><span class="tag warn">历史数据</span> 以下数值和告警仅为历史采集，不代表当前状态。 ${generated}</div>`)
+    : card('快照状态', `快照文件更新时间 ${fileAge} 前`,
+      `<div class="card-body"><span class="tag ok">数据新鲜</span> 当前数值来自最近一次采集。 ${generated}</div>`);
   renderView(`
+    ${freshness}
     <div class="stat-grid">
       ${(d.queues || []).map((q) => stat('⇄', q.items, q.name, `${fmtBytes(q.bytes)} · 最老 ${fmtAge(q.oldest_age_seconds)}`)).join('')}
       ${stat('⛃', fmtBytes(f.bytes), '本地应急仓', `${f.items || 0} 个文件 · ${pct}% 容量`)}
     </div>
-    ${tableCard('上传身份配额', `快照 ${Math.round(p.snapshot_age_seconds)}s 前${p.stale ? ' · 已过期' : ''}`,
+    ${tableCard('上传身份配额', `文件更新时间 ${fileAge} 前${stale ? ' · 已过期' : ''}`,
       ['身份', '状态', '受限起始'],
       (d.quota || []).map((q) => `<tr data-live-key="quota:${esc(q.identity)}"><td>${esc(q.identity)}</td>
         <td><span class="tag ${q.state === 'ok' ? 'ok' : 'bad'}">${esc(q.state)}</span></td>

@@ -52,6 +52,29 @@ class RequestBotMixin:
                 if json.loads(card["payload"]).get("draft"):
                     self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
 
+    def _rq_card_view(self, card, payload=None):
+        """Presentation provenance is not the member's current role.
+
+        Legacy own-ticket cards mixed both roles and have no reliable provenance;
+        recover them as user cards. Management can be reopened from the workbench.
+        """
+        p = payload if payload is not None else json.loads(card["payload"])
+        if p.get("view") in ("user", "staff"):
+            return p["view"]
+        if p.get("mode") == "staff":
+            return "staff"
+        if p.get("mode") in ("mine", "follow") or p.get("draft"):
+            return "user"
+        rid = card.get("request_id")
+        row = self._requests.get(rid) if rid else None
+        if (
+            row
+            and row["emby_user_id"] != card["user_id"]
+            and set(json.loads(card["actions"])) & {"accept", "reject", "internal", "correct"}
+        ):
+            return "staff"
+        return "user"
+
     async def _rq_render(
         self,
         chat,
@@ -67,6 +90,8 @@ class RequestBotMixin:
         input_kind=None,
     ):
         """Rotate capabilities only after successful edit. An old token cannot act on a new card."""
+        payload = dict(payload or {})
+        payload.setdefault("view", "staff" if payload.get("mode") == "staff" else "user")
         token = secrets.token_hex(8)
         actions, keyboard = [], []
         for row in rows:
@@ -279,7 +304,12 @@ class RequestBotMixin:
                 f"#{row['id']} {escape(row['display_title'])} · {row['media_label']} · {row['status_label']}\n{escape(summary)}"
                 + (f" · {escape(row['username'])}" if mode == "staff" else "")
             )
-            keys.append([button(f"#{row['id']} 详情", f"view:{row['id']}")])
+            label = (
+                f"#{row['id']} {row['display_title']}" if mode == "staff" else f"#{row['id']} 详情"
+            )
+            if len(label) > 55:
+                label = label[:54] + "…"
+            keys.append([button(label, f"view:{row['id']}")])
         if not rows:
             text.append("暂无符合条件的工单。")
         keys.append(
@@ -306,7 +336,7 @@ class RequestBotMixin:
         if nav:
             keys.append(nav)
         keys.append([button("◀ 求片中心", "home")])
-        p.update(mode=mode, status=status, page=page)
+        p.update(mode=mode, status=status, page=page, view="staff" if mode == "staff" else "user")
         return await self._rq_render(chat, mid, member, "\n\n".join(text), keys, p)
 
     async def _rq_candidates(self, chat, mid, member, p, *, fetch=False):
@@ -486,13 +516,15 @@ class RequestBotMixin:
             input_kind="simple_seasons" if entering_seasons else None,
         )
 
-    async def _rq_detail(self, chat, mid, member, rid, *, prefix="", thread=None, full=False):
-        staff = self._rq_staff(member)
+    async def _rq_detail(
+        self, chat, mid, member, rid, *, prefix="", thread=None, full=False, view="user"
+    ):
+        staff = view == "staff"
         row = self._requests.authorize(rid, member["emby_user_id"], staff=staff)
         own = row["emby_user_id"] == member["emby_user_id"]
-        p = {"rid": rid}
+        p = {"rid": rid, "view": view}
         keys = []
-        body = f"🎬 <b>{escape(row['display_title'][:130])}</b>\n{row['media_label']} · 工单 #{rid} · {row['status_label']}\n"
+        body = f"🎬 <b>{escape(row['display_title'])}</b>\n{row['media_label']} · 工单 #{rid} · {row['status_label']}\n"
         if row.get("original_title") and row["original_title"] != row["title"]:
             body += escape(row["original_title"][:100]) + "\n"
         body += "\n"
@@ -568,11 +600,11 @@ class RequestBotMixin:
                         ]
                     ] + keys
                     keys.append([button("🔒 内部备注", "internal")])
-                if own:
+                if own and not staff:
                     keys += [
                         [button("补充 / 回复", "reply"), button("撤回求片", "cancel")],
                     ]
-            if "admin" in (member.get("roles") or []):
+            if staff and "admin" in (member.get("roles") or []):
                 keys.append(
                     [button("🔒 管理员纠错", "correct"), button("🔒 人工退回额度", "refund")]
                 )
@@ -620,8 +652,8 @@ class RequestBotMixin:
                     [
                         button("返回详情", f"view:{rid}"),
                         button(
-                            "工作台" if self._rq_staff(member) else "我的求片",
-                            "list:staff" if self._rq_staff(member) else "list:mine",
+                            "工作台" if p.get("view") == "staff" else "我的求片",
+                            "list:staff" if p.get("view") == "staff" else "list:mine",
                         ),
                     ]
                 ]
@@ -651,6 +683,7 @@ class RequestBotMixin:
             ):
                 raise RequestError("这张卡片已过期或不属于你，请从 /requests 或 /uploader 重新打开")
             p = json.loads(card["payload"])
+            p["view"] = self._rq_card_view(card, p)
             self._rq_clear_input(chat)
             await self._answer_callback(callback_id)
             acked = True
@@ -770,22 +803,39 @@ class RequestBotMixin:
                 chat, mid, member, row["id"], prefix="已关注原单，未扣次。"
             )
         if cmd == "view":
-            return await self._rq_detail(chat, mid, member, int(arg))
+            return await self._rq_detail(chat, mid, member, int(arg), view=p.get("view", "user"))
         rid = int(p.get("rid") or card.get("request_id") or 0)
-        staff = self._rq_staff(member)
+        view = p.get("view", "user")
+        staff = view == "staff"
+        if (
+            cmd
+            in (
+                "accept",
+                "reject",
+                "rejectok",
+                "reason",
+                "ask",
+                "internal",
+                "correct",
+                "refund",
+                "retry",
+            )
+            and not staff
+        ):
+            raise RequestError("这是用户求片卡，请从独立上片员通知或工作台处理")
         row = self._requests.authorize(rid, uid, staff=staff)
         if cmd == "full":
-            return await self._rq_detail(chat, mid, member, rid, full=True)
+            return await self._rq_detail(chat, mid, member, rid, full=True, view=view)
         if cmd == "thread":
             page = int(p.get("thread", 0)) + int(arg) if arg else 0
-            return await self._rq_detail(chat, mid, member, rid, thread=page)
+            return await self._rq_detail(chat, mid, member, rid, thread=page, view=view)
         if cmd == "retry":
             if not staff:
                 raise RequestError("你不是上片员")
             self._requests.retry_notifications(rid)
             await self.flush_request_notifications()
             return await self._rq_detail(
-                chat, mid, member, rid, prefix="已尝试重发未送达通知，未重复处理/扣次。"
+                chat, mid, member, rid, prefix="已尝试重发未送达通知，未重复处理/扣次。", view=view
             )
         if row["revision"] != card["revision"]:
             raise RequestError("工单已被修改，请重新打开详情")
@@ -819,7 +869,7 @@ class RequestBotMixin:
                 note=p.get("reason", "") if status == "rejected" else "",
                 revision=card["revision"],
             )
-            await self._rq_detail(chat, mid, member, rid)
+            await self._rq_detail(chat, mid, member, rid, view=p.get("view", "user"))
             return await self.flush_request_notifications()
         if cmd == "reject":
             p["reason"] = ""
@@ -917,7 +967,10 @@ class RequestBotMixin:
             await self.send(chat, f"请回复当前求片卡 #{card['message_id']}；本条未转达任何工单。")
             return True
         p, kind, mid = json.loads(card["payload"]), waiting["kind"], card["message_id"]
+        p["view"] = self._rq_card_view(card, p)
         try:
+            if kind in ("ask", "internal", "reason", "correct", "refund") and p["view"] != "staff":
+                raise RequestError("此用户卡不能执行管理操作，请重新打开工作台")
             if kind == "search":
                 parsed = parse_link(text)
                 if parsed:
@@ -1013,7 +1066,7 @@ class RequestBotMixin:
                         revision=card["revision"],
                     )
                     self._rq_clear_input(chat)
-                    await self._rq_detail(chat, mid, member, rid)
+                    await self._rq_detail(chat, mid, member, rid, view=p.get("view", "user"))
                     await self.flush_request_notifications()
                     return True
                 elif kind == "correct":
@@ -1034,6 +1087,7 @@ class RequestBotMixin:
                     prefix="已记录。"
                     if kind in ("internal", "refund", "correct")
                     else "消息已保存并将通知对方。",
+                    view=p.get("view", "user"),
                 )
                 await self.flush_request_notifications()
         except RequestError as exc:
@@ -1070,7 +1124,10 @@ class RequestBotMixin:
                 self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
                 continue
             try:
-                mid = await self._rq_detail(card["chat_id"], card["message_id"], member, rid)
+                with self._bind_session("", ""):
+                    mid = await self._rq_detail(
+                        card["chat_id"], card["message_id"], member, rid, view=self._rq_card_view(card)
+                    )
                 ok = bool(mid) and ok
             except RequestError:
                 self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
@@ -1090,15 +1147,22 @@ class RequestBotMixin:
                 (notice["tg_user_id"], notice["message_id"]),
             ):
                 continue
-            result = await self._edit(
-                notice["tg_user_id"],
-                notice["message_id"],
-                f"工单 #{rid} · {row['status_label']}\n旧卡已停用，请用 /uploader 打开工作台。",
-            )
+            with self._bind_session("", ""):
+                result = await self._edit(
+                    notice["tg_user_id"],
+                    notice["message_id"],
+                    f"工单 #{rid} · {row['status_label']}\n旧卡已停用，请用 /uploader 打开工作台。",
+                )
             ok = bool(result) and ok
         return ok
 
     async def flush_request_notifications(self, limit=50):
+        # Outbound cards (including a requester who is also an uploader) must not
+        # become that private chat's active user menu or password input panel.
+        with self._bind_session("", ""):
+            return await self._flush_request_notifications(limit)
+
+    async def _flush_request_notifications(self, limit=50):
         """Durable leased outbox. Retry delivers messages only, never business actions."""
         if not self._requests_ready() or not self.enabled:
             return 0
@@ -1126,7 +1190,7 @@ class RequestBotMixin:
                         if job["kind"] == "new":
                             # A queued new notice may have become terminal before delivery.
                             mid = await self._rq_detail(
-                                chat, None, member, row["id"], prefix="新求片"
+                                chat, None, member, row["id"], prefix="新求片", view="staff"
                             )
                         else:
                             body = f"工单 #{row['id']} · {escape(row['display_title'])}\n\n"
@@ -1159,7 +1223,13 @@ class RequestBotMixin:
                                 member,
                                 body,
                                 [[button("查看工单", f"view:{row['id']}")]],
-                                {"rid": row["id"], "notice": True},
+                                {
+                                    "rid": row["id"],
+                                    "notice": True,
+                                    "view": "staff"
+                                    if job["kind"] == "message" and not payload["staff"]
+                                    else "user",
+                                },
                                 rid=row["id"],
                                 revision=row["revision"],
                             )

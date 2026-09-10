@@ -68,8 +68,10 @@ def test_password_result_not_disclosed_after_rebinding(bot):
     bot._emby.set_user_password = password
     async def run():
         await bot._handle_callback(callback('resetpw'))
+        await bot._handle_callback(callback('pw:' + bot._pending['12'][2]['nonce'] + ':random'))
         nonce = bot._pending['12'][2]['nonce']
-        await bot._handle_callback(callback('resetpw_ok:' + nonce))
+        bot.calls.clear()  # selected password was shown while this binding was still valid
+        await bot._handle_callback(callback('pw:' + nonce + ':confirm'))
     asyncio.run(run())
     assert issued and issued[0] not in str(bot.calls)
 

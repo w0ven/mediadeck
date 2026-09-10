@@ -118,7 +118,8 @@ def test_telegram_password_change_revokes_old_panel_login(integrated):
     bot._emby.set_user_password = record
     async def run():
         await bot._handle_callback(callback('resetpw'))
-        await bot._handle_callback(callback('resetpw_ok:' + bot._pending['12'][2]['nonce']))
+        await bot._handle_callback(callback('pw:' + bot._pending['12'][2]['nonce'] + ':random'))
+        await bot._handle_callback(callback('pw:' + bot._pending['12'][2]['nonce'] + ':confirm'))
     asyncio.run(run())
     assert issued
     assert client.get('/api/whoami', auth=('demo-user-1', old)).status_code == 401
@@ -135,7 +136,8 @@ def test_failed_password_reset_keeps_old_login_and_cache(integrated):
     bot._emby.set_user_password = AsyncMock(return_value=False)
     async def run():
         await bot._handle_callback(callback('resetpw'))
-        await bot._handle_callback(callback('resetpw_ok:' + bot._pending['12'][2]['nonce']))
+        await bot._handle_callback(callback('pw:' + bot._pending['12'][2]['nonce'] + ':random'))
+        await bot._handle_callback(callback('pw:' + bot._pending['12'][2]['nonce'] + ':confirm'))
     asyncio.run(run())
     assert app.state.cache.get('panelauth:demo-user-1') == cached
     assert client.get('/api/whoami', auth=('demo-user-1', old)).status_code == 200

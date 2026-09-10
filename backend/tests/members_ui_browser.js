@@ -21,6 +21,7 @@
   let lastRenew = null;
   let lastGroup = null;
   let lastRetry = null;
+  let failDetailRead = false;
   let meterConfig = {cutover:false, baseline_confirmed:false, report_interval_seconds:15};
 
   class FakeSource {
@@ -265,7 +266,10 @@
         }
         return { ok: true, local_ok: true, remote_ok: true };
       }
-      if (method === 'GET' && !rest) return detailOf(id) || {};
+      if (method === 'GET' && !rest) {
+        if (failDetailRead) throw new Error('local detail transport failure');
+        return detailOf(id) || {};
+      }
     }
     return {};
   };
@@ -417,6 +421,52 @@
       && document.querySelector('#member-detail h3').textContent === 'alice', 'alice detail missing');
     assert(!document.getElementById('member-detail').classList.contains('hidden'), 'detail hidden');
     assert(/权益/.test(visibleText(document.getElementById('member-detail'))), 'overview tab missing 权益');
+
+    const observedMember = DB.find(m => m.emby_user_id === 'u-alice');
+    const observationKeys = ['emby_status','emby_disabled','emby_is_admin','sync_status','policy_matches','sync_recorded'];
+    const originalObservation = Object.fromEntries(observationKeys.map(k => [k, observedMember[k]]));
+    const statusSource = sources.filter(s => /topics=members/.test(s.url)).at(-1);
+    const statusEditor = document.getElementById('md-days');
+    statusEditor.value = '45'; statusEditor.focus();
+    const statusCases = [
+      ['policy_match', 'present', false, true, false, ['当前策略一致', '无下发记录']],
+      ['never_applied', 'present', false, false, false, ['无下发记录', '策略不一致']],
+      ['failed', 'present', false, false, true, ['同步失败', '策略不一致']],
+      ['emby_missing', 'missing', null, null, true, ['账号缺失', '无法同步']],
+      ['unknown', 'unknown', null, null, true, ['Emby 未知', '同步未知']],
+      ['unknown', 'present', null, null, true, ['Emby 存在', '同步未知']],
+      ['skipped_admin', 'present', false, null, false, ['管理员跳过']],
+      ['in_sync', 'present', false, true, true, ['已同步']],
+    ];
+    for (const [sync, emby, disabled, matches, recorded, labels] of statusCases) {
+      Object.assign(observedMember, {sync_status:sync,emby_status:emby,emby_disabled:disabled,
+        emby_is_admin:sync === 'skipped_admin',policy_matches:matches,sync_recorded:recorded});
+      statusSource.emit('members', {observation:[sync,emby]});
+      await waitFor(() => labels.every(label => visibleText(document.getElementById('md-emby-status')).includes(label)),
+        'drawer status did not refresh: ' + sync + '/' + emby);
+      assert(visibleText(document.querySelector('tr[data-id="u-alice"] td:nth-child(5)')) ===
+        visibleText(document.getElementById('md-emby-status')), 'list/detail status diverged: ' + sync);
+      assert(document.getElementById('md-days') === statusEditor && statusEditor.value === '45'
+        && document.activeElement === statusEditor, 'status refresh replaced dirty form or focus');
+      if (sync !== 'in_sync') assert(!visibleText(document.getElementById('md-emby-status')).includes('已同步'), 'unverified state falsely labelled synced');
+    }
+    Object.assign(observedMember, originalObservation);
+    statusEditor.value = '30'; statusEditor.blur();
+    statusSource.emit('members', {observation:'restored'});
+    await tick(250);
+    // Details opened by ID must also refresh when their row is not on this page.
+    await go('members?q=bob&id=u-alice&tab=overview');
+    assert(!document.querySelector('tr[data-id="u-alice"]'), 'off-page detail fixture still on page');
+    const offPageSource = sources.filter(s => !s.closed && /topics=members/.test(s.url)).at(-1);
+    Object.assign(observedMember, {sync_status:'policy_match',policy_matches:true,sync_recorded:false});
+    offPageSource.emit('members', {observation:'off-page'});
+    await waitFor(() => visibleText(document.getElementById('md-emby-status')).includes('无下发记录'), 'off-page observation stayed stale');
+    failDetailRead = true;
+    offPageSource.emit('members', {observation:'off-page-failure'});
+    await waitFor(() => visibleText(document.getElementById('md-emby-status')).includes('同步未知'), 'failed off-page refresh kept old success');
+    failDetailRead = false;
+    Object.assign(observedMember, originalObservation);
+    await go('members?page_size=50&id=u-alice&tab=overview');
 
     const tabBtns = [...document.querySelectorAll('#member-detail [data-tab]')].map((b) => b.dataset.tab);
     assert(tabBtns.join() === 'overview,entitlements,devices,invites,audit', 'tabs: ' + tabBtns.join());

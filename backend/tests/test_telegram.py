@@ -293,7 +293,7 @@ def test_menu_follows_state_after_registering() -> None:
 def test_registration_creates_the_account_and_links_the_chat() -> None:
     members, emby = _FakeMembers(), _FakeEmby()
     bot = _bot(members, emby)
-    asyncio.run(bot._finish_registration(1, "42", "tguser", "newmember"))
+    asyncio.run(bot._finish_registration(42, "42", "tguser", "newmember"))
 
     assert emby.created == ["newmember"]
     assert members.upserted and members.upserted[0][1] == "newmember"
@@ -301,10 +301,10 @@ def test_registration_creates_the_account_and_links_the_chat() -> None:
     assert members.bound == [("emby-newmember", "42", "tguser")]
 
 
-def test_the_generated_password_is_shown_once_and_not_chosen() -> None:
+def test_internal_registration_executor_shows_generated_password_once() -> None:
     emby = _FakeEmby()
     bot = _bot(_FakeMembers(), emby)
-    asyncio.run(bot._finish_registration(1, "42", "u", "newmember"))
+    asyncio.run(bot._finish_registration(42, "42", "u", "newmember"))
 
     assert emby.passwords, "a password should have been set"
     issued = emby.passwords[0][1]
@@ -318,14 +318,14 @@ def test_bad_usernames_are_refused_before_touching_emby() -> None:
         assert not USERNAME_RE.match(bad), bad
         emby = _FakeEmby()
         bot = _bot(_FakeMembers(), emby)
-        asyncio.run(bot._finish_registration(1, "42", "u", bad))
+        asyncio.run(bot._finish_registration(42, "42", "u", bad))
         assert emby.created == [], f"{bad!r} reached Emby"
 
 
 def test_a_taken_username_fails_without_creating_a_member() -> None:
     members, emby = _FakeMembers(), _FakeEmby(fail=True)
     bot = _bot(members, emby)
-    asyncio.run(bot._finish_registration(1, "42", "u", "duplicate"))
+    asyncio.run(bot._finish_registration(42, "42", "u", "duplicate"))
     assert members.upserted == []
     assert members.bound == []
     assert any("创建失败" in m for m in bot.sent)  # type: ignore[attr-defined]
@@ -372,7 +372,7 @@ def test_the_cap_is_rechecked_at_creation_not_only_at_the_start() -> None:
 
     emby = _FakeEmby()
     bot = _bot(_FakeMembers(), emby, cfg={"max_users": 5}, db=_Db())
-    asyncio.run(bot._finish_registration(1, "42", "u", "toolate"))
+    asyncio.run(bot._finish_registration(42, "42", "u", "toolate"))
     assert emby.created == [], "the account was created after the cap was reached"
 
 
@@ -388,7 +388,7 @@ def test_an_existing_member_cannot_register_twice() -> None:
 def test_register_days_zero_means_no_expiry() -> None:
     members = _FakeMembers()
     bot = _bot(members, _FakeEmby(), cfg={"register_days": 0})
-    asyncio.run(bot._finish_registration(1, "42", "u", "forever"))
+    asyncio.run(bot._finish_registration(42, "42", "u", "forever"))
     assert "expires_at" not in members.upserted[0][2]
 
 
@@ -756,7 +756,7 @@ def test_the_credential_is_spent_only_after_the_account_exists(transactional_bot
         observed.append(user_id)
         return consume(verdict, user_id, **kwargs)
     monkeypatch.setattr(reg, 'consume', checked_consume)
-    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'newmember', admission=admission))
+    asyncio.run(bot._finish_registration(42, '42', 'tguser', 'newmember', admission=admission))
     assert observed == ['emby-newmember']
     assert reg.get_redeem(card['code'])['status'] == 'used'
     assert reg.get_redeem(card['code'])['used_by'] == 'emby-newmember'
@@ -772,7 +772,7 @@ def test_a_failed_creation_does_not_spend_the_credential(transactional_bot) -> N
     card = bot._registration.generate_redeem('standard', days=30)[0]
     admission = bot._registration.resolve('42', card['code'])
     assert admission.allowed
-    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'duplicate', admission=admission))
+    asyncio.run(bot._finish_registration(42, '42', 'tguser', 'duplicate', admission=admission))
     assert bot._members.list() == []
     assert bot._registration.get_redeem(card['code'])['status'] == 'unused'
     assert bot._registration.get_redeem(card['code'])['used_at'] is None
@@ -786,7 +786,7 @@ def test_a_rejected_username_does_not_spend_the_credential() -> None:
     bot._registration = reg
 
     asyncio.run(bot._finish_registration(
-        1, "42", "tguser", "no",
+        42, "42", "tguser", "no",
         admission=_Verdict(via="invite", credential="INV")))
 
     assert emby.created == []
@@ -799,7 +799,7 @@ def test_an_invite_records_who_vouched_for_the_new_member(transactional_bot) -> 
     invite = bot._registration.issue_invite('emby-owner')
     admission = bot._registration.resolve('42', invite['code'])
     assert admission.allowed and admission.inviter_id == 'emby-owner'
-    asyncio.run(bot._finish_registration(1, '42', 'tguser', 'newmember', admission=admission))
+    asyncio.run(bot._finish_registration(42, '42', 'tguser', 'newmember', admission=admission))
     member = bot._members.find_by_telegram('42')
     assert member['inviter_id'] == 'emby-owner' and member['register_via'] == 'invite'
     assert bot._registration.get_invite(invite['code'])['uses_left'] == 0
@@ -1219,13 +1219,17 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
                      "enabled": False, "active_streams": 9}]
 
     bot = _points_bot(scheduler=_FakeScheduler())
+    class _PlaybackSessions:
+        async def active_sessions(self):
+            return [{'Id': str(n), 'Item': 'Test playback'} for n in range(13)]
+    bot._emby = _PlaybackSessions()
     text = asyncio.run(bot._nodes_text())
     assert "hk1" in text and "25%" in text
     assert "ca1" in text and "95%" in text
     assert "维护中" in text
-    assert "当前在线：<b>5</b> 路播放" in text
-    assert "2 路" in text and "3 路" in text
-    assert "9 路" in text
+    assert "当前在线：<b>13</b> 路播放" in text
+    assert "2 个连接" in text and "3 个连接" in text
+    assert "9 个连接" in text
 
 
 def test_line_page_does_not_keep_account_card_buttons() -> None:
