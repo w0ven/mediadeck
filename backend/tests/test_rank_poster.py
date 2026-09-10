@@ -15,8 +15,10 @@ def test_rank_poster_renders_jpeg_without_covers() -> None:
 
 def test_watch_poster_renders_without_avatars() -> None:
     data = render_watch_poster(
-        [{"username": "alice", "tg_user_id": "1", "seconds": 3600, "hours": 1},
-         {"username": "bob", "tg_user_id": "2", "seconds": 1800, "hours": 0.5}],
+        [{"username": "alice", "tg_username": "alice", "tg_user_id": "1",
+          "seconds": 3600, "hours": 1, "group_id": "whitelist"},
+         {"username": "bob", "tg_username": "bob", "tg_user_id": "2",
+          "seconds": 1800, "hours": 0.5}],
         weekly=False, when="2026-09-09", avatars={"1": b"not-an-image"})
     assert data[:2] == b"\xff\xd8"
     assert len(data) > 4000
