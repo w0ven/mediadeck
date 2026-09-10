@@ -929,9 +929,10 @@ def test_listing_returns_every_builtin_card() -> None:
     with TestClient(app) as client:
         cards = client.get("/api/plugins?category=task", auth=ADMIN).json()
         ids = {c["id"] for c in cards}
-        assert {"group_audit", "inactive_cleanup", "viewing_report",
+        assert {"inactive_cleanup", "viewing_report",
                 "rankings_post", "rankings_weekly", "watch_rank_post",
                 "watch_rank_weekly", "expiry_reminder"} <= ids
+        assert "group_audit" not in ids
         assert all("fields" in c and "config" in c for c in cards)
 
 

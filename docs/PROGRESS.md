@@ -4,6 +4,15 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — collapse duplicate group gates; viewing-report poster
+
+- Task-center hides `group_audit`; membership scan under 群组与频道 is the only
+  group check. Registration no longer has a second require_group field.
+- Viewing reports send a private summary poster, and a manual run returns
+  immediately then finishes in the background so the page does not time out.
+
+---
+
 ## 2026-09-10 — fetch Telegram nicknames for watch ranks
 
 - Binding stored tg_user_id but left tg_username empty for most members, so the

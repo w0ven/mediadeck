@@ -304,3 +304,39 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
     draw.text((64, 980), "▎电视剧", font=_font(32), fill=ACCENT)
     _cover_grid(overlay, shows, covers, 1028)
     return _jpeg(Image.alpha_composite(canvas, overlay))
+
+
+def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
+                          plays: int, traffic: str,
+                          titles: list[dict[str, Any]] | None = None) -> bytes:
+    size = (1080, 1350)
+    canvas = _glass_bg(size).convert("RGBA")
+    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rounded_rectangle((36, 36, size[0] - 36, size[1] - 36),
+                           radius=22, outline=(183, 203, 245, 46), width=1)
+    _title_plate(overlay, f"你的{label}", f"近 {days} 天")
+    who = _clip((name or "会员").strip() or "会员", 16)
+    draw.text((80, 214), who, font=_font(36), fill=TEXT)
+    stats = (
+        (80, 300, f"{hours:g}", "小时"),
+        (400, 300, str(int(plays)), "次播放"),
+        (720, 300, traffic, "流量"),
+    )
+    for x, y, value, caption in stats:
+        draw.rounded_rectangle((x, y, x + 260, y + 160), radius=16,
+                               fill=(22, 29, 43, 210), outline=(172, 191, 239, 50), width=1)
+        draw.text((x + 24, y + 28), value, font=_font(36), fill=TEXT)
+        draw.text((x + 24, y + 96), caption, font=_font(22), fill=ACCENT)
+    draw.text((80, 520), "看得最多", font=_font(28), fill=ACCENT)
+    y = 572
+    for i, item in enumerate((titles or [])[:5], 1):
+        draw.rounded_rectangle((80, y, 1000, y + 108), radius=14,
+                               fill=(22, 29, 43, 200), outline=(172, 191, 239, 40), width=1)
+        draw.text((108, y + 22), f"{i:02d}", font=_font(24), fill=ACCENT)
+        draw.text((168, y + 18), _clip(str(item.get("title") or "—"), 16),
+                  font=_font(30), fill=TEXT)
+        draw.text((168, y + 62), f"{int(item.get('plays') or 0)} 次",
+                  font=_font(22), fill=TEXT2)
+        y += 124
+    return _jpeg(Image.alpha_composite(canvas, overlay))

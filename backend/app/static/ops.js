@@ -663,7 +663,8 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
         [tg.allow_admin_grant ? '预授权' : '', tg.allow_invite ? '邀请码' : '',
           tg.allow_redeem ? '卡密' : ''].filter(Boolean).join(' / ') || '全部通道已关闭')}
       ${stat('☺', tg.max_users ? `上限 ${tg.max_users}` : '不限', '名额',
-        tg.require_group ? `需加入 ${tg.require_group}` : '无群组要求')}
+        (tg.membership_rules?.gate_enabled && (tg.membership_rules.targets||[]).some(t=>t.enabled))
+          ? '需加入关联群组/频道' : '无群组要求')}
       ${stat('⚡', '任务中心', '定时推送', '排行与到期提醒已迁至自动化')}
     </div>
     ${card('机器人对接', 'Token 仅保存在服务端，不会回传浏览器',
@@ -733,9 +734,7 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           <span class="muted">0 = 不限；名额是防止链接外泄后被刷爆的唯一闸门</span></div>
         <div class="form-row"><label for="tg-group">默认用户组</label>
           <input id="tg-group" value="${esc(tg.default_group_id || '')}" placeholder="留空使用系统默认组"></div>
-        <div class="form-row"><label for="tg-reqgroup">要求群组</label>
-          <input id="tg-reqgroup" value="${esc(tg.require_group || '')}" placeholder="@yourgroup 或 -100xxxxxxxxx">
-          <span class="muted">留空则不限制</span></div>
+        <p class="help">加入群组/频道的要求只在「群组与频道」里配置，这里不再重复填写。</p>
         <div class="toolbar"><button class="btn primary" id="tg-save2">保存</button></div>
       </div>`)}
     ${card('通知与排行', '这两件事现在是定时任务',
@@ -789,7 +788,6 @@ function telegramPagePayload() {
     register_days: num('tg-regdays', 30),
     max_users: num('tg-max', 0),
     default_group_id: str('tg-group'),
-    require_group: str('tg-reqgroup'),
   };
 }
 async function sendRankingsNow() {
