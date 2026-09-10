@@ -11,7 +11,7 @@ import pytest
 
 CHROMIUM = shutil.which("chromium") or shutil.which("chromium-browser")
 STATIC = Path(__file__).resolve().parents[1] / "app" / "static"
-SCRIPTS = ("hardglass.css", "workspace.js", "workspace.css", "app.js", "intake.js", "nodepool.js", "ops.js", "members.js", "app.css")
+SCRIPTS = ("hardglass.css", "workspace.js", "workspace.css", "app.js", "intake.js", "nodepool.js", "ops.js", "members.js", "dialog.js", "app.css")
 
 
 def _write_harness(tmp_path: Path, *, hash_route: str = "members") -> Path:

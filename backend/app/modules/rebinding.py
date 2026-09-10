@@ -127,7 +127,7 @@ class RebindingService:
                     status, note = "conflict", "账号或绑定已变化，请重新验证"
                 else:
                     conn.execute(
-                        "UPDATE members SET tg_user_id=?,tg_username=?,tg_bound_at=?,updated_at=? WHERE emby_user_id=? AND tg_user_id=?",
+                        "UPDATE members SET tg_user_id=?,tg_username=?,tg_display_name='',tg_bound_at=?,updated_at=? WHERE emby_user_id=? AND tg_user_id=?",
                         (
                             r["tg_user_id"],
                             r["tg_username"],

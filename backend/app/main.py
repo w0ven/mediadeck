@@ -227,6 +227,8 @@ async def _startup() -> None:
     store = SettingsStore(cfg.settings_file)
     app.state.store = store
     app.state.cache = TTLCache()
+    app.state.member_snapshot_lock = asyncio.Lock()
+    app.state.member_snapshot_revision = 0
     app.state.settings_service = SettingsService(store)
     # First run: migrate .env values into the editable settings document so
     # existing deployments keep working, then never read them again.
@@ -1662,6 +1664,13 @@ async def _reissue_rate_caps(
 
 
 async def _telegram_member_changed(user_id: str, previous_bandwidth: int | None) -> dict[str, Any]:
+    try:
+        return await _apply_telegram_member_change(user_id, previous_bandwidth)
+    finally:
+        _invalidate_member_snapshot()
+
+
+async def _apply_telegram_member_change(user_id: str, previous_bandwidth: int | None) -> dict[str, Any]:
     """Bot's committed entitlement change uses the same policy/rate rules as Web."""
     member = app.state.members.get(user_id)
     if not member:
@@ -1710,6 +1719,49 @@ async def groups_delete(group_id: str, user: str = Depends(_auth)) -> dict[str, 
 
 
 # ---- members ---------------------------------------------------------------
+def _invalidate_member_snapshot() -> None:
+    # Versioning also disarms a read already in flight when a write completes.
+    app.state.member_snapshot_revision += 1
+    app.state.cache.delete('members:emby')
+
+
+async def _member_emby_snapshot() -> tuple[dict[str, Any] | None, str | None]:
+    """Share a short-lived upstream observation across pages and SSE clients.
+
+    Local member data is never cached. Audited changes invalidate the remote
+    snapshot; TTL also observes changes made directly in Emby. A failed refresh
+    reports unknown rather than recycling stale presence/policy as fact.
+    """
+    revision = await asyncio.to_thread(
+        app.state.db.one, "SELECT MAX(id) AS id FROM audit_log WHERE "
+        "action LIKE 'member.%' OR action LIKE 'group.%' OR action LIKE 'enforce.%' "
+        "OR action='telegram.prouser'")
+    version = (id(app.state.emby), revision['id'], app.state.member_snapshot_revision)
+    async with app.state.member_snapshot_lock:
+        cached = app.state.cache.get('members:emby')
+        if cached is not None and cached[0] == version:
+            return cached[1]
+        try:
+            users = {u['Id']: u for u in await app.state.emby.list_users()}
+            value = (users, None)
+        except Exception as exc:  # noqa: BLE001 - a failed upstream is optional
+            value = (None, member_ops.redact(exc))
+        app.state.cache.set('members:emby', (version, value), ttl=5 if value[1] else 30)
+        return value
+
+
+@app.middleware('http')
+async def _invalidate_member_observation(request: Request, call_next):
+    # Also invalidate direct Emby writes, including partial remote failures.
+    changing = request.method in ('POST', 'PUT', 'PATCH', 'DELETE') and request.url.path.startswith(
+        ('/api/members', '/api/groups', '/api/emby/users', '/api/enforcement'))
+    try:
+        return await call_next(request)
+    finally:
+        if changing and hasattr(app.state, 'cache'):
+            _invalidate_member_snapshot()
+
+
 @app.get("/api/members", dependencies=[Depends(_auth)])
 async def members_list(status: str | None = None, group_id: str | None = None,
                        role: str | None = None, search: str | None = None,
@@ -1729,7 +1781,7 @@ async def members_list(status: str | None = None, group_id: str | None = None,
     page, so pagination cannot mis-label an enrolled account as unmanaged.
     """
     paged = page is not None or offset is not None
-    fetch_limit = 5000 if paged else max(1, min(int(limit or 500), 5000))
+    fetch_limit = None if paged else max(1, min(int(limit or 500), 5000))
     members = await asyncio.to_thread(
         app.state.members.list, status=status, group_id=group_id,
         role=role, search=search, limit=fetch_limit,
@@ -1750,13 +1802,7 @@ async def members_list(status: str | None = None, group_id: str | None = None,
                                   {"bytes_7d": 0, "bytes_30d": 0,
                                    "bytes_total": 0})
     known = await asyncio.to_thread(member_ops.known_member_ids, app.state.members)
-    emby_users: dict[str, Any] | None = None
-    unmanaged_error: str | None = None
-    try:
-        emby_users = {u["Id"]: u for u in await app.state.emby.list_users()}
-    except Exception as exc:  # noqa: BLE001 - the member list must still render
-        unmanaged_error = str(exc)[:200]
-        emby_users = None
+    emby_users, unmanaged_error = await _member_emby_snapshot()
     if emby_users:
         for member in members:
             user = emby_users.get(member["emby_user_id"]) or {}

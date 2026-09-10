@@ -192,7 +192,7 @@ RULES_TEXT = """📜 <b>行为准则</b>
 发送 /start 回到菜单。"""
 
 MEMBER_COMMANDS = {"start", "help", "me", "myinfo", "rules", "rank"}
-GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "rank", "rules", "help")
+GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "usage", "rank", "rules", "help")
 GROUP_ADMIN_COMMANDS = (
     "kk", "renew", "score", "prouser", "revuser", "rmemby", "rm",
 )
@@ -277,6 +277,7 @@ class TelegramBot(RebindBotMixin):
         self._http: httpx.AsyncClient | None = None
         self._http_token = ""
         self._tg_profiles: dict[str, dict[str, str]] = {}
+        self._tg_profile_until: dict[str, float] = {}
         self._job_progress: dict[str, tuple[str, int]] = {}
         self._http_loop: asyncio.AbstractEventLoop | None = None
         self._in_flight: set[asyncio.Task] = set()
@@ -455,6 +456,7 @@ class TelegramBot(RebindBotMixin):
             commands = [
                 {"command": "start", "description": "打开私聊"},
                 {"command": "me", "description": "我的简卡"},
+                {"command": "usage", "description": "用量与观看"},
                 {"command": "rank", "description": "观看排行"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
@@ -1439,8 +1441,10 @@ class TelegramBot(RebindBotMixin):
                     if cap and used >= cap:
                         raise ConfigError('注册名额已满。')
                     member = self._members.upsert(emby_id, username, payload, actor='telegram', conn=conn)
-                    conn.execute('UPDATE members SET tg_user_id=?,tg_username=?,tg_bound_at=? WHERE emby_user_id=?',
-                                 (tg_user_id, tg_username, now, emby_id))
+                    conn.execute('UPDATE members SET tg_user_id=?,tg_username=?,tg_display_name=?,tg_bound_at=? WHERE emby_user_id=?',
+                                 (tg_user_id, tg_username,
+                                  self._tg_profiles.get(tg_user_id, {}).get('display_name', ''),
+                                  now, emby_id))
                     self._members.audit('telegram', 'member.telegram.bind', emby_id, 'linked', conn=conn)
                     if (admission is not None and self._registration is not None
                             and not self._registration.consume(admission, emby_id, conn=conn)):
@@ -2026,8 +2030,7 @@ class TelegramBot(RebindBotMixin):
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
             if not profile:
                 continue
-            if profile.get("username") and not row.get("tg_username"):
-                row["tg_username"] = profile["username"]
+            row["tg_username"] = profile.get("username", "")
             if profile.get("display_name"):
                 row["tg_display_name"] = profile["display_name"]
         medals = ("🥇", "🥈", "🥉")
@@ -2041,7 +2044,14 @@ class TelegramBot(RebindBotMixin):
             for offset, row in enumerate(chunk):
                 rank = start + offset + 1
                 medal = medals[rank - 1] if rank <= 3 else "🏅"
-                name = watch_rank_mention(row)
+                # Telegram counts caption length after HTML parsing. Bound
+                # labels, not raw HTML, so ten clickable names fit without
+                # cutting an entity or closing tag (including emoji names).
+                label = str(row.get('tg_display_name') or row.get('tg_username') or '')
+                visible = dict(row)
+                if len(label.encode('utf-16-le')) // 2 > 40:
+                    visible['tg_display_name'] = label.encode('utf-16-le')[:76].decode('utf-16-le', errors='ignore') + '…'
+                name = watch_rank_mention(visible)
                 if str(row.get("group_id") or "") == WHITELIST_GROUP_ID:
                     name += " · 💠白名单"
                 lines.append(
@@ -2500,8 +2510,7 @@ class TelegramBot(RebindBotMixin):
                      {'text': '关闭', 'callback_data': 'panel_close'}],
                     *self._private_button('manage', '完整管理 · 私聊')]
         return [
-            [{"text": "🔍 查找用户", "callback_data": "admin_find"},
-             {"text": "🎁 赠送开号", "callback_data": "admin_find"}],
+            [{"text": "🔍 查找 / 赠送开号", "callback_data": "admin_find"}],
             [{"text": "📋 求片队列", "callback_data": "admin_reqs"},
              {"text": "🎟 生成卡密", "callback_data": "admin_code"}],
             [{"text": "✅ 预授权注册", "callback_data": "admin_auth"}],
@@ -2868,23 +2877,28 @@ class TelegramBot(RebindBotMixin):
             await self._cmd_rm(chat_id, actor, [str(target.get("username") or "")])
 
     def _find_target(self, token: str) -> dict[str, Any] | None:
-        """Resolve '@name' or a bare Emby username to a member."""
-        name = str(token or "").strip().lstrip("@")
+        """Resolve Telegram id, @handle or Emby username to a member."""
+        raw = str(token or "").strip()
+        name = raw.lstrip("@")
         if not name:
             return None
-        if name.isdigit():
+        if not raw.startswith('@') and name.isascii() and name.isdigit():
             found = self._members.find_by_telegram(name)
             if found:
                 return found
-        found = self._members.find_by_username(name)
-        if found:
-            return found
-        # A Telegram @handle is not the Emby login, so fall back to the link
-        # table rather than telling an operator their own admin does not exist.
-        for candidate in self._members.linked_telegram():
-            if str(candidate.get("tg_username") or "").lower() == name.lower():
-                return candidate
-        return None
+        if not raw.startswith('@'):
+            found = self._members.find_by_username(name)
+            if found:
+                return found
+        if self._db is None:
+            return None
+        rows = self._db.query(
+            'SELECT emby_user_id FROM members WHERE tg_username=? COLLATE NOCASE AND tg_user_id<>\'\'',
+            (name,))
+        ids = {r['emby_user_id'] for r in rows}
+        if len(ids) != 1:
+            return None
+        return self._members.get(ids.pop())
 
     def _admin_actor(self, member: dict[str, Any], tg_username: str) -> str:
         label = tg_username or member.get("username") or "admin"
@@ -2917,15 +2931,17 @@ class TelegramBot(RebindBotMixin):
         lines = [
             "❓ <b>群内命令</b>",
             "",
-            "· /me 我的账号卡：状态、分组、额度与剩余、观看摘要（完整资料请私聊）",
-            "· /rank 今日 / 本周观影时长与热度",
+            "· /me 我的账号卡",
+            "· /usage 用量与观看",
+            "· /rank 日 / 周观影榜（海报）",
             "· /rules 行为准则",
             "· /start 打开私聊菜单",
         ]
         if self.is_admin(member):
             lines += [
                 "",
-                "管理员可回复对方消息或带参数使用 /kk /renew /score /prouser /revuser /rmemby。",
+                "管理（回复对方或带参数）：/kk /renew /score /prouser /revuser /rm",
+                "卡密、全员续期/加分请私聊；赠送开号可用 /kk 查找未注册 TG。",
             ]
         return "\n".join(lines)
 
@@ -2994,8 +3010,7 @@ class TelegramBot(RebindBotMixin):
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
             if not profile:
                 continue
-            if profile.get("username") and not row.get("tg_username"):
-                row["tg_username"] = profile["username"]
+            row["tg_username"] = profile.get("username", "")
             if profile.get("display_name"):
                 row["tg_display_name"] = profile["display_name"]
         if not rows:
@@ -3169,10 +3184,8 @@ class TelegramBot(RebindBotMixin):
             hours = 24
             if args and args[0] in ("7", "168", "30", "720"):
                 hours = 168
-            await self._fill_rank_profiles(hours)
-            await self._show(chat_id, self._watch_rankings_text(hours),
-                             self._watch_rankings_keyboard(hours))
-            return
+            shown = await self._present_watch_rank(chat_id, hours)
+            return shown
         if command == "manage" and self.is_admin(member):
             if in_group:
                 await self._show(chat_id, "请私聊打开管理菜单，或直接使用 /kk /renew 等命令。")
@@ -3225,7 +3238,10 @@ class TelegramBot(RebindBotMixin):
             return
 
         if in_group and command not in GROUP_ADMIN_COMMANDS:
-            await self._group_start(chat_id, 'manage')
+            await self._show(
+                chat_id,
+                "群里管理只用 /kk /renew /score /prouser /revuser /rm。\n"
+                "卡密、全员续期/加分请私聊；赠送开号可用 /kk 查找未注册 TG。")
             return
         actor = self._admin_actor(member, tg_username)
         handler = getattr(self, f"_cmd_{command}", None)
@@ -3428,10 +3444,28 @@ class TelegramBot(RebindBotMixin):
             await self.send(chat_id, "用法：<code>/renew 用户名 天数</code>")
             return
         days = int(args[1])
+        if _GROUP.get():
+            nonce = secrets.token_hex(6)
+            self._pending[self._pkey(chat_id)] = (
+                "admin_confirm", time.time() + PENDING_TTL,
+                {"action": "renew_one", "user_id": str(target.get("emby_user_id")),
+                 "days": days, "actor": actor, "nonce": nonce,
+                 "username": target.get("username")})
+            shown = await self._show(
+                chat_id,
+                f"⚠ 确认给 <b>{escape(str(target.get('username')))}</b> 续期 {days} 天？",
+                [[{"text": "✅ 确认续期", "callback_data": f"admin_ok:{nonce}"},
+                  {"text": "✖ 取消", "callback_data": "admin_cancel"}]])
+            if shown:
+                self._pending[self._pkey(chat_id)][2]["message_id"] = self._panel.get(self._pkey(chat_id))
+                self._remember_admin_panel(chat_id, target, actor)
+            else:
+                self._pending.pop(self._pkey(chat_id), None)
+            return shown
         updated = self._members.renew(str(target.get("emby_user_id")), days,
                                       actor=actor)
         notice = await self._after_member_change(target)
-        await self.send(
+        return await self._show(
             chat_id,
             f"✅ <b>{escape(str(target.get('username')))}</b> 已续期 {days} 天，"
             f"现在{_fmt_expiry(updated.get('expires_at_effective', updated.get('expires_at')))}。{notice}")
@@ -3445,14 +3479,17 @@ class TelegramBot(RebindBotMixin):
         user_ids = [str(m["emby_user_id"]) for m in self._members.list(limit=5000)]
         total = len(user_ids)
         # Everyone at once is not undoable, so it is confirmed before it runs.
+        nonce = secrets.token_hex(6)
         self._pending[self._pkey(chat_id)] = (
             "admin_confirm", time.time() + PENDING_TTL,
-            {"action": "renewall", "days": days, "actor": actor, "user_ids": user_ids})
+            {"action": "renewall", "days": days, "actor": actor, "user_ids": user_ids,
+             "nonce": nonce})
         await self.send(
             chat_id,
             f"⚠ <b>全员续期</b>\n\n将给 <b>{total}</b> 个账号各加 {days} 天。\n\n确认执行？",
-            [[{"text": "✅ 确认", "callback_data": "admin_ok"},
+            [[{"text": "✅ 确认", "callback_data": f"admin_ok:{nonce}"},
               {"text": "✖ 取消", "callback_data": "admin_cancel"}]])
+        self._pending[self._pkey(chat_id)][2]["message_id"] = self._panel.get(self._pkey(chat_id))
 
     async def _cmd_rm(self, chat_id: Any, actor: str,
                       args: list[str]) -> None:
@@ -3505,6 +3542,23 @@ class TelegramBot(RebindBotMixin):
             await self.send(chat_id, "积分服务不可用。")
             return
         user_id = str(target.get("emby_user_id"))
+        if _GROUP.get():
+            nonce = secrets.token_hex(6)
+            self._pending[self._pkey(chat_id)] = (
+                "admin_confirm", time.time() + PENDING_TTL,
+                {"action": "score_one", "user_id": user_id, "delta": delta,
+                 "actor": actor, "nonce": nonce, "username": target.get("username")})
+            shown = await self._show(
+                chat_id,
+                f"⚠ 确认给 <b>{escape(str(target.get('username')))}</b> 积分 {delta:+d}？",
+                [[{"text": "✅ 确认", "callback_data": f"admin_ok:{nonce}"},
+                  {"text": "✖ 取消", "callback_data": "admin_cancel"}]])
+            if shown:
+                self._pending[self._pkey(chat_id)][2]["message_id"] = self._panel.get(self._pkey(chat_id))
+                self._remember_admin_panel(chat_id, target, actor)
+            else:
+                self._pending.pop(self._pkey(chat_id), None)
+            return shown
         try:
             balance = self._points.add(user_id, delta, "admin.adjust",
                                        ref="tg", actor=actor)
@@ -3512,7 +3566,7 @@ class TelegramBot(RebindBotMixin):
             await self.send(chat_id, f"❌ {_public_error(exc)}")
             return
         self._members.audit(actor, "points.adjust", user_id, f"delta={delta}")
-        await self.send(
+        return await self._show(
             chat_id,
             f"✅ <b>{escape(str(target.get('username')))}</b> 积分 {delta:+d}，当前 {balance}。")
 
@@ -3524,14 +3578,17 @@ class TelegramBot(RebindBotMixin):
         amount = int(args[0].lstrip("+"))
         user_ids = [str(m["emby_user_id"]) for m in self._members.list(limit=5000)]
         total = len(user_ids)
+        nonce = secrets.token_hex(6)
         self._pending[self._pkey(chat_id)] = (
             "admin_confirm", time.time() + PENDING_TTL,
-            {"action": "scoreall", "amount": amount, "actor": actor, "user_ids": user_ids})
+            {"action": "scoreall", "amount": amount, "actor": actor, "user_ids": user_ids,
+             "nonce": nonce})
         await self.send(
             chat_id,
             f"⚠ <b>全员积分</b>\n\n将给 <b>{total}</b> 个账号各 {amount:+d} 分。\n\n确认执行？",
-            [[{"text": "✅ 确认", "callback_data": "admin_ok"},
+            [[{"text": "✅ 确认", "callback_data": f"admin_ok:{nonce}"},
               {"text": "✖ 取消", "callback_data": "admin_cancel"}]])
+        self._pending[self._pkey(chat_id)][2]["message_id"] = self._panel.get(self._pkey(chat_id))
 
     async def _cmd_gift(self, chat_id: Any, actor: str,
                         args: list[str]) -> None:
@@ -3657,7 +3714,52 @@ class TelegramBot(RebindBotMixin):
             return
         extra = waiting[2]
         action = str(extra.get("action") or "")
+        if action in ('renew_one', 'score_one'):
+            if extra.get('consumed'):
+                return
+            # Cards hold the same draft object: consume before any remote
+            # await, so a restored old card cannot replay the single-user op.
+            extra['consumed'] = True
         actor = str(extra.get("actor") or "tg:admin")
+
+        if action == "renew_one":
+            days = int(extra.get("days") or 0)
+            uid = str(extra.get("user_id") or "")
+            row = self._members.get(uid)
+            if not row:
+                await self._edit(chat_id, message_id, "这个用户已经不在了。")
+                return
+            try:
+                updated = self._members.renew(uid, days, actor=actor)
+            except (ValueError, KeyError) as exc:
+                await self._edit(chat_id, message_id, f"❌ {_public_error(exc)}")
+                return
+            notice = await self._after_member_change(row)
+            await self._edit(
+                chat_id, message_id,
+                f"✅ <b>{escape(str(row.get('username')))}</b> 已续期 {days} 天，"
+                f"现在{_fmt_expiry(updated.get('expires_at_effective', updated.get('expires_at')))}。{notice}")
+            return
+
+        if action == "score_one":
+            delta = int(extra.get("delta") or 0)
+            uid = str(extra.get("user_id") or "")
+            if not self._members.get(uid):
+                await self._edit(chat_id, message_id, "这个用户已经不在了。")
+                return
+            if self._points is None:
+                await self._edit(chat_id, message_id, "积分服务不可用。")
+                return
+            try:
+                balance = self._points.add(uid, delta, "admin.adjust", ref="tg", actor=actor)
+            except ValueError as exc:
+                await self._edit(chat_id, message_id, f"❌ {_public_error(exc)}")
+                return
+            self._members.audit(actor, "points.adjust", uid, f"delta={delta}")
+            await self._edit(
+                chat_id, message_id,
+                f"✅ <b>{escape(str(extra.get('username') or uid))}</b> 积分 {delta:+d}，当前 {balance}。")
+            return
 
         if action == "renewall":
             days = int(extra.get("days") or 0)
@@ -3792,6 +3894,10 @@ class TelegramBot(RebindBotMixin):
         if in_group and not self._group_chat_allowed(message.get("chat") or {}):
             return
 
+        self._remember_tg_user(from_user)
+        reply_user = (message.get('reply_to_message') or {}).get('from') or {}
+        self._remember_tg_user(reply_user)
+        tg_name = self._tg_profiles.get(tg_user_id, {}).get('display_name') or tg_name
         with self._bind_session(chat_id, tg_user_id, group=in_group,
                                 thread_id=self._thread_id(message)):
             await self._handle_bound_message(
@@ -3941,7 +4047,7 @@ class TelegramBot(RebindBotMixin):
             shown = await self._handle_command(
                 chat_id, tg_user_id, tg_username, text, display_name=tg_name)
             command = text.split()[0].lower().split('@', 1)[0]
-            if shown and command in ('/kk', '/me'):
+            if shown and command in ('/kk', '/me', '/rank', '/renew', '/score'):
                 await self._delete_trigger_command(chat_id, message.get('message_id'))
             return
 
@@ -3963,6 +4069,8 @@ class TelegramBot(RebindBotMixin):
         tg_user_id = str(from_user.get("id") or "")
         tg_name = from_user.get("first_name") or "朋友"
         callback_id = str(callback.get("id") or "")
+        self._remember_tg_user(from_user)
+        tg_name = self._tg_profiles.get(tg_user_id, {}).get('display_name') or tg_name
         await self._run_callback(data, chat_id, message_id, callback_id,
                                  tg_user_id, tg_name, message)
 
@@ -4056,7 +4164,7 @@ class TelegramBot(RebindBotMixin):
             await self._answer_callback(callback_id, '这不是你的操作卡片，请发送自己的命令。')
             return
         panel = self._admin_panel(chat_id, message_id)
-        targeted = data.startswith(('admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or data in (
+        targeted = data.startswith(('admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
             'admin_card', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
             'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser')
         if panel:
@@ -4084,7 +4192,7 @@ class TelegramBot(RebindBotMixin):
                               'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_renew', 'admin_score', 'admin_usage',
                               'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift')
-            public = public or data.startswith(('admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
+            public = public or data.startswith(('admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
                 await self._answer_callback(callback_id, '请使用卡片上的私聊入口继续此操作。')
                 return
@@ -4207,10 +4315,15 @@ class TelegramBot(RebindBotMixin):
             self._pending.pop(self._pkey(chat_id), None)
             await self._show_home(chat_id, tg_user_id, tg_name)
             return
-        if data == "admin_ok":
+        if data == "admin_ok" or data.startswith("admin_ok:"):
             waiting = self._pending.get(self._pkey(chat_id))
             if waiting and waiting[2].get("action") == "rm":
                 return  # legacy generic confirmations cannot authorise deletion
+            nonce = (waiting[2].get("nonce") if waiting else None)
+            if data.startswith('admin_ok:') and not nonce:
+                return
+            if nonce and data != f"admin_ok:{nonce}":
+                return
             await self._admin_confirm(chat_id, message_id, member)
             return
         if data.startswith(("rm_self:", "rm_cascade:")):
@@ -4692,6 +4805,10 @@ class TelegramBot(RebindBotMixin):
             sent = await self.send(chat_id, part) and sent
         return sent
 
+    async def _present_watch_rank(self, chat_id: Any, hours: int = 24) -> bool:
+        """Commands share the scheduled calendar board, poster and pager."""
+        return await self.broadcast_watch_rank(chat_id, 7 if hours >= 168 else 1)
+
     async def broadcast_watch_rank(self, chat_id: str, days: int = 1) -> bool:
         """Scheduled watch-time board: podium photo plus a numbered pager."""
         if not chat_id or not self.enabled:
@@ -4701,14 +4818,19 @@ class TelegramBot(RebindBotMixin):
         keyboard = self._watch_rank_keyboard(1, len(pages), days)
         photo = await self._watch_rank_poster(days)
         if photo:
+            payload = {"chat_id": str(chat_id), "caption": pages[0],
+                       "parse_mode": "HTML",
+                       "reply_markup": {"inline_keyboard": keyboard}}
+            if _THREAD.get() and self._in_bound_chat(chat_id):
+                payload['message_thread_id'] = _THREAD.get()
             result = await self._call_multipart(
-                "sendPhoto",
-                {"chat_id": str(chat_id), "caption": pages[0][:1024],
-                 "parse_mode": "HTML",
-                 "reply_markup": {"inline_keyboard": keyboard}},
+                "sendPhoto", payload,
                 {"photo": ("watch-rank.jpg", photo, "image/jpeg")})
             if isinstance(result, dict) and result.get("message_id"):
                 self._photo_panels.add((str(chat_id), int(result["message_id"])))
+                if _SESSION.get() is not None:
+                    self._touch_panel(chat_id, result['message_id'])
+                    self._remember_menu(chat_id, result['message_id'], keyboard)
                 return True
             if result is not None:
                 return True
@@ -4749,22 +4871,48 @@ class TelegramBot(RebindBotMixin):
         display = " ".join(part for part in (first, last) if part)
         return {"display_name": display, "username": handle}
 
+    def _store_tg_profile(self, tg_id: str, profile: dict[str, str]) -> None:
+        if len(self._tg_profiles) >= 5000 and tg_id not in self._tg_profiles:
+            oldest = next(iter(self._tg_profiles))
+            self._tg_profiles.pop(oldest, None)
+            self._tg_profile_until.pop(oldest, None)
+        self._tg_profiles[tg_id] = profile
+        self._tg_profile_until[tg_id] = time.time() + 6 * 3600
+        if self._db is not None:
+            self._db.execute(
+                'UPDATE members SET tg_username=?,tg_display_name=? WHERE tg_user_id=? '
+                'AND (tg_username<>? OR tg_display_name<>?)',
+                (profile['username'], profile['display_name'], tg_id,
+                 profile['username'], profile['display_name']))
+
+    def _remember_tg_user(self, user: dict[str, Any]) -> None:
+        """Only Telegram-supplied user fields, never infer a handle from login."""
+        tg_id = str(user.get('id') or '')
+        if user.get('is_bot') or not tg_id.isascii() or not tg_id.isdigit():
+            return
+        if not user.get('first_name'):
+            return  # an id-only/partial object is not evidence of a removed name
+        profile = {
+            'display_name': ' '.join(str(user.get(k) or '').strip()
+                                     for k in ('first_name', 'last_name')).strip(),
+            'username': str(user.get('username') or '').strip().lstrip('@'),
+        }
+        self._store_tg_profile(tg_id, profile)
+
     async def _remember_watch_profiles(self, rows: list[dict[str, Any]]) -> None:
         seen: set[str] = set()
         for row in rows:
-            tg_id = str(row.get("tg_user_id") or "")
-            if not tg_id or tg_id in seen or tg_id in self._tg_profiles:
+            tg_id = str(row.get('tg_user_id') or '')
+            if not tg_id or tg_id in seen or self._tg_profile_until.get(tg_id, 0) > time.time():
                 continue
             seen.add(tg_id)
+            # A failed lookup gets a short negative TTL, without erasing known
+            # database names or preventing later normal interactions updating them.
+            self._tg_profile_until[tg_id] = time.time() + 300
             with contextlib.suppress(Exception):
                 profile = await self._tg_profile(tg_id)
-                self._tg_profiles[tg_id] = profile
-                handle = str(profile.get("username") or "").strip()
-                if handle and self._db is not None:
-                    with contextlib.suppress(Exception):
-                        self._db.execute(
-                            "UPDATE members SET tg_username=? WHERE tg_user_id=? AND tg_username=''",
-                            (handle, tg_id))
+                if profile.get('display_name') or profile.get('username'):
+                    self._store_tg_profile(tg_id, profile)
 
     async def _fill_rank_profiles(self, hours: int) -> None:
         rows: list[dict[str, Any]] = []
@@ -4825,8 +4973,7 @@ class TelegramBot(RebindBotMixin):
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
             if not profile:
                 continue
-            if profile.get("username") and not row.get("tg_username"):
-                row["tg_username"] = profile["username"]
+            row["tg_username"] = profile.get("username", "")
             if profile.get("display_name"):
                 row["tg_display_name"] = profile["display_name"]
         avatars: dict[str, bytes] = {}

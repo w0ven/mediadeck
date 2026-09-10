@@ -77,7 +77,7 @@
   });
 
   const DB = [
-    mk('u-alice', 'alice', { invitee_count: 1, inviter_id: 'u-sponsor', inviter_name: 'sponsor', tg_username: 'alice_tg', tg_user_id: '100' }),
+    mk('u-alice', 'alice', { invitee_count: 1, inviter_id: 'u-sponsor', inviter_name: 'sponsor', tg_username: 'alice_tg', tg_user_id: '100', tg_display_name: '观影小明' }),
     mk('u-bob', 'bob', {
       entitlement_state: 'expired', state: 'expired',
       expires_at: now - 86400, expires_at_effective: now - 86400,
@@ -278,6 +278,24 @@
     return true;
   };
   window.prompt = () => '30';
+  // Exercise the shipped asynchronous DOM dialogs, not the retired native
+  // confirm contract. Only the operator's clicks are automated.
+  const realConfirm = window.deckConfirm;
+  window.deckConfirm = (msg) => {
+    const answer = window.confirm(msg);
+    const pending = realConfirm(msg);
+    document.querySelector('.deck-dialog-backdrop:not(.deck-dialog-closing) ' +
+      (answer ? '.deck-dialog-btn-confirm' : '.deck-dialog-btn-cancel')).click();
+    return pending;
+  };
+  const realPrompt = window.deckPrompt;
+  window.deckPrompt = (msg, value) => {
+    const pending = realPrompt(msg, value);
+    const dialog = document.querySelector('.deck-dialog-backdrop:not(.deck-dialog-closing)');
+    dialog.querySelector('input').value = window.prompt(msg, value);
+    dialog.querySelector('.deck-dialog-btn-confirm').click();
+    return pending;
+  };
 
   const rowNames = () => [...document.querySelectorAll('#members-tbody .linkish')].map((el) => el.textContent.trim());
   const visibleText = (el) => (el ? el.textContent.replace(/\s+/g, ' ').trim() : '');
@@ -306,6 +324,7 @@
 
     const aliceRow = document.querySelector('tr[data-id="u-alice"]');
     assert(aliceRow && /Emby 在线/.test(visibleText(aliceRow)), 'alice emby present not shown');
+    assert(visibleText(aliceRow).includes('观影小明') && !visibleText(aliceRow).includes('@alice_tg'), 'TG nickname should precede handle');
 
     await go('members?q=alice&page=1&page_size=5');
     await tick();
@@ -333,11 +352,47 @@
     await tick();
     await waitFor(() => rowNames().length === 5, 'page 1 size 5 failed');
     const page1 = rowNames();
+    const pickPage1 = document.querySelector('.m-pick');
+    pickPage1.checked = true;
+    pickPage1.dispatchEvent(new Event('change', {bubbles:true}));
+    assert(!document.getElementById('members-bulk').classList.contains('hidden'), 'page 1 selection missing');
     await go('members?page_size=5&page=2');
     await tick();
     await waitFor(() => /page=2/.test(location.hash) && rowNames().length === 5,
       'go page 2 did not load: ' + location.hash + ' ' + rowNames().join(','));
     const page2 = rowNames();
+    assert(document.getElementById('members-bulk').classList.contains('hidden'), 'page 1 selection leaked into page 2');
+    const pickPage2 = document.querySelector('.m-pick');
+    const page2Id = pickPage2.dataset.id;
+    pickPage2.checked = true;
+    pickPage2.dispatchEvent(new Event('change', {bubbles:true}));
+    document.querySelector('[data-bulk="suspend"]').click();
+    await waitFor(() => requests.some(r => r.path === '/api/members/bulk'), 'page 2 bulk not sent');
+    assert(requests.filter(r => r.path === '/api/members/bulk').at(-1).body.user_ids.join() === page2Id,
+      'bulk operated on a hidden page 1 selection');
+    await waitFor(() => document.getElementById('members-bulk').classList.contains('hidden'), 'completed selection retained');
+    // A confirmation held open across browser navigation must not submit
+    // the selection from the previous page when it is finally accepted.
+    const autoConfirm = window.deckConfirm;
+    window.deckConfirm = realConfirm;
+    const heldPick = document.querySelector('.m-pick');
+    heldPick.checked = true;
+    heldPick.dispatchEvent(new Event('change', {bubbles:true}));
+    const bulkBefore = requests.filter(r => r.path === '/api/members/bulk').length;
+    document.querySelector('[data-bulk="suspend"]').click();
+    await waitFor(() => document.querySelector('.deck-dialog-backdrop:not(.deck-dialog-closing)'), 'bulk confirmation not visible');
+    await go('members?page_size=5&page=1');
+    document.querySelector('.deck-dialog-backdrop:not(.deck-dialog-closing) .deck-dialog-btn-confirm').click();
+    await tick();
+    assert(requests.filter(r => r.path === '/api/members/bulk').length === bulkBefore, 'stale page confirmation performed a bulk write');
+    window.deckConfirm = autoConfirm;
+    await go('members?page_size=5&page=2');
+    const filterPick = document.querySelector('.m-pick');
+    filterPick.checked = true;
+    filterPick.dispatchEvent(new Event('change', {bubbles:true}));
+    await go('members?q=alice&page_size=5');
+    assert(document.getElementById('members-bulk').classList.contains('hidden'), 'filter retained hidden selection');
+    await go('members?page_size=5&page=2');
     page1.forEach((name) => assert(!page2.includes(name), 'page 2 overlaps page 1 with ' + name));
     await go('members?page_size=5&page=1');
     await tick();
@@ -473,7 +528,7 @@
     const detail = document.getElementById('member-detail');
     const heading = detail.querySelector('h3');
     const selectedBefore = document.getElementById('m-sel-count').textContent;
-    assert(/已选择 1 人/.test(selectedBefore), 'selection count: ' + selectedBefore);
+    assert(/已选择当前页 1 人/.test(selectedBefore), 'selection count: ' + selectedBefore);
 
     const beforeReq = requests.length;
     const source = sources.filter((s) => /topics=members/.test(s.url)).at(-1);
@@ -490,7 +545,7 @@
     assert(document.getElementById('member-detail') === detail, 'live update replaced detail node');
     assert(detail.contains(heading) && heading.textContent === 'alice', 'live update closed/rebuilt detail');
     assert(box.isConnected && box.checked, 'live update lost checkbox');
-    assert(/已选择 1 人/.test(document.getElementById('m-sel-count').textContent), 'live update lost selection count');
+    assert(/已选择当前页 1 人/.test(document.getElementById('m-sel-count').textContent), 'live update lost selection count');
     assert(scrollBefore > 0 && document.getElementById('members-table-wrap').scrollTop === scrollBefore,
       'live update changed table scroll ' + document.getElementById('members-table-wrap').scrollTop);
     const memberGets = requests.slice(beforeReq).filter((r) => r.path.startsWith('/api/members?')).length;
@@ -501,6 +556,7 @@
 
     drawerEditor.blur();
     document.getElementById('md-close').click();
+    await waitFor(() => document.getElementById('member-detail').classList.contains('hidden'), 'drawer close did not finish');
     document.querySelector('[data-act="metering"]').click();
     await waitFor(() => document.getElementById('meter-cutover'), 'metering preview missing');
     document.getElementById('meter-cutover').click(); await tick();

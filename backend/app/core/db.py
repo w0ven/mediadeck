@@ -656,6 +656,10 @@ class Database:
             # already answers for someone else.
             self._ensure_column("members", "tg_user_id", "TEXT NOT NULL DEFAULT ''")
             self._ensure_column("members", "tg_username", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column("members", "tg_display_name", "TEXT NOT NULL DEFAULT ''")
+            self._conn.execute(
+                'CREATE INDEX IF NOT EXISTS idx_members_tg_username '
+                'ON members(tg_username COLLATE NOCASE)')
             self._ensure_column("members", "tg_bound_at", "INTEGER")
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_members_tg "

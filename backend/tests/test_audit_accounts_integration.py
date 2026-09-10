@@ -164,7 +164,7 @@ def test_all_bot_entitlement_paths_use_injected_callback(integrated, monkeypatch
             await bot._admin_handle_text(12, member, kind, extra, '7')
         elif path == 'bulk':
             await bot._handle_command(12, '12', 'operator', '/renewall 7')
-            await bot._handle_callback(callback('admin_ok'))
+            await bot._handle_callback(callback('admin_ok:' + bot._pending['12'][2]['nonce']))
         elif path == 'gift':
             await bot._handle_command(12, '12', 'operator', '/gift demo-user-1 days 7')
         elif path == 'shop':
@@ -281,7 +281,7 @@ def test_bulk_renew_stops_if_authority_changes_during_sync(integrated):
     bot._on_member_changed = changed
     async def run():
         await bot._handle_command(12, '12', 'operator', '/renewall 7')
-        await bot._handle_callback(callback('admin_ok'))
+        await bot._handle_callback(callback('admin_ok:' + bot._pending['12'][2]['nonce']))
     asyncio.run(run())
     assert bot._members.get('u2')['expires_at_effective'] == before
     assert '剩余未执行' in str(bot.calls)

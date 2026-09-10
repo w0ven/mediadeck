@@ -162,8 +162,13 @@ def test_group_me_does_not_show_other_people(bot):
     assert "alice" in last_text(bot)
 
 
-def test_group_rank_is_rolling_watch_time_not_calendar_today(bot):
-    now = int(time.time())
+def test_group_rank_matches_scheduled_calendar_board(bot):
+    from unittest.mock import AsyncMock
+
+    from app.modules.stats import ranking_bounds
+    _, until = ranking_bounds(1)
+    now = int(until)
+    bot._watch_rank_poster = AsyncMock(return_value=None)
     bot.db.execute(
         "INSERT INTO play_events (emby_user_id,username,item_id,item_name,item_type,"
         "series_name,device_id,client,play_method,node,remote_ip,bytes,seconds,"
@@ -179,18 +184,19 @@ def test_group_rank_is_rolling_watch_time_not_calendar_today(bot):
     bot._stats = StatsService(bot.db)
     run(bot._handle_message(_msg("/rank", user=ALICE, username="alice_tg")))
     body = last_text(bot)
-    assert "今日" in body
-    assert "alice" in body and "2小时0分" in body
-    assert "root" not in body
-    mid = bot._panel[f"g:{GROUP}:0:{ALICE}"]
-    run(bot._handle_callback(_cb("rank:720", user=ALICE, mid=mid)))
-    assert "本周" in last_text(bot)
-    assert "root" in last_text(bot)
+    assert "1 天观影榜" in body
+    assert 'tg://user?id=901' in body and 'T' in body and "2小时0分" in body
+    assert 'tg://user?id=900' not in body
+    assert bot._watch_rank_poster.await_args.args == (1,)
+    run(bot._handle_message(_msg('/rank 7', user=ALICE, username='alice_tg')))
+    assert "7 天观影榜" in last_text(bot)
+    assert 'tg://user?id=900' in last_text(bot)
+    assert bot._watch_rank_poster.await_args.args == (7,)
 
 
 def test_private_rank_and_myinfo_aliases_still_work(bot):
     run(bot._handle_command("900", ADMIN, "rootadmin", "/rank"))
-    assert "今日观影榜" in last_text(bot)
+    assert "1 天观影榜" in last_text(bot)
     bot.calls.clear()
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)
@@ -299,9 +305,14 @@ def test_rmemby_cancel_and_replay_do_not_delete(bot):
 def test_group_renew_and_score_accept_reply_or_args(bot):
     before = bot.members.get("u1")["expires_at"] or int(time.time())
     reply = {"from": {"id": int(ALICE), "username": "alice_tg", "is_bot": False}}
+    key = f'g:{GROUP}:0:{ADMIN}'
     run(bot._handle_message(_msg("/renew 30", reply=reply)))
+    assert bot.members.get('u1')['expires_at'] == before
+    run(bot._handle_callback(_cb('admin_ok:' + bot._pending[key][2]['nonce'], mid=bot._panel[key])))
     assert bot.members.get("u1")["expires_at"] >= before + 29 * 86400
     run(bot._handle_message(_msg("/score alice +8")))
+    assert bot.points.balance('u1') == 0
+    run(bot._handle_callback(_cb('admin_ok:' + bot._pending[key][2]['nonce'], mid=bot._panel[key])))
     assert bot.points.balance("u1") == 8
     run(bot._handle_message(_msg("/prouser alice")))
     key = f'g:{GROUP}:0:{ADMIN}'
@@ -350,7 +361,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
                        if m == "setMyCommands" and p["scope"]["type"] == "chat")
     admin_cmds = next(p["commands"] for m, p in bot.calls
                       if m == "setMyCommands" and p["scope"]["type"] == "chat_member")
-    assert {c["command"] for c in member_cmds} == {"start", "me", "rank", "rules", "help"}
+    assert {c["command"] for c in member_cmds} == {"start", "me", "usage", "rank", "rules", "help"}
     assert {"kk", "renew", "rmemby", "score"} <= {c["command"] for c in admin_cmds}
     bot.calls.clear()
     bot.invalidate_commands()
