@@ -4,6 +4,14 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — replace stretched ranking JPEGs with a dark glass plate
+
+- Heat and watch posters no longer stretch the old random background JPEGs.
+  Both use a generated dark-glass gradient plus a thin frame; heat posters
+  still overlay the EmbyBoss mask for cover slots.
+
+---
+
 ## 2026-09-10 — accept Telegram avatar downloads without image Content-Type
 
 - Watch-rank podium dropped every profile photo because file downloads come

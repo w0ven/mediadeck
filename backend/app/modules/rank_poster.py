@@ -2,11 +2,10 @@
 from __future__ import annotations
 
 import io
-import random
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ASSETS = Path(__file__).resolve().parent / "rank_assets"
 MOVIE_SIZE = (144, 210)
@@ -73,16 +72,35 @@ def _paste_or_name(canvas: Image.Image, draw: ImageDraw.ImageDraw, xy: tuple[int
     draw.text((x + 8, y + size[1] // 2 - 10), _clip(title, 7), fill=(210, 220, 235), font=font)
 
 
+def _glass_bg(size: tuple[int, int]) -> Image.Image:
+    """Dark glass plate. The old random JPEGs stretched badly and looked cheap."""
+    width, height = size
+    ramp = Image.new("RGB", (1, height))
+    pix = ramp.load()
+    for y in range(height):
+        t = y / max(1, height - 1)
+        pix[0, y] = (int(6 + 16 * t), int(10 + 20 * t), int(18 + 34 * t))
+    bg = ramp.resize((width, height), Image.Resampling.BILINEAR).convert("RGBA")
+    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    ImageDraw.Draw(glow).ellipse(
+        (-int(width * 0.15), -int(height * 0.25), int(width * 1.15), int(height * 0.55)),
+        fill=(90, 120, 170, 38))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=max(12, width // 40)))
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    draw.rectangle((0, 0, width, int(height * 0.16)), fill=(255, 255, 255, 16))
+    inset = max(16, width // 48)
+    draw.rounded_rectangle((inset, inset, width - inset, height - inset),
+                           radius=max(18, width // 40), outline=(186, 206, 236, 46), width=2)
+    return Image.alpha_composite(Image.alpha_composite(bg, glow), overlay).convert("RGB")
+
+
 def _board_from_assets(weekly: bool) -> Image.Image | None:
     mask_path = ASSETS / ("week_ranks_mask.png" if weekly else "day_ranks_mask.png")
-    bg_dir = ASSETS / "bg"
-    if not mask_path.is_file() or not bg_dir.is_dir():
-        return None
-    bgs = [p for p in bg_dir.iterdir() if p.suffix.lower() in {".jpg", ".jpeg", ".png"}]
-    if not bgs:
+    if not mask_path.is_file():
         return None
     mask = Image.open(mask_path).convert("RGBA")
-    bg = Image.open(random.choice(bgs)).convert("RGBA").resize(mask.size, Image.Resampling.LANCZOS)
+    bg = _glass_bg(mask.size).convert("RGBA")
     bg.paste(mask, (0, 0), mask)
     return bg.convert("RGB")
 
@@ -146,10 +164,8 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
     """Podium card for the top three watchers; caption still lists the page."""
     avatars = avatars or {}
     width, height = 1280, 720
-    canvas = Image.new("RGB", (width, height), (8, 12, 22))
+    canvas = _glass_bg((width, height))
     draw = ImageDraw.Draw(canvas)
-    draw.rectangle((0, 0, width, 110), fill=(14, 22, 38))
-    draw.rectangle((0, height - 48, width, height), fill=(14, 22, 38))
     title_font = _font(44)
     name_font = _font(26)
     meta_font = _font(20)
