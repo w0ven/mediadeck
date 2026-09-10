@@ -8,7 +8,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 ASSETS = Path(__file__).resolve().parent / "rank_assets"
-CANVAS = (1080, 1350)
+CANVAS = (1080, 1920)
 WHITELIST_GROUP_ID = "whitelist"
 _DATA_FONT = Path(__file__).resolve().parents[2] / "data" / "fonts" / "NotoSansCJK-Bold.ttc"
 FONT_PATHS = (
@@ -86,6 +86,7 @@ def _poster_wall(covers: dict[str, bytes] | None, size: tuple[int, int] = CANVAS
         (-80, -40), (300, -80), (700, -30),
         (-60, 380), (340, 340), (720, 400),
         (-40, 820), (360, 860), (740, 800),
+        (-40, 1280), (360, 1320), (740, 1260),
     )
     opened: list[Image.Image] = []
     for blob in blobs:
@@ -131,11 +132,13 @@ def _title_plate(overlay: Image.Image, title: str, when: str) -> None:
 
 
 def _watch_label(row: dict[str, Any] | None) -> str:
+    nick = str((row or {}).get("tg_display_name") or "").strip()
+    if nick:
+        return nick
     handle = str((row or {}).get("tg_username") or "").strip().lstrip("@")
-    tg_id = str((row or {}).get("tg_user_id") or "")
     if handle:
         return f"@{handle}"
-    if tg_id:
+    if str((row or {}).get("tg_user_id") or ""):
         return "Telegram用户"
     return "未绑定"
 
@@ -241,31 +244,50 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
     draw = ImageDraw.Draw(overlay)
     _frame(overlay)
     _title_plate(overlay, "观影周榜" if weekly else "观影日榜", when)
-    name_font = _font(34)
-    meta_font = _font(22)
-    y = 220
-    heights = (340, 236, 236)
-    for i, height in enumerate(heights):
+    name_font = _font(32)
+    meta_font = _font(24)
+    y = 214
+    height = 148
+    for i in range(10):
         row = rows[i] if i < len(rows) else None
         whitelist = _is_whitelist(row)
         label = _watch_label(row)
-        box = (80, y, 1000, y + height)
+        box = (64, y, 1016, y + height)
         _glass_card(draw, box, whitelist=whitelist)
-        size = 140 if i == 0 else 108
-        ax, ay = 112, y + (88 if i == 0 else 62)
-        ring = (206, 190, 255) if whitelist else ((177, 193, 255) if i == 0 else (150, 168, 196))
+        size = 96
+        ax, ay = 88, y + 26
+        ring = (206, 190, 255) if whitelist else ((232, 197, 92) if i == 0 else (177, 193, 255))
         blob = avatars.get(str((row or {}).get("tg_user_id") or "")) if row else None
         face = _open_cover(blob, (size, size))
         badge = _circle(face, size, ring) if face is not None else _letter_avatar(label, size, ring)
         overlay.alpha_composite(badge, dest=(ax - 6, ay - 6))
         nx = ax + size + 28
-        draw.text((nx, ay + 14), _clip(label, 16), font=name_font if i == 0 else _font(30),
+        rank = f"{i + 1:02d}"
+        draw.text((nx, ay + 4), rank, font=_font(22), fill=ACCENT)
+        draw.text((nx + 56, ay), _clip(label, 14), font=name_font,
                   fill=WL_NAME if whitelist else TEXT)
-        draw.text((nx, ay + 66), _duration(row) if row else "—", font=meta_font, fill=ACCENT)
+        draw.text((nx + 56, ay + 46), _duration(row) if row else "—", font=meta_font, fill=ACCENT)
         if whitelist:
-            _whitelist_badge(overlay, (nx, ay + 108))
-        y += height + 24
+            _whitelist_badge(overlay, (760, ay + 36))
+        y += height + 14
     return _jpeg(Image.alpha_composite(canvas, overlay))
+
+
+def _cover_grid(overlay: Image.Image, items: list[dict[str, Any]], covers: dict[str, bytes],
+                origin_y: int) -> None:
+    draw = ImageDraw.Draw(overlay)
+    xs = (64, 248, 432, 616, 800)
+    tile = (168, 248)
+    for i, item in enumerate(items[:10]):
+        col, row = i % 5, i // 5
+        x, y = xs[col], origin_y + row * 330
+        overlay.alpha_composite(
+            _rounded_cover(covers.get(str(item.get("item_id") or "")), tile,
+                           title=str(item.get("title") or "—")), (x, y))
+        draw.text((x, y + 256), _clip(str(item.get("title") or "—"), 8),
+                  font=_font(22), fill=TEXT)
+        draw.text((x, y + 288), f"{int(item.get('plays') or 0)} 次播放",
+                  font=_font(18), fill=TEXT2)
 
 
 def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]], *,
@@ -277,26 +299,8 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
     draw = ImageDraw.Draw(overlay)
     _frame(overlay)
     _title_plate(overlay, "播放周榜" if weekly else "播放日榜", when)
-    xs = (80, 268, 456, 644, 832)
-    tile = (168, 248)
-    draw.text((80, 214), "▎电影", font=_font(28), fill=ACCENT)
-    for i, item in enumerate(movies[:5]):
-        x, y = xs[i], 258
-        overlay.alpha_composite(
-            _rounded_cover(covers.get(str(item.get("item_id") or "")), tile,
-                           title=str(item.get("title") or "—")), (x, y))
-        draw.text((x, y + 260), _clip(str(item.get("title") or "—"), 6),
-                  font=_font(20), fill=TEXT)
-        draw.text((x, y + 292), f"{int(item.get('plays') or 0)} 次播放",
-                  font=_font(16), fill=TEXT2)
-    draw.text((80, 676), "▎电视剧", font=_font(28), fill=ACCENT)
-    for i, item in enumerate(shows[:5]):
-        x, y = xs[i], 720
-        overlay.alpha_composite(
-            _rounded_cover(covers.get(str(item.get("item_id") or "")), tile,
-                           title=str(item.get("title") or "—")), (x, y))
-        draw.text((x, y + 260), _clip(str(item.get("title") or "—"), 6),
-                  font=_font(20), fill=TEXT)
-        draw.text((x, y + 292), f"{int(item.get('plays') or 0)} 次播放",
-                  font=_font(16), fill=TEXT2)
+    draw.text((64, 214), "▎电影", font=_font(32), fill=ACCENT)
+    _cover_grid(overlay, movies, covers, 262)
+    draw.text((64, 980), "▎电视剧", font=_font(32), fill=ACCENT)
+    _cover_grid(overlay, shows, covers, 1028)
     return _jpeg(Image.alpha_composite(canvas, overlay))

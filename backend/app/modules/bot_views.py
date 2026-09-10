@@ -41,11 +41,14 @@ def member_mention(member: dict[str, Any]) -> str:
 
 
 def watch_rank_label(row: dict[str, Any]) -> str:
-    """Watch-time board shows a Telegram handle, never the Emby username."""
+    """Nickname first, then @username. Never the Emby account name."""
+    nick = str(row.get("tg_display_name") or "").strip()
+    if nick:
+        return nick
     handle = str(row.get("tg_username") or "").strip().lstrip("@")
-    tg_id = str(row.get("tg_user_id") or "")
     if handle:
         return f"@{handle}"
+    tg_id = str(row.get("tg_user_id") or "")
     if tg_id.isascii() and tg_id.isdigit() and 0 < int(tg_id) < 2**63:
         return "Telegram用户"
     return "未绑定"
