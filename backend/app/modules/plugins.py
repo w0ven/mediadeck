@@ -375,6 +375,16 @@ class PluginRegistry:
             hour = max(0, min(23, int(self.config(plugin_id).get("hour", hour))))
         return hour
 
+    def _daily_minute(self, plugin_id: str) -> int:
+        """Minute offset within the daily hour, mirroring _daily_hour."""
+        spec = self._plugins[plugin_id].spec
+        minute = 0
+        if not any(f.key == "minute" for f in spec.fields):
+            return minute
+        with contextlib.suppress(Exception):
+            minute = max(0, min(59, int(self.config(plugin_id).get("minute", minute))))
+        return minute
+
     def _due(self, plugin_id: str, now: float) -> bool:
         plugin = self._plugins[plugin_id]
         spec = plugin.spec
@@ -384,11 +394,13 @@ class PluginRegistry:
             retry = self._last_retry.get(plugin_id)
             if retry is not None and now - retry < RETRY_INTERVAL:
                 return False
-            # Daily job: once per calendar day, at or after the given hour.
+            # Daily job: once per calendar day, at or after the given time.
             today = time.strftime("%Y-%m-%d", time.localtime(now))
             if self._last_daily.get(plugin_id) == today:
                 return False
-            if time.localtime(now).tm_hour < self._daily_hour(plugin_id):
+            local = time.localtime(now)
+            if (local.tm_hour, local.tm_min) < (self._daily_hour(plugin_id),
+                                                self._daily_minute(plugin_id)):
                 return False
             try:
                 return bool(plugin.due_today(self.config(plugin_id), now))
@@ -421,7 +433,9 @@ class PluginRegistry:
 
     async def _loop(self) -> None:
         while True:
-            await asyncio.sleep(60)
+            # Tick on the wall-clock minute so minute-level schedules fire on
+            # the minute instead of drifting with loop overhead.
+            await asyncio.sleep(60 - (time.time() % 60))
             with contextlib.suppress(Exception):
                 await self.tick()
 
