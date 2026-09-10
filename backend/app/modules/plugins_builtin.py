@@ -461,17 +461,16 @@ def _fmt_bytes(n: int) -> str:
 # 4. Rankings post
 # ---------------------------------------------------------------------------
 class RankingsPostPlugin(Plugin):
-    """Daily group bulletin: watch time plus movie/episode heat.
+    """Daily group bulletin: movie/episode heat with a poster.
 
-    This is the scheduled post, not the in-chat ranking menu. Existing cards
-    keep posting to the same chat; the body now matches the daily EmbyBoss
-    leaderboard rather than a 30-day mixed list.
+    Watch-time is a separate plugin. This card keeps posting to the same chat
+    it already used; the body matches EmbyBoss day_ranks, not a mixed list.
     """
 
     spec = Spec(
         id="rankings_post",
         name="日榜推送",
-        description="每天固定把观影时长和电影/剧集热度发到指定群组或频道。",
+        description="每天固定把电影/剧集热度海报发到指定群组或频道。",
         category="task",
         icon="🏆",
         hour=21,
@@ -503,7 +502,7 @@ class RankingsWeeklyPlugin(Plugin):
     spec = Spec(
         id="rankings_weekly",
         name="周榜推送",
-        description="每周日固定把观影时长和电影/剧集热度发到指定群组或频道。",
+        description="每周日固定把电影/剧集热度海报发到指定群组或频道。",
         category="task",
         icon="📅",
         hour=21,
@@ -525,6 +524,70 @@ class RankingsWeeklyPlugin(Plugin):
         if not _telegram_ready(self.ctx):
             return {"ok": False, "错误": "机器人未启用"}
         ok = await self.ctx.telegram.broadcast_rankings(chat, days=7)
+        return {"ok": bool(ok), "推送目标": chat, "统计天数": 7,
+                "结果": "已发送" if ok else "发送失败"}
+
+
+class WatchRankPostPlugin(Plugin):
+    """Daily watch-time board covering every member with sampled seconds."""
+
+    spec = Spec(
+        id="watch_rank_post",
+        name="观影时长日榜",
+        description="每天固定把有观影时长的人全部发到指定群组，每页 10 人。",
+        category="task",
+        icon="⏱",
+        hour=23,
+        fields=[
+            Field("chat_id", "推送目标", kind="str", default="",
+                  help="@channel 或 -100xxxxxxxxxx；留空则不推送"),
+            Field("hour", "推送时间", kind="int", default=23, min=0, max=23,
+                  help="每天几点推送（0–23）"),
+            Field("days", "统计范围", kind="int", default=1, min=1, max=30,
+                  help="日榜默认 1 天，按完整自然日"),
+        ],
+    )
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        chat = str(config.get("chat_id") or "").strip()
+        if not chat:
+            return {"ok": False, "错误": "未填写推送目标"}
+        if not _telegram_ready(self.ctx):
+            return {"ok": False, "错误": "机器人未启用"}
+        days = max(1, int(config.get("days") or 1))
+        ok = await self.ctx.telegram.broadcast_watch_rank(chat, days=days)
+        return {"ok": bool(ok), "推送目标": chat, "统计天数": days,
+                "结果": "已发送" if ok else "发送失败"}
+
+
+class WatchRankWeeklyPlugin(Plugin):
+    """Sunday watch-time board covering the last seven complete days."""
+
+    spec = Spec(
+        id="watch_rank_weekly",
+        name="观影时长周榜",
+        description="每周日固定把有观影时长的人全部发到指定群组，每页 10 人。",
+        category="task",
+        icon="📅",
+        hour=23,
+        fields=[
+            Field("chat_id", "推送目标", kind="str", default="",
+                  help="@channel 或 -100xxxxxxxxxx；留空则不推送"),
+            Field("hour", "推送时间", kind="int", default=23, min=0, max=23,
+                  help="当天几点推送（0–23）"),
+        ],
+    )
+
+    def due_today(self, config: dict[str, Any], now: float) -> bool:
+        return time.localtime(now).tm_wday == 6
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        chat = str(config.get("chat_id") or "").strip()
+        if not chat:
+            return {"ok": False, "错误": "未填写推送目标"}
+        if not _telegram_ready(self.ctx):
+            return {"ok": False, "错误": "机器人未启用"}
+        ok = await self.ctx.telegram.broadcast_watch_rank(chat, days=7)
         return {"ok": bool(ok), "推送目标": chat, "统计天数": 7,
                 "结果": "已发送" if ok else "发送失败"}
 
@@ -666,6 +729,8 @@ BUILTIN_PLUGINS = (
     ViewingReportPlugin,
     RankingsPostPlugin,
     RankingsWeeklyPlugin,
+    WatchRankPostPlugin,
+    WatchRankWeeklyPlugin,
     ExpiryReminderPlugin,
     RequestDigestPlugin,
     *POINTS_PLUGINS,

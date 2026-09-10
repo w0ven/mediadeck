@@ -98,7 +98,8 @@ REQUEST_STATUS_ICONS = {
 
 # Callbacks whose handler sends its own answerCallbackQuery, because it has
 # something to say. Everything else is acked immediately.
-SELF_ANSWERING_CALLBACKS = ("req_claim:", "req_done:", "req_fail:", "tg_rebind_review:")
+SELF_ANSWERING_CALLBACKS = (
+    "req_claim:", "req_done:", "req_fail:", "tg_rebind_review:", "urank:", "urank_close")
 
 ADMIN_HELP = """🛠 <b>管理员命令</b>
 
@@ -1971,11 +1972,10 @@ class TelegramBot(RebindBotMixin):
         ]
 
     def _rankings_text(self, days: int = 1) -> str:
-        """Scheduled group post: watch time plus movie/episode heat.
+        """Scheduled heat bulletin: movie/episode plays, not watch-time.
 
-        This is the embyboss-style daily/weekly bulletin, not the in-chat
-        ranking menu. Points stay on the member ranking page. days=1 is
-        yesterday's complete local calendar day, not a rolling 24 hours.
+        Watch-time is a separate post covering every member with sampled
+        seconds. days=1 is yesterday's complete local calendar day.
         """
         days = max(1, int(days or 1))
         stamp = ranking_stamp(days)
@@ -1986,42 +1986,78 @@ class TelegramBot(RebindBotMixin):
         else:
             title = f"近 {days} 天播放榜"
         lines = [f"🏆 <b>{title}</b>  {stamp}\n"]
+        movies: list[dict[str, Any]] = []
+        shows: list[dict[str, Any]] = []
         if self._stats is not None:
-            with contextlib.suppress(Exception):
-                users = self._stats.top_users(days=days, limit=10, calendar=True)
-                if users:
-                    lines.append("<b>⏱ 观影时长</b>")
-                    for i, u in enumerate(users, 1):
-                        lines.append(
-                            f"{i}. {escape(str(u.get('username') or '—'))} · "
-                            f"{duration(int((u.get('hours') or 0) * 3600))}")
-                    lines.append("")
-            movies: list[dict[str, Any]] = []
-            shows: list[dict[str, Any]] = []
             with contextlib.suppress(Exception):
                 movies, shows = self._stats.top_titles_split(
                     days=days, limit=10, calendar=True)
-            if movies:
-                lines.append("<b>▎电影</b>")
-                for i, row in enumerate(movies, 1):
-                    lines.append(
-                        f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                        f"播放次数: {int(row.get('plays') or 0)}  时长: "
-                        f"{duration(int((row.get('hours') or 0) * 3600))}")
-                lines.append("")
-            if shows:
-                lines.append("<b>▎电视剧</b>")
-                for i, row in enumerate(shows, 1):
-                    lines.append(
-                        f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                        f"播放次数: {int(row.get('plays') or 0)}  时长: "
-                        f"{duration(int((row.get('hours') or 0) * 3600))}")
-                lines.append("")
+        if movies:
+            lines.append("<b>▎电影</b>")
+            for i, row in enumerate(movies, 1):
+                lines.append(
+                    f"{i}. {escape(str(row.get('title') or '—'))}\n"
+                    f"播放次数: {int(row.get('plays') or 0)}  时长: "
+                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+            lines.append("")
+        if shows:
+            lines.append("<b>▎电视剧</b>")
+            for i, row in enumerate(shows, 1):
+                lines.append(
+                    f"{i}. {escape(str(row.get('title') or '—'))}\n"
+                    f"播放次数: {int(row.get('plays') or 0)}  时长: "
+                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+            lines.append("")
         while lines and not lines[-1]:
             lines.pop()
         if len(lines) == 1:
             lines.append("暂时还没有排行数据。")
         return "\n".join(lines)
+
+    def _watch_rank_pages(self, days: int = 1, page_size: int = 10) -> list[str]:
+        """Every member with watch time, ten names per page like EmbyBoss."""
+        days = max(1, int(days or 1))
+        stamp = ranking_stamp(days)
+        heading = f"▎🏆 <b>{days} 天观影榜</b>"
+        rows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                rows = self._stats.top_users(days=days, limit=5000, calendar=True)
+        medals = ("🥇", "🥈", "🥉")
+        pages: list[str] = []
+        size = max(1, int(page_size or 10))
+        if not rows:
+            return [f"{heading}\n\n暂时还没有排行数据。\n\n#UPlaysRank  {stamp}"]
+        for start in range(0, len(rows), size):
+            chunk = rows[start:start + size]
+            lines = [heading, ""]
+            for offset, row in enumerate(chunk):
+                rank = start + offset + 1
+                medal = medals[rank - 1] if rank <= 3 else "🏅"
+                name = member_mention({
+                    "username": row.get("username") or "—",
+                    "tg_user_id": row.get("tg_user_id") or "",
+                })
+                lines.append(
+                    f"{medal}<b>第{rank}名</b> | {name}\n"
+                    f"  观影时长 | {duration(int(row.get('seconds') or (row.get('hours') or 0) * 3600))}")
+            lines.append("")
+            lines.append(f"#UPlaysRank  {stamp}")
+            pages.append("\n".join(lines))
+        return pages
+
+    @staticmethod
+    def _watch_rank_keyboard(page: int, total: int, days: int) -> list[list[dict[str, str]]]:
+        page = max(1, int(page or 1))
+        total = max(1, int(total or 1))
+        days = max(1, int(days or 1))
+        row: list[dict[str, str]] = []
+        if page > 1:
+            row.append({"text": "◀ 上一页", "callback_data": f"urank:{page - 1}_{days}"})
+        row.append({"text": f"{page}/{total}", "callback_data": f"urank:{page}_{days}"})
+        if page < total:
+            row.append({"text": "下一页 ▶", "callback_data": f"urank:{page + 1}_{days}"})
+        return [row, [{"text": "❌ 关闭", "callback_data": "urank_close"}]]
 
     @staticmethod
     def _split_bulletin(text: str, limit: int = 1000) -> list[str]:
@@ -3925,6 +3961,27 @@ class TelegramBot(RebindBotMixin):
                                    message: dict[str, Any], in_group: bool) -> None:
         # Committed receipt retries are recipient-only transport work, never
         # a replay of registration or an administrative operation.
+        if data == 'urank_close' or data.startswith('urank:'):
+            if data == 'urank_close':
+                await self._answer_callback(callback_id)
+                await self._call("editMessageReplyMarkup", {
+                    "chat_id": chat_id, "message_id": message_id,
+                    "reply_markup": {"inline_keyboard": []}})
+                return
+            try:
+                page_s, days_s = data.split(":", 1)[1].split("_", 1)
+                page, days = int(page_s), int(days_s)
+            except (ValueError, IndexError):
+                await self._answer_callback(callback_id, "页码无效。")
+                return
+            pages = self._watch_rank_pages(days)
+            if page < 1 or page > len(pages):
+                await self._answer_callback(callback_id, "没有这一页。")
+                return
+            await self._answer_callback(callback_id, f"第 {page} 页")
+            await self._edit(chat_id, message_id, pages[page - 1],
+                             self._watch_rank_keyboard(page, len(pages), days))
+            return
         if data.startswith('gift_receipt_retry:'):
             if in_group or not self._gift_receipts:
                 await self._answer_callback(callback_id, '请在本人私聊查看注册群回执。')
@@ -4532,7 +4589,7 @@ class TelegramBot(RebindBotMixin):
         return sent
 
     async def broadcast_rankings(self, chat_id: str, days: int = 1) -> bool:
-        """Scheduled group bulletin with poster when covers can be drawn."""
+        """Scheduled heat bulletin with poster when covers can be drawn."""
         if not chat_id or not self.enabled:
             return False
         caption = self._rankings_text(days)
@@ -4552,6 +4609,14 @@ class TelegramBot(RebindBotMixin):
         for part in parts:
             sent = await self.send(chat_id, part) and sent
         return sent
+
+    async def broadcast_watch_rank(self, chat_id: str, days: int = 1) -> bool:
+        """Scheduled watch-time board: every member with time, paginated."""
+        if not chat_id or not self.enabled:
+            return False
+        pages = self._watch_rank_pages(days)
+        return await self.send(
+            chat_id, pages[0], self._watch_rank_keyboard(1, len(pages), days))
 
     async def _rankings_poster(self, days: int) -> bytes | None:
         if self._stats is None:

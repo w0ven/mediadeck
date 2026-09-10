@@ -530,8 +530,17 @@ def test_a_request_cannot_be_reviewed_twice() -> None:
 
 class _FakeStats:
     def top_users(self, days=30, limit=20, **_kw):
-        return [{"username": "alice", "hours": 12.5, "plays": 30, "bytes": 1},
-                {"username": "bob", "hours": 8.0, "plays": 12, "bytes": 1}]
+        rows = [
+            {"username": "alice", "hours": 12.5, "seconds": 45000, "plays": 30,
+             "bytes": 1, "tg_user_id": "1001"},
+            {"username": "bob", "hours": 8.0, "seconds": 28800, "plays": 12,
+             "bytes": 1, "tg_user_id": "1002"},
+        ]
+        for i in range(3, 16):
+            rows.append({"username": f"user{i}", "hours": max(0.1, 6 - i * 0.2),
+                         "seconds": max(60, 21600 - i * 700), "plays": i,
+                         "bytes": 1, "tg_user_id": str(2000 + i)})
+        return rows[:limit]
 
     def top_titles(self, days=30, limit=20, **_kw):
         return [{"title": "Some Show", "plays": 40, "hours": 20.0,
@@ -551,7 +560,7 @@ def test_rankings_list_both_viewers_and_titles() -> None:
                       _FakeMembers(), stats=_FakeStats())
     text = bot._rankings_text(1)
     assert "播放日榜" in text
-    assert "alice" in text
+    assert "alice" not in text
     assert "Some Show" in text and "40" in text
     assert "A Film" in text
     assert "▎电影" in text and "▎电视剧" in text
@@ -1230,8 +1239,8 @@ def test_the_ranking_gains_a_points_section() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_FakeStats(), points=_FakePoints())
     text = bot._rankings_text(1)
-    assert "播放日榜" in text and "alice" in text
-    assert "▎电影" in text
+    assert "播放日榜" in text and "▎电影" in text
+    assert "alice" not in text
 
 
 # -- onboarding: deep links, pasted codes, quieter menus ---------------------
@@ -1501,6 +1510,36 @@ def test_broadcast_rankings_sends_poster_then_overflow_text(monkeypatch) -> None
     assert str(calls[0][2]).startswith("🏆 <b>播放日榜</b>")
     assert calls[0][3] == "ranks.jpg"
     assert [c[0] for c in calls[1:]] == ["send"]
+
+
+def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
+    bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
+                      _FakeMembers(), stats=_FakeStats())
+    pages = bot._watch_rank_pages(1, page_size=10)
+    assert len(pages) == 2
+    assert "alice" in pages[0] and "tg://user?id=1001" in pages[0]
+    assert "user15" in pages[1]
+    assert "第1名" in pages[0] and "第11名" in pages[1]
+    keys = bot._watch_rank_keyboard(1, 2, 1)
+    actions = {b["callback_data"] for row in keys for b in row}
+    assert "urank:2_1" in actions and "urank_close" in actions
+    assert "urank:1_1" in {b["callback_data"] for row in bot._watch_rank_keyboard(2, 2, 1) for b in row}
+
+
+def test_broadcast_watch_rank_sends_first_page_with_pager() -> None:
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED},
+                      _FakeMembers(), stats=_FakeStats())
+    sent: list[tuple] = []
+
+    async def fake_send(chat, text, keyboard=None):
+        sent.append((chat, text, keyboard))
+        return True
+
+    bot.send = fake_send  # type: ignore[assignment]
+    assert asyncio.run(bot.broadcast_watch_rank("@board", 1)) is True
+    assert sent and "1 天观影榜" in sent[0][1]
+    actions = {b["callback_data"] for row in sent[0][2] for b in row}
+    assert "urank:2_1" in actions
 
 
 def test_broadcast_rankings_falls_back_to_text_without_poster() -> None:
