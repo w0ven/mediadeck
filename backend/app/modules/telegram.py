@@ -45,6 +45,7 @@ from app.modules.bot_views import (
     member_mention,
     poetry_line,
     quota_lines,
+    watch_rank_mention,
 )
 from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
@@ -2036,10 +2037,9 @@ class TelegramBot(RebindBotMixin):
             for offset, row in enumerate(chunk):
                 rank = start + offset + 1
                 medal = medals[rank - 1] if rank <= 3 else "🏅"
-                name = member_mention({
-                    "username": row.get("username") or "—",
-                    "tg_user_id": row.get("tg_user_id") or "",
-                })
+                name = watch_rank_mention(row)
+                if str(row.get("group_id") or "") == WHITELIST_GROUP_ID:
+                    name += " · 💠白名单"
                 lines.append(
                     f"{medal}<b>第{rank}名</b> | {name}\n"
                     f"  观影时长 | {duration(int(row.get('seconds') or (row.get('hours') or 0) * 3600))}")
@@ -2995,7 +2995,7 @@ class TelegramBot(RebindBotMixin):
             return "\n".join(lines)
         for i, row in enumerate(rows, 1):
             lines.append(
-                f"{i}. {escape(str(row.get('username') or '-'))} · {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}"
+                f"{i}. {watch_rank_mention(row)} · {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}"
                 + ('（已确认，部分跨界历史无法拆分）' if row.get('incomplete') else ''))
         return "\n".join(lines)
 
@@ -4712,12 +4712,36 @@ class TelegramBot(RebindBotMixin):
                 blob = await self._tg_avatar_bytes(tg_id)
                 if blob:
                     avatars[tg_id] = blob
+        covers = await self._ranking_covers(days)
         from app.modules.rank_poster import render_watch_poster
         try:
             return render_watch_poster(
-                rows, weekly=days >= 3, avatars=avatars, when=ranking_stamp(days))
+                rows, weekly=days >= 3, avatars=avatars, covers=covers,
+                when=ranking_stamp(days))
         except Exception:  # noqa: BLE001 - fall back to text
             return None
+
+    async def _ranking_covers(self, days: int) -> dict[str, bytes]:
+        covers: dict[str, bytes] = {}
+        if self._stats is None:
+            return covers
+        fetch = getattr(self._emby, "item_primary_image", None)
+        if not callable(fetch):
+            return covers
+        try:
+            movies, shows = self._stats.top_titles_split(
+                days=days, limit=5, calendar=True)
+        except Exception:  # noqa: BLE001 - covers are optional
+            return covers
+        for row in [*movies, *shows]:
+            item_id = str(row.get("item_id") or "")
+            if not item_id or item_id in covers:
+                continue
+            with contextlib.suppress(Exception):
+                blob = await fetch(item_id)
+                if blob:
+                    covers[item_id] = blob
+        return covers
 
     async def _rankings_poster(self, days: int) -> bytes | None:
         if self._stats is None:
@@ -4730,17 +4754,7 @@ class TelegramBot(RebindBotMixin):
             return None
         if not movies and not shows:
             return None
-        covers: dict[str, bytes] = {}
-        fetch = getattr(self._emby, "item_primary_image", None)
-        if callable(fetch):
-            for row in [*movies, *shows]:
-                item_id = str(row.get("item_id") or "")
-                if not item_id or item_id in covers:
-                    continue
-                with contextlib.suppress(Exception):
-                    blob = await fetch(item_id)
-                    if blob:
-                        covers[item_id] = blob
+        covers = await self._ranking_covers(days)
         from app.modules.rank_poster import render_rank_poster
         try:
             return render_rank_poster(

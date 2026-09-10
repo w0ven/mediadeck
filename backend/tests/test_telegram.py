@@ -532,14 +532,15 @@ class _FakeStats:
     def top_users(self, days=30, limit=20, **_kw):
         rows = [
             {"username": "alice", "hours": 12.5, "seconds": 45000, "plays": 30,
-             "bytes": 1, "tg_user_id": "1001"},
+             "bytes": 1, "tg_user_id": "1001", "tg_username": "alice"},
             {"username": "bob", "hours": 8.0, "seconds": 28800, "plays": 12,
-             "bytes": 1, "tg_user_id": "1002"},
+             "bytes": 1, "tg_user_id": "1002", "tg_username": "bob"},
         ]
         for i in range(3, 16):
             rows.append({"username": f"user{i}", "hours": max(0.1, 6 - i * 0.2),
                          "seconds": max(60, 21600 - i * 700), "plays": i,
-                         "bytes": 1, "tg_user_id": str(2000 + i)})
+                         "bytes": 1, "tg_user_id": str(2000 + i),
+                         "tg_username": f"user{i}"})
         return rows[:limit]
 
     def top_titles(self, days=30, limit=20, **_kw):
@@ -1547,8 +1548,9 @@ def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
                       _FakeMembers(), stats=_FakeStats())
     pages = bot._watch_rank_pages(1, page_size=10)
     assert len(pages) == 2
-    assert "alice" in pages[0] and "tg://user?id=1001" in pages[0]
-    assert "user15" in pages[1]
+    assert "@alice" in pages[0] and "tg://user?id=1001" in pages[0]
+    assert "alice" not in pages[0].replace("@alice", "")
+    assert "@user15" in pages[1]
     assert "第1名" in pages[0] and "第11名" in pages[1]
     keys = bot._watch_rank_keyboard(1, 2, 1)
     labels = [b["text"] for row in keys for b in row]
@@ -1559,6 +1561,43 @@ def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
     many_labels = [b["text"] for row in many for b in row]
     assert "1" in "".join(many_labels) or "·1·" in many_labels
     assert "12" in many_labels and "⏭️ +5" in many_labels
+
+
+def test_watch_rank_pages_show_telegram_handle_not_emby_name() -> None:
+    class _Named:
+        def _rows(self, limit=20):
+            return [
+                {"username": "emby_alice", "tg_username": "misakaioo",
+                 "tg_user_id": "1001", "hours": 4, "seconds": 14400, "plays": 2,
+                 "group_id": "whitelist"},
+                {"username": "emby_bob", "tg_username": "",
+                 "tg_user_id": "1002", "hours": 3, "seconds": 10800, "plays": 1},
+                {"username": "emby_carol", "tg_username": "",
+                 "tg_user_id": "", "hours": 1, "seconds": 3600, "plays": 1},
+            ][:limit]
+
+        def top_users(self, days=30, limit=20, **_kw):
+            return self._rows(limit)
+
+        def top_watchers(self, hours=24, limit=10, **_kw):
+            return self._rows(limit)
+
+        def top_titles(self, **k):
+            return []
+
+        def top_titles_split(self, **k):
+            return [], []
+
+    bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
+                      _FakeMembers(), stats=_Named())
+    page = bot._watch_rank_pages(1)[0]
+    assert "@misakaioo" in page and "tg://user?id=1001" in page
+    assert "💠白名单" in page
+    assert "emby_alice" not in page and "emby_bob" not in page and "emby_carol" not in page
+    assert "Telegram用户" in page and "tg://user?id=1002" in page
+    assert "未绑定" in page
+    menu = bot._watch_rankings_text(24)
+    assert "@misakaioo" in menu and "emby_alice" not in menu
 
 
 def test_broadcast_watch_rank_sends_first_page_with_pager() -> None:

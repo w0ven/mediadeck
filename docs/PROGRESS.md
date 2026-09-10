@@ -4,6 +4,17 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — watch rank shows Telegram names, poster-wall background
+
+- Watch-time board and podium use Telegram `@handle`, never the Emby username.
+  Bound accounts without a handle show a clickable “Telegram用户”; unbound show “未绑定”.
+- Ranking posters drop the stretched glass plate. Background is a darkened collage
+  of the day’s Emby covers; cards stay hard-glass. Whitelist members get the panel
+  crystal-shield badge on the watch poster and caption.
+- Heat posters keep movie/TV covers in a 5-column gallery over the same wall.
+
+---
+
 ## 2026-09-10 — replace stretched ranking JPEGs with a dark glass plate
 
 - Heat and watch posters no longer stretch the old random background JPEGs.
