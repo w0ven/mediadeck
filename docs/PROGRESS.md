@@ -4,6 +4,14 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — accept Telegram avatar downloads without image Content-Type
+
+- Watch-rank podium dropped every profile photo because file downloads come
+  back as `application/octet-stream`. Accept JPEG/PNG/GIF magic bytes, and
+  fall back to `getChat` big photo when profile photos are empty.
+
+---
+
 ## 2026-09-10 — watch-rank podium, numbered pager and weekly task cards
 
 - Watch-time bulletin now sends a podium JPEG. Top three use Telegram profile
