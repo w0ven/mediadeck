@@ -4,6 +4,21 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-11 — notify requesters when accepted titles land in the library
+
+- Accepted requests stay ``accepted``. A new ``request_library_watch`` row
+  tracks pending/partial/done/expired; 10 days without a match expires it.
+- Every 15 minutes the ``request_library_watch`` plugin reverse-matches one
+  ``latest_items`` window (limit 100) against local watches, then
+  ``request_lookup`` only the hits. A 6-hour full scan covers late scrapes.
+- Movies notify once on arrival. Series notify on first demanded content and
+  again when the demanded episodes are complete. Requester and followers each
+  get an outbox ``library`` job; the same person/stage cannot repeat.
+- ``latest_items(..., watch=True)`` is the poller path: ProviderIds, no
+  artwork filter, limit 100. Dashboard callers are unchanged.
+
+---
+
 ## 2026-09-10 — viewing report, group scan progress, login page, /rank
 
 - Viewing reports always send, including members with no plays; poster uses the

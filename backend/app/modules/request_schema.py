@@ -59,6 +59,18 @@ def migrate_requests(db):
         """CREATE TABLE IF NOT EXISTS request_inputs (
             chat_id TEXT PRIMARY KEY, user_id TEXT NOT NULL, token TEXT NOT NULL,
             kind TEXT NOT NULL, expires_at INTEGER NOT NULL)""",
+        """CREATE TABLE IF NOT EXISTS request_library_watch (
+            request_id INTEGER PRIMARY KEY,
+            state TEXT NOT NULL DEFAULT 'pending',
+            notified_stage TEXT NOT NULL DEFAULT '',
+            last_checked_at INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL)""",
     ]
     for sql in statements:
         c.execute(sql)
+    c.execute(
+        "INSERT OR IGNORE INTO request_library_watch"
+        "(request_id,state,notified_stage,last_checked_at,created_at) "
+        "SELECT id,'pending','',0,strftime('%s','now') FROM media_requests "
+        "WHERE status='accepted'"
+    )

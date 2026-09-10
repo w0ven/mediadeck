@@ -376,3 +376,20 @@ def test_rejection_input_retains_role_revision_and_single_execution_guards(bot):
     assert len([e for e in bot.service.events(1) if e['kind'] in ('accepted','rejected')])==1
     tap(bot,'rejectok','801',card=old)
     assert bot.service.get(1)['status']=='accepted'
+
+
+def test_library_arrival_notifies_requester_and_follower_privately(bot):
+    row = submit(bot)
+    bot.service.follow(row['id'], 'u2')
+    tap(bot, 'accept', '801')
+    assert bot.service.get(row['id'])['status'] == 'accepted'
+    bot.service.apply_library_stage(row['id'], 'complete')
+    run(bot.flush_request_notifications())
+    for chat in ('900', '901'):
+        texts = [
+            p.get('text', '')
+            for m, p in bot.transport.calls
+            if m == 'sendMessage' and str(p.get('chat_id')) == chat
+        ]
+        assert any('已入库' in t for t in texts)
+    assert bot.service.get(row['id'])['status'] == 'accepted'

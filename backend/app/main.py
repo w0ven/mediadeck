@@ -53,6 +53,7 @@ from app.modules.playback import PlaybackRouter, caller_device, caller_token
 from app.modules.plugins import PluginRegistry
 from app.modules.plugins_builtin import (
     PluginContext,
+    ensure_request_library_watch,
     migrate_legacy_telegram_jobs,
     register_builtin,
 )
@@ -482,6 +483,7 @@ async def _startup() -> None:
         shop=app.state.shop,
         scheduler=app.state.scheduler,
         requests=app.state.requests,
+        tmdb=app.state.tmdb,
         intake_store=app.state.intake_store,
         intake_paths=app.state.intake_paths,
         intake_fs=FsReader(),
@@ -493,6 +495,8 @@ async def _startup() -> None:
     # at the same hour and to the same chat.
     with contextlib.suppress(Exception):
         migrate_legacy_telegram_jobs(store)
+    with contextlib.suppress(Exception):
+        ensure_request_library_watch(store)
     app.state.plugins = register_builtin(
         PluginRegistry(store, app.state.db), app.state.plugin_ctx)
     # Handed over after registration rather than at construction: the bot

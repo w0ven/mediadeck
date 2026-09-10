@@ -64,6 +64,7 @@ class PluginContext:
     scheduler: Any = None
     # Media requests, for the digest card that nudges uploaders.
     requests: Any = None
+    tmdb: Any = None
     # -- intake pipeline observability ---------------------------------------
     # Injected wholesale rather than reached for: the collector's filesystem
     # reader and media-server client are the two seams the tests replace, and
@@ -990,6 +991,70 @@ class BotMigrationSweepPlugin(Plugin):
         with contextlib.suppress(Exception):
             await old.send(int(OWNER_TG), "\n".join(report_lines))
         return {"ok": not failures, **summary}
+class RequestLibraryWatchPlugin(Plugin):
+    """Notify requesters when an accepted title lands in the library.
+
+    Acceptance does not change again, so this plugin is the only automatic
+    follow-up. Incremental rounds reverse-match one latest-items window;
+    a slower full scan covers titles that missed that window.
+    """
+
+    spec = Spec(
+        id="request_library_watch",
+        name="求片入库通知",
+        description="已接受的求片在媒体库出现后，私聊通知求片人和关注者。"
+                    "每 15 分钟用最近新增条目反查，每 6 小时全量精确核对。",
+        category="request",
+        icon="📥",
+        interval=900,
+    )
+
+    async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        if self.ctx.requests is None:
+            return {"ok": False, "错误": "求片服务不可用"}
+        from app.modules.request_watch import FULL_SCAN_EVERY, poll_library_watches
+
+        now = time.time()
+        state = self.ctx.state(self.spec.id)
+        try:
+            last_full = float(state.get("last_full_scan") or 0)
+        except (TypeError, ValueError):
+            last_full = 0.0
+        full = now - last_full >= FULL_SCAN_EVERY
+        try:
+            summary = await poll_library_watches(
+                self.ctx.requests,
+                self.ctx.emby,
+                tmdb=self.ctx.tmdb,
+                now=int(now),
+                full=full,
+            )
+        except Exception:  # noqa: BLE001 - a plugin must never take the scheduler down
+            return {"ok": True, "结果": "本轮跳过"}
+        if full and not summary.get("skipped"):
+            self.ctx.set_state(self.spec.id, {"last_full_scan": now})
+        out = {
+            "ok": True,
+            "全量": int(full),
+            "核对": int(summary.get("checked") or 0),
+            "查询": int(summary.get("lookups") or 0),
+            "通知": int(summary.get("notified") or 0),
+            "过期": int(summary.get("expired") or 0),
+        }
+        if summary.get("skipped"):
+            out["结果"] = str(summary.get("结果") or "本轮跳过")
+        return out
+
+
+def ensure_request_library_watch(store: Any) -> None:
+    """Enable arrival notices once; later operator switches are left alone."""
+    if store is None:
+        return
+    plugins = dict(store.section("plugins") or {})
+    if "request_library_watch" in plugins:
+        return
+    plugins["request_library_watch"] = {"enabled": True, "config": {}}
+    store.set_section("plugins", plugins)
 
 
 BUILTIN_PLUGINS = (
@@ -1004,6 +1069,7 @@ BUILTIN_PLUGINS = (
     BotMigrationSweepPlugin,
     ExpiryReminderPlugin,
     RequestDigestPlugin,
+    RequestLibraryWatchPlugin,
     *POINTS_PLUGINS,
 )
 

@@ -189,12 +189,14 @@ class MockEmby:
             }
         ]
 
-    async def latest_items(self, limit: int = 12) -> list[dict[str, Any]]:
+    async def latest_items(self, limit: int = 12, *, watch: bool = False) -> list[dict[str, Any]]:
         items = [
             {"Id": "mock-item-1", "Name": "Demo Movie One", "Type": "Movie",
-             "ProductionYear": 2024, "DateCreated": "2026-09-01T10:00:00Z"},
+             "ProductionYear": 2024, "DateCreated": "2026-09-01T10:00:00Z",
+             "tmdb_id": 101},
             {"Id": "mock-item-2", "Name": "Demo Series Two", "Type": "Series",
-             "ProductionYear": 2023, "DateCreated": "2026-08-31T10:00:00Z"},
+             "ProductionYear": 2023, "DateCreated": "2026-08-31T10:00:00Z",
+             "tmdb_id": 102},
         ]
         return items[:max(1, limit)]
 

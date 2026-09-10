@@ -929,7 +929,7 @@ def test_the_request_category_carries_the_digest_card() -> None:
     """The automation page grows a 求片 tab from the category alone."""
     with TestClient(app) as client:
         cards = client.get("/api/plugins?category=request", auth=ADMIN).json()
-        assert {c["id"] for c in cards} == {"request_digest"}
+        assert {c["id"] for c in cards} == {"request_digest", "request_library_watch"}
 
 
 def test_the_points_category_carries_the_points_plugins() -> None:
