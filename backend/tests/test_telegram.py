@@ -1521,9 +1521,14 @@ def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
     assert "user15" in pages[1]
     assert "第1名" in pages[0] and "第11名" in pages[1]
     keys = bot._watch_rank_keyboard(1, 2, 1)
+    labels = [b["text"] for row in keys for b in row]
     actions = {b["callback_data"] for row in keys for b in row}
+    assert "·1·" in labels and "2" in labels
     assert "urank:2_1" in actions and "urank_close" in actions
-    assert "urank:1_1" in {b["callback_data"] for row in bot._watch_rank_keyboard(2, 2, 1) for b in row}
+    many = bot._watch_rank_keyboard(1, 12, 7)
+    many_labels = [b["text"] for row in many for b in row]
+    assert "1" in "".join(many_labels) or "·1·" in many_labels
+    assert "12" in many_labels and "⏭️ +5" in many_labels
 
 
 def test_broadcast_watch_rank_sends_first_page_with_pager() -> None:
@@ -1531,14 +1536,20 @@ def test_broadcast_watch_rank_sends_first_page_with_pager() -> None:
                       _FakeMembers(), stats=_FakeStats())
     sent: list[tuple] = []
 
-    async def fake_send(chat, text, keyboard=None):
-        sent.append((chat, text, keyboard))
-        return True
+    async def fake_poster(days):
+        return b"\xff\xd8fake"
 
-    bot.send = fake_send  # type: ignore[assignment]
+    async def fake_multipart(method, fields, files, timeout=40):
+        sent.append(("photo", method, fields, files["photo"][0]))
+        return {"message_id": 88}
+
+    bot._watch_rank_poster = fake_poster  # type: ignore[assignment]
+    bot._call_multipart = fake_multipart  # type: ignore[assignment]
     assert asyncio.run(bot.broadcast_watch_rank("@board", 1)) is True
-    assert sent and "1 天观影榜" in sent[0][1]
-    actions = {b["callback_data"] for row in sent[0][2] for b in row}
+    assert sent[0][1] == "sendPhoto" and sent[0][3] == "watch-rank.jpg"
+    assert "1 天观影榜" in sent[0][2]["caption"]
+    markup = sent[0][2]["reply_markup"]["inline_keyboard"]
+    actions = {b["callback_data"] for row in markup for b in row}
     assert "urank:2_1" in actions
 
 

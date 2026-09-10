@@ -4,6 +4,18 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — watch-rank podium, numbered pager and weekly task cards
+
+- Watch-time bulletin now sends a podium JPEG. Top three use Telegram profile
+  photos when available, otherwise a letter avatar. Caption still lists the
+  current page of every member with time.
+- Pager buttons are numbered pages like EmbyBoss, with ±5 when there are more
+  than five pages. Photo captions are edited in place when flipping pages.
+- Daily and weekly heat/watch plugins remain separate Web automation cards.
+  Local suite: **1903 passed, 56 skipped**.
+
+---
+
 ## 2026-09-10 — separate watch-time board, paging and EmbyBoss poster assets
 
 - Watch-time ranking is no longer mixed into the heat poster. It is its own

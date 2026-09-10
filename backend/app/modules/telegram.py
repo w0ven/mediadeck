@@ -416,6 +416,8 @@ class TelegramBot(RebindBotMixin):
             return None
         url = f"{API_ROOT}/bot{auth_part}/{method}"
         payload = dict(fields)
+        if isinstance(payload.get("reply_markup"), (dict, list)):
+            payload["reply_markup"] = json.dumps(payload["reply_markup"], ensure_ascii=False)
         chat_id = payload.get("chat_id")
         thread = _THREAD.get() if chat_id is not None and self._in_bound_chat(chat_id) else None
         if thread:
@@ -2048,16 +2050,33 @@ class TelegramBot(RebindBotMixin):
 
     @staticmethod
     def _watch_rank_keyboard(page: int, total: int, days: int) -> list[list[dict[str, str]]]:
+        """Numbered pager like EmbyBoss plays_list_button."""
         page = max(1, int(page or 1))
         total = max(1, int(total or 1))
         days = max(1, int(days or 1))
+        if total <= 8:
+            numbers = list(range(1, total + 1))
+        else:
+            window = {1, total, page, page - 1, page + 1, page - 2, page + 2}
+            numbers = [n for n in range(1, total + 1) if n in window]
+            if page > 4:
+                numbers = [1, 0] + [n for n in numbers if n != 1]
+            if page < total - 3:
+                numbers = [n for n in numbers if n != total] + [0, total]
         row: list[dict[str, str]] = []
-        if page > 1:
-            row.append({"text": "◀ 上一页", "callback_data": f"urank:{page - 1}_{days}"})
-        row.append({"text": f"{page}/{total}", "callback_data": f"urank:{page}_{days}"})
-        if page < total:
-            row.append({"text": "下一页 ▶", "callback_data": f"urank:{page + 1}_{days}"})
-        return [row, [{"text": "❌ 关闭", "callback_data": "urank_close"}]]
+        for n in numbers:
+            if n == 0:
+                row.append({"text": "…", "callback_data": f"urank:{page}_{days}"})
+                continue
+            label = f"·{n}·" if n == page else str(n)
+            row.append({"text": label, "callback_data": f"urank:{n}_{days}"})
+        extra = [{"text": "❌ 关闭", "callback_data": "urank_close"}]
+        if total > 5:
+            if page - 5 >= 1:
+                extra.append({"text": "⏮️ -5", "callback_data": f"urank:{page - 5}_{days}"})
+            if page + 5 <= total:
+                extra.append({"text": "⏭️ +5", "callback_data": f"urank:{page + 5}_{days}"})
+        return [row, extra]
 
     @staticmethod
     def _split_bulletin(text: str, limit: int = 1000) -> list[str]:
@@ -3979,8 +3998,14 @@ class TelegramBot(RebindBotMixin):
                 await self._answer_callback(callback_id, "没有这一页。")
                 return
             await self._answer_callback(callback_id, f"第 {page} 页")
-            await self._edit(chat_id, message_id, pages[page - 1],
-                             self._watch_rank_keyboard(page, len(pages), days))
+            keyboard = self._watch_rank_keyboard(page, len(pages), days)
+            if message.get("photo") or (str(chat_id), int(message_id)) in self._photo_panels:
+                await self._call("editMessageCaption", {
+                    "chat_id": chat_id, "message_id": message_id,
+                    "caption": pages[page - 1], "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": keyboard}})
+                return
+            await self._edit(chat_id, message_id, pages[page - 1], keyboard)
             return
         if data.startswith('gift_receipt_retry:'):
             if in_group or not self._gift_receipts:
@@ -4611,12 +4636,77 @@ class TelegramBot(RebindBotMixin):
         return sent
 
     async def broadcast_watch_rank(self, chat_id: str, days: int = 1) -> bool:
-        """Scheduled watch-time board: every member with time, paginated."""
+        """Scheduled watch-time board: podium photo plus a numbered pager."""
         if not chat_id or not self.enabled:
             return False
         pages = self._watch_rank_pages(days)
-        return await self.send(
-            chat_id, pages[0], self._watch_rank_keyboard(1, len(pages), days))
+        keyboard = self._watch_rank_keyboard(1, len(pages), days)
+        photo = await self._watch_rank_poster(days)
+        if photo:
+            result = await self._call_multipart(
+                "sendPhoto",
+                {"chat_id": str(chat_id), "caption": pages[0][:1024],
+                 "parse_mode": "HTML",
+                 "reply_markup": {"inline_keyboard": keyboard}},
+                {"photo": ("watch-rank.jpg", photo, "image/jpeg")})
+            if isinstance(result, dict) and result.get("message_id"):
+                self._photo_panels.add((str(chat_id), int(result["message_id"])))
+                return True
+            if result is not None:
+                return True
+        return await self.send(chat_id, pages[0], keyboard)
+
+    async def _tg_avatar_bytes(self, tg_user_id: str) -> bytes | None:
+        if not str(tg_user_id).isdigit():
+            return None
+        photos = await self._call(
+            "getUserProfilePhotos",
+            {"user_id": int(tg_user_id), "limit": 1}, timeout=10)
+        sizes = ((photos or {}).get("photos") or [None])[0] if isinstance(photos, dict) else None
+        if not sizes:
+            return None
+        file_id = str((sizes[-1] or {}).get("file_id") or "")
+        if not file_id:
+            return None
+        info = await self._call("getFile", {"file_id": file_id}, timeout=10)
+        path = str((info or {}).get("file_path") or "") if isinstance(info, dict) else ""
+        if not path:
+            return None
+        token = self._token()
+        client = await self._client()
+        if not token or client is None:
+            return None
+        try:
+            r = await client.get(f"{API_ROOT}/file/bot{token}/{path}", timeout=15)
+        except Exception:  # noqa: BLE001 - avatar is optional
+            return None
+        if r.status_code == 200 and r.content and str(r.headers.get("content-type") or "").startswith("image/"):
+            return r.content
+        return None
+
+    async def _watch_rank_poster(self, days: int) -> bytes | None:
+        days = max(1, int(days or 1))
+        rows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                rows = self._stats.top_users(days=days, limit=3, calendar=True)
+        if not rows:
+            return None
+        avatars: dict[str, bytes] = {}
+        for row in rows:
+            tg_id = str(row.get("tg_user_id") or "")
+            if not tg_id or tg_id in avatars:
+                continue
+            with contextlib.suppress(Exception):
+                blob = await self._tg_avatar_bytes(tg_id)
+                if blob:
+                    avatars[tg_id] = blob
+        from app.modules.rank_poster import render_watch_poster
+        try:
+            return render_watch_poster(
+                rows, weekly=days >= 3, avatars=avatars, when=ranking_stamp(days))
+        except Exception:  # noqa: BLE001 - fall back to text
+            return None
 
     async def _rankings_poster(self, days: int) -> bytes | None:
         if self._stats is None:
