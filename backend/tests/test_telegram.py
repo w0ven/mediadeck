@@ -1219,13 +1219,17 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
                      "enabled": False, "active_streams": 9}]
 
     bot = _points_bot(scheduler=_FakeScheduler())
+    class _PlaybackSessions:
+        async def active_sessions(self):
+            return [{'Id': str(n), 'Item': 'Test playback'} for n in range(13)]
+    bot._emby = _PlaybackSessions()
     text = asyncio.run(bot._nodes_text())
     assert "hk1" in text and "25%" in text
     assert "ca1" in text and "95%" in text
     assert "维护中" in text
-    assert "当前在线：<b>5</b> 路播放" in text
-    assert "2 路" in text and "3 路" in text
-    assert "9 路" in text
+    assert "当前在线：<b>13</b> 路播放" in text
+    assert "2 个连接" in text and "3 个连接" in text
+    assert "9 个连接" in text
 
 
 def test_line_page_does_not_keep_account_card_buttons() -> None:

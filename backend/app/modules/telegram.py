@@ -37,6 +37,7 @@ from typing import Any
 
 import httpx
 
+from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_rebinding import RebindBotMixin
@@ -64,6 +65,8 @@ API_ROOT = "https://api.telegram.org"
 # the client timeout so a hung socket is noticed rather than waited on forever.
 POLL_TIMEOUT = 25
 HTTP_TIMEOUT = POLL_TIMEOUT + 10
+PLAYBACK_COUNT_TTL = 5.0  # same freshness window as the Web Emby sessions view
+PLAYBACK_COUNT_TIMEOUT = 5.0
 
 # A username has to survive being an Emby login and a path component.
 USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,19}$")
@@ -229,6 +232,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         self._config = config_provider
         self._members = members
         self._emby = emby
+        self._online_plays_cache = TTLCache(ttl=PLAYBACK_COUNT_TTL, max_entries=1)
         self._stats = stats
         self._db = db
         self._rebinding = RebindingService(db) if db is not None else None
@@ -1629,19 +1633,29 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 nodes = list(self._scheduler.snapshot() or [])
         return nodes
 
-    def _online_plays(self, nodes: list[dict[str, Any]] | None = None) -> int | None:
-        total = 0
-        known = False
-        for node in nodes if nodes is not None else self._node_snapshot():
-            if node.get("active_streams") is None:
-                continue
-            known = True
-            if node.get("enabled", True) and not node.get("manually_disabled"):
-                total += max(0, int(node.get("active_streams") or 0))
-        return total if known else None
+    async def _online_plays(self) -> int | None:
+        """Count the same normalised playback sessions as the Web, not probe connections.
+
+        The adapter already excludes idle/logged-in sessions. Paused playback stays
+        included, just like /api/emby/sessions; node scheduling flags are irrelevant.
+        """
+        async def load() -> tuple[int | None]:
+            try:
+                sessions = await asyncio.wait_for(
+                    self._emby.active_sessions(), timeout=PLAYBACK_COUNT_TIMEOUT)
+                if not isinstance(sessions, list):
+                    return (None,)
+                return (len(sessions),)
+            except Exception:  # noqa: BLE001 - an optional read must not break the line menu
+                return (None,)
+
+        # Wrap None so unavailable results also get a short TTL, without inventing
+        # zero or falling back to node-probe estimates during an Emby outage.
+        result = await self._online_plays_cache.resolve("emby:playback-count", load)
+        return result[0]
 
     def _load_lines(self) -> list[str]:
-        """Node utilisation plus live play counts.
+        """Node utilisation and probe connections, not Emby playback-session counts.
 
         Internal node names stay here: member-facing addresses belong in
         the configured playback-line list.
@@ -1664,9 +1678,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 mark = f"🟢 {percent}%"
             line = f"{escape(str(node.get('name') or '-'))} · {mark}"
             if node.get("active_streams") is not None:
-                line += f" · {max(0, int(node['active_streams']))} 路"
+                line += f" · {max(0, int(node['active_streams']))} 个连接"
             rows.append(line)
-        rows.append("\n<i>水位越低越空闲，系统会自动为你选择线路。</i>")
+        rows.append("\n<i>节点连接数不等于 Emby 播放会话数；水位越低越空闲，系统会自动为你选择线路。</i>")
         return rows
 
     async def _nodes_text(self) -> str:
@@ -1698,10 +1712,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if note:
             parts.append(escape(note).replace("\n", "\n"))
             parts.append("")
-        online = self._online_plays()
+        online = await self._online_plays()
         if online is not None:
-            parts.append(f"当前在线：<b>{online}</b> 路播放")
-            parts.append("")
+            parts.append(f"当前在线：<b>{online}</b> 路播放（Emby 会话）")
+        else:
+            parts.append("当前在线：暂不可用（Emby 播放会话查询失败）")
+        parts.append("")
         if show_load:
             if custom or str(cfg.get("emby_public_url") or "").strip() or online is not None:
                 parts.append("节点水位")
