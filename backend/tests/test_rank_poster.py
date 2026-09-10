@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.modules.rank_poster import render_rank_poster
+from app.modules.rank_poster import render_rank_poster, render_watch_poster
 from app.modules.stats import ranking_bounds, ranking_stamp
 from app.modules.telegram import TelegramBot
 
@@ -9,6 +9,15 @@ def test_rank_poster_renders_jpeg_without_covers() -> None:
     movies = [{"title": "Film One", "item_id": "m1", "plays": 3, "hours": 2}]
     shows = [{"title": "Show One", "item_id": "s1", "plays": 8, "hours": 5}]
     data = render_rank_poster(movies, shows, weekly=False, when="2026-09-09")
+    assert data[:2] == b"\xff\xd8"
+    assert len(data) > 4000
+
+
+def test_watch_poster_renders_without_avatars() -> None:
+    data = render_watch_poster(
+        [{"username": "alice", "tg_user_id": "1", "seconds": 3600, "hours": 1},
+         {"username": "bob", "tg_user_id": "2", "seconds": 1800, "hours": 0.5}],
+        weekly=False, when="2026-09-09", avatars={"1": b"not-an-image"})
     assert data[:2] == b"\xff\xd8"
     assert len(data) > 4000
 

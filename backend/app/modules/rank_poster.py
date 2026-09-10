@@ -119,6 +119,68 @@ def _fallback_board(movies: list[dict[str, Any]], shows: list[dict[str, Any]],
     return out.getvalue()
 
 
+def _circle(cover: Image.Image, size: int, ring: tuple[int, int, int]) -> Image.Image:
+    fitted = _fit(cover.convert("RGB"), (size, size))
+    mask = Image.new("L", (size, size), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+    out = Image.new("RGBA", (size + 12, size + 12), (0, 0, 0, 0))
+    ring_draw = ImageDraw.Draw(out)
+    ring_draw.ellipse((0, 0, size + 11, size + 11), fill=ring + (255,))
+    out.paste(fitted, (6, 6), mask)
+    return out
+
+
+def _letter_avatar(title: str, size: int, ring: tuple[int, int, int]) -> Image.Image:
+    canvas = Image.new("RGB", (size, size), (36, 48, 72))
+    draw = ImageDraw.Draw(canvas)
+    glyph = _clip(title, 1)
+    font = _font(max(24, size // 2))
+    box = draw.textbbox((0, 0), glyph, font=font)
+    draw.text(((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2 - 4),
+              glyph, fill=(240, 246, 255), font=font)
+    return _circle(canvas, size, ring)
+
+
+def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
+                        avatars: dict[str, bytes] | None = None, when: str = "") -> bytes:
+    """Podium card for the top three watchers; caption still lists the page."""
+    avatars = avatars or {}
+    width, height = 1280, 720
+    canvas = Image.new("RGB", (width, height), (8, 12, 22))
+    draw = ImageDraw.Draw(canvas)
+    draw.rectangle((0, 0, width, 110), fill=(14, 22, 38))
+    draw.rectangle((0, height - 48, width, height), fill=(14, 22, 38))
+    title_font = _font(44)
+    name_font = _font(26)
+    meta_font = _font(20)
+    heading = "观影周榜" if weekly else "观影日榜"
+    draw.text((48, 32), heading, fill=(240, 246, 255), font=title_font)
+    if when:
+        box = draw.textbbox((0, 0), when, font=meta_font)
+        draw.text((width - 48 - (box[2] - box[0]), 44), when, fill=(150, 168, 196), font=meta_font)
+    podium = (
+        (1, (width // 2 - 110, 150), 220, (232, 197, 92), "🥇"),
+        (2, (180, 250), 180, (196, 206, 220), "🥈"),
+        (3, (width - 180 - 180, 270), 170, (205, 140, 92), "🥉"),
+    )
+    for rank, (x, y), size, ring, medal in podium:
+        row = rows[rank - 1] if rank <= len(rows) else None
+        title = str((row or {}).get("username") or "—")
+        blob = avatars.get(str((row or {}).get("tg_user_id") or "")) if row else None
+        face = _open_cover(blob, (size, size))
+        badge = _circle(face, size, ring) if face is not None else _letter_avatar(title, size, ring)
+        canvas.paste(badge, (x, y), badge)
+        label = _clip(title, 8)
+        seconds = int((row or {}).get("seconds") or ((row or {}).get("hours") or 0) * 3600)
+        hours, minutes = divmod(max(0, seconds) // 60, 60)
+        time_text = f"{hours}小时{minutes}分" if hours else f"{minutes}分"
+        draw.text((x, y + size + 22), f"{medal} {label}", fill=(240, 246, 255), font=name_font)
+        draw.text((x, y + size + 58), time_text if row else "—", fill=(150, 168, 196), font=meta_font)
+    out = io.BytesIO()
+    canvas.save(out, format="JPEG", quality=88)
+    return out.getvalue()
+
+
 def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]], *,
                        weekly: bool = False, covers: dict[str, bytes] | None = None,
                        when: str = "") -> bytes:
