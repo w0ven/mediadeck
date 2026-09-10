@@ -37,6 +37,8 @@ from app.modules.plugins_builtin import (
     PluginContext,
     RankingsPostPlugin,
     RankingsWeeklyPlugin,
+    WatchRankPostPlugin,
+    WatchRankWeeklyPlugin,
     RequestDigestPlugin,
     ViewingReportPlugin,
     migrate_legacy_telegram_jobs,
@@ -115,6 +117,7 @@ class FakeBot:
         self._audit = audit or {"checked": 0, "left": [], "unavailable": False}
         self.notified: list[tuple[str, str]] = []
         self.broadcasts: list[tuple[str, int]] = []
+        self.watch_broadcasts: list[tuple[str, int]] = []
         self.expiring_calls: list[list[dict[str, Any]]] = []
 
     async def audit_group_membership(self) -> dict[str, Any]:
@@ -126,6 +129,10 @@ class FakeBot:
 
     async def broadcast_rankings(self, chat_id: str, days: int = 1) -> bool:
         self.broadcasts.append((chat_id, days))
+        return True
+
+    async def broadcast_watch_rank(self, chat_id: str, days: int = 1) -> bool:
+        self.watch_broadcasts.append((chat_id, days))
         return True
 
     async def notify_expiring(self, members: list[dict[str, Any]]) -> int:
@@ -741,6 +748,27 @@ def test_weekly_rankings_post_on_sunday_and_not_midweek() -> None:
     assert summary["ok"] is True and bot.broadcasts == [("@somechannel", 7)]
 
 
+def test_watch_rank_post_sends_every_viewer_board() -> None:
+    bot = FakeBot()
+    summary = asyncio.run(WatchRankPostPlugin(make_ctx(telegram=bot)).run(
+        {"chat_id": "@somechannel", "hour": 23, "days": 1}))
+    assert summary["ok"] is True
+    assert bot.watch_broadcasts == [("@somechannel", 1)]
+    assert bot.broadcasts == []
+
+
+def test_weekly_watch_rank_on_sunday_and_not_midweek() -> None:
+    plugin = WatchRankWeeklyPlugin(make_ctx(telegram=FakeBot()))
+    sunday = time.mktime((2026, 9, 13, 23, 0, 0, 6, 256, -1))
+    wednesday = time.mktime((2026, 9, 9, 23, 0, 0, 2, 252, -1))
+    assert plugin.due_today({}, sunday) is True
+    assert plugin.due_today({}, wednesday) is False
+    bot = FakeBot()
+    summary = asyncio.run(WatchRankWeeklyPlugin(make_ctx(telegram=bot)).run(
+        {"chat_id": "@somechannel", "hour": 23}))
+    assert summary["ok"] is True and bot.watch_broadcasts == [("@somechannel", 7)]
+
+
 # -- expiry_reminder --------------------------------------------------------
 def test_expiry_reminder_notifies_members_inside_the_window() -> None:
     soon = time.time() + 2 * 86400
@@ -902,7 +930,8 @@ def test_listing_returns_every_builtin_card() -> None:
         cards = client.get("/api/plugins?category=task", auth=ADMIN).json()
         ids = {c["id"] for c in cards}
         assert {"group_audit", "inactive_cleanup", "viewing_report",
-                "rankings_post", "rankings_weekly", "expiry_reminder"} <= ids
+                "rankings_post", "rankings_weekly", "watch_rank_post",
+                "watch_rank_weekly", "expiry_reminder"} <= ids
         assert all("fields" in c and "config" in c for c in cards)
 
 

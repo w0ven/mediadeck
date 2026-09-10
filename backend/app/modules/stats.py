@@ -314,13 +314,13 @@ class StatsService:
         days = max(1, min(int(days or 1), MAX_DAYS))
         if calendar:
             since, until = ranking_bounds(days, now=now)
-            rows = self.top_watchers(hours=days * 24, limit=200, since=since, until=until)
+            rows = self.top_watchers(hours=days * 24, limit=limit, since=since, until=until)
         else:
-            rows = self.top_watchers(hours=days * 24, limit=200)
+            rows = self.top_watchers(hours=days * 24, limit=limit)
         for row in rows:
             row['bytes'] = values['by_user'].get(row['user_id'])
             row['traffic_period'] = values['period']
-        return rows[:max(1,min(limit,200))]
+        return rows[:max(1, min(int(limit), 5000))]
 
     def top_watchers(self, hours: int = 24, limit: int = 10, *,
                      since: float | None = None, until: float | None = None) -> list[dict[str, Any]]:
@@ -345,17 +345,18 @@ class StatsService:
             'WHERE started_at>=? AND started_at<?) GROUP BY emby_user_id',
             (since, until, since, until))}
         rows = []
-        for member in self._db.query('SELECT emby_user_id,username,group_id FROM members'):
+        for member in self._db.query('SELECT emby_user_id,username,group_id,tg_user_id FROM members'):
             uid = member['emby_user_id']
             window = windows.get(uid)
             if not window or (not window['seconds'] and not window['incomplete']):
                 continue
             rows.append({'user_id': uid, 'username': member['username'] or uid[:8],
                          'group_id': member['group_id'],
+                         'tg_user_id': member.get('tg_user_id') or '',
                          'hours': round(window['seconds']/3600, 1),
                          'seconds': int(window['seconds']), 'incomplete': window['incomplete'],
                          'plays': counts.get(uid, 0)})
-        return sorted(rows, key=lambda r: (-r['seconds'], -r['plays'], r['user_id']))[:max(1,min(int(limit),200))]
+        return sorted(rows, key=lambda r: (-r['seconds'], -r['plays'], r['user_id']))[:max(1, min(int(limit), 5000))]
 
     def top_titles(self, days: int = 30, limit: int = 20, *,
                    calendar: bool = False, now: float | None = None) -> list[dict[str, Any]]:

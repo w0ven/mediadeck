@@ -4,6 +4,20 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-10 — separate watch-time board, paging and EmbyBoss poster assets
+
+- Watch-time ranking is no longer mixed into the heat poster. It is its own
+  scheduled bulletin, listing every member with sampled seconds, ten names per
+  page, with prev/next buttons. Bound Telegram names are clickable profile
+  links. Heat posters stay movie/TV only.
+- Poster layout now uses the EmbyBoss mask, random background and cover
+  coordinates. PingFang and board assets are vendored. Missing covers still
+  become named tiles.
+- New plugins `watch_rank_post` / `watch_rank_weekly` default off except where
+  an operator enables them. Local suite: **1902 passed, 56 skipped**.
+
+---
+
 ## 2026-09-10 — ranking posters, line-page buttons and scheduled daily/weekly boards
 
 - Bot 「播放线路」 no longer keeps the previous account-card buttons. The page
