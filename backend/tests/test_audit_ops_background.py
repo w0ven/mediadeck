@@ -159,22 +159,33 @@ async def test_timeout_is_visible_and_manual_retry_works(registry, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("plugin_cls", [GroupAuditPlugin, InactiveCleanupPlugin])
-async def test_unsent_warning_never_starts_suspension_clock(plugin_cls):
+async def test_unsent_warning_never_starts_suspension_clock():
     member = {"emby_user_id": "test-member", "tg_user_id": "123456", "status": "active",
               "last_seen_at": time.time() - 40 * 86400}
     bot = SimpleNamespace(enabled=True, notify_member=AsyncMock(return_value=False),
                           audit_group_membership=AsyncMock(return_value={"checked": 1, "left": [member]}))
     members = SimpleNamespace(list=lambda **kw: [member], set_status=Mock())
     ctx = PluginContext(telegram=bot, members=members)
-    plugin = plugin_cls(ctx)
-    config = {"action": "suspend", "grace_days": 0, "days": 7, "notify": True, "suspend_after_days": 3}
+    plugin = GroupAuditPlugin(ctx)
+    config = {"action": "suspend", "grace_days": 0}
     result = await plugin.run(config)
     assert not ctx.state(plugin.spec.id)
     assert result["ok"] is False
     bot.notify_member.return_value = True
     await plugin.run(config)
     assert bot.notify_member.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_inactive_cleanup_suspends_without_member_notice():
+    member = {"emby_user_id": "test-member", "tg_user_id": "123456", "status": "active",
+              "last_seen_at": time.time() - 40 * 86400}
+    bot = SimpleNamespace(enabled=True, notify_member=AsyncMock(return_value=False))
+    members = SimpleNamespace(list=lambda **kw: [member], set_status=Mock())
+    result = await InactiveCleanupPlugin(PluginContext(telegram=bot, members=members)).run({"days": 7})
+    assert result["已停用"] == 1
+    members.set_status.assert_called_once()
+    bot.notify_member.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -199,15 +210,13 @@ async def test_stop_cancels_manual_runs_even_without_scheduler_start(registry):
 
 
 @pytest.mark.asyncio
-async def test_inactive_grace_longer_than_notice_ttl_can_finish():
+async def test_inactive_cleanup_whitelist_is_exempt():
     member = {"emby_user_id": "test-member", "tg_user_id": "123456", "status": "active",
-              "last_seen_at": time.time() - 120 * 86400}
+              "group_id": "whitelist", "last_seen_at": time.time() - 120 * 86400}
     members = SimpleNamespace(list=lambda **kw: [member], set_status=Mock())
-    ctx = PluginContext(members=members)
-    ctx.set_state("inactive_cleanup", {"test-member": time.time() - 91 * 86400})
-    result = await InactiveCleanupPlugin(ctx).run({"notify": False, "suspend_after_days": 90})
-    assert result["已停用"] == 1
-    members.set_status.assert_called_once()
+    result = await InactiveCleanupPlugin(PluginContext(members=members)).run({"days": 7})
+    assert result["已停用"] == 0 and result["白名单豁免"] == 1
+    members.set_status.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -91,14 +91,15 @@ class StatsService:
         for table in ('play_events', 'watch_legacy_events'):
             sampled = ' AND sampled=0' if table == 'play_events' else ''
             rows = self._db.query(
-                'SELECT emby_user_id, SUM(CASE WHEN started_at>=? AND ended_at<=? '
-                'THEN seconds ELSE 0 END) AS seconds, '
-                'SUM(CASE WHEN started_at<? OR ended_at>? THEN 1 ELSE 0 END) AS uncertain '
+                'SELECT emby_user_id, '
+                'SUM(CASE WHEN ended_at>started_at THEN seconds * '
+                'MAX(0, MIN(ended_at, ?)-MAX(started_at, ?)) / (ended_at-started_at) '
+                'ELSE 0 END) AS seconds '
                 'FROM ' + table + ' WHERE ended_at>? AND started_at<? AND seconds>0' +
                 sampled + where + ' GROUP BY emby_user_id',
-                (since, until, since, until, since, until, *args))
+                (until, since, since, until, *args))
             for row in rows:
-                add(row['emby_user_id'], float(row['seconds'] or 0), int(row['uncertain'] or 0))
+                add(row['emby_user_id'], float(row['seconds'] or 0))
         for row in self._db.query(
                 'SELECT emby_user_id,SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
                 'FROM watch_samples WHERE ended_at>? AND started_at<?' + where +
@@ -112,10 +113,9 @@ class StatsService:
             start = float(live.get('started_at') or until)
             end = float(live.get('last_ts') or until)
             if seconds and end > since and start < until:
-                if start >= since and end <= until:
-                    add(uid, seconds)
-                else:
-                    add(uid, uncertain=1)
+                span = max(0.0, end - start)
+                overlap = max(0.0, min(end, until) - max(start, since))
+                add(uid, seconds if span <= 0 else seconds * overlap / span)
         for row in values.values():
             row['incomplete'] = bool(row['uncertain_records'])
         return values
@@ -488,7 +488,7 @@ class StatsService:
             } for d in _day_list(days)],
             "watch": self.watch_summary(user_id),
             "recent_plays": self._db.query(
-                "SELECT item_name, series_name, client, play_method, node, seconds,"
+                "SELECT item_id, item_name, series_name, client, play_method, node, seconds,"
                 " bytes, started_at FROM play_events WHERE emby_user_id=?"
                 " AND started_at >= ? ORDER BY started_at DESC LIMIT 50",
                 (user_id, since_ts)),

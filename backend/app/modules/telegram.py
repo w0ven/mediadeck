@@ -277,6 +277,7 @@ class TelegramBot(RebindBotMixin):
         self._http: httpx.AsyncClient | None = None
         self._http_token = ""
         self._tg_profiles: dict[str, dict[str, str]] = {}
+        self._job_progress: dict[str, tuple[str, int]] = {}
         self._http_loop: asyncio.AbstractEventLoop | None = None
         self._in_flight: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
@@ -1706,13 +1707,8 @@ class TelegramBot(RebindBotMixin):
         except Exception:
             return "观看统计：暂不可用"
         start = time.strftime('%Y-%m-%d', time.localtime(s['first_at'])) if s.get('first_at') else '尚无记录'
-        def window(key: str, incomplete: str) -> str:
-            value = duration(s[key])
-            if s.get(incomplete):
-                return f'已确认 {value}，另有跨界历史无法拆分' if s[key] else '有跨界历史，时长无法完整还原'
-            return value
-        return (f"近24小时观看：{window('seconds_24h', 'incomplete_24h')}\n"
-                f"近30天观看：{window('seconds_30d', 'incomplete_30d')}\n"
+        return (f"近24小时观看：{duration(s['seconds_24h'])}\n"
+                f"近30天观看：{duration(s['seconds_30d'])}\n"
                 f"累计已记录：{duration(s['recorded_seconds'])}\n"
                 f"统计起点：{start}")
 
@@ -2922,7 +2918,7 @@ class TelegramBot(RebindBotMixin):
             "❓ <b>群内命令</b>",
             "",
             "· /me 我的账号卡：状态、分组、额度与剩余、观看摘要（完整资料请私聊）",
-            "· /rank 近 24 小时 / 近 30 天观看时长",
+            "· /rank 今日 / 本周观影时长与热度",
             "· /rules 行为准则",
             "· /start 打开私聊菜单",
         ]
@@ -2952,12 +2948,8 @@ class TelegramBot(RebindBotMixin):
         if self._stats is not None and hasattr(self._stats, 'watch_summary'):
             with contextlib.suppress(Exception):
                 summary = self._stats.watch_summary(str(member['emby_user_id']))
-        for key, label, uncertain in (('seconds_24h', '近24小时', 'incomplete_24h'),
-                                      ('seconds_30d', '近30天', 'incomplete_30d')):
-            value = (summary or {}).get(key)
-            text = duration(value)
-            hint = '（部分记录）' if (summary or {}).get(uncertain) else ''
-            lines.append(label + '：<b>' + text + '</b>' + hint)
+        for key, label in (('seconds_24h', '近24小时'), ('seconds_30d', '近30天')):
+            lines.append(label + '：<b>' + duration((summary or {}).get(key)) + '</b>')
         lines += ['', '💰 <b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         return '\n'.join(lines)
 
@@ -2993,18 +2985,31 @@ class TelegramBot(RebindBotMixin):
     def _watch_rankings_text(self, hours: int = 24) -> str:
         hours = self._rank_hours(hours)
         window = "今日" if hours <= 24 else "本周"
-        lines = [f"🏆 <b>{window}观影时长</b>\n"]
+        lines = [f"🏆 <b>{window}观影榜</b>\n"]
         rows: list[dict[str, Any]] = []
         if self._stats is not None:
             with contextlib.suppress(Exception):
                 rows = self._stats.top_watchers(hours=hours, limit=10)
+        for row in rows:
+            profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
+            if not profile:
+                continue
+            if profile.get("username") and not row.get("tg_username"):
+                row["tg_username"] = profile["username"]
+            if profile.get("display_name"):
+                row["tg_display_name"] = profile["display_name"]
         if not rows:
             lines.append("暂时还没有排行数据。")
             return "\n".join(lines)
+        medals = ("🥇", "🥈", "🥉")
         for i, row in enumerate(rows, 1):
+            medal = medals[i - 1] if i <= 3 else "🏅"
+            name = watch_rank_mention(row)
+            if str(row.get("group_id") or "") == WHITELIST_GROUP_ID:
+                name += " · 💠白名单"
             lines.append(
-                f"{i}. {watch_rank_mention(row)} · {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}"
-                + ('（已确认，部分跨界历史无法拆分）' if row.get('incomplete') else ''))
+                f"{medal}<b>第{i}名</b> | {name}\n"
+                f"  观影时长 | {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}")
         return "\n".join(lines)
 
     def _heat_rankings_text(self, days: int = 1) -> str:
@@ -3164,6 +3169,7 @@ class TelegramBot(RebindBotMixin):
             hours = 24
             if args and args[0] in ("7", "168", "30", "720"):
                 hours = 168
+            await self._fill_rank_profiles(hours)
             await self._show(chat_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
             return
@@ -4275,6 +4281,7 @@ class TelegramBot(RebindBotMixin):
                 if tail.isdigit():
                     days = 7 if int(tail) >= 3 else 1
             hours = 168 if days >= 3 else 24
+            await self._fill_rank_profiles(hours)
             await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
             return
@@ -4305,6 +4312,7 @@ class TelegramBot(RebindBotMixin):
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
                     hours = 168 if int(tail) >= 48 else 24
+            await self._fill_rank_profiles(hours)
             await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
                              self._watch_rankings_keyboard(hours))
             return
@@ -4602,6 +4610,34 @@ class TelegramBot(RebindBotMixin):
 
     # -- outbound notifications ----------------------------------------------
 
+    async def post_job_progress(self, job: str, text: str) -> bool:
+        """One group message per job, edited from start → running → result.
+
+        Uses raw send/edit so a progress card never steals the personal panel.
+        """
+        chats = self._group_allowlist()
+        if not chats or not self.enabled or not text:
+            return False
+        chat_id = chats[0]
+        key = str(job or "").strip() or "job"
+        previous = self._job_progress.get(key)
+        payload = {
+            "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        if previous:
+            edited = await self._call("editMessageText", {
+                **payload, "chat_id": previous[0], "message_id": previous[1],
+            })
+            error = str(_CALL_ERROR.get() or self._last_error or "").lower()
+            if edited is not None or "not modified" in error:
+                return True
+        result = await self._call("sendMessage", payload)
+        if isinstance(result, dict) and result.get("message_id"):
+            self._job_progress[key] = (str(chat_id), int(result["message_id"]))
+            return True
+        return False
+
     async def notify_member(self, member: dict[str, Any], text: str) -> bool:
         chat_id = member.get("tg_user_id")
         if not chat_id or not self.enabled:
@@ -4713,17 +4749,9 @@ class TelegramBot(RebindBotMixin):
         display = " ".join(part for part in (first, last) if part)
         return {"display_name": display, "username": handle}
 
-    async def _fill_watch_profiles(self, days: int, page: int, page_size: int = 10) -> None:
-        rows: list[dict[str, Any]] = []
-        if self._stats is not None:
-            with contextlib.suppress(Exception):
-                rows = self._stats.top_users(days=days, limit=5000, calendar=True)
-        size = max(1, int(page_size or 10))
-        start = max(0, (max(1, int(page or 1)) - 1) * size)
-        needed = rows[:10] if page <= 1 else []
-        needed.extend(rows[start:start + size])
+    async def _remember_watch_profiles(self, rows: list[dict[str, Any]]) -> None:
         seen: set[str] = set()
-        for row in needed:
+        for row in rows:
             tg_id = str(row.get("tg_user_id") or "")
             if not tg_id or tg_id in seen or tg_id in self._tg_profiles:
                 continue
@@ -4737,6 +4765,24 @@ class TelegramBot(RebindBotMixin):
                         self._db.execute(
                             "UPDATE members SET tg_username=? WHERE tg_user_id=? AND tg_username=''",
                             (handle, tg_id))
+
+    async def _fill_rank_profiles(self, hours: int) -> None:
+        rows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                rows = self._stats.top_watchers(hours=self._rank_hours(hours), limit=10)
+        await self._remember_watch_profiles(rows)
+
+    async def _fill_watch_profiles(self, days: int, page: int, page_size: int = 10) -> None:
+        rows: list[dict[str, Any]] = []
+        if self._stats is not None:
+            with contextlib.suppress(Exception):
+                rows = self._stats.top_users(days=days, limit=5000, calendar=True)
+        size = max(1, int(page_size or 10))
+        start = max(0, (max(1, int(page or 1)) - 1) * size)
+        needed = rows[:10] if page <= 1 else []
+        needed.extend(rows[start:start + size])
+        await self._remember_watch_profiles(needed)
 
     async def _tg_avatar_bytes(self, tg_user_id: str) -> bytes | None:
         if not str(tg_user_id).isdigit():

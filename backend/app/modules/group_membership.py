@@ -6,6 +6,7 @@ The existing member deletion service still owns Emby-first deletion and history.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import contextvars
 import copy
 import hashlib
@@ -357,12 +358,45 @@ class GroupMembership:
         self._scan_task.add_done_callback(self.bot._in_flight.discard)
         return self.status()
 
+    def _progress_text(self) -> str:
+        latest = self._latest or {}
+        total = int(latest.get('total') or 0)
+        processed = int(latest.get('processed') or 0)
+        rows = latest.get('rows') or []
+        counts: dict[str, int] = {}
+        for row in rows:
+            action = str((row or {}).get('action') or 'kept')
+            counts[action] = counts.get(action, 0) + 1
+        current = (latest.get('current') or {}).get('username') or ''
+        if latest.get('running'):
+            stage = '开始运行…' if processed == 0 else f'运行中 {processed}/{total}'
+        elif latest.get('cancelled'):
+            stage = '已取消'
+        elif latest.get('error'):
+            stage = '失败：' + str(latest.get('error'))
+        else:
+            stage = '已完成'
+        extra = f'\n当前：{escape(str(current))}' if current else ''
+        return (f'⚑ <b>关联群组/频道成员检测</b>\n{stage}{extra}\n'
+                f'已核 {processed}/{total} · 删除 {counts.get("deleted", 0)} · '
+                f'保留 {counts.get("kept", 0) + counts.get("detected", 0)} · '
+                f'取消 {counts.get("cancelled", 0)}')
+
+    async def _announce(self) -> None:
+        post = getattr(self.bot, 'post_job_progress', None)
+        if not callable(post):
+            return
+        with contextlib.suppress(Exception):
+            await post('group_membership', self._progress_text())
+
     async def _scan(self, source: str, fingerprint: str, state_key: str) -> None:
         try:
             await self._persist('latest', self._latest, key=state_key)
+            await self._announce()
             rows = await self._io(self.db.query,
                 'SELECT emby_user_id,username,tg_user_id,tg_bound_at,group_id,created_at FROM members ORDER BY emby_user_id')
             self._latest['total'] = len(rows)
+            await self._announce()
             for member in rows:
                 if fingerprint != self.fingerprint() or not self.bot.enabled:
                     self._latest['cancelled'] = True
@@ -371,6 +405,10 @@ class GroupMembership:
                 self._latest['rows'].append(await self.inspect(member, source=source, fingerprint=fingerprint))
                 self._latest['processed'] += 1
                 self._latest['current'] = None
+                processed = self._latest['processed']
+                total = int(self._latest.get('total') or 0)
+                if processed == 1 or processed == total or processed % 10 == 0:
+                    await self._announce()
                 await asyncio.sleep(0)
         except asyncio.CancelledError:
             self._latest['cancelled'] = True
@@ -385,6 +423,7 @@ class GroupMembership:
                 self._latest.update(error=type(exc).__name__, persistence_failed=True)
                 self.bot._last_error = '成员检测结果持久化失败'
                 raise
+            await self._announce()
 
     async def handle_update(self, update: dict[str, Any]) -> bool:
         event = update.get('chat_member') or update.get('my_chat_member')

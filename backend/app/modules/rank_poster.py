@@ -308,35 +308,46 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
 
 def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
                           plays: int, traffic: str,
-                          titles: list[dict[str, Any]] | None = None) -> bytes:
+                          titles: list[dict[str, Any]] | None = None,
+                          covers: dict[str, bytes] | None = None,
+                          whitelist: bool = False) -> bytes:
     size = (1080, 1350)
-    canvas = _glass_bg(size).convert("RGBA")
+    canvas = _poster_wall(covers, size)
     overlay = Image.new("RGBA", size, (0, 0, 0, 0))
     draw = ImageDraw.Draw(overlay)
-    draw.rounded_rectangle((36, 36, size[0] - 36, size[1] - 36),
-                           radius=22, outline=(183, 203, 245, 46), width=1)
+    _frame(overlay)
     _title_plate(overlay, f"你的{label}", f"近 {days} 天")
     who = _clip((name or "会员").strip() or "会员", 16)
-    draw.text((80, 214), who, font=_font(36), fill=TEXT)
+    draw.text((80, 214), who, font=_font(42), fill=WL_NAME if whitelist else TEXT)
+    if whitelist:
+        _whitelist_badge(overlay, (80 + 8 * len(who) + 36, 220))
     stats = (
-        (80, 300, f"{hours:g}", "小时"),
-        (400, 300, str(int(plays)), "次播放"),
-        (720, 300, traffic, "流量"),
+        (80, 292, f"{hours:g}", "小时"),
+        (400, 292, str(int(plays)), "次播放"),
+        (720, 292, traffic or "0 B", "流量"),
     )
     for x, y, value, caption in stats:
-        draw.rounded_rectangle((x, y, x + 260, y + 160), radius=16,
-                               fill=(22, 29, 43, 210), outline=(172, 191, 239, 50), width=1)
-        draw.text((x + 24, y + 28), value, font=_font(36), fill=TEXT)
-        draw.text((x + 24, y + 96), caption, font=_font(22), fill=ACCENT)
-    draw.text((80, 520), "看得最多", font=_font(28), fill=ACCENT)
-    y = 572
-    for i, item in enumerate((titles or [])[:5], 1):
-        draw.rounded_rectangle((80, y, 1000, y + 108), radius=14,
-                               fill=(22, 29, 43, 200), outline=(172, 191, 239, 40), width=1)
-        draw.text((108, y + 22), f"{i:02d}", font=_font(24), fill=ACCENT)
-        draw.text((168, y + 18), _clip(str(item.get("title") or "—"), 16),
+        _glass_card(draw, (x, y, x + 260, y + 150), whitelist=whitelist)
+        draw.text((x + 24, y + 28), _clip(str(value), 8), font=_font(36), fill=TEXT)
+        draw.text((x + 24, y + 92), caption, font=_font(22), fill=ACCENT)
+    titles = list(titles or [])[:5]
+    if not titles:
+        _glass_card(draw, (80, 490, 1000, 820), whitelist=whitelist)
+        draw.text((112, 560), "这段时间还没有观看记录", font=_font(32), fill=TEXT)
+        draw.text((112, 620), "报告照样送给你，下次有片单再填上。", font=_font(22), fill=TEXT2)
+        return _jpeg(Image.alpha_composite(canvas, overlay))
+    draw.text((80, 478), "看得最多", font=_font(28), fill=ACCENT)
+    y = 528
+    for i, item in enumerate(titles, 1):
+        _glass_card(draw, (80, y, 1000, y + 128), whitelist=False)
+        cover = _rounded_cover(
+            (covers or {}).get(str(item.get("item_id") or "")),
+            (72, 108), radius=10, title=str(item.get("title") or "—"))
+        overlay.alpha_composite(cover, (100, y + 10))
+        draw.text((192, y + 22), f"{i:02d}", font=_font(22), fill=ACCENT)
+        draw.text((252, y + 18), _clip(str(item.get("title") or "—"), 16),
                   font=_font(30), fill=TEXT)
-        draw.text((168, y + 62), f"{int(item.get('plays') or 0)} 次",
+        draw.text((252, y + 70), f"{int(item.get('plays') or 0)} 次",
                   font=_font(22), fill=TEXT2)
-        y += 124
+        y += 142
     return _jpeg(Image.alpha_composite(canvas, overlay))

@@ -40,15 +40,16 @@ def sampled(tmp_path, monkeypatch):
     return db, members, emby, sampler, clock, path
 
 
-def test_crossing_old_session_is_not_false_zero(rb):
+def test_crossing_old_session_is_clipped_into_the_window(rb):
     now = time.time()
     rb.db.execute('INSERT INTO play_events(emby_user_id,seconds,started_at,ended_at) VALUES(?,?,?,?)',
                   ('u1', 1200, now-86400-600, now-86400+1800))
     summary = rb._stats.watch_summary('u1', now)
-    assert summary['incomplete_24h'] and summary['seconds_24h'] == 0
+    assert summary['seconds_24h'] == 900
+    assert not summary['incomplete_24h']
     assert summary['seconds_30d'] == summary['recorded_seconds'] == 1200
     text = rb._watch_text(rb.members.get('u1'))
-    assert '有跨界历史，时长无法完整还原' in text
+    assert '跨界' not in text
     assert '近24小时观看：0秒' not in text
 
 

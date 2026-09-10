@@ -37,6 +37,9 @@ class TTLCache:
                 self._data.clear()
         self._data[key] = (time.time() + (self._ttl if ttl is None else ttl), value)
 
+    def delete(self, key: str) -> None:
+        self._data.pop(key, None)
+
     def clear(self) -> None:
         self._data.clear()
 

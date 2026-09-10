@@ -112,7 +112,7 @@ async function testRemote(name) {
 async function deleteRemote(name) {
   const actionContext = pageContext('storage');
   name = uq(name);
-  if (!confirm(`删除远程账号 ${name}？仍被挂载引用时会被拒绝。`)) return;
+  if (!(await deckConfirm(`删除远程账号 ${name}？仍被挂载引用时会被拒绝。`))) return;
   try {
     await api(`/api/storage/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('storage', false, false, actionContext);
@@ -139,7 +139,7 @@ async function ctlMount(name, action) {
 async function deleteMount(name) {
   const actionContext = pageContext('storage');
   name = uq(name);
-  if (!confirm(`删除挂载点 ${name}？`)) return;
+  if (!(await deckConfirm(`删除挂载点 ${name}？`))) return;
   try {
     await api(`/api/storage/mounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('storage', false, false, actionContext);
@@ -414,7 +414,7 @@ async function submitGroup(prefix, existingId) {
   const payload = groupPayload(prefix);
   try {
     if (existingId) {
-      if (!confirm('保存后会立即更新该组未单独覆盖限速的成员，正在播放的人会重签限速。')) return;
+      if (!(await deckConfirm('保存后会立即更新该组未单独覆盖限速的成员，正在播放的人会重签限速。'))) return;
       await api(`/api/groups/${encodeURIComponent(existingId)}`, { method: 'PUT', body: JSON.stringify(payload) });
       toast('已保存');
       if (!context.isCurrent() || !modal.isConnected) return;
@@ -451,7 +451,7 @@ async function deleteGroup(id, count) {
   id = uq(id);
   if (isWhitelistGroup(id)) return toast('白名单是固定系统分组，不能删除', 1);
   if (count) return toast(`仍有 ${count} 个用户在该组，请先迁移`, 1);
-  if (!confirm(`删除用户组 ${id}？`)) return;
+  if (!(await deckConfirm(`删除用户组 ${id}？`))) return;
   try {
     await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('groups', false, false, actionContext);
@@ -958,7 +958,7 @@ function exportRedeem() {
 async function revokeRedeem(value) {
   const actionContext = pageContext('redeem');
   value = uq(value);
-  if (!confirm('作废这张卡密？作废后无法再用来注册。')) return;
+  if (!(await deckConfirm('作废这张卡密？作废后无法再用来注册。'))) return;
   try {
     await api(`/api/redeem/${encodeURIComponent(value)}/revoke`, { method: 'POST' });
     toast('已作废');
@@ -1083,7 +1083,7 @@ async function addGrant() {
 async function revokeGrant(value) {
   const actionContext = pageContext('invites');
   value = uq(value);
-  if (!confirm('撤销这条预授权？对方将无法直接注册。')) return;
+  if (!(await deckConfirm('撤销这条预授权？对方将无法直接注册。'))) return;
   try {
     await api(`/api/registration/grants/${encodeURIComponent(value)}`,
       { method: 'DELETE' });
@@ -1153,7 +1153,7 @@ PAGES.tggroup = async (context = pageContext('tggroup')) => {
     catch(err){if(context.isCurrent())$('#gm-scan-state').textContent='读取失败：'+err.message;}
   };
   $('#gm-scan').onclick=async()=>{
-    if(data?.rules?.delete_enabled&&!confirm('删除开关已开启：本次检测会重新核实并删除不合规存量会员本人（含白名单），历史保留，不连带。继续？'))return;
+    if(data?.rules?.delete_enabled&&!(await deckConfirm('删除开关已开启：本次检测会重新核实并删除不合规存量会员本人（含白名单），历史保留，不连带。继续？')))return;
     $('#gm-scan').disabled=true;
     try{await api('/api/telegram/membership/scan',{method:'POST'});if(context.isCurrent())await refresh();}
     catch(err){if(context.isCurrent()){$('#gm-scan-state').textContent=err.message;$('#gm-scan').disabled=false;}}
@@ -1519,7 +1519,7 @@ async function toggleAccessRule(id, enabled, input) {
 
 async function deleteAccessRule(id) {
   const actionContext = pageContext('access');
-  if (!confirm('删除这条规则？')) return;
+  if (!(await deckConfirm('删除这条规则？'))) return;
   try {
     await api(`/api/access/rules/${id}`, { method: 'DELETE' });
     toast('规则已删除');
@@ -1719,7 +1719,7 @@ function editShopItem(id) {
 }
 async function deleteShopItem(id, name) {
   const actionContext = pageContext('shop');
-  if (!confirm(`确定删除商品「${uq(name)}」？已产生的兑换记录会保留。`)) return;
+  if (!(await deckConfirm(`确定删除商品「${uq(name)}」？已产生的兑换记录会保留。`))) return;
   try {
     await api(`/api/shop/items/${Number(id)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('shop', false, false, actionContext);
@@ -1827,9 +1827,9 @@ async function resolveRequest(id, done) {
   const actionContext = pageContext('requests');
   let note = '';
   if (!done) {
-    note = prompt('无法处理的原因？会原样发给求片人。', '暂时找不到片源');
+    note = await deckPrompt('无法处理的原因？会原样发给求片人。', '暂时找不到片源');
     if (note === null) return;
-  } else if (!confirm('标记为已处理？求片人会收到通知。')) {
+  } else if (!(await deckConfirm('标记为已处理？求片人会收到通知。'))) {
     return;
   }
   try {
