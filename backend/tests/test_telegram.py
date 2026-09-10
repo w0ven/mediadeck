@@ -1512,6 +1512,36 @@ def test_broadcast_rankings_sends_poster_then_overflow_text(monkeypatch) -> None
     assert [c[0] for c in calls[1:]] == ["send"]
 
 
+def test_tg_avatar_accepts_telegram_octet_stream_jpeg() -> None:
+    jpeg = b"\xff\xd8\xff" + b"x" * 32
+    bot = TelegramBot(lambda: {"enabled": True, "bot_token": FAKE_CRED}, _FakeMembers())
+
+    class _Resp:
+        status_code = 200
+        content = jpeg
+        headers = {"content-type": "application/octet-stream"}
+
+    class _Client:
+        async def get(self, url, timeout=None):
+            assert "file/bot" in url and url.endswith("photos/a.jpg")
+            return _Resp()
+
+    async def fake_call(method, payload=None, timeout=20):
+        if method == "getUserProfilePhotos":
+            return {"total_count": 1, "photos": [[{"file_id": "small"}, {"file_id": "big"}]]}
+        if method == "getFile":
+            assert payload == {"file_id": "big"}
+            return {"file_path": "photos/a.jpg"}
+        raise AssertionError(method)
+
+    async def fake_client():
+        return _Client()
+
+    bot._call = fake_call  # type: ignore[assignment]
+    bot._client = fake_client  # type: ignore[assignment]
+    assert asyncio.run(bot._tg_avatar_bytes("1001")) == jpeg
+
+
 def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_FakeStats())

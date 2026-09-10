@@ -4656,6 +4656,16 @@ class TelegramBot(RebindBotMixin):
                 return True
         return await self.send(chat_id, pages[0], keyboard)
 
+    @staticmethod
+    def _image_bytes(content: bytes, content_type: str = "") -> bytes | None:
+        if not content:
+            return None
+        if content[:2] == b"\xff\xd8" or content[:8] == b"\x89PNG\r\n\x1a\n" or content[:6] in (b"GIF87a", b"GIF89a"):
+            return content
+        if str(content_type or "").lower().startswith("image/"):
+            return content
+        return None
+
     async def _tg_avatar_bytes(self, tg_user_id: str) -> bytes | None:
         if not str(tg_user_id).isdigit():
             return None
@@ -4663,9 +4673,10 @@ class TelegramBot(RebindBotMixin):
             "getUserProfilePhotos",
             {"user_id": int(tg_user_id), "limit": 1}, timeout=10)
         sizes = ((photos or {}).get("photos") or [None])[0] if isinstance(photos, dict) else None
-        if not sizes:
-            return None
-        file_id = str((sizes[-1] or {}).get("file_id") or "")
+        file_id = str((sizes[-1] or {}).get("file_id") or "") if sizes else ""
+        if not file_id:
+            chat = await self._call("getChat", {"chat_id": int(tg_user_id)}, timeout=10)
+            file_id = str(((chat or {}).get("photo") or {}).get("big_file_id") or "") if isinstance(chat, dict) else ""
         if not file_id:
             return None
         info = await self._call("getFile", {"file_id": file_id}, timeout=10)
@@ -4680,9 +4691,9 @@ class TelegramBot(RebindBotMixin):
             r = await client.get(f"{API_ROOT}/file/bot{token}/{path}", timeout=15)
         except Exception:  # noqa: BLE001 - avatar is optional
             return None
-        if r.status_code == 200 and r.content and str(r.headers.get("content-type") or "").startswith("image/"):
-            return r.content
-        return None
+        if r.status_code != 200:
+            return None
+        return self._image_bytes(r.content or b"", str(r.headers.get("content-type") or ""))
 
     async def _watch_rank_poster(self, days: int) -> bytes | None:
         days = max(1, int(days or 1))
