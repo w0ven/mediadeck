@@ -139,11 +139,11 @@ class GroupAuditPlugin(Plugin):
     spec = Spec(
         id="group_audit",
         name="群组核查",
-        description="检查已关联 Telegram 的成员是否还在要求的群组里。退群不等于停止付费，"
-                    "所以默认只报告；通知与停用需要显式选择。",
+        description="旧的单群 require_group 核查，已被「群组与频道」成员检测替代，不再出现在任务中心。",
         category="task",
         icon="⚑",
         interval=3600,
+        hidden=True,
         fields=[
             Field("action", "发现退群后", kind="select", default="report",
                   options=[("report", "仅报告"), ("notify", "通知本人"),
@@ -355,10 +355,11 @@ class ViewingReportPlugin(Plugin):
     spec = Spec(
         id="viewing_report",
         name="观影报告",
-        description="给已关联 Telegram 的成员发送本人的周报或月报（只发给本人，不公开）。",
+        description="给已关联 Telegram 的成员发送本人的周报或月报（只发给本人，不公开）。手动运行在后台发送，避免页面超时。",
         category="task",
         icon="📊",
         hour=20,
+        background=True,
         fields=[
             Field("period", "报告周期", kind="select", default="weekly",
                   options=[("weekly", "每周（周一发送）"), ("monthly", "每月（1 号发送）")]),
@@ -399,10 +400,16 @@ class ViewingReportPlugin(Plugin):
                 # notification nobody asked for, so it is not sent.
                 skipped += 1
                 continue
+            caption = self._text(label, days, hours, plays, total_bytes, detail)
             ok = False
-            with contextlib.suppress(Exception):
-                ok = await self.ctx.telegram.notify_member(
-                    member, self._text(label, days, hours, plays, total_bytes, detail))
+            photo = self._poster(member, label, days, hours, plays, total_bytes, detail)
+            notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
+            if photo and callable(notify_photo):
+                with contextlib.suppress(Exception):
+                    ok = await notify_photo(member, photo, caption)
+            if not ok:
+                with contextlib.suppress(Exception):
+                    ok = await self.ctx.telegram.notify_member(member, caption)
             if ok:
                 sent += 1
                 delivery["sent"].append(uid)
@@ -427,6 +434,18 @@ class ViewingReportPlugin(Plugin):
             lines.extend(f"{i}. {html.escape(name)} · {count} 次"
                          for i, (name, count) in enumerate(titles, 1))
         return "\n".join(lines)
+
+    def _poster(self, member: dict[str, Any], label: str, days: int, hours: float,
+                plays: int, total_bytes: int, detail: dict[str, Any]) -> bytes | None:
+        titles = [{"title": name, "plays": count} for name, count in _top_titles(detail, 5)]
+        try:
+            from app.modules.rank_poster import render_viewing_poster
+            return render_viewing_poster(
+                name=str(member.get("tg_username") or member.get("username") or ""),
+                label=label, days=days, hours=hours, plays=plays,
+                traffic=_fmt_bytes(total_bytes), titles=titles)
+        except Exception:  # noqa: BLE001 - caption still goes out
+            return None
 
 
 def _summarise(detail: dict[str, Any]) -> tuple[float, int, int]:

@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from app.modules.rank_poster import render_rank_poster, render_watch_poster
+from app.modules.rank_poster import render_rank_poster, render_viewing_poster, render_watch_poster
 from app.modules.stats import ranking_bounds, ranking_stamp
 from app.modules.telegram import TelegramBot
 
@@ -41,6 +41,14 @@ def test_ranking_bounds_are_complete_local_days() -> None:
     assert week_until == until
     assert ranking_stamp(1, now=now) == "2026-09-09"
     assert ranking_stamp(7, now=now) == "2026-09-03 ~ 2026-09-09"
+
+
+def test_viewing_poster_renders_jpeg() -> None:
+    data = render_viewing_poster(
+        name="@kele", label="周报", days=7, hours=3.5, plays=12,
+        traffic="1.2 GB", titles=[{"title": "剧集甲", "plays": 4}])
+    assert data[:2] == b"\xff\xd8"
+    assert len(data) > 4000
 
 
 def test_bulletin_split_keeps_newlines() -> None:

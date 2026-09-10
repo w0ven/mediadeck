@@ -1156,8 +1156,10 @@ class TelegramBot(RebindBotMixin):
         else:
             lines.append("这里是影视库账号服务，<b>当前暂停注册</b>。\n")
             lines.append("已有用户请使用已绑定的 Telegram；更换 TG 可申请换绑。")
-        if str(cfg.get("require_group") or "").strip():
-            lines.append("\n注册前需要先加入官方群组。")
+        rules = self.membership.rules() if self.membership else {}
+        if rules.get("gate_enabled") and any(
+                t.get("enabled") for t in (rules.get("targets") or [])):
+            lines.append("\n使用前需要先加入关联群组并关注频道。")
         return "\n".join(lines)
 
     # -- registration ---------------------------------------------------------
@@ -1231,9 +1233,6 @@ class TelegramBot(RebindBotMixin):
         used, cap = self.registration_slots()
         if cap and used >= cap:
             return f"注册名额已满（{used}/{cap}），请联系管理员。"
-        allowed, _status = await self.in_required_group(tg_user_id)
-        if not allowed:
-            return "需要先加入官方群组才能注册。"
         return ""
 
     _USERNAME_PROMPT = (
@@ -4608,6 +4607,18 @@ class TelegramBot(RebindBotMixin):
         if not chat_id or not self.enabled:
             return False
         return await self.send(chat_id, text)
+
+    async def notify_member_photo(self, member: dict[str, Any], photo: bytes,
+                                  caption: str = "") -> bool:
+        chat_id = member.get("tg_user_id")
+        if not chat_id or not self.enabled or not photo:
+            return False
+        result = await self._call_multipart(
+            "sendPhoto",
+            {"chat_id": str(chat_id), "caption": (caption or "")[:1024],
+             "parse_mode": "HTML"},
+            {"photo": ("viewing-report.jpg", photo, "image/jpeg")})
+        return bool(isinstance(result, dict) and result.get("message_id")) or result is not None
 
     async def notify_expiring(self, members: list[dict[str, Any]]) -> int:
         sent = 0

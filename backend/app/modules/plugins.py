@@ -107,6 +107,8 @@ class Spec:
     # Optional: only run when the local hour equals this (daily jobs).
     hour: int | None = None
     icon: str = "⚙"
+    hidden: bool = False
+    background: bool = False
 
 
 class Plugin:
@@ -294,6 +296,7 @@ class PluginRegistry:
             "config": self.config(plugin_id),
             "interval": spec.interval,
             "hour": spec.hour,
+            "hidden": bool(spec.hidden),
             "running": plugin_id in self._running,
             "last_run": last,
         }
@@ -302,6 +305,8 @@ class PluginRegistry:
         out = []
         for pid, plugin in self._plugins.items():
             if category and plugin.spec.category != category:
+                continue
+            if plugin.spec.hidden:
                 continue
             out.append(self.card(pid))
         return out
@@ -317,11 +322,19 @@ class PluginRegistry:
         plugin = self._plugins[plugin_id]
         if plugin_id in self._running:
             return {"ok": False, "error": "already running"}
+        started = time.time()
+        if trigger == "manual" and plugin.spec.background:
+            self._running.add(plugin_id)
+            asyncio.create_task(self._execute(plugin_id, trigger, started))
+            return {"ok": True, "结果": "已开始后台发送，完成后写入运行历史"}
+        return await self._execute(plugin_id, trigger, started)
+
+    async def _execute(self, plugin_id: str, trigger: str, started: float) -> dict[str, Any]:
+        plugin = self._plugins[plugin_id]
         self._running.add(plugin_id)
         owner = asyncio.current_task()
         if owner is not None:
             self._active.add(owner)
-        started = time.time()
         try:
             summary = await asyncio.wait_for(
                 plugin.run(self.config(plugin_id)), timeout=RUN_TIMEOUT)
