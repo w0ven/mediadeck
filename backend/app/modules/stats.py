@@ -346,7 +346,7 @@ class StatsService:
             (since, until, since, until))}
         rows = []
         for member in self._db.query(
-                'SELECT emby_user_id,username,group_id,tg_user_id,tg_username FROM members'):
+                'SELECT emby_user_id,username,group_id,tg_user_id,tg_username,tg_display_name FROM members'):
             uid = member['emby_user_id']
             window = windows.get(uid)
             if not window or (not window['seconds'] and not window['incomplete']):
@@ -355,6 +355,7 @@ class StatsService:
                          'group_id': member['group_id'],
                          'tg_user_id': member.get('tg_user_id') or '',
                          'tg_username': member.get('tg_username') or '',
+                         'tg_display_name': member.get('tg_display_name') or '',
                          'hours': round(window['seconds']/3600, 1),
                          'seconds': int(window['seconds']), 'incomplete': window['incomplete'],
                          'plays': counts.get(uid, 0)})

@@ -119,6 +119,11 @@ def _run(bot, text: str, chat: str = ADMIN_CHAT, username: str = "rootadmin"):
     return bot.sent[-1][1] if bot.sent else ""
 
 
+def _confirm_button(bot):
+    return next(b['callback_data'] for row in bot.sent[-1][2] for b in row
+                if b.get('callback_data', '').startswith('admin_ok:'))
+
+
 def _tap(bot, data: str, chat: str = ADMIN_CHAT):
     asyncio.run(bot._handle_callback({
         "id": "cb1", "data": data,
@@ -278,7 +283,7 @@ def test_renewall_does_nothing_until_it_is_confirmed(bot) -> None:
     assert "确认" in prompt
     assert bot.members.get("u1")["expires_at"] == before
 
-    result = _tap(bot, "admin_ok")
+    result = _tap(bot, _confirm_button(bot))
     assert "已为 2 个账号各续期 7 天" in result
     assert bot.members.get("u1")["expires_at"] > (before or 0)
 
@@ -296,17 +301,18 @@ def test_a_confirmation_is_refused_if_the_role_was_dropped_meanwhile(bot) -> Non
     _run(bot, "/renewall 7")
     bot.members.set_roles("admin1", [], actor="test")
 
-    assert "无权限" in _tap(bot, "admin_ok")
+    assert "无权限" in _tap(bot, _confirm_button(bot))
     assert bot.members.get("u1")["expires_at"] == before
 
 
 def test_confirming_twice_does_not_run_it_twice(bot) -> None:
     """The pending state is consumed, so a double tap is inert."""
     _run(bot, "/renewall 7")
-    _tap(bot, "admin_ok")
+    action = _confirm_button(bot)
+    result = _tap(bot, action)
     after_first = bot.members.get("u1")["expires_at"]
 
-    assert "过期" in _tap(bot, "admin_ok")
+    assert _tap(bot, action) == result  # stale taps do not overwrite success
     assert bot.members.get("u1")["expires_at"] == after_first
 
 
@@ -400,7 +406,7 @@ def test_scoreall_needs_confirmation_then_credits_everyone(bot) -> None:
     assert "确认" in prompt
     assert bot.points.balance("u1") == 0
 
-    result = _tap(bot, "admin_ok")
+    result = _tap(bot, _confirm_button(bot))
     assert "2 个账号" in result
     assert bot.points.balance("u1") == 10
     assert bot.points.balance("admin1") == 10

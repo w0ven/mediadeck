@@ -38,7 +38,7 @@ def test_formal_settings_dirty_permissions_save_and_scan_results(api, tmp_path):
                 url = urlsplit(route.request.url)
                 if not route.request.url.startswith(base):
                     return route.abort()
-                if url.path.startswith('/api/live'):
+                if url.path.startswith(('/api/live', '/api/stream')):
                     return route.fulfill(status=200, content_type='text/event-stream', body='')
                 if url.path.startswith(('/api/', '/static/')) or url.path == '/healthz':
                     response = client.request(route.request.method, url.path + ('?' + url.query if url.query else ''),
@@ -78,8 +78,8 @@ def test_formal_settings_dirty_permissions_save_and_scan_results(api, tmp_path):
             expect(page.locator('.card').filter(has=page.locator('#gm-save')).locator('.save-feedback')).to_contain_text('保存失败')
             expect(page.locator('.gm-url')).to_have_value('https://t.me/edited_link')
             assert page.evaluate('configDirty()')
-            page.once('dialog', lambda dialog: dialog.dismiss())
-            page.evaluate("go('tggroup')")
+            page.evaluate("void go('tggroup')")
+            page.locator('.deck-dialog-backdrop:not(.deck-dialog-closing) .deck-dialog-btn-cancel').click()
             assert page.evaluate("state.page === 'tgbot'")
             state.permission = 'administrator'
             page.locator('#gm-save').click()
@@ -99,8 +99,8 @@ def test_formal_settings_dirty_permissions_save_and_scan_results(api, tmp_path):
             expect(page.locator('#gm-scan-policy')).to_contain_text('删除开关已开启')
             state.membership = 'left'
             state.block_user = True
-            page.once('dialog', lambda dialog: dialog.accept())
             page.locator('#gm-scan').click()
+            page.locator('.deck-dialog-backdrop:not(.deck-dialog-closing) .deck-dialog-btn-confirm').click()
             expect(page.locator('#gm-scan')).to_be_disabled()
             expect(page.locator('#gm-scan-progress progress')).to_be_visible()
             page.screenshot(path=str(artifacts / 'membership-scan-progress.png'), full_page=True)

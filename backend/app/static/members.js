@@ -16,6 +16,8 @@
     listing: null,
     groups: [],
     selected: new Set(),
+    selectionQuery: '',
+    listVersion: 0,
     writingHash: false,
     liveSrc: null,
     liveBound: false,
@@ -239,7 +241,7 @@
   }
 
   function accountCell(m) {
-    const tg = m.tg_username ? '@' + m.tg_username : (m.tg_user_id ? '已绑定' : '');
+    const tg = m.tg_display_name || (m.tg_username ? '@' + m.tg_username : (m.tg_user_id ? 'TG ' + m.tg_user_id : ''));
     const white = isWhitelistGroup(m.group_id);
     return `<div class="hg-account ${white?'is-whitelist':''}"><span class="hg-avatar" aria-hidden="true">${white?whitelistEmblem():esc((m.username || '?').slice(0,2).toUpperCase())}</span><div>
       <button class="linkish" type="button" data-act="open" data-id="${esc(m.emby_user_id)}">${esc(m.username || m.emby_user_id)}</button>
@@ -310,7 +312,7 @@
     const gopts = groups.map((g) =>
       `<option value="${esc(g.id)}" ${params.get('group_id') === g.id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
     return `<div class="toolbar members-filters" id="members-filters" data-live-preserve>
-      <label>搜索 <input id="m-q" type="search" value="${esc(params.get('q') || '')}" placeholder="搜索账号、备注或联系方式…" aria-label="搜索用户" autocomplete="off" name="member-search" spellcheck="false"></label>
+      <label>搜索 <input id="m-q" type="search" value="${esc(params.get('q') || '')}" placeholder="账号、TG ID / @用户名、备注或联系方式…" aria-label="搜索用户" autocomplete="off" name="member-search" spellcheck="false"></label>
       <label>状态 <select id="m-status" aria-label="权益状态">
         <option value="">全部</option>
         ${['active', 'expired', 'exhausted', 'suspended', 'pending'].map((s) =>
@@ -347,7 +349,7 @@
       <div class="hg-page-intro"><div><span class="hg-eyebrow">MEMBERS</span><h2>账号与权益</h2><p>先定位用户，再查看详情；危险操作始终单独确认。</p></div><div class="toolbar"><button class="btn sm" data-act="enforce">策略预览</button><button class="btn sm" data-act="metering">实测计量与接管预览</button></div></div>
       ${statsHtml(listing)}
       <div class="toolbar ${ms.selected.size?'':'hidden'}" id="members-bulk" aria-label="已选择用户的批量操作">
-        <span class="muted" id="m-sel-count">已选 ${ms.selected.size} 人（跨页勾选不会操作未选用户）</span>
+        <span class="muted" id="m-sel-count">已选当前页 ${ms.selected.size} 人（换页或筛选后清空）</span>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="renew">续期</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="suspend">停用</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="activate">启用</button>
@@ -421,7 +423,7 @@
 
   function patchSelection() {
     const count = $('#m-sel-count');
-    if (count) count.textContent = `已选择 ${ms.selected.size} 人 · 仅操作已选用户`;
+    if (count) count.textContent = `已选择当前页 ${ms.selected.size} 人 · 仅操作已选用户`;
     $('#members-bulk')?.classList.toggle('hidden',!ms.selected.size);
     const pageBox=$('#m-pick-page'),rows=ms.listing?.members || [];
     if(pageBox){pageBox.checked=rows.length>0&&rows.every(m=>ms.selected.has(m.emby_user_id));pageBox.indeterminate=!pageBox.checked&&rows.some(m=>ms.selected.has(m.emby_user_id));}
@@ -494,19 +496,35 @@
     void groups;
   }
 
+  function selectionQuery(params = currentParams()) {
+    const query = membersQueryFromParams(params);
+    query.sort();
+    return query.toString();
+  }
+
   async function loadMembers(context) {
     context = context || membersContext(false);
     const params = currentParams();
+    const query = selectionQuery(params);
+    const version = ++ms.listVersion;
+    if (query !== ms.selectionQuery) {
+      ms.selected.clear();
+      ms.selectionQuery = query;
+    }
+    const current = () => version === ms.listVersion && query === selectionQuery()
+      && (typeof context.isCurrent !== 'function' || context.isCurrent());
     if (!context.live) {
       if (typeof renderView === 'function') renderView(pageLoading(), context);
       else $('#view').innerHTML = pageLoading();
     }
     try {
       const [listing, groups] = await Promise.all([
-        api('/api/members?' + membersQueryFromParams(params).toString()),
+        api('/api/members?' + query),
         (context.live && ms.groups.length) ? Promise.resolve(ms.groups) : api('/api/groups'),
       ]);
-      if (typeof context.isCurrent === 'function' && !context.isCurrent()) return;
+      if (!current()) return;
+      const visible = new Set((listing.members || []).map(m => m.emby_user_id));
+      ms.selected = new Set([...ms.selected].filter(id => visible.has(id)));
       ms.listing = listing;
       ms.groups = groups;
       const html = shellHtml(listing, params, groups);
@@ -536,7 +554,7 @@
         await fillDetail(id, params.get('tab') || 'overview');
       }
     } catch (e) {
-      if (typeof context.isCurrent === 'function' && !context.isCurrent()) return;
+      if (!current()) return;
       if (!context.live) {
         $('#view').innerHTML = pageError(e);
         const btn = $('#retry-page');
@@ -895,12 +913,17 @@
   }
 
   async function bulk(action) {
-    const ids = [...ms.selected];
+    const scope = ms.selectionQuery;
+    const visible = new Set((ms.listing?.members || []).map(m => m.emby_user_id));
+    const ids = [...ms.selected].filter(id => visible.has(id));
+    const stillSelected = () => state.page === 'members' && scope === selectionQuery()
+      && ids.every(id => ms.selected.has(id) && (ms.listing?.members || []).some(m => m.emby_user_id === id));
     if (!ids.length) return toast('没有选中的用户', 1);
     if (!(await deckConfirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'停用',activate:'启用','reset-traffic':'重置用量'})[action]}？`))) return;
+    if (!stillSelected()) return;
     if (action === 'renew') {
       const days = Number((await deckPrompt('续期天数', '30')) || '0');
-      if (!days) return;
+      if (!days || !stillSelected()) return;
       const r = await api('/api/members/bulk', {
         method: 'POST', body: JSON.stringify({ action: 'renew', user_ids: ids, days }),
       });
@@ -912,6 +935,10 @@
       });
       if (r.ok_flag === false || (r.remote_failed || []).length) toast('部分失败', 1);
       else toast(`已更新 ${r.ok || 0} 人`);
+    }
+    if (scope === ms.selectionQuery) {
+      ids.forEach(id => ms.selected.delete(id));
+      patchSelection();
     }
     await refreshNow();
   }

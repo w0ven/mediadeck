@@ -292,7 +292,7 @@ class MemberService:
 
     def list(self, status: str | None = None, group_id: str | None = None,
              role: str | None = None, search: str | None = None,
-             limit: int = 500, register_via: str | None = None,
+             limit: int | None = 500, register_via: str | None = None,
              inviter_id: str | None = None) -> list[dict[str, Any]]:
         sql = "SELECT * FROM members"
         clauses, params = [], []
@@ -306,13 +306,20 @@ class MemberService:
             clauses.append("inviter_id=?")
             params.append(str(inviter_id))
         if search:
-            clauses.append("(username LIKE ? OR note LIKE ? OR contact LIKE ?)")
-            like = f"%{search}%"
-            params += [like, like, like]
+            needle = str(search).strip().lstrip("@")
+            clauses.append(
+                "(username LIKE ? OR note LIKE ? OR contact LIKE ?"
+                " OR tg_username LIKE ? OR CAST(tg_user_id AS TEXT) LIKE ?)")
+            like = f"%{needle}%"
+            params += [like, like, like, like, like]
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
-        sql += " ORDER BY username COLLATE NOCASE ASC LIMIT ?"
-        params.append(max(1, min(limit, 5000)))
+        sql += " ORDER BY username COLLATE NOCASE ASC, emby_user_id ASC"
+        # The paged API must filter/sort the full population before slicing;
+        # a hidden 5000-row cap loses matches and lies about total pages.
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, min(limit, 5000)))
         rows = [self._decorate(r) for r in self._db.query(sql, tuple(params))]
         self._attach_tree(rows)
         # Status/role are filtered after decoration: the *effective* state is
@@ -827,16 +834,18 @@ class MemberService:
             now = int(time.time())
             if previous and previous["emby_user_id"] != user_id:
                 conn.execute(
-                    "UPDATE members SET tg_user_id='',tg_username='',tg_bound_at=NULL,"
+                    "UPDATE members SET tg_user_id='',tg_username='',tg_display_name='',tg_bound_at=NULL,"
                     "updated_at=? WHERE emby_user_id=?",
                     (now, previous["emby_user_id"]))
                 self.audit(actor, "member.telegram.unbind", previous["emby_user_id"],
                            "chat rebound to another member", conn=conn)
 
             conn.execute(
-                "UPDATE members SET tg_user_id=?,tg_username=?,tg_bound_at=?,"
+                "UPDATE members SET tg_user_id=?,tg_username=?,tg_display_name=?,tg_bound_at=?,"
                 "updated_at=? WHERE emby_user_id=?",
-                (tg_user_id, str(tg_username or "").strip(), now, now, user_id))
+                (tg_user_id, str(tg_username or "").strip(),
+                 member.get('tg_display_name', '') if member.get('tg_user_id') == tg_user_id else '',
+                 now, now, user_id))
             # The numeric chat id is an identifier, not a secret, but there is no
             # reason to spill it into the log either.
             self.audit(actor, "member.telegram.bind", user_id,
@@ -849,7 +858,7 @@ class MemberService:
             raise KeyError(user_id)
         if member.get("tg_user_id"):
             self._db.execute(
-                "UPDATE members SET tg_user_id='',tg_username='',tg_bound_at=NULL,"
+                "UPDATE members SET tg_user_id='',tg_username='',tg_display_name='',tg_bound_at=NULL,"
                 "updated_at=? WHERE emby_user_id=?",
                 (int(time.time()), user_id))
             self.audit(actor, "member.telegram.unbind", user_id, "unlinked")

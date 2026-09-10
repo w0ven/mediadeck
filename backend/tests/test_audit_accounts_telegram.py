@@ -227,7 +227,7 @@ def test_bulk_confirmation_does_not_expand_to_new_members(bot):
     async def run():
         await bot._handle_command(12, '12', 'operator', '/scoreall 10')
         bot._members.upsert('later', 'later', {'group_id': 'standard'})
-        await bot._handle_callback(callback('admin_ok'))
+        await bot._handle_callback(callback('admin_ok:' + bot._pending['12'][2]['nonce']))
     asyncio.run(run())
     assert bot._points.balance('later') == 0
     assert bot._points.balance('u1') == 1010
