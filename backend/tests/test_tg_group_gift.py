@@ -356,3 +356,19 @@ def test_username_interrupted_by_gate_restores_gift_not_username_side_effect(env
         await confirm_registration_password(env)
         assert env.members.find_by_telegram(str(TARGET))['username'] == 'ReallyCreated'
     asyncio.run(run())
+
+
+def test_gift_card_shows_recipient_username_when_reachable(env):
+    async def run():
+        original = env.bot._call
+        async def call(method, payload=None, timeout=20):
+            if method == 'getChat' and str(payload.get('chat_id')) == str(TARGET):
+                return {'id': TARGET, 'username': 'target_user', 'first_name': 'Target'}
+            return await original(method, payload, timeout)
+        env.bot._call = call
+        mid, _ = await issue(env)
+        text = env.tg.text(GROUP, mid)
+        assert 'tg://user?id=955' in text
+        assert '@target_user</a>' in text
+        assert 'TG 955' not in text
+    asyncio.run(run())

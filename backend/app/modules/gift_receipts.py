@@ -19,7 +19,8 @@ class GiftReceipts:
     def bot_id(self) -> str:
         return self.bot._token().split(':', 1)[0]
 
-    def stage(self, conn: Any, admission: Any, member: dict, group_name: str) -> int | None:
+    def stage(self, conn: Any, admission: Any, member: dict, group_name: str,
+              *, recipient_label: str | None = None) -> int | None:
         """Called inside the SAME transaction as binding + credential consumption."""
         if not admission or admission.via != 'admin' or not admission.credential:
             return None
@@ -30,7 +31,8 @@ class GiftReceipts:
         tg_id = str(grant['tg_user_id'])
         expires = member.get('expires_at_effective', member.get('expires_at'))
         term = time.strftime('%Y-%m-%d 到期', time.localtime(expires)) if expires else '永久'
-        body = (f'🎉 <a href="tg://user?id={tg_id}">TG {tg_id}</a> 注册成功\n'
+        label = escape(str(recipient_label).strip()) if str(recipient_label or '').strip() else f'TG {tg_id}'
+        body = (f'🎉 <a href="tg://user?id={tg_id}">{label}</a> 注册成功\n'
                 f'账号：<b>{escape(str(member["username"]))}</b>\n'
                 f'{escape(group_name)} · {term}')
         now = int(time.time())

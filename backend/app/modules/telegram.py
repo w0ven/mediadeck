@@ -1444,6 +1444,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 payload['group_id'] = group_id
             if days > 0:
                 payload['expires_at'] = now + days * 86400
+            handle = str(tg_username or '').strip().lstrip('@')
+            display = str(self._tg_profiles.get(tg_user_id, {}).get('display_name') or '').strip()
+            receipt_label = ('@' + handle) if handle else (display or f'TG {tg_user_id}')
             if self._db is not None:
                 with self._db.write() as conn:
                     admission = self._fresh_admission(tg_user_id, admission)
@@ -1462,7 +1465,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                     if self._gift_receipts:
                         group = self._groups.get(group_id) if self._groups and group_id else None
                         receipt_id = self._gift_receipts.stage(conn, admission, member,
-                            str((group or {}).get('name') or group_id or '用户组'))
+                            str((group or {}).get('name') or group_id or '用户组'),
+                            recipient_label=receipt_label)
             else:
                 member = self._members.upsert(emby_id, username, payload, actor='telegram')
                 self._members.bind_telegram(emby_id, tg_user_id, tg_username, actor='telegram')
@@ -2325,6 +2329,22 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             {"tg_id": tg_id, "message_id": self._panel.get(self._pkey(chat_id)), "actor": actor})
         self._remember_admin_panel(chat_id, {'tg_user_id': tg_id}, actor)
 
+    async def _friendly_tg_label(self, tg_id: str) -> str:
+        """Best-effort human label for a Telegram user: @username, display
+        name, or the bare ID when nothing better is reachable. A failed
+        lookup must never block the admin action it only decorates."""
+        try:
+            profile = await self._tg_profile(str(tg_id))
+        except Exception:  # noqa: BLE001 - label is cosmetic
+            profile = {}
+        handle = str((profile or {}).get('username') or '').strip().lstrip('@')
+        if handle:
+            return '@' + handle
+        display = str((profile or {}).get('display_name') or '').strip()
+        if display:
+            return display
+        return 'TG ' + str(tg_id)
+
     async def _admin_gift(self, chat_id: Any, message_id: int,
                           member: dict[str, Any] | None, data: str) -> None:
         if not self.is_admin(member):
@@ -2391,9 +2411,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             issuer = str(member.get('tg_user_id') or _ACTOR.get())
             issuer_name = str(member.get('tg_username') or '')
             issuer_label = '@' + issuer_name if issuer_name else 'TG ' + issuer
+            recipient_label = await self._friendly_tg_label(target)
             await self._edit(chat_id, message_id,
                 f'🎁 <a href="tg://user?id={escape(issuer, quote=True)}">{escape(issuer_label)}</a> 为 '
-                f'<a href="tg://user?id={target}">TG {target}</a> 赠送了一份注册资格\n'
+                f'<a href="tg://user?id={target}">{escape(recipient_label)}</a> 赠送了一份注册资格\n'
                 '点击下方领取，前往机器人完成注册。',
                 [[{'text': '领取并注册', 'url': link}]])
             return
