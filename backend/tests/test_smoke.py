@@ -500,7 +500,7 @@ def test_node_without_matching_root_is_never_chosen() -> None:
                             "/mnt/gdrive3/Media", "gdrive3:Media")))
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
-                       headers=_basic(), follow_redirects=False)
+                       headers=_play(), follow_redirects=False)
         assert "gd3only" not in r.headers["location"]     # fell back to Emby
         preview = client.get("/api/playback/preview?item_id=item42",
                              headers=_basic()).json()
@@ -773,8 +773,7 @@ def test_stream_edge_does_not_bypass_emby_auth() -> None:
     A reverse proxy makes this endpoint public, so without verifying the
     caller's own Emby token anyone could guess an item id and be handed a
     signed media URL with no login at all -- turning the library into an open
-    download site. Unverified callers fall through to Emby (fail-open), which
-    then applies its own decision.
+    download site. Unverified callers are refused before routing.
     """
     with TestClient(app) as client:
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
@@ -782,22 +781,22 @@ def test_stream_edge_does_not_bypass_emby_auth() -> None:
         # no credential at all -> must not receive a node URL
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        follow_redirects=False)
-        assert r.status_code == 302
-        assert "mock-" not in r.headers["location"]
+        assert r.status_code == 401
+        assert "location" not in r.headers
 
         # a rejected credential -> same
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        headers=_play("invalid-token"), follow_redirects=False)
-        assert "mock-" not in r.headers["location"]
+        assert r.status_code == 403 and "location" not in r.headers
 
         # a valid credential -> accelerated
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        headers=_play(), follow_redirects=False)
         assert "mock-" in r.headers["location"]
 
-        reasons = {e["reason"] for e in client.get("/api/playback/log",
-                                                   headers=_basic()).json()}
-        assert "unauthorised" in reasons
+        # Authentication failures are rejected before the routing/signer log.
+        assert all(e["reason"] != "unauthorised" for e in client.get(
+            "/api/playback/log", headers=_basic()).json())
 
 
 def test_client_token_is_read_from_every_shape_emby_uses() -> None:
@@ -849,6 +848,7 @@ def test_member_rate_cap_is_signed_into_the_node_url() -> None:
                    json={"group_id": "standard"})
         client.put("/api/members/u1/overrides", headers=_basic(),
                    json={"bandwidth_limit_kbps": 8000})
+        app.state.emby.set_sessions([{"Id": "rate-session", "UserId": "u1"}])
 
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        headers=_play(), follow_redirects=False)
@@ -887,6 +887,10 @@ def test_shared_key_is_attributed_by_device_not_by_first_caller() -> None:
         client.put("/api/members/u2/overrides", headers=_basic(),
                    json={"bandwidth_limit_kbps": 2000})
 
+        app.state.emby.set_sessions([
+            {"Id": "rate-u1", "UserId": "u1", "DeviceId": "dev:u1"},
+            {"Id": "rate-u2", "UserId": "u2", "DeviceId": "dev:u2"},
+        ])
         headers = _play("admin-key")
         headers["X-Emby-Device-Id"] = "dev:u1"
         first = client.get("/emby/Videos/item42/stream.mkv?Static=true",
@@ -911,18 +915,8 @@ def test_shared_key_is_attributed_by_device_not_by_first_caller() -> None:
         headers.pop("X-Emby-Device-Id")
         third = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                            headers=headers, follow_redirects=False)
-        origin = app.state.settings_service.emby_config()["url"].rstrip("/")
-        assert third.status_code == 302
-        assert third.headers["location"] == (
-            f"{origin}/emby/Videos/item42/stream.mkv?Static=true")
-        assert third.headers["x-mediadeck-decision"] == "unattributed-caller"
-        assert third.headers["x-mediadeck-node"] == ""
-        third_args = parse_qs(urlsplit(third.headers["location"]).query, keep_blank_values=True)
-        assert third_args == {"Static": ["true"]}
-        assert {"k", "e", "md5", "expires", "r", "u"}.isdisjoint(third_args)
-        decision = app.state.playback.recent(1)[0]
-        assert decision["reason"] == "unattributed-caller"
-        assert decision["redirected"] is False and decision["signed"] is False
+        assert third.status_code == 403
+        assert "location" not in third.headers
 
 
 def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> None:
@@ -971,6 +965,7 @@ def test_redirected_viewer_is_not_shown_as_estimate() -> None:
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
         client.put("/api/members/u1", headers=_basic(),
                    json={"group_id": "standard"})
+        app.state.emby.set_sessions([{"Id": "attribution-session", "UserId": "u1"}])
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        headers=_play(), follow_redirects=False)
         assert r.status_code == 302 and "u=" in r.headers["location"]
@@ -1042,11 +1037,11 @@ def test_proxy_mode_answers_204_instead_of_looping() -> None:
         assert "location" not in r.headers
         assert r.headers["x-mediadeck-fallback"] == "transcode"
 
-        # unauthenticated -> 204 as well, never a signed URL
+        # unauthenticated -> fail closed, never a signed URL
         r = client.get("/emby/videos/item42/original.mkv",
                        headers=proxy, follow_redirects=False)
-        assert r.status_code == 204
-        assert r.headers["x-mediadeck-fallback"] == "unauthorised"
+        assert r.status_code == 401
+        assert "location" not in r.headers
 
         # accelerable -> still a real 302 to the node
         r = client.get("/emby/videos/item42/original.mkv",

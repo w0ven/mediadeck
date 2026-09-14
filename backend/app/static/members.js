@@ -777,7 +777,7 @@
   }
 
   function resetOverrideInput(key) {
-    const ids = {max_streams:'ov-streams',bandwidth_limit_kbps:'ov-bandwidth',max_devices:'ov-devices',
+    const ids = {max_streams:'ov-streams',bandwidth_limit_kbps:'ov-bandwidth',
       allow_transcode:'ov-transcode',allow_download:'ov-download',extra_traffic_bytes:'ov-extra'};
     if (ids[key] && document.getElementById(ids[key])) document.getElementById(ids[key]).value = '';
     if (key === 'libraries') {

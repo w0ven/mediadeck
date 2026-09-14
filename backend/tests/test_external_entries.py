@@ -53,6 +53,8 @@ def client():
         assert result.status_code == 200
         assert client.put("/api/settings/playback", auth=ADMIN,
                           json={"enabled": True}).status_code == 200
+        app.state.emby.set_sessions([{"Id": "entry-session", "UserId": "u1",
+                                      "DeviceId": "entry-client"}])
         yield client
 
 
@@ -79,6 +81,10 @@ def assert_direct(response):
 def test_actual_video_routes_keep_node_signature_and_rate(client, prefix, tail, method):
     client.put("/api/members/u1", auth=ADMIN, json={"group_id": "standard"})
     client.put("/api/members/u1/overrides", auth=ADMIN, json={"bandwidth_limit_kbps": 8000})
+    # Policy synchronization can disconnect the old login. Model the client's
+    # subsequent authenticated session, rather than playing without a session.
+    app.state.emby.set_sessions([{"Id": "entry-session", "UserId": "u1",
+                                  "DeviceId": "entry-client"}])
     response = request(client, entry_headers(), f"{prefix}/item42/{tail}", method)
     assert response.status_code == 302
     parsed = urlsplit(response.headers["location"])
@@ -132,8 +138,7 @@ def test_non_ascii_assertion_is_not_an_exception():
 @pytest.mark.parametrize("key", ["", "invalid-token"])
 def test_entry_credential_never_bypasses_emby_auth(client, key):
     response = request(client, {**entry_headers(token=key), "X-Mediadeck-Proxy": "1"})
-    assert response.status_code == 204
-    assert response.headers["x-mediadeck-fallback"] == "unauthorised"
+    assert response.status_code == (401 if not key else 403)
     assert "location" not in response.headers
 
 
@@ -181,7 +186,9 @@ def test_playback_caches_and_signed_urls_are_isolated_by_entry(client, monkeypat
             assert urlsplit(response.headers["location"]).hostname == f"{name}.example.com"
     # Separate metadata, positive auth and per-user rate caches; affinity
     # still uses the same media path, so entries do not scatter one file.
-    assert access.await_count == paths.await_count == users.await_count == 3
+    assert paths.await_count == 3
+    # Shared admission revalidates each caller before any cached URL is issued.
+    assert access.await_count == users.await_count == 10
     assert len(selected) == 1
 
 
@@ -191,7 +198,7 @@ def test_warm_entry_auth_does_not_authorise_another_entry(client, monkeypatch):
     for entry in ("friend-b", None):
         headers = entry_headers(entry) if entry else {"X-Emby-Token": "client-emby-token"}
         response = request(client, {**headers, "X-Mediadeck-Proxy": "1"})
-        assert response.status_code == 204 and "location" not in response.headers
+        assert response.status_code == 403 and "location" not in response.headers
 
 
 def test_entry_cannot_bypass_access_rules(client, monkeypatch):
@@ -421,7 +428,11 @@ def test_nginx_origin_template_covers_routes_trust_and_cache(client):
     assert 'if ($request_method !~ "^(GET|HEAD)$") { return 418; }' in config
     assert "proxy_set_header X-Mediadeck-Entry-Key $http_x_mediadeck_entry_key;" in config
     assert "proxy_set_header X-Mediadeck-Proxy nginx;" in config
-    assert "error_page 418 500 502 503 504 = @mediadeck_emby_origin;" in config
+    assert "error_page 418 = @mediadeck_emby_origin;" in config
+    assert "418 500" not in config
+    caddy = client.get("/api/integration/frontend?server=caddy", auth=ADMIN).json()["config"]
+    assert "@fallback status 204\n" in caddy
+    assert "@fallback status 204 500" not in caddy
     assert "proxy_cache off;" in config
     assert "proxy_ssl_verify on;" in config
     # 403 access denials must not be converted into a successful fallback.

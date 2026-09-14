@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 
@@ -397,7 +398,38 @@ class LiveEmby:
         async with self._client(timeout, verify) as client:
             r = self._check(await client.get(f"{base}/emby/Sessions", headers=headers))
             r.raise_for_status()
-            return list(r.json() or [])
+            data = r.json()
+            if not isinstance(data, list) or any(not isinstance(s, dict) for s in data):
+                raise ValueError("invalid Emby session response")
+            return data
+
+    async def playback_info(self, item: str, method: str, headers: dict[str, str],
+                            query: dict[str, str], payload: dict[str, Any] | None
+                            ) -> tuple[int, dict[str, Any]]:
+        base, _, timeout, verify = self._conn()
+        # Caller headers only: never substitute the configured admin API key.
+        forwarded = {k: v for k, v in headers.items() if k.lower() not in
+                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}}
+        async with self._client(timeout, verify) as client:
+            r = await client.request(method, f"{base}/emby/Items/{quote(item, safe='')}/PlaybackInfo",
+                                     headers=forwarded, params=query, json=payload)
+            try:
+                data = r.json()
+            except ValueError:
+                if r.is_success:
+                    raise
+                data = {"Message": "PlaybackInfo unavailable"}
+            if not isinstance(data, dict):
+                raise TypeError("invalid PlaybackInfo response")
+            return r.status_code, data
+
+    async def report_stopped(self, token: str, device: str, payload: dict[str, Any]) -> int:
+        base, _, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            r = await client.post(f"{base}/emby/Sessions/Playing/Stopped",
+                                  headers={"X-Emby-Token": token, "X-Emby-Device-Id": device},
+                                  json=payload)
+            return r.status_code
 
     async def stop_session(self, session_id: str, reason: str = "") -> bool:
         """End a playback session.
@@ -420,9 +452,8 @@ class LiveEmby:
             r = await client.post(
                 f"{base}/emby/Sessions/{session_id}/Playing/Stop", headers=headers)
             stopped = r.status_code in (200, 204)
-            with contextlib.suppress(httpx.HTTPError):
-                await client.delete(
-                    f"{base}/emby/Sessions/{session_id}", headers=headers)
+            # HTTP acceptance is not proof the client stopped. Do not delete
+            # the session: that would hide a still-playing client from admission.
             return stopped
 
     async def delete_session(self, session_id: str) -> bool:

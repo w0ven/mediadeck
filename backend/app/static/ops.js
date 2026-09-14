@@ -229,10 +229,6 @@ function overrideEditor(m, libs) {
         <input id="ov-bandwidth" aria-label="带宽覆盖" type="number" min="0" step="0.1" placeholder="继承" ${storedNumberAttrs(num('bandwidth_limit_kbps'), num('bandwidth_limit_kbps') === '' ? '' : kbpsToMBps(num('bandwidth_limit_kbps')))} style="width:110px">
         <span class="muted">MB/s，0=不限速。保存后正在播放的人会重签限速。</span>
         <button class="btn sm" type="button" onclick="clearOverrideField('bandwidth_limit_kbps')">还原</button></div></div>
-    <div class="ov-row"><div class="ov-label">设备</div>
-      <div class="ov-src">${ovSource(m, 'max_devices', grp.max_devices || 0, eff.max_devices, (v) => v ? v + ' 台' : '不限')}</div>
-      <div class="ov-controls"><input id="ov-devices" aria-label="设备上限覆盖" type="number" min="0" placeholder="继承" value="${esc(num('max_devices'))}" style="width:90px">
-        <button class="btn sm" type="button" onclick="clearOverrideField('max_devices')">还原</button></div></div>
     <div class="ov-row"><div class="ov-label">转码</div>
       <div class="ov-src">${ovSource(m, 'allow_transcode', grp.allow_transcode, eff.allow_transcode, boolLabel)}</div>
       <div class="ov-controls">${flagSelect('ov-transcode', ov.allow_transcode)}
@@ -271,9 +267,7 @@ function collectOverridesFromForm(existing) {
   const bandwidth = ($('#ov-bandwidth') || {}).value;
   if (bandwidth === '' || bandwidth == null) delete ov.bandwidth_limit_kbps;
   else ov.bandwidth_limit_kbps = readStoredNumber($('#ov-bandwidth'), value => mBpsToKbps(parseFloat(value)));
-  const devices = ($('#ov-devices') || {}).value;
-  if (devices === '' || devices == null) delete ov.max_devices;
-  else ov.max_devices = parseInt(devices, 10);
+  delete ov.max_devices;
   const readFlag = (elId, key) => {
     const v = (($('#' + elId) || {}).value || '');
     if (v === '') delete ov[key];
@@ -344,7 +338,6 @@ function groupLimitsText(g) {
   const bits = [];
   bits.push(g.max_streams ? g.max_streams + ' 路' : '并发不限');
   bits.push(g.bandwidth_limit_kbps ? fmtKbps(g.bandwidth_limit_kbps) : '不限速');
-  bits.push(g.max_devices ? g.max_devices + ' 设备' : '设备不限');
   bits.push(g.request_quota ? '求片 ' + g.request_quota + '/月' : '求片不限');
   bits.push(g.allow_transcode ? '转码' : '禁转码');
   bits.push(g.allow_download ? '下载' : '禁下载');
@@ -382,8 +375,7 @@ function groupForm(prefix, g) {
       <div><div style="margin-bottom:4px">${bwPresetButtons(prefix + '-bandwidth')}</div>
       <input id="${prefix}-bandwidth" type="number" min="0" step="0.1" ${storedNumberAttrs(g.bandwidth_limit_kbps || 0, kbpsToMBps(g.bandwidth_limit_kbps || 0))} style="width:110px">
       <span class="muted">MB/s，0 = 不限速。保存后该组未覆盖成员会重签限速。</span></div></div>
-    <div class="form-row"><label for="${prefix}-streams">并发</label><input id="${prefix}-streams" type="number" min="0" value="${v('max_streams', 2)}" style="width:90px"><span class="muted">路，0 = 不限</span></div>
-    <div class="form-row"><label for="${prefix}-devices">设备</label><input id="${prefix}-devices" type="number" min="0" value="${v('max_devices', 3)}" style="width:90px"><span class="muted">台，0 = 不限</span></div>
+    <div class="form-row"><label for="${prefix}-streams">并发</label><input id="${prefix}-streams" type="number" min="0" value="${v('max_streams', 2)}" style="width:90px"><span class="muted">路，0 = 不限。暂停保留席位；超额播放在发链接前拒绝。</span></div>
     <div class="form-row"><label for="${prefix}-requests">每月求片</label><input id="${prefix}-requests" type="number" min="0" value="${v('request_quota', 3)}" style="width:90px"><span class="muted">次/月，0 = 不限；被拒绝的求片也算一次</span></div>
     <div class="form-row"><label>权限</label>
       <label><input id="${prefix}-transcode" type="checkbox" ${g.allow_transcode == null || g.allow_transcode ? 'checked' : ''}> 转码</label>
@@ -401,7 +393,6 @@ function groupPayload(prefix) {
     traffic_quota_bytes: readStoredNumber($(`#${prefix}-gib`), () => Math.round(gib * 1024 ** 3)),
     bandwidth_limit_kbps: readStoredNumber($(`#${prefix}-bandwidth`), value => mBpsToKbps(parseFloat(value) || 0)),
     max_streams: parseInt($(`#${prefix}-streams`).value, 10) || 0,
-    max_devices: parseInt($(`#${prefix}-devices`).value, 10) || 0,
     request_quota: parseInt($(`#${prefix}-requests`).value, 10) || 0,
     allow_transcode: $(`#${prefix}-transcode`).checked,
     allow_download: $(`#${prefix}-download`).checked,

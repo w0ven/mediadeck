@@ -4,6 +4,41 @@ Newest entries first. Every working session appends one entry.
 
 ---
 
+## 2026-09-14 — device observability and shared session admission (local)
+
+- Preserved the pre-topic commit. Initial inherited admission tests actually
+  failed (5 failed, 8 passed); completion claims were not used as evidence.
+- Removed the registered-device cap from panel/Bot configuration and enforcement;
+  retained device counts/history, block and forget. Existing concurrency values
+  and native policy mapping remain unchanged.
+- Admission now counts Emby Sessions, not DeviceIds, with serialized fresh
+  snapshots and persistent SQLite leases. Invalid identity/session observations
+  fail closed. Retry/seek and double entrance checks do not double-reserve.
+- Added shared nginx admission for stream/original and HLS, and a metadata-only
+  PlaybackInfo proxy that binds PlaySessionId before returning URLs. Supports
+  query-only empty POST. Subtitles and other auxiliary resources do not reserve.
+  Gateway routing and source-capability handling remain unchanged; no video proxy.
+- Pauses retain a seat (not billable time). Matching successful Stopped reports
+  release seats; stale PlaySessionIds do not release replacements. Pending starts
+  have no blind TTL. Clients that never report stop retain the seat until their
+  Emby Session disappears; see PLAYBACK_ADMISSION.md for the exact contract.
+- Advisory Stop no longer deletes sessions or retries every tick after HTTP
+  acceptance. LastActivityDate is not used to guess who started first.
+- Final full suite: **1921 passed, 2 failed, 79 errors, 56 skipped**. The two
+  failures (entry browser helper and member-list latency) and the shared browser
+  setup error were reproduced on the preserved pre-topic archive. Full lint:
+  **51 pre-existing errors**, no additional lint debt. No CI-green claim.
+- Targeted admission/entrance/smoke/member-browser collection: **171 passed**.
+  Real temporary nginx plus the supplied gateway source passed local integration;
+  caller edition verification and cloud resolution were mocked, not production.
+  Mock uvicorn boot and authenticated Chromium device-cap UI checks passed.
+- Delivered generic nginx template and protocol/rollout documentation. Private
+  operator-specific candidate and detailed logs are outside the public repository.
+  Next: controller-owned PR/release, Deck restart and nginx reload, then dedicated
+  live-client acceptance. Gateway and Emby do not require a restart for this wiring.
+
+---
+
 ## 2026-09-11 — notify requesters when accepted titles land in the library
 
 - Accepted requests stay ``accepted``. A new ``request_library_watch`` row

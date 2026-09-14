@@ -26,7 +26,7 @@ def test_fixed_whitelist_cannot_be_deleted_even_when_empty(subject):
 
 
 def test_decorations_do_not_reset_custom_limits_or_add_roles(subject):
-    subject.groups.update(WHITELIST_GROUP_ID,{'name':'内部成员','max_streams':3,'max_devices':4})
+    subject.groups.update(WHITELIST_GROUP_ID,{'name':'内部成员','max_streams':3})
     subject.members.upsert('u1','alice',{'group_id':WHITELIST_GROUP_ID})
     before=subject.db.one("SELECT * FROM members WHERE emby_user_id='u1'")
     member=subject.members.get('u1')
@@ -34,7 +34,7 @@ def test_decorations_do_not_reset_custom_limits_or_add_roles(subject):
     assert home.startswith('💠 ') and home.count('内部成员') == 1
     assert '白名单 · 专属成员' not in home
     assert 'admin' not in {b.get('callback_data') for row in keys for b in row}
-    assert member['roles']==[] and member['max_streams']==3 and member['max_devices']==4
+    assert member['roles']==[] and member['max_streams']==3
     assert subject._whitelist_decoration(member) == '💠 '
     assert '内部成员' in subject._user_card(member)
     assert subject._usage_text(member).startswith('💠 ')

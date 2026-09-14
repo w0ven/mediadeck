@@ -110,8 +110,9 @@ CREATE TABLE IF NOT EXISTS members (
 CREATE INDEX IF NOT EXISTS idx_members_plan ON members(plan_id);
 CREATE INDEX IF NOT EXISTS idx_members_status ON members(status);
 
--- One row per device per member. Emby has a device list but no notion of
--- "this account may use at most N devices", so the limit is enforced here.
+-- One row per device per member. Registration is uncapped; the row is
+-- observational (and can be blocked by an operator). Concurrent-play
+-- limits live on max_streams, not here.
 CREATE TABLE IF NOT EXISTS devices (
     emby_user_id    TEXT NOT NULL,
     device_id       TEXT NOT NULL,

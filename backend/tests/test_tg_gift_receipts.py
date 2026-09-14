@@ -359,3 +359,14 @@ def test_unlimited_and_numeric_measurement_text_remain_truthful(env, used):
     text = env.tg.text(GROUP, mid)
     assert '剩余：<b>不限</b>' in text
     assert ('本周期暂无播放记录' if used is None else '0 B' if used == 0 else '1.0 KiB') in text
+
+
+def test_receipt_label_uses_registration_handle(env):
+    async def run():
+        mid, _ = await issue(env)
+        await register(env)
+        posts = public_receipts(env)
+        assert len(posts) == 1
+        assert '@local_user</a> 注册成功' in posts[0]['text']
+        assert 'TG 955</a>' not in posts[0]['text']
+    asyncio.run(run())

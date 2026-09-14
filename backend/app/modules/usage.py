@@ -130,9 +130,15 @@ class UsageSampler:
         self._last_tick = 0.0
         self._last_error: str | None = None
         self._ticks = 0
-        # Device-cap refusals collected during a tick, kicked after billing so
-        # one over-limit client cannot abort accounting for everyone else.
+        # Excess concurrent plays collected during a tick, kicked after billing
+        # so one over-limit client cannot abort accounting for everyone else.
+        # This is a safety net for traffic that never hits the panel edge;
+        # admission refusal on the stream path is the actual guarantee.
         self._pending_kicks: list[tuple[str, str]] = []
+        # Clients that ignore Playback/Stop would otherwise be retried every
+        # tick (~5s), hammering Emby session writes. Back off per session id.
+        self._kick_failures: dict[str, int] = {}
+        self._kick_backoff_until: dict[str, float] = {}
         self._tick_lock = asyncio.Lock()
         self._publish_live()
 
@@ -155,7 +161,7 @@ class UsageSampler:
         if billed_users and self._enforcement:
             result["enforced"] = await self._enforce_exhausted(billed_users)
         if self._pending_kicks and self._enforcement:
-            result["device_kicks"] = await self._kick_refused_devices()
+            result["stream_kicks"] = await self._kick_overflow_streams()
         return result
 
     def _sample(self, sessions: list[dict[str, Any]], now: float,
@@ -279,6 +285,8 @@ class UsageSampler:
             billed_bytes += chunk
             billed_users[user_id] = billed_users.get(user_id, 0) + chunk
 
+        self._collect_overflow_kicks(sessions, now)
+
         # Sessions that vanished have ended.
         for sid in [s for s in self._live if s not in seen]:
             self._finish(sid, self._live[sid], now)
@@ -400,7 +408,7 @@ class UsageSampler:
         device_id = str(session.get("DeviceId") or "")
         if not device_id:
             return
-        accepted = self._members.register_device(
+        self._members.register_device(
             user_id, device_id,
             device_name=session.get("DeviceName") or "",
             client=session.get("Client") or "",
@@ -408,23 +416,66 @@ class UsageSampler:
             last_ip=session.get("RemoteEndPoint") or "",
             now=int(now),
         )
-        if not accepted and self._enforcement:
-            sid = str(session.get("Id") or "")
-            if sid:
+
+    def _collect_overflow_kicks(self, sessions: list[dict[str, Any]], now: float) -> None:
+        """Queue newest extra *playing* sessions after the full list is known.
+
+        Stop is advisory. This cannot replace edge admission, and a failed Stop
+        must not retry every tick.
+        """
+        if not self._enforcement:
+            return
+        from app.modules.streams import overflow_session_ids
+
+        by_user: dict[str, list[dict[str, Any]]] = {}
+        for session in sessions:
+            uid = str(session.get("UserId") or "")
+            if uid:
+                by_user.setdefault(uid, []).append(session)
+        queued: set[str] = {sid for sid, _ in self._pending_kicks}
+        for user_id, rows in by_user.items():
+            member = self._members.get(user_id)
+            if not member:
+                continue
+            for session in rows:
+                sid = str(session.get("Id") or "")
+                device_id = str(session.get("DeviceId") or "")
+                if not sid or sid in queued or not is_playing(session):
+                    continue
+                if device_id and self._members.device_blocked(user_id, device_id):
+                    if self._kick_backoff_until.get(sid, 0.0) > now:
+                        continue
+                    queued.add(sid)
+                    self._pending_kicks.append((sid, user_id))
+            cap = int(member.get("max_streams") or 0)
+            if cap <= 0:
+                continue
+            for sid in overflow_session_ids(rows, user_id, cap):
+                if sid in queued:
+                    continue
+                if self._kick_backoff_until.get(sid, 0.0) > now:
+                    continue
+                queued.add(sid)
                 self._pending_kicks.append((sid, user_id))
 
     # -- enforcement hooks ---------------------------------------------------
-    async def _kick_refused_devices(self) -> int:
+    async def _kick_overflow_streams(self) -> int:
         kicked = 0
+        now = time.time()
         for sid, user_id in self._pending_kicks:
             try:
-                stopped = await self._emby.stop_session(sid, "设备数已达上限")
+                stopped = await self._emby.stop_session(sid, "同时播放路数已达上限")
             except Exception:  # noqa: BLE001 - a flaky node must not abort the rest
                 stopped = False
             if stopped:
                 kicked += 1
+            # Back off even on HTTP success: acceptance does not prove playback
+            # stopped, and repeating accepted commands every tick is a storm.
+            fails = min(self._kick_failures.get(sid, 0) + 1, 5)
+            self._kick_failures[sid] = fails
+            self._kick_backoff_until[sid] = now + min(60 * (2 ** (fails - 1)), 900)
             await run_usage_io(self._members.audit,
-                               "system", "device.kick", user_id, f"session={sid}")
+                               "system", "stream.kick", user_id, f"session={sid}")
         self._pending_kicks = []
         return kicked
 

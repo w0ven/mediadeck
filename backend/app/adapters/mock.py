@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import random
 import time
+import uuid
 from typing import Any
 
 from app.adapters.base import MemberPolicyResult
@@ -150,6 +151,21 @@ class MockEmby:
         depending on random demo data.
         """
         return list(self._sessions)
+
+    async def playback_info(self, item: str, method: str, headers: dict[str, str],
+                            query: dict[str, str], payload: dict[str, Any] | None
+                            ) -> tuple[int, dict[str, Any]]:
+        return 200, {"PlaySessionId": uuid.uuid4().hex, "MediaSources": [
+            {"Id": "src-" + item, "DirectStreamUrl": "/Videos/" + item + "/stream.mkv?Static=true"}]}
+
+    async def report_stopped(self, token: str, device: str, payload: dict[str, Any]) -> int:
+        uid = await self.user_for_token(token, device)
+        if not uid:
+            return 401
+        for session in self._sessions:
+            if session.get("UserId") == uid and session.get("DeviceId") == device:
+                session.pop("NowPlayingItem", None)
+        return 204
 
     def set_sessions(self, sessions: list[dict[str, Any]]) -> None:
         self._sessions = list(sessions)

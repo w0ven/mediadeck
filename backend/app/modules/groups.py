@@ -48,7 +48,7 @@ DEFAULT_GROUPS: list[dict[str, Any]] = [
         "description": "有到期时间，按月流量计费",
         "billing_mode": "both",
         "duration_days": 30, "traffic_quota_bytes": 1024 * GIB,
-        "bandwidth_limit_kbps": 0, "max_streams": 2, "max_devices": 3,
+        "bandwidth_limit_kbps": 0, "max_streams": 2, "max_devices": 0,
         "allow_download": 0, "allow_transcode": 1,
         "is_default": 1,
     },
@@ -57,7 +57,7 @@ DEFAULT_GROUPS: list[dict[str, Any]] = [
         "description": "永不过期，按月流量计费",
         "billing_mode": "traffic",
         "duration_days": 0, "traffic_quota_bytes": 2048 * GIB,
-        "bandwidth_limit_kbps": 0, "max_streams": 4, "max_devices": 5,
+        "bandwidth_limit_kbps": 0, "max_streams": 4, "max_devices": 0,
         "allow_download": 1, "allow_transcode": 1,
         "is_default": 0,
     },
@@ -76,7 +76,7 @@ WHITELIST_GROUP: dict[str, Any] = {
     # here; a time-billed group with 0 days would be rejected by _validate.
     "billing_mode": "none",
     "duration_days": 0, "traffic_quota_bytes": 0,
-    "bandwidth_limit_kbps": 0, "max_streams": 10, "max_devices": 10,
+    "bandwidth_limit_kbps": 0, "max_streams": 10, "max_devices": 0,
     "allow_download": 1, "allow_transcode": 1,
     "is_default": 0, "request_quota": 0,
 }
@@ -87,7 +87,6 @@ _INT_FIELDS = (
     ("traffic_quota_bytes", "月流量额度", 0, 1 << 62),
     ("bandwidth_limit_kbps", "带宽限速 kbps", 0, 10_000_000),
     ("max_streams", "并发路数", 0, 100),
-    ("max_devices", "设备数上限", 0, 100),
     ("request_quota", "每月求片次数", 0, 10_000),
 )
 
@@ -168,6 +167,9 @@ class GroupService:
             raise ConfigError("计时组必须设置默认时长")
         if needs_traffic(mode) and out["traffic_quota_bytes"] <= 0:
             raise ConfigError("计流量组必须设置月流量额度")
+        # Device registration is uncapped. The column stays so existing rows
+        # survive; writes always store 0 so a leftover form cannot restore a cap.
+        out["max_devices"] = 0
         return out
 
     # -- read ----------------------------------------------------------------
@@ -179,12 +181,16 @@ class GroupService:
             row["member_count"] = self._db.one(
                 "SELECT COUNT(*) AS n FROM members WHERE group_id=?",
                 (row["id"],))["n"]
+            row["max_devices"] = 0
         return rows
 
     def get(self, group_id: str) -> dict[str, Any] | None:
         if not group_id:
             return None
-        return self._db.one("SELECT * FROM groups WHERE id=?", (group_id,))
+        row = self._db.one("SELECT * FROM groups WHERE id=?", (group_id,))
+        if row:
+            row["max_devices"] = 0
+        return row
 
     def default_group_id(self) -> str | None:
         row = self._db.one(
