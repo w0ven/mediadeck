@@ -1481,7 +1481,7 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
         "traffic_quota_bytes": 10 * 1024 ** 3,
         "traffic_percent": 50,
         "bandwidth_limit_kbps": 20000,
-        "max_streams": 2, "max_devices": 3, "device_count": 1,
+        "max_streams": 2, "device_count": 1,
     }
     bot = _bot(_FakeMembers({"999": member}))
     text = bot._usage_text(member)
@@ -1489,7 +1489,8 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
     assert "⚡ <b>带宽</b>" in text and "上限：<b>20 Mbps</b>" in text
     assert "同时播放：2" in text
-    assert "已登记设备：1 / 3" in text
+    assert "已登记设备：1" in text
+    assert "已登记设备：1 /" not in text
 
 
 def test_broadcast_rankings_sends_poster_then_overflow_text(monkeypatch) -> None:

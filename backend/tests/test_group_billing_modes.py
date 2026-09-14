@@ -46,7 +46,7 @@ def stack(tmp_path):
     ov = {
         "expires_at_override": now + 90 * 86400,
         "bandwidth_limit_kbps": 777,
-        "max_devices": 9,
+        "max_streams": 9,
         "extra_traffic_bytes": 333,
     }
     db.execute("UPDATE members SET overrides_json=? WHERE emby_user_id=?", (json.dumps(ov), "u"))
@@ -65,7 +65,7 @@ def test_explicit_date_actions_replace_effective_overlay(stack, policy, days):
         assert after["expires_at_effective"] is None
     else:
         assert abs(after["expires_at_effective"] - (now + days * 86400)) <= 2
-    assert after["bandwidth_limit_kbps"] == 777 and after["max_devices"] == 9
+    assert after["bandwidth_limit_kbps"] == 777 and after["max_streams"] == 9
     assert after["traffic_used_bytes"] == 987654
 
 
@@ -89,7 +89,7 @@ def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id, 
     assert out["traffic_used_bytes"] == 987654
     assert (out["traffic_quota_bytes"] > 0) == traffic_billed
     assert out["overrides"]["extra_traffic_bytes"] == 333
-    assert out["bandwidth_limit_kbps"] == 777 and out["max_devices"] == 9
+    assert out["bandwidth_limit_kbps"] == 777 and out["max_streams"] == 9
 
 
 def test_time_only_disables_quota_without_wiping_ledger(stack):

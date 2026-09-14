@@ -105,7 +105,9 @@ wedges in D-state. This page makes all of it visible in one place.
 - [x] Node enroll: name-only create, one-line install, call-home report, rotate token
 - [x] Global storage remotes + mounts; nodes pick mounts instead of pasting rclone.conf
 - [x] Referential integrity (plan/remote in use -> HTTP 409)
-- [x] max_devices enforced on register + mid-stream kick
+- [x] device registration is observational (no registration cap)
+- [x] shared session admission across PlaybackInfo, direct dispatch and HLS; durable leases, advisory Stop only
+- [x] generic nginx integration and local gateway compatibility validation (operator deployment separate)
 
 ## v1.0.0 — Live import executor + UI pass
 - [ ] Bridge import jobs to real host-side workers (sanitized IPC)

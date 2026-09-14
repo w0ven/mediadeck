@@ -225,6 +225,7 @@ def test_override_keys_are_whitelisted() -> None:
     with pytest.raises(ConfigError):
         validate_overrides({"nonsense": 1})
     assert validate_overrides({}) == {}
+    assert validate_overrides({"max_devices": 3, "max_streams": 2}) == {"max_streams": 2}
 
 
 def test_merge_prefers_overrides_field_by_field(stack) -> None:
@@ -259,7 +260,7 @@ def test_policy_maps_limits_onto_emby_fields(stack) -> None:
     stack["groups"].create({
         "id": "capped", "name": "Capped", "billing_mode": "both",
         "duration_days": 7, "traffic_quota_bytes": 50 * GIB,
-        "bandwidth_limit_kbps": 8000, "max_streams": 1, "max_devices": 1,
+        "bandwidth_limit_kbps": 8000, "max_streams": 1,
         "allow_transcode": 0, "allow_download": 0,
     })
     stack["members"].upsert("u1", "alice", {"group_id": "capped"})
@@ -452,16 +453,18 @@ def test_devices_are_tracked_from_sessions(stack) -> None:
     assert stack["members"].get("u1")["device_count"] == 1
 
 
-def test_max_devices_refuses_new_device_and_audits(stack) -> None:
+def test_device_registration_is_uncapped_and_blocked_still_refused(stack) -> None:
     m = stack["members"]
     m.upsert("u1", "alice", {"group_id": "standard"})
-    m.set_overrides("u1", {"max_devices": 1})
     assert m.register_device("u1", "phone") is True
-    assert m.register_device("u1", "tablet") is False
+    assert m.register_device("u1", "tablet") is True
     assert m.register_device("u1", "phone") is True  # existing still refreshes
+    assert m.get("u1")["device_count"] == 2
+    m.set_device_blocked("u1", "tablet", True)
+    assert m.register_device("u1", "tablet") is False
     rows = stack["db"].query(
         "SELECT action FROM audit_log WHERE action='device.refused'")
-    assert len(rows) == 1
+    assert rows == []
 
 
 def test_exhausted_member_is_cut_off_within_one_tick(stack) -> None:

@@ -682,8 +682,10 @@ location ~ {_PLAYBACK_PATH_RE} {{
     proxy_hide_header X-Mediadeck-Entry-Key;
     add_header Cache-Control "private, no-store" always;
     proxy_redirect off;
+    # Only an admitted routing fallback may reach origin. Authentication,
+    # admission and dependency failures (including 5xx) must stay closed.
     proxy_intercept_errors on;
-    error_page 418 500 502 503 504 = @mediadeck_emby_origin;
+    error_page 418 = @mediadeck_emby_origin;
 }}
 
 location @mediadeck_emby_origin {{
@@ -728,7 +730,8 @@ location / {{
         reverse_proxy {panel_host} {{
             header_up Host {panel_authority}
             header_up X-Mediadeck-Proxy 1
-            @fallback status 204 500 502 503 504
+            # Only an admitted routing fallback may reach origin.
+            @fallback status 204
             handle_response @fallback {{
                 reverse_proxy {emby_host} {{
                     header_up -X-Mediadeck-Entry

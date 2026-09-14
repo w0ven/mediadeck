@@ -50,7 +50,6 @@ ROLES = ("admin", "uploader")
 OVERRIDE_KEYS = (
     "max_streams",
     "bandwidth_limit_kbps",
-    "max_devices",
     "allow_transcode",
     "allow_download",
     "libraries_mode",
@@ -139,6 +138,9 @@ def validate_overrides(payload: Any) -> dict[str, Any]:
         payload = {}
     if not isinstance(payload, dict):
         raise ConfigError("覆盖层必须是对象")
+    # Retired entitlement: drop leftover keys so an older client cannot
+    # reintroduce a registration cap, and so a stored overlay still saves.
+    payload = {k: v for k, v in payload.items() if k != "max_devices"}
     unknown = [k for k in payload if k not in OVERRIDE_KEYS]
     if unknown:
         raise ConfigError(f"不支持的覆盖字段: {', '.join(sorted(unknown))}")
@@ -149,8 +151,6 @@ def validate_overrides(payload: Any) -> dict[str, Any]:
     if "bandwidth_limit_kbps" in payload:
         out["bandwidth_limit_kbps"] = _as_int(
             payload["bandwidth_limit_kbps"], "带宽限速", 0, 10_000_000)
-    if "max_devices" in payload:
-        out["max_devices"] = _as_int(payload["max_devices"], "设备数上限", 0, 100)
     for flag in ("allow_transcode", "allow_download"):
         if flag in payload:
             out[flag] = 1 if payload[flag] else 0
@@ -195,8 +195,6 @@ def merge_effective(group: dict[str, Any] | None, overrides: dict[str, Any] | No
         group.get("max_streams") or 0)
     bandwidth = ov["bandwidth_limit_kbps"] if "bandwidth_limit_kbps" in ov else int(
         group.get("bandwidth_limit_kbps") or 0)
-    devices = ov["max_devices"] if "max_devices" in ov else int(
-        group.get("max_devices") or 0)
     transcode = ov["allow_transcode"] if "allow_transcode" in ov else group.get(
         "allow_transcode", 1)
     download = ov["allow_download"] if "allow_download" in ov else group.get(
@@ -229,7 +227,6 @@ def merge_effective(group: dict[str, Any] | None, overrides: dict[str, Any] | No
     return {
         "max_streams": int(streams),
         "bandwidth_limit_kbps": int(bandwidth),
-        "max_devices": int(devices),
         "allow_transcode": bool(transcode),
         "allow_download": bool(download),
         "libraries": libraries,
@@ -370,6 +367,7 @@ class MemberService:
         out["billing_mode"] = group["billing_mode"] if group else "none"
         out["roles"] = parse_roles(out.pop("roles", ""))
         overrides = parse_overrides(out.pop("overrides_json", None))
+        overrides.pop("max_devices", None)
         out["overrides"] = overrides
         effective = merge_effective(group, overrides, out)
         out["effective"] = effective
@@ -377,7 +375,6 @@ class MemberService:
         # Flatten the fields the rest of the panel reads.
         out["max_streams"] = effective["max_streams"]
         out["bandwidth_limit_kbps"] = effective["bandwidth_limit_kbps"]
-        out["max_devices"] = effective["max_devices"]
         out["allow_transcode"] = effective["allow_transcode"]
         out["allow_download"] = effective["allow_download"]
         out["libraries"] = list(effective["libraries"])
@@ -986,44 +983,31 @@ class MemberService:
                         device_name: str = "", client: str = "",
                         app_version: str = "", last_ip: str = "",
                         now: int | None = None) -> bool:
-        """Record a device, refusing new ones once the member's cap is hit.
+        """Record a device. Registration is uncapped.
 
-        Existing devices always refresh: kicking someone off a phone they
-        already use because they opened a second app on it would be wrong.
-        The cap only applies to *new* device ids.
+        Existing devices always refresh. A blocked device still refreshes its
+        last-seen row so the operator can see it, but playback must not treat
+        that as accepted. Device count is observational; concurrent-play
+        limits live on max_streams, not here.
         """
         if not device_id:
             return True
         now = now or int(time.time())
         existing = self._db.one(
-            "SELECT 1 AS x FROM devices WHERE emby_user_id=? AND device_id=?",
+            "SELECT blocked FROM devices WHERE emby_user_id=? AND device_id=?",
             (user_id, device_id))
         if existing:
-            blocked = self._db.one(
-                "SELECT blocked FROM devices WHERE emby_user_id=? AND device_id=?",
-                (user_id, device_id))
             self._db.execute(
                 "UPDATE devices SET device_name=?,client=?,app_version=?,"
                 "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=?",
                 (device_name, client, app_version, last_ip, now, user_id, device_id))
-            if blocked and blocked.get("blocked"):
+            if existing.get("blocked"):
                 self.audit("system", "device.blocked", user_id,
                            encode_audit_detail({
                                "device_id": {"from": device_id, "to": device_id},
                            }), ok=False)
                 return False
             return True
-
-        member = self.get(user_id)
-        cap = int((member or {}).get("max_devices") or 0)
-        if cap > 0:
-            count = self._db.one(
-                "SELECT COUNT(*) AS n FROM devices WHERE emby_user_id=? AND blocked=0",
-                (user_id,))["n"]
-            if count >= cap:
-                self.audit("system", "device.refused", user_id,
-                           f"device={device_id} cap={cap}", ok=False)
-                return False
 
         self._db.execute(
             "INSERT INTO devices (emby_user_id,device_id,device_name,client,"
@@ -1215,6 +1199,14 @@ class MemberService:
         return self._db.query(
             "SELECT * FROM devices WHERE emby_user_id=? ORDER BY last_seen_at DESC",
             (user_id,))
+
+    def device_blocked(self, user_id: str, device_id: str) -> bool:
+        if not user_id or not device_id:
+            return False
+        row = self._db.one(
+            "SELECT blocked FROM devices WHERE emby_user_id=? AND device_id=?",
+            (user_id, device_id))
+        return bool(row and row.get("blocked"))
 
     # -- audit ---------------------------------------------------------------
     def audit(self, actor: str, action: str, subject: str = "",

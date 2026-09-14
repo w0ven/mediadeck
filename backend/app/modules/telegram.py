@@ -1745,11 +1745,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member, public=_GROUP.get()),
                  '', *bandwidth_lines(member), '']
-        streams, devices = member.get('max_streams'), member.get('max_devices')
+        streams = member.get('max_streams')
         if streams not in (None, ''):
-            lines.append(f"同时播放：{streams} 路")
-        if devices not in (None, ''):
-            lines.append(f"已登记设备：{member.get('device_count', 0)} / {devices}")
+            lines.append(f"同时播放：{streams} 路" if int(streams or 0) else "同时播放：不限")
+        lines.append(f"已登记设备：{member.get('device_count', 0)}")
         lines.extend([f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}", "", self._watch_text(member)])
         return '\n'.join(lines)
 

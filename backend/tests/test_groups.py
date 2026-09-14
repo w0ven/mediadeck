@@ -72,7 +72,7 @@ def test_the_whitelist_group_never_expires_and_is_loosely_limited(groups) -> Non
     assert whitelist["billing_mode"] == "none"
     assert whitelist["traffic_quota_bytes"] == 0
     assert whitelist["max_streams"] == 10
-    assert whitelist["max_devices"] == 10
+    assert whitelist["max_devices"] == 0
     assert whitelist["allow_download"] == 1
     assert whitelist["allow_transcode"] == 1
     assert whitelist["request_quota"] == 0
