@@ -32,8 +32,9 @@ Inside the media nginx server:
 The template requires nginx's HTTP auth_request module. Inspect the current
 production configuration before applying an operator-specific candidate; the
 public template intentionally contains no production hosts or credentials.
-Gateway code changes are not required. Deployment needs a Deck restart and nginx
-configuration test/reload, not an Emby restart or mass policy rewrite.
+Lifecycle wiring needs a Deck restart and nginx configuration test/reload,
+not an Emby restart or mass policy rewrite. The separately versioned gateway
+registry optimization retains its existing routing and capability contract.
 
 ## Protocol contract
 
@@ -44,6 +45,8 @@ Normal clients keep their original Emby URLs:
 | GET/HEAD/POST Items/{item}/PlaybackInfo | Deck `/api/playback/info/{item}` verifies caller/item, admits, forwards metadata, binds returned PlaySessionId before returning URLs |
 | GET/HEAD stream/original | shared admission, then unchanged gateway/Deck 302 dispatch |
 | video/audio stream/HLS URLs | shared admission, then unchanged Emby origin |
+| POST Sessions/Playing | Deck `/api/playback/started` forwards the caller's report and observes only an existing matching bound play after Emby accepts |
+| POST Sessions/Playing/Progress | Deck `/api/playback/progress` does the same, including paused progress; it cannot acquire another seat |
 | POST Sessions/Playing/Stopped | Deck `/api/playback/stopped` forwards the caller's report, releases only on successful delivery and matching PlaySessionId |
 
 PlaybackInfo POST accepts either a JSON object or an empty body with query
@@ -73,14 +76,24 @@ omits DeviceId. A request-supplied UserId is never used as authentication.
   is necessary for normal resume using an already-issued 302 URL without a new
   media request. Paused/idle clients are not selected for advisory overflow Stop.
 - A matching successful Stopped report or disappearance of the Emby Session
-  releases a bound lease. For legacy unbound sessions, a transition from observed
-  playback to idle also releases it. A bound PlaySessionId is not cleared merely
-  by an idle snapshot, which can lag behind a replacement start.
-- Pending starts do not expire blindly after a few seconds. A client that abandons
-  PlaybackInfo and never reports Stopped retains its seat until its Emby Session
-  disappears (for example logout). Likewise, a client that omits the current
-  PlaySessionId in Stopped is not promised immediate release. This conservative
-  behavior avoids claiming that a missing observation proves no stream exists.
+  releases its lease. An observed play also releases when a fresh snapshot is
+  idle, including a bound PlaySessionId. Start/progress acknowledgements update
+  observation even if nobody requests another URL during the entire play.
+- A newly bound replacement resets observation so delayed old events cannot
+  release or mark the new pending play. Failed metadata issuance releases only
+  the seat newly acquired by that failed request, not an existing play.
+- An unobserved pending start has a **120-second grace period**. Only a fresh
+  snapshot showing neither playing nor paused may expire it. Snapshot failure
+  never means idle. A recheck/seek does not renew the deadline; a genuinely new
+  PlaySessionId starts a new grace period. Deadline state persists on restart.
+- Legacy rows without issuance timestamps receive one 120-second migration
+  grace period; restarting again does not renew it. Missing lifecycle reports
+  no longer hold an idle account forever. A client resuming after expiry must
+  pass admission again, and may be rejected if another session took the seat.
+- This intentionally prioritizes avoiding indefinite lockout over strict
+  enforcement for clients that hide all playback state: an already-issued
+  cloud URL cannot be revoked by deleting its lease. Real playback and pause
+  visible in Emby remain counted regardless of pending age.
 - Stop command HTTP acceptance is advisory. It does not delete the Emby Session,
   and both accepted and failed commands back off. LastActivityDate never decides
   who started first; unknown start order is not a license to kick existing plays.
@@ -105,6 +118,11 @@ with distinct DeviceIds. Do not change unrelated users' caps.
    PlaySessionId must not release a new play.
 5. Check query-only empty POST PlaybackInfo, subtitle fetch with no seat claimed,
    invalid token/item denial, and dependency failure without fallback.
+6. Start and finish a play with no intervening admission; after successful
+   start/progress the idle snapshot must release it without a password change.
+7. Abandon a pending start: deny another session at 119 seconds, admit at 120
+   only with a fresh idle snapshot. Repeat across restart; playing/paused and
+   snapshot-outage cases must never be expired by time alone.
 
 Local tests execute real nginx on temporary ports against Deck's mock adapters.
 They cover both the metadata issuance transaction and direct/manifest entrances.

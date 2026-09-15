@@ -1403,7 +1403,7 @@ async def enroll_script(token: str) -> PlainTextResponse:
 
 
 async def _admit_playback(request: Request, item_id: str,
-                          query: dict[str, str]) -> str:
+                          query: dict[str, str], *, reserve: bool = True) -> str:
     token = caller_token(request.headers, query)
     device = caller_device(request.headers, query)
     headers = {"Cache-Control": "private, no-store"}
@@ -1416,6 +1416,8 @@ async def _admit_playback(request: Request, item_id: str,
         raise HTTPException(503, "playback authentication unavailable", headers=headers) from None
     if not uid or not permitted:
         raise HTTPException(403, "playback access denied", headers=headers)
+    if not reserve:
+        return uid
     admission = await app.state.streams.inspect(
         uid, device_id=device, token=token,
         session_id=query.get("SessionId", query.get("sessionId", "")),
@@ -1438,18 +1440,20 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
             raise HTTPException(400, "invalid PlaybackInfo JSON") from None
         if not isinstance(payload, dict):
             raise HTTPException(400, "PlaybackInfo body must be an object")
-    uid = await _admit_playback(request, item_id, query)
+    uid = await _admit_playback(request, item_id, query, reserve=False)
     device = caller_device(request.headers, query)
     async def issue():
         return await app.state.emby.playback_info(item_id, request.method,
                                                  dict(request.headers), query, payload)
     try:
         admission, code, data = await app.state.streams.issue_info(
-            uid, device, query.get("SessionId", ""), issue)
+            uid, device, query.get("SessionId", query.get("sessionId", "")), issue)
     except Exception:  # noqa: BLE001 - never return a partially checked URL
         raise HTTPException(503, "PlaybackInfo unavailable") from None
     if not admission.allowed:
-        raise HTTPException(403, "playback admission refused")
+        status = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
+        raise HTTPException(status, "playback admission refused", headers={
+            "Cache-Control": "private, no-store", "X-Mediadeck-Decision": admission.reason})
     return JSONResponse(data, status_code=code, headers={"Cache-Control": "private, no-store"})
 
 
@@ -1467,6 +1471,29 @@ async def playback_admit(request: Request) -> Response:
         raise HTTPException(403, "unsupported playback path")
     await _admit_playback(request, match[1], dict(parse_qsl(original.query)))
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/api/playback/started", include_in_schema=False)
+@app.post("/api/playback/progress", include_in_schema=False)
+async def playback_activity(request: Request, payload: dict[str, Any] = Body(...)) -> Response:  # noqa: B008
+    query = dict(request.query_params)
+    token = caller_token(request.headers, query)
+    device = caller_device(request.headers, query)
+    if not token:
+        raise HTTPException(401, "playback authentication required")
+    try:
+        uid = await app.state.emby.user_for_token(token, device)
+        if not uid:
+            raise HTTPException(401, "playback authentication required")
+        event = "progress" if request.url.path.endswith("/progress") else "started"
+        async def issue():
+            return await app.state.emby.report_playback(event, dict(request.headers), query, payload)
+        code = await app.state.streams.report_activity(uid, payload, issue)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - failed delivery cannot observe a play
+        raise HTTPException(503, "playback report unavailable") from None
+    return Response(status_code=code, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/playback/stopped", include_in_schema=False)
