@@ -1473,9 +1473,26 @@ async def playback_admit(request: Request) -> Response:
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
 
 
+async def _playback_report_payload(request: Request) -> dict[str, Any]:
+    # Native clients also send JSON as text/plain (accepted by Emby). Do not
+    # let FastAPI's Content-Type-dependent Body validation reject those reports.
+    raw = await request.body()
+    if not raw.strip():
+        return {key: request.query_params[key] for key in
+                ("SessionId", "PlaySessionId", "ItemId") if key in request.query_params}
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, "invalid playback report JSON") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "playback report must be an object")
+    return payload
+
+
 @app.post("/api/playback/started", include_in_schema=False)
 @app.post("/api/playback/progress", include_in_schema=False)
-async def playback_activity(request: Request, payload: dict[str, Any] = Body(...)) -> Response:  # noqa: B008
+async def playback_activity(request: Request) -> Response:
+    payload = await _playback_report_payload(request)
     query = dict(request.query_params)
     token = caller_token(request.headers, query)
     device = caller_device(request.headers, query)
@@ -1497,7 +1514,8 @@ async def playback_activity(request: Request, payload: dict[str, Any] = Body(...
 
 
 @app.post("/api/playback/stopped", include_in_schema=False)
-async def playback_stopped(request: Request, payload: dict[str, Any] = Body(...)) -> Response:  # noqa: B008
+async def playback_stopped(request: Request) -> Response:
+    payload = await _playback_report_payload(request)
     token = caller_token(request.headers, dict(request.query_params))
     device = caller_device(request.headers, dict(request.query_params))
     uid = await app.state.emby.user_for_token(token, device) if token else None
