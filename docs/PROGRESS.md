@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-16 — v0.36.1 native lifecycle format compatibility
+
+- Live acceptance caught a v0.36.0 lifecycle regression: a native client sends
+  a JSON object with `Content-Type: text/plain`, which framework Body validation
+  rejected before forwarding. Restored the original event path while correcting.
+- Parse start/progress/stopped JSON independently of Content-Type and support
+  empty query-only reports. Recognize query-carried native device/authorization
+  fields without trusting caller-supplied UserId or replacing authentication.
+- **113 integrated targeted tests passed**, including native-format and invalid
+  token cases. No change to pending expiry, source registry caching, cloud URLs
+  or actual concurrency limits. New formal patch tag; do not rewrite v0.36.0.
+
+---
+
 ## 2026-09-16 — v0.36.0 playback lifecycle and registry reuse
 
 - Fixed the unobserved-start lockout left by the earlier observed-idle repair:

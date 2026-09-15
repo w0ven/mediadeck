@@ -112,11 +112,12 @@ def caller_token(headers: Any, query: dict[str, str]) -> str:
         if value:
             return str(value).strip()
     # Authorization: MediaBrowser Client="...", Token="abc"
-    auth = headers.get("authorization") or headers.get("x-emby-authorization") or ""
+    auth = (headers.get("authorization") or headers.get("x-emby-authorization")
+            or query.get("X-Emby-Authorization") or query.get("X-MediaBrowser-Authorization") or "")
     match = re.search(r'token\s*=\s*"?([^",\s]+)"?', str(auth), re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    for key in ("api_key", "ApiKey", "apikey", "X-Emby-Token"):
+    for key in ("api_key", "ApiKey", "apikey", "X-Emby-Token", "X-MediaBrowser-Token"):
         if query.get(key):
             return str(query[key]).strip()
     return ""
@@ -138,11 +139,13 @@ def caller_device(headers: Any, query: dict[str, str]) -> str:
         value = headers.get(header)
         if value:
             return str(value).strip()
-    auth = headers.get("authorization") or headers.get("x-emby-authorization") or ""
+    auth = (headers.get("authorization") or headers.get("x-emby-authorization")
+            or query.get("X-Emby-Authorization") or query.get("X-MediaBrowser-Authorization") or "")
     match = re.search(r'deviceid\s*=\s*"?([^",\s]+)"?', str(auth), re.IGNORECASE)
     if match:
         return match.group(1).strip()
-    for key in ("DeviceId", "deviceId", "deviceid", "device_id"):
+    for key in ("DeviceId", "deviceId", "deviceid", "device_id",
+                "X-Emby-Device-Id", "X-MediaBrowser-Device-Id"):
         if query.get(key):
             return str(query[key]).strip()
     return ""

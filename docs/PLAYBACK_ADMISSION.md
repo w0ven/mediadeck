@@ -52,6 +52,10 @@ Normal clients keep their original Emby URLs:
 PlaybackInfo POST accepts either a JSON object or an empty body with query
 parameters. Caller headers, query and device profile are forwarded, without a
 configured admin key. Video data is **not** proxied through Deck.
+Lifecycle JSON objects are parsed independently of Content-Type: native clients
+using `text/plain` are supported, as are empty query-only reports. Query-carried
+`X-Emby-Device-Id` and `X-Emby-Authorization` retain caller identity; `UserId`
+remains untrusted and never replaces token authentication.
 
 The nginx internal auth subrequest calls `GET /api/playback/admit`, passing the
 original caller headers and `X-Original-URI`. The latter supplies only the path
