@@ -341,6 +341,23 @@ class LiveEmby:
             ))
             r.raise_for_status()
             items = (r.json() or {}).get("Items") or []
+            # Items exposes only the default file for grouped editions on Emby.
+            # PlaybackInfo lists the exact source IDs offered to the player.
+            # This is metadata-only GET: do not issue a playback session here.
+            try:
+                playback = self._check(await client.get(
+                    f"{base}/emby/Items/{quote(str(item_id), safe='')}/PlaybackInfo",
+                    headers=headers,
+                ))
+                playback.raise_for_status()
+                payload = playback.json()
+                editions = payload.get("MediaSources") if isinstance(payload, dict) else []
+                if not isinstance(editions, list):
+                    editions = []
+            except (httpx.HTTPError, UpstreamError, ValueError):
+                # Preserve existing primary-file routing if edition lookup is
+                # unavailable. Unknown explicit sources still fail closed.
+                editions = []
         out: dict[str, str] = {}
         for item in items:
             for source in item.get("MediaSources") or []:
@@ -351,6 +368,16 @@ class LiveEmby:
                     out[str(source_id)] = str(path)
             if not out and item.get("Path"):
                 out[str(item_id)] = str(item["Path"])
+        # Append grouped editions without changing the default-first ordering
+        # used by clients which omit MediaSourceId. Never invent ID aliases or
+        # hand a remote URL to a local-file playback node.
+        for source in editions:
+            if not isinstance(source, dict):
+                continue
+            path = source.get("Path")
+            source_id = source.get("Id")
+            if path and source_id and not str(path).lower().startswith("http"):
+                out[str(source_id)] = str(path)
         return out
 
     # -- library -------------------------------------------------------------
@@ -422,6 +449,17 @@ class LiveEmby:
             if not isinstance(data, dict):
                 raise TypeError("invalid PlaybackInfo response")
             return r.status_code, data
+
+    async def report_playback(self, event: str, headers: dict[str, str],
+                              query: dict[str, str], payload: dict[str, Any]) -> int:
+        base, _, timeout, verify = self._conn()
+        suffix = {"started": "", "progress": "/Progress"}[event]
+        forwarded = {k: v for k, v in headers.items() if k.lower() not in
+                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}}
+        async with self._client(timeout, verify) as client:
+            r = await client.post(f"{base}/emby/Sessions/Playing{suffix}",
+                                  headers=forwarded, params=query, json=payload)
+            return r.status_code
 
     async def report_stopped(self, token: str, device: str, payload: dict[str, Any]) -> int:
         base, _, timeout, verify = self._conn()

@@ -72,13 +72,19 @@ def test_last_slot_race_and_restart(stack):
     asyncio.run(check())
 
 
-def test_pending_does_not_expire_blindly(stack, monkeypatch):
-    _, _, guard = stack
+def test_pending_expiry_requires_fresh_idle_snapshot(stack, monkeypatch):
+    _, emby, guard = stack
     async def check():
         for s in "ab":
             assert (await guard.inspect("u1", s)).allowed
         monkeypatch.setattr("time.time", lambda: 9999999999)
-        assert not (await guard.inspect("u1", "c")).allowed
+        # Time alone is insufficient when Emby is unavailable.
+        original = emby.active_sessions_raw
+        emby.active_sessions_raw = AsyncMock(side_effect=RuntimeError("offline"))
+        assert (await guard.inspect("u1", "c")).reason == "sessions-unavailable"
+        assert len(guard._db.query("SELECT * FROM stream_leases")) == 2
+        emby.active_sessions_raw = original
+        assert (await guard.inspect("u1", "c")).allowed
     asyncio.run(check())
 
 
@@ -348,6 +354,11 @@ http {{
                                  json={"IsPlayback": True})
                 assert info.status_code == 200
                 play_ids[device] = info.json()["PlaySessionId"]
+                for path in ("/emby/sessions/playing", "/Sessions/Playing/Progress"):
+                    assert edge.post(path, headers=headers(device), json={
+                        "ItemId": "item42", "PlaySessionId": play_ids[device]}).status_code == 204
+                assert app.state.db.one("SELECT observed FROM stream_leases WHERE session_id=?",
+                                        (device,))["observed"] == 1
                 for path in ("/Videos/item42/stream.mkv?Static=true&MediaSourceId=mobile",
                              "/emby/videos/item42/original.mkv?MediaSourceId=mobile"):
                     assert edge.get(path, headers=headers(device)).status_code == 302

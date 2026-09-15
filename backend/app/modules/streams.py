@@ -1,17 +1,21 @@
 """Fail-closed, session (not device) admission shared by playback entrances.
 
 A lease belongs to an authenticated Emby Session Id. Pending starts and pauses
-retain their seat: releasing a paused 302 client would let its normal resume
-compete with a newly admitted client without requesting another URL. Billing
-continues to exclude pauses. Leases survive Deck restarts and have no blind TTL.
+retain their seat while Emby reports playback (including pause). Unobserved
+starts have a bounded grace period, checked against a fresh snapshot before
+release. Already issued cloud URLs cannot be revoked by releasing a seat.
+Billing continues to exclude pauses; lease deadlines survive Deck restarts.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import Any
 
 from app.modules.usage import is_playing
+
+PENDING_START_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -57,8 +61,9 @@ class StreamAdmission:
 
     A pending lease ends on a successful client Stopped report or disappearance
     of the Emby session. An observed play also ends when Emby reports it idle.
-    An abandoned client that remains logged in without reporting Stopped keeps
-    its seat rather than silently allowing an unobserved late start over cap.
+    Start/progress acknowledgements observe the bound play, even when no later
+    admission happens during playback. Abandoned idle starts expire after two
+    minutes; an unavailable snapshot never counts as proof of idleness.
     """
 
     def __init__(self, members: Any, emby: Any) -> None:
@@ -71,6 +76,11 @@ class StreamAdmission:
                          "observed INTEGER NOT NULL DEFAULT 0, "
                          "PRIMARY KEY(user_id, session_id))")
         self._db._ensure_column("stream_leases", "play_id", "TEXT NOT NULL DEFAULT ''")
+        self._db._ensure_column("stream_leases", "pending_at", "REAL NOT NULL DEFAULT 0")
+        # Legacy rows have no trustworthy issuance time. Give them one grace
+        # period, not an immediate wipe; never reset deadlines on a restart.
+        self._db.execute("UPDATE stream_leases SET pending_at=? WHERE pending_at=0",
+                         (time.time(),))
 
     async def _snapshot(self) -> list[dict[str, Any]]:
         rows = await self._emby.active_sessions_raw()
@@ -126,12 +136,18 @@ class StreamAdmission:
         if actual_device and self._members.device_blocked(uid, actual_device):
             return Admission(False, "device-blocked")
         current = {str(s["Id"]): bool(s.get("NowPlayingItem")) for s in rows}
+        now = time.time()
         with self._db.write() as conn:
-            leases = conn.execute("SELECT session_id,observed,play_id FROM stream_leases WHERE user_id=?",
+            leases = conn.execute("SELECT session_id,observed,play_id,pending_at FROM stream_leases WHERE user_id=?",
                                   (uid,)).fetchall()
             for lease in leases:
                 key, observed = lease[0], lease[1]
-                if key not in current or (observed and not current[key] and not lease[2]):
+                # A bound PlaySessionId protects against delayed Stop reports;
+                # it is not proof that media is still playing. Once a previously
+                # observed play is idle in Emby's fresh snapshot, release it.
+                # Pauses retain NowPlayingItem and pending starts remain observed=0.
+                pending_expired = not observed and now - lease[3] >= PENDING_START_SECONDS
+                if key not in current or (not current[key] and (observed or pending_expired)):
                     conn.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
                                  (uid, key))
             held = {r[0] for r in conn.execute(
@@ -148,8 +164,8 @@ class StreamAdmission:
                 return Admission(True, "same-play")
             if len(occupied | live) >= cap:
                 return Admission(False, "over-limit")
-            conn.execute("INSERT INTO stream_leases (user_id,session_id,observed) VALUES (?,?,0)",
-                         (uid, sid))
+            conn.execute("INSERT INTO stream_leases (user_id,session_id,observed,pending_at) VALUES (?,?,0,?)",
+                         (uid, sid, now))
             return Admission(True, "granted")
 
     def _matching(self, rows: list[dict[str, Any]], uid: str, device: str,
@@ -171,13 +187,54 @@ class StreamAdmission:
             result = self._admit(uid, device, session_id, rows)
             if not result.allowed:
                 return result, 403, {}
-            code, data = await issue()
             matches = self._matching(rows, uid, device, session_id)
+            def release_failed_start():
+                # Only this request's newly acquired seat; never release a
+                # previous play when replacement metadata fails.
+                if result.reason == "granted" and len(matches) == 1:
+                    self._db.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
+                                     (uid, str(matches[0]["Id"])))
+            try:
+                code, data = await issue()
+            except BaseException:
+                release_failed_start()
+                raise
+            if not 200 <= code < 300:
+                release_failed_start()
             if 200 <= code < 300 and data.get("PlaySessionId") and len(matches) == 1:
-                self._db.execute("UPDATE stream_leases SET play_id=? "
+                # The replacement play has not been observed yet. Do not let
+                # the previous play's observed flag release this pending start
+                # when an old Stopped report makes the session briefly idle.
+                self._db.execute("UPDATE stream_leases SET "
+                                 "observed=CASE WHEN play_id=? THEN observed ELSE 0 END, "
+                                 "pending_at=CASE WHEN play_id=? THEN pending_at ELSE ? END, play_id=? "
                                  "WHERE user_id=? AND session_id=?",
-                                 (str(data["PlaySessionId"]), uid, str(matches[0]["Id"])))
+                                 (str(data["PlaySessionId"]), str(data["PlaySessionId"]),
+                                  time.time(), str(data["PlaySessionId"]), uid, str(matches[0]["Id"])))
             return result, code, data
+
+    async def report_activity(self, uid: str, payload: dict[str, Any], issue: Any) -> int:
+        """Observe only an existing bound play AFTER Emby accepts its event.
+
+        Do not hold the admission lock during progress network I/O. The SQL
+        compare against the current play_id makes late events harmless, and
+        progress cannot create seats or renew abandoned-start deadlines.
+        """
+        code = await issue()
+        play_id = str(payload.get("PlaySessionId") or "")
+        if not 200 <= code < 300 or not play_id:
+            return code
+        async with self._lock:
+            rows = self._db.query("SELECT session_id FROM stream_leases "
+                                  "WHERE user_id=? AND play_id=?", (uid, play_id))
+            if len(rows) == 1:
+                sid = str(rows[0]["session_id"])
+                if payload.get("SessionId") and str(payload["SessionId"]) != sid:
+                    return code
+                self._db.execute("UPDATE stream_leases SET observed=1 "
+                                 "WHERE user_id=? AND session_id=? AND play_id=?",
+                                 (uid, sid, play_id))
+        return code
 
     async def report_stopped(self, uid: str, device: str, token: str,
                              payload: dict[str, Any]) -> int:

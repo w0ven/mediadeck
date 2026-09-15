@@ -2,6 +2,29 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-16 — v0.36.0 playback lifecycle and registry reuse
+
+- Fixed the unobserved-start lockout left by the earlier observed-idle repair:
+  successful start/progress acknowledgements now mark only the matching bound
+  play; ended observed plays release on a fresh idle snapshot.
+- Operator-selected 120-second pending grace, persisted across restart. Legacy
+  rows receive one migration grace. Actual playback/pause and unavailable
+  snapshots are never expired merely by time. Cloud URLs already issued remain
+  outside revocation guarantees; authentication and concurrency caps are retained.
+- PlaybackInfo reserves once atomically with issuance; a failed new issuance
+  releases its own claim, not an older play. Delayed old lifecycle events do not
+  mark or release replacement plays. Nginx start/progress wiring is versioned.
+- Preserved deployed grouped-edition media-path lookup in the formal source tree.
+- Versioned the gateway registry reuse separately from its private configuration;
+  no cloud URL cache or alternate authentication policy is introduced.
+- Full suite before gateway integration: **1939 passed, 2 failed, 79 setup errors,
+  56 skipped**. The two failures and representative shared browser fixture error
+  also reproduce on unmodified v0.35.0 (entry UI helper, member-list latency test,
+  browser `state` fixture). This is not a claim of green full-suite CI.
+- Final integrated playback/gateway/adapter checks: **107 passed**, including real local nginx and
+  anonymous/forbidden/paused/restart/late-event paths. Production protocol and
+  deployed revision verification remain deployment acceptance, not test results.
+
 ---
 
 ## 2026-09-14 — device observability and shared session admission (local)

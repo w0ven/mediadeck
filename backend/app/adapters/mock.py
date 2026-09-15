@@ -158,6 +158,21 @@ class MockEmby:
         return 200, {"PlaySessionId": uuid.uuid4().hex, "MediaSources": [
             {"Id": "src-" + item, "DirectStreamUrl": "/Videos/" + item + "/stream.mkv?Static=true"}]}
 
+    async def report_playback(self, event: str, headers: dict[str, str],
+                              query: dict[str, str], payload: dict[str, Any]) -> int:
+        from app.modules.playback import caller_token, caller_device
+        from starlette.datastructures import Headers
+        hdr = Headers(headers)
+        device = caller_device(hdr, query)
+        uid = await self.user_for_token(caller_token(hdr, query), device)
+        if not uid:
+            return 401
+        for session in self._sessions:
+            if session.get("UserId") == uid and session.get("DeviceId") == device:
+                session["NowPlayingItem"] = {"Id": payload.get("ItemId") or "item42"}
+                session["PlayState"] = {"IsPaused": bool(payload.get("IsPaused"))}
+        return 204
+
     async def report_stopped(self, token: str, device: str, payload: dict[str, Any]) -> int:
         uid = await self.user_for_token(token, device)
         if not uid:
