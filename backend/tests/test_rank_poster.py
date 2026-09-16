@@ -32,12 +32,12 @@ def test_rank_poster_accepts_broken_cover_bytes() -> None:
 
 
 def test_ranking_bounds_are_complete_local_days() -> None:
-    now = datetime(2026, 9, 10, 8, 0, 0).timestamp()
+    now = datetime(2026, 9, 10, 8, 0, 0).timestamp()  # noqa: DTZ001 - intentionally use host-local calendar days
     since, until = ranking_bounds(1, now=now)
-    assert datetime.fromtimestamp(since) == datetime(2026, 9, 9, 0, 0, 0)
-    assert datetime.fromtimestamp(until) == datetime(2026, 9, 10, 0, 0, 0)
+    assert datetime.fromtimestamp(since) == datetime(2026, 9, 9, 0, 0, 0)  # noqa: DTZ001, DTZ006 - intentionally use host-local calendar days
+    assert datetime.fromtimestamp(until) == datetime(2026, 9, 10, 0, 0, 0)  # noqa: DTZ001, DTZ006 - intentionally use host-local calendar days
     week_since, week_until = ranking_bounds(7, now=now)
-    assert datetime.fromtimestamp(week_since) == datetime(2026, 9, 3, 0, 0, 0)
+    assert datetime.fromtimestamp(week_since) == datetime(2026, 9, 3, 0, 0, 0)  # noqa: DTZ001, DTZ006 - intentionally use host-local calendar days
     assert week_until == until
     assert ranking_stamp(1, now=now) == "2026-09-09"
     assert ranking_stamp(7, now=now) == "2026-09-03 ~ 2026-09-09"

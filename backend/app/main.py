@@ -1099,7 +1099,7 @@ async def settings_integration_save(payload: dict[str, Any] = Body(...)) -> dict
 
 @app.get("/api/integration/frontend", dependencies=[Depends(_auth)])
 async def integration_frontend(response: Response, server: str = "caddy",
-                               entry: str = "") -> dict[str, Any]:
+                               entry: str = "", origin_fallback: bool = True) -> dict[str, Any]:
     """Reverse-proxy rule that puts the panel on the real playback path.
 
     Answers "how does my existing Emby domain dispatch to nodes": the operator
@@ -1122,7 +1122,8 @@ async def integration_frontend(response: Response, server: str = "caddy",
     return {
         "server": server,
         "config": emby_frontend_snippet(panel_public, emby_public, server,
-                                         service.emby_config()["url"]),
+                                         service.emby_config()["url"],
+                                         origin_fallback=origin_fallback),
     }
 
 
@@ -1578,6 +1579,19 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
         cache_scope=entry.cache_scope if entry else "direct",
         only_node=entry.node if entry and entry.pinned else "",
     )
+
+    # Capacity/storage loss is an outage, not authorization to stream from
+    # the origin. Keep the admitted failure diagnostic and never leak nginx's
+    # internal fallback sentinel to players.
+    if not decision.redirected and (
+        decision.reason == "no-capable-node"
+        or request.headers.get("x-mediadeck-origin-fallback") == "off"
+    ):
+        return Response(status_code=503, headers={
+            **response_headers,
+            "X-Mediadeck-Fallback": decision.reason,
+            "Retry-After": "15",
+        })
 
     # Behind a front-door proxy, a "go to Emby instead" answer must not be a
     # redirect: the proxy matches that URL too, sends it back here, and the

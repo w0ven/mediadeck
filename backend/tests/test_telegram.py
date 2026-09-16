@@ -1525,7 +1525,7 @@ def test_tg_avatar_accepts_telegram_octet_stream_jpeg() -> None:
     class _Resp:
         status_code = 200
         content = jpeg
-        headers = {"content-type": "application/octet-stream"}
+        headers = {"content-type": "application/octet-stream"}  # noqa: RUF012 - immutable test response fixture
 
     class _Client:
         async def get(self, url, timeout=None):

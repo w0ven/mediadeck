@@ -23,7 +23,7 @@ def test_grouped_editions_preserve_primary_and_ignore_remote_sources(monkeypatch
     monkeypatch.setattr(adapter, '_client', lambda *_: httpx.AsyncClient(
         transport=httpx.MockTransport(upstream)))
     paths = asyncio.run(adapter.item_media_paths('item'))
-    assert list(paths)[0] == 'primary'
+    assert next(iter(paths)) == 'primary'
     assert paths['primary'] == '/media/example/primary.mkv'
     assert 'cloud' not in paths
     assert ('edition' in paths) == (edition_status == 200)

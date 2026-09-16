@@ -363,7 +363,7 @@ def test_unlimited_and_numeric_measurement_text_remain_truthful(env, used):
 
 def test_receipt_label_uses_registration_handle(env):
     async def run():
-        mid, _ = await issue(env)
+        _mid, _ = await issue(env)
         await register(env)
         posts = public_receipts(env)
         assert len(posts) == 1

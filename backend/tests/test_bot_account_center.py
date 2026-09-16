@@ -41,7 +41,7 @@ def cb(data, user=NEW, chat=None, mid=101, photo=False):
 
 
 @pytest.fixture
-def bot(base_bot):
+def bot(base_bot):  # noqa: F811 - pytest fixture injection
     b = base_bot
     config = {**b._cfg(), "group_interaction_chats": [str(GROUP)]}
     b._config = lambda: config

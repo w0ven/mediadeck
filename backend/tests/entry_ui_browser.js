@@ -14,6 +14,7 @@
   Storage.prototype.setItem = (...args) => leaks.push(args.join(' '));
   toast = (message) => messages.push(message);
   window.confirm = () => true;
+  window.deckConfirm = async message => window.confirm(message);
   renderPage = async () => {
     $('#ee-list').dataset.revision = saved.external_entries_revision;
     $('#ee-list').innerHTML = entryRows(saved.external_entries);
@@ -90,6 +91,7 @@
       : new Promise((resolve) => { releaseRead = () => resolve(structuredClone(saved)); });
     const beforeBusy = writes;
     const mutation = rotateEntry('friend-a');
+    await Promise.resolve(); // async confirmation resolves before the mutation starts
     assert($('#ee-add').disabled, 'busy buttons disabled');
     await rotateEntry('friend-a');
     releaseRead();

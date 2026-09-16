@@ -2,7 +2,8 @@
 import asyncio
 from unittest.mock import AsyncMock
 
-from test_stream_admission import stack, row
+from test_stream_admission import row, stack  # noqa: F401
+
 from app.modules.streams import StreamAdmission
 
 
@@ -10,7 +11,7 @@ def bind(guard, sid, play_id):
     guard._db.execute("UPDATE stream_leases SET play_id=? WHERE session_id=?", (play_id, sid))
 
 
-def test_observed_bound_idle_releases_without_password_change(stack):
+def test_observed_bound_idle_releases_without_password_change(stack):  # noqa: F811 - pytest fixture injection
     _, emby, guard = stack
     async def check():
         for sid in "ab":
@@ -24,7 +25,7 @@ def test_observed_bound_idle_releases_without_password_change(stack):
     asyncio.run(check())
 
 
-def test_persisted_observed_bound_idle_releases_after_guard_restart(stack):
+def test_persisted_observed_bound_idle_releases_after_guard_restart(stack):  # noqa: F811 - pytest fixture injection
     members, emby, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
     guard._db.execute("INSERT INTO stream_leases(user_id,session_id,observed,play_id) VALUES ('u1','a',1,'old-play')")
@@ -32,7 +33,7 @@ def test_persisted_observed_bound_idle_releases_after_guard_restart(stack):
     assert asyncio.run(restarted.inspect("u1", "c")).allowed
 
 
-def test_bound_paused_play_and_pending_start_keep_their_seats(stack):
+def test_bound_paused_play_and_pending_start_keep_their_seats(stack):  # noqa: F811 - pytest fixture injection
     _, emby, guard = stack
     async def check():
         for sid in "ab":
@@ -45,7 +46,7 @@ def test_bound_paused_play_and_pending_start_keep_their_seats(stack):
     asyncio.run(check())
 
 
-def test_new_play_id_does_not_inherit_previous_play_observed_flag(stack):
+def test_new_play_id_does_not_inherit_previous_play_observed_flag(stack):  # noqa: F811 - pytest fixture injection
     members, emby, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
     guard._db.execute("INSERT INTO stream_leases(user_id,session_id,observed,play_id) VALUES ('u1','a',1,'old-play')")

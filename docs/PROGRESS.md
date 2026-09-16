@@ -2,6 +2,29 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-17 — v0.36.2 isolated media readers and outage semantics
+
+- FUSE open/stat can stall every nginx worker despite `aio threads`. Node
+  provisioning now uses separate, read-only loopback HTTP readers for each
+  existing pool. Signing, admission and per-user limits stay in nginx.
+- Add asynchronous real-byte readiness with bounded HTTP reads and stale-sample
+  rejection. New node units fail closed until representative probes are supplied;
+  health and load requests never touch FUSE. Document existing-node migration.
+- Return diagnostic 503 for no capable node after caller authorization, with
+  no origin redirect. Export explicit no-origin-fallback proxy policy and keep
+  existing authorized transcode fallback behavior where enabled.
+- Validation: `ruff check app tests` passed; full pytest **2062 passed, 56 skipped**.
+  Real nginx/network-namespace tests cover signed GET/HEAD/Range, both pools,
+  encoded paths, tampering and health responsiveness while a reader is stopped.
+  Mock-mode browser servers booted and their navigation/save tests passed.
+- Repaired existing lint findings and outdated test harness assumptions about
+  cookie login, asynchronous dialogs and snapshot fixtures so the full required
+  validation runs cleanly. These changes do not alter authentication policy.
+- Remaining operational limits: samples prove their own paths, not the entire
+  library; unreachable hosts and external storage outages still need recovery.
+
+---
+
 ## 2026-09-16 — v0.36.1 native lifecycle format compatibility
 
 - Live acceptance caught a v0.36.0 lifecycle regression: a native client sends

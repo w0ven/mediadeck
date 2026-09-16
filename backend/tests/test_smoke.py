@@ -501,7 +501,9 @@ def test_node_without_matching_root_is_never_chosen() -> None:
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
                        headers=_play(), follow_redirects=False)
-        assert "gd3only" not in r.headers["location"]     # fell back to Emby
+        assert r.status_code == 503
+        assert "location" not in r.headers
+        assert r.headers["x-mediadeck-fallback"] == "no-capable-node"
         preview = client.get("/api/playback/preview?item_id=item42",
                              headers=_basic()).json()
         assert preview["redirected"] is False

@@ -167,7 +167,15 @@ def nginx_site(node: Any) -> str:
         literals.append(f"geo $mediadeck_pool_path_{index} {{ default {_nginx_quote(node_path)}; }}")
         locations.append(f"""
     location {_nginx_quote(str(pool.url_prefix).rstrip('/') + '/')} {{{guard}
-        alias $mediadeck_pool_path_{index}/;
+        # FUSE open/stat can block even with aio threads. Only the isolated
+        # loopback HTTP reader touches the mount; nginx and health stay live.
+        proxy_pass http://127.0.0.1:{9810 + index}/;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_buffering off;
+        proxy_connect_timeout 1s;
+        proxy_read_timeout 30s;
+        proxy_force_ranges on;
 
         # Per-user cap from the signed r argument (bytes/second, 0 =
         # uncapped). limit_rate is per request. HTTP/1.1 stops one TCP
@@ -361,6 +369,8 @@ ExecStart=/usr/bin/rclone mount {remote} {node_path} \\
     --vfs-read-chunk-size 32M \\
     --vfs-read-chunk-size-limit 1G \\
     --vfs-read-ahead 256M \\
+    --vfs-read-chunk-streams 0 \\
+    --tpslimit 4 --tpslimit-burst 4 --timeout 30s --contimeout 10s \\
     --buffer-size 64M \\
     --cache-dir {cache_path} \\
     --umask 022 \\
@@ -370,6 +380,29 @@ Restart=on-failure
 RestartSec=10
 # A stale FUSE mount wedges every reader in uninterruptible sleep.
 TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
+def media_reader_unit(node: Any, pool: Any, index: int) -> str:
+    """Isolate all filesystem operations from nginx's event-loop workers."""
+    _config_name(node.name)
+    _config_name(pool.name)
+    if not 0 <= index <= 1000:
+        raise ValueError("invalid media reader index")
+    return f"""[Unit]
+Description=mediadeck isolated media reader ({node.name}/{pool.name})
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/rclone serve http {_systemd_quote(pool.node_path)} --addr 127.0.0.1:{9810 + index} --read-only --vfs-cache-mode off --dir-cache-time 5s --no-modtime --no-checksum --log-level ERROR
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -387,6 +420,7 @@ After=network-online.target
 
 [Service]
 Type=simple
+Environment=LOADPROBE_MEDIA_PROBES=/etc/mediadeck/media-probes.json
 ExecStart=/usr/bin/python3 /opt/mediadeck-agent/loadprobe.py --port {LOADPROBE_PORT} --signing-config /etc/mediadeck/signing.json
 Restart=always
 RestartSec=5
@@ -441,6 +475,18 @@ def install_script(node: Any, panel_url: str) -> str:
     nginx_config = nginx_site(node)
     probe_config = loadprobe_unit(node)
     meter_config = meterd_unit(node, panel)
+    reader_steps = []
+    for index, pool in enumerate(pools):
+        if not pool.node_path:
+            continue
+        content = media_reader_unit(node, pool, index)
+        delimiter = _delimiter("MEDIADECK_READER_EOF", content)
+        unit_name = f"mediadeck-reader-{node.name}-{pool.name}.service"
+        reader_steps.append(
+            f"cat > /etc/systemd/system/{unit_name} <<'{delimiter}'\n"
+            f"{content}\n{delimiter}\n"
+            f"systemctl daemon-reload\nsystemctl enable --now {unit_name}\n")
+    readers_install = "\n".join(reader_steps)
     nginx_end = _delimiter("MEDIADECK_NGINX_EOF", nginx_config)
     probe_end = _delimiter("MEDIADECK_PROBE_EOF", probe_config)
     meter_end = _delimiter("MEDIADECK_METERD_EOF", meter_config)
@@ -595,6 +641,7 @@ cat > /etc/nginx/sites-available/mediadeck-{node.name} <<'{nginx_end}'
 {nginx_end}
 ln -sf /etc/nginx/sites-available/mediadeck-{node.name} /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
+{readers_install}
 nginx -t && systemctl reload nginx
 
 echo "==> 6/6 安装负载探针与计量代理"
@@ -621,7 +668,7 @@ sleep 2
 
 echo
 echo "==> 自检"
-curl -fsS http://127.0.0.1:{LOADPROBE_PORT}/load >/dev/null && echo "    [OK] 负载探针" || echo "    [!!] 探针未响应"
+curl -fsS http://127.0.0.1:{LOADPROBE_PORT}/load | python3 -c 'import json,sys; sys.exit(not json.load(sys.stdin).get("ok"))' && echo "    [OK] 负载与媒体读取探测" || echo "    [!!] 节点尚未就绪：检查媒体探测样本 /etc/mediadeck/media-probes.json"
 curl -fsS http://127.0.0.1:{METERD_PORT}/healthz >/dev/null && echo "    [OK] 计量代理" || echo "    [!!] 计量代理未响应"
 curl -fsS {shlex.quote(f'https://{host}/healthz')} >/dev/null && echo "    [OK] nginx 对外服务" || echo "    [!!] nginx 未响应"
 echo
@@ -641,7 +688,7 @@ _PLAYBACK_PATH_RE = r"^/(emby/)?[Vv]ideos/[^/]+/(?i:stream|original)(\.[A-Za-z0-
 
 
 def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
-                          emby_origin_url: str = "") -> str:
+                          emby_origin_url: str = "", *, origin_fallback: bool = True) -> str:
     """Front-door rule that puts the panel on the real playback path.
 
     This is the answer to "how does my existing Emby domain dispatch to nodes":
@@ -653,6 +700,10 @@ def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
     emby_host = (emby_origin_url or emby_url).rstrip("/") or "http://127.0.0.1:8096"
     emby_domain = _host_of(emby_url) or "emby.example.com"
     panel_authority = urlparse(panel_host).netloc
+    fallback_policy = "on" if origin_fallback else "off"
+    fallback_directives = ("proxy_intercept_errors on;\n    error_page 418 = @mediadeck_emby_origin;"
+                           if origin_fallback else "proxy_intercept_errors off;")
+    method_status = 418 if origin_fallback else 405
 
     if server == "nginx":
         return f"""# nginx — 加到 {emby_domain} 的 server 块里，放在 location / 之前
@@ -662,7 +713,7 @@ def emby_frontend_snippet(panel_url: str, emby_url: str, server: str = "caddy",
 location ~ {_PLAYBACK_PATH_RE} {{
     # Method routing happens before proxying. A named error_page target keeps
     # the original method, body and URI; no request reaches the panel first.
-    if ($request_method !~ "^(GET|HEAD)$") {{ return 418; }}
+    if ($request_method !~ "^(GET|HEAD)$") {{ return {method_status}; }}
     proxy_pass {panel_host};
     proxy_set_header Host {panel_authority};
     proxy_ssl_server_name on;
@@ -672,6 +723,7 @@ location ~ {_PLAYBACK_PATH_RE} {{
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Mediadeck-Proxy nginx;
+    proxy_set_header X-Mediadeck-Origin-Fallback {fallback_policy};
     proxy_set_header X-Mediadeck-Entry $http_x_mediadeck_entry;
     proxy_set_header X-Mediadeck-Entry-Key $http_x_mediadeck_entry_key;
     # Authentication and entry selection must run on every request. In
@@ -684,8 +736,8 @@ location ~ {_PLAYBACK_PATH_RE} {{
     proxy_redirect off;
     # Only an admitted routing fallback may reach origin. Authentication,
     # admission and dependency failures (including 5xx) must stay closed.
-    proxy_intercept_errors on;
-    error_page 418 = @mediadeck_emby_origin;
+    # No capable media node is always 503, never an origin fallback sentinel.
+    {fallback_directives}
 }}
 
 location @mediadeck_emby_origin {{
@@ -730,6 +782,7 @@ location / {{
         reverse_proxy {panel_host} {{
             header_up Host {panel_authority}
             header_up X-Mediadeck-Proxy 1
+            header_up X-Mediadeck-Origin-Fallback {fallback_policy}
             # Only an admitted routing fallback may reach origin.
             @fallback status 204
             handle_response @fallback {{

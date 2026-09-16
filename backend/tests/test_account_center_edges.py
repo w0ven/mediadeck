@@ -52,7 +52,7 @@ def test_main_expected_nodes_excludes_disabled_never_reporter(monkeypatch):
         assert [r["name"] for r in rows] == ["de1"]
 
 
-def seed_watch(bot):
+def seed_watch(bot):  # noqa: F811 - pytest fixture injection
     now = int(time.time())
     start = now - 10 * 86400
     bot.db.execute(
@@ -62,8 +62,8 @@ def seed_watch(bot):
     return now, start
 
 
-def test_legacy_history_disjoint_import_rollups_and_retry_after_prune(bot):
-    now, boundary = seed_watch(bot)
+def test_legacy_history_disjoint_import_rollups_and_retry_after_prune(bot):  # noqa: F811 - pytest fixture injection
+    now, _boundary = seed_watch(bot)
     rows = [
         {
             "event_id": "old1",
@@ -95,8 +95,8 @@ def test_legacy_history_disjoint_import_rollups_and_retry_after_prune(bot):
 
 
 @pytest.mark.parametrize("case", ["overlap", "unknown_user", "bad_seconds", "duplicate"])
-def test_invalid_legacy_data_never_partially_imports(bot, case):
-    now, boundary = seed_watch(bot)
+def test_invalid_legacy_data_never_partially_imports(bot, case):  # noqa: F811 - pytest fixture injection
+    _now, boundary = seed_watch(bot)
     good = {
         "event_id": "old1",
         "emby_user_id": "u1",
@@ -120,8 +120,8 @@ def test_invalid_legacy_data_never_partially_imports(bot, case):
     assert bot.db.query("SELECT * FROM watch_legacy_baselines") == []
 
 
-def test_live_time_appears_once_then_moves_to_finished_totals(bot):
-    now, boundary = seed_watch(bot)
+def test_live_time_appears_once_then_moves_to_finished_totals(bot):  # noqa: F811 - pytest fixture injection
+    now, _boundary = seed_watch(bot)
     bot._stats.bind_live_watch(lambda: [{"user_id": "u1", "started_at": now - 100, "seconds": 80}])
     assert bot._stats.watch_summary("u1")["recorded_seconds"] == 380
     assert bot._stats.top_watchers(hours=720)[0]["seconds"] == 380
@@ -133,7 +133,7 @@ def test_live_time_appears_once_then_moves_to_finished_totals(bot):
     assert bot._stats.watch_summary("u1")["recorded_seconds"] == 380
 
 
-def test_revoked_reviewer_during_presence_check_cannot_approve(bot):
+def test_revoked_reviewer_during_presence_check_cannot_approve(bot):  # noqa: F811 - pytest fixture injection
     r = request(bot)
     notice = bot.db.one("SELECT * FROM tg_rebind_notices")
 
@@ -155,7 +155,7 @@ def test_revoked_reviewer_during_presence_check_cannot_approve(bot):
     assert bot.members.get("u1")["tg_user_id"] == "901"
 
 
-def test_verified_request_duplicates_do_not_fan_out_again(bot):
+def test_verified_request_duplicates_do_not_fan_out_again(bot):  # noqa: F811 - pytest fixture injection
     request(bot)
     notices = len(bot.db.query("SELECT * FROM tg_rebind_notices"))
     asyncio.run(bot._handle_message(msg("/rebind")))
@@ -164,7 +164,7 @@ def test_verified_request_duplicates_do_not_fan_out_again(bot):
     assert len(bot.db.query("SELECT * FROM tg_rebind_notices")) == notices
 
 
-def test_logo_failure_falls_back_without_deleting_working_menu(bot):
+def test_logo_failure_falls_back_without_deleting_working_menu(bot):  # noqa: F811 - pytest fixture injection
     bot._cfg()["menu_logo_url"] = "https://example.com/logo.png"
     original = bot._call
 

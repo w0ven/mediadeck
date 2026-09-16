@@ -180,7 +180,7 @@ def _bar(percent: float | None, width: int = 10) -> str:
     if percent is None:
         return "░" * width
     pct = max(0.0, min(100.0, float(percent)))
-    filled = int(round(pct / 100.0 * width))
+    filled = round(pct / 100.0 * width)
     filled = max(0, min(width, filled))
     return "█" * filled + "░" * (width - filled)
 
@@ -727,9 +727,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if message.get("sender_chat"):
             return True
         sender = message.get("from") or {}
-        if sender.get("is_bot") and str(sender.get("username") or "").lower() == "groupanonymousbot":
-            return True
-        return False
+        return bool(sender.get("is_bot") and str(sender.get("username") or "").lower() == "groupanonymousbot")
 
     def _remember_card_actor(self, chat_id: Any, message_id: Any) -> None:
         actor = _ACTOR.get()
@@ -1734,7 +1732,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return "观看统计：暂不可用"
         try:
             s = self._stats.watch_summary(str(member['emby_user_id']))
-        except Exception:
+        except Exception:  # noqa: BLE001 - preserve failure diagnostics without breaking caller
             return "观看统计：暂不可用"
         start = time.strftime('%Y-%m-%d', time.localtime(s['first_at'])) if s.get('first_at') else '尚无记录'
         return (f"近24小时观看：{duration(s['seconds_24h'])}\n"

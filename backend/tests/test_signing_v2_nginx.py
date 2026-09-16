@@ -18,6 +18,7 @@ import ssl
 import subprocess
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -103,6 +104,7 @@ def exercise(root, args):
     config_path, meter_db, deny = root / "signing.json", root / "meter.db", root / "deny.map"
     deny.write_text("# none\n")
     probe_process = meter_process = nginx_process = None
+    readers = []
     logs = []
 
     def spawn(command, name):
@@ -131,6 +133,13 @@ def exercise(root, args):
             return db.execute("SELECT COUNT(*) FROM conns").fetchone()[0]
 
     try:
+        for index, media in enumerate((pool_main, pool_other)):
+            reader = spawn([shutil.which("rclone"), "serve", "http", str(media),
+                            "--addr", f"127.0.0.1:{9810 + index}", "--read-only",
+                            "--vfs-cache-mode", "off", "--no-modtime", "--no-checksum"],
+                           f"reader-{index}")
+            readers.append(reader)
+            wait_port(9810 + index, reader)
         meter_process = spawn([sys.executable, str(ROOT / "agent/meterd.py"), "--bind", "127.0.0.1",
                                "--port", str(meter_port), "--persist", str(meter_db),
                                "--deny-map", str(deny), "--interval", "3600", "--enable-nft"], "meter")
@@ -173,6 +182,20 @@ def exercise(root, args):
         assert request(node_port, good, context, "HEAD")[:2] == (200, b"")
         status, body, hdr = request(node_port, good, context, headers={"Range": "bytes=2-5"})
         assert (status, body, hdr.get("Content-Range")) == (206, BODY[2:6], "bytes 2-5/16")
+        # A filesystem reader may hang; the nginx event loop and health must
+        # remain responsive while an authenticated media request is pending.
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            os.kill(readers[0].pid, signal.SIGSTOP)
+            try:
+                pending = executor.submit(request, node_port, good, context)
+                time.sleep(0.15)
+                started = time.monotonic()
+                assert request(node_port, "/healthz", context)[0] == 200
+                assert time.monotonic() - started < 2
+                assert not pending.done()
+            finally:
+                os.kill(readers[0].pid, signal.SIGCONT)
+            assert pending.result(timeout=5)[:2] == (200, BODY)
         assert request(node_port, target(rate=125000), context)[:2] == (200, BODY)
         assert request(node_port, target(tag=""), context)[:2] == (200, BODY)
         assert conn_count() == 0, "metering=false must never register or collect"
@@ -226,13 +249,15 @@ def exercise(root, args):
         stop(nginx_process)
         stop(probe_process)
         stop(meter_process)
+        for reader in readers:
+            stop(reader)
         for log in logs:
             log.close()
         subprocess.run(["nft", "delete", "table", "inet", "mediadeck_meter"], capture_output=True, check=False)
 
 
 def test_real_nginx_v2_and_optional_metering_in_isolated_netns(tmp_path):
-    if any(not shutil.which(tool) for tool in ("nginx", "openssl", "nft", "unshare", "ip")):
+    if any(not shutil.which(tool) for tool in ("nginx", "openssl", "nft", "unshare", "ip", "rclone")):
         pytest.skip("isolated nginx/kernel test tools unavailable")
     support = subprocess.run(["unshare", "-n", "true"], capture_output=True, check=False)
     if support.returncode:
