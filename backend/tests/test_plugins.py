@@ -37,10 +37,10 @@ from app.modules.plugins_builtin import (
     PluginContext,
     RankingsPostPlugin,
     RankingsWeeklyPlugin,
-    WatchRankPostPlugin,
-    WatchRankWeeklyPlugin,
     RequestDigestPlugin,
     ViewingReportPlugin,
+    WatchRankPostPlugin,
+    WatchRankWeeklyPlugin,
     migrate_legacy_telegram_jobs,
     register_builtin,
 )

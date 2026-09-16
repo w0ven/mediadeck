@@ -55,7 +55,7 @@ def stack(tmp_path):
 
 @pytest.mark.parametrize("policy,days", [("apply_group", 7), ("clear", None), ("set", 60)])
 def test_explicit_date_actions_replace_effective_overlay(stack, policy, days):
-    db, g, m, now, ov = stack
+    _db, _g, m, now, _ov = stack
     payload = {"group_id": "short", "expiry_policy": policy}
     if policy == "set":
         payload["expires_at"] = now + 60 * 86400
@@ -70,7 +70,7 @@ def test_explicit_date_actions_replace_effective_overlay(stack, policy, days):
 
 
 def test_timed_to_timed_keep_preserves_effective_term(stack):
-    db, g, m, now, ov = stack
+    _db, _g, m, now, ov = stack
     out = m.upsert("u", "alice", {"group_id": "short"})
     assert out["expires_at_effective"] == now + 90 * 86400
     assert out["overrides"] == ov
@@ -80,7 +80,7 @@ def test_timed_to_timed_keep_preserves_effective_term(stack):
 
 @pytest.mark.parametrize("group_id,traffic_billed", [("vip", True), (WHITELIST_GROUP_ID, False)])
 def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id, traffic_billed):
-    db, g, m, now, ov = stack
+    _db, _g, m, _now, _ov = stack
     p = group_preview(m, "u", group_id)
     assert p["policies"]["keep"]["expires_at"] is None
     out = m.upsert("u", "alice", {"group_id": group_id, "expiry_policy": "keep"})
@@ -93,14 +93,14 @@ def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id, 
 
 
 def test_time_only_disables_quota_without_wiping_ledger(stack):
-    db, g, m, now, ov = stack
+    _db, _g, m, now, _ov = stack
     out = m.upsert("u", "alice", {"group_id": "timeonly"})
     assert out["traffic_quota_bytes"] == 0 and out["traffic_used_bytes"] == 987654
     assert out["expires_at_effective"] == now + 90 * 86400
 
 
 def test_existing_non_time_group_masks_stale_personal_date(stack):
-    db, g, m, now, ov = stack
+    db, _g, m, _now, _ov = stack
     db.execute("UPDATE members SET group_id='vip' WHERE emby_user_id='u'")
     assert m.get("u")["expires_at_effective"] is None
     # Changing back defaults to the actual unlimited term, not the hidden 90d.
@@ -110,7 +110,7 @@ def test_existing_non_time_group_masks_stale_personal_date(stack):
     assert out["expires_at_effective"] is None
 
 
-def test_bot_group_confirm_can_cancel_then_applies_once(bot):
+def test_bot_group_confirm_can_cancel_then_applies_once(bot):  # noqa: F811 - pytest fixture injection
     run = asyncio.run
     before = bot.members.get("u1")["group_id"]
     run(bot._handle_message(msg("/kk 901", user="900")))
@@ -132,7 +132,7 @@ def test_bot_group_confirm_can_cancel_then_applies_once(bot):
     assert bot.members.get("u1")["updated_at"] == stamp
 
 
-def test_bot_changed_group_definition_invalidates_confirmation(bot):
+def test_bot_changed_group_definition_invalidates_confirmation(bot):  # noqa: F811 - pytest fixture injection
     run = asyncio.run
     # /prouser grants directly; obtain a real preview from the group menu.
     run(bot._handle_message(msg("/kk 901", user="900")))

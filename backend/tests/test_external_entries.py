@@ -164,7 +164,11 @@ def test_other_fallbacks_preserved(client, condition):
             client.post(f"/api/nodes/{node}/disable", auth=ADMIN)
     path = PATH.replace("item42", "unknown") if condition == "unresolved" else PATH
     response = request(client, {**entry_headers(), "X-Mediadeck-Proxy": "nginx"}, path)
-    assert response.status_code == 418 and "location" not in response.headers
+    assert response.status_code == (503 if condition == "no-node" else 418)
+    assert "location" not in response.headers
+    if condition == "no-node":
+        assert response.headers["x-mediadeck-fallback"] == "no-capable-node"
+        assert response.headers["retry-after"] == "15"
 
 
 def test_playback_caches_and_signed_urls_are_isolated_by_entry(client, monkeypatch):
@@ -437,3 +441,26 @@ def test_nginx_origin_template_covers_routes_trust_and_cache(client):
     assert "proxy_ssl_verify on;" in config
     # 403 access denials must not be converted into a successful fallback.
     assert "error_page 403" not in config
+
+
+@pytest.mark.parametrize("method", ["GET", "HEAD"])
+def test_forbidden_origin_fallback_preserves_auth_and_returns_outage(client, method):
+    headers = {**entry_headers(), "X-Mediadeck-Proxy": "nginx",
+               "X-Mediadeck-Origin-Fallback": "off"}
+    for node in ("edge-a", "edge-b"):
+        client.post(f"/api/nodes/{node}/disable", auth=ADMIN)
+    response = request(client, headers, method=method)
+    assert response.status_code == 503
+    assert response.headers["x-mediadeck-fallback"] == "no-capable-node"
+    assert "location" not in response.headers
+    headers.pop("X-Emby-Token")
+    assert request(client, headers, method=method).status_code == 401
+
+
+def test_no_origin_policy_is_exported_explicitly(client):
+    config = client.get("/api/integration/frontend?server=nginx&origin_fallback=false",
+                        auth=ADMIN).json()["config"]
+    assert "X-Mediadeck-Origin-Fallback off;" in config
+    assert "proxy_intercept_errors off;" in config
+    assert "error_page 418" not in config
+    assert "return 405" in config

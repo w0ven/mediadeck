@@ -1,6 +1,14 @@
-#!/usr/bin/env python3
 """Directed tests for 8339 sources.json reuse. No cloud-link cache."""
-import hashlib, json, os, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
+import hashlib
+import json
+import os
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -124,7 +132,7 @@ class RegistryCacheTests(unittest.TestCase):
         def worker():
             try:
                 results.append(gateway.load_registry())
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - preserve failure diagnostics without breaking caller
                 errors.append(exc)
 
         threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -329,7 +337,7 @@ class MissingConfigRejectTests(unittest.TestCase):
         gateway.configure()
         class FakeResp:
             code = 302
-            headers = {'Location': 'https://cdn.example.cmecloud.cn/obj'}
+            headers = {'Location': 'https://cdn.example.cmecloud.cn/obj'}  # noqa: RUF012 - immutable test response fixture
             def close(self):
                 pass
         cap = hashlib.sha256(self.foreign.encode()).hexdigest()

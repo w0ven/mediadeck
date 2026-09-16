@@ -73,7 +73,8 @@ def test_member_list_db_work_does_not_stall_other_pages(monkeypatch):
     monkeypatch.setattr(main.app.state, "stats", SimpleNamespace(hours_this_month=lambda: {"u1": 1.0}), raising=False)
     monkeypatch.setattr(main.app.state, "points", SimpleNamespace(balances=lambda: {"u1": 2}), raising=False)
     monkeypatch.setattr(main.app.state, "ledger", SimpleNamespace(summary_for_users=dict), raising=False)
-    monkeypatch.setattr(main.app.state, "emby", SimpleNamespace(list_users=AsyncMock(return_value=[{"Id": "u1", "Name": "viewer"}])), raising=False)
+    monkeypatch.setattr(main, "_member_emby_snapshot", AsyncMock(
+        return_value=({"u1": {"Id": "u1", "Name": "viewer"}}, None)))
 
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test",

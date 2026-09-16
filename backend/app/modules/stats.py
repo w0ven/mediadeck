@@ -50,15 +50,15 @@ def ranking_bounds(days: int, *, now: float | None = None) -> tuple[float, float
     days=7 is the seven complete days before today.
     """
     days = max(1, min(int(days or 1), MAX_DAYS))
-    local = datetime.fromtimestamp(time.time() if now is None else float(now))
+    local = datetime.fromtimestamp(time.time() if now is None else float(now))  # noqa: DTZ006 - intentionally use host-local calendar days
     today = local.replace(hour=0, minute=0, second=0, microsecond=0)
     return (today - timedelta(days=days)).timestamp(), today.timestamp()
 
 
 def ranking_stamp(days: int, *, now: float | None = None) -> str:
     since, until = ranking_bounds(days, now=now)
-    start = datetime.fromtimestamp(since).strftime("%Y-%m-%d")
-    end = datetime.fromtimestamp(max(since, until - 1)).strftime("%Y-%m-%d")
+    start = datetime.fromtimestamp(since).strftime("%Y-%m-%d")  # noqa: DTZ006 - intentionally use host-local calendar days
+    end = datetime.fromtimestamp(max(since, until - 1)).strftime("%Y-%m-%d")  # noqa: DTZ006 - intentionally use host-local calendar days
     return end if days <= 1 else f"{start} ~ {end}"
 
 

@@ -70,7 +70,8 @@ def test_nginx_literals_do_not_become_directives_or_recursive_variables():
     assert 'secure_link_md5' not in text and secret not in text
     assert 'auth_request /_mediadeck/verify;' in text
     assert json.loads(signing_config(node))["secret"] == secret
-    assert 'alias $mediadeck_pool_path_0/;' in text
+    assert 'alias ' not in text
+    assert 'proxy_pass http://127.0.0.1:9810/;' in text
 
 
 @pytest.mark.skipif(not shutil.which("nginx"), reason="nginx parser unavailable")

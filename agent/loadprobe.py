@@ -737,6 +737,60 @@ class Sampler:
                     "user_speeds_fallback": completed}
 
 
+class MediaReadiness:
+    """Bounded HTTP reads against loopback readers, never FUSE in /load."""
+
+    def __init__(self, config: str, *, start: bool = True):
+        self.config = config
+        self.ok = not config
+        self.checked_at = 0.0
+        self.error = "media_probe_pending" if config else ""
+        if config and start:
+            threading.Thread(target=self._run, daemon=True).start()
+
+    def check(self) -> None:
+        try:
+            from pathlib import Path
+            from urllib.parse import urlsplit
+            urls = json.loads(Path(self.config).read_text())
+            if not isinstance(urls, list) or not urls:
+                raise ValueError("empty media probes")
+            for url in urls:
+                parsed = urlsplit(url)
+                if (parsed.scheme != "http" or parsed.hostname != "127.0.0.1"
+                        or parsed.username or parsed.password or parsed.query):
+                    raise ValueError("media probe must use credential-free loopback HTTP")
+                request = Request(url, headers={"Range": "bytes=0-0"})
+                # Never follow redirects: a local endpoint must not make the
+                # probe fetch an external URL or authentication endpoint.
+                opener = build_opener(ProxyHandler({}), NoRedirect())
+                with opener.open(request, timeout=3) as response:
+                    if (response.status != 206
+                            or not re.fullmatch(r"bytes 0-0/[1-9][0-9]*",
+                                                response.headers.get("Content-Range", ""))
+                            or len(response.read(2)) != 1):
+                        raise ValueError("media byte unavailable")
+            self.ok, self.error = True, ""
+        except Exception:  # noqa: BLE001 - no media URLs or credentials in diagnostics
+            self.ok, self.error = False, "media_read_unavailable"
+        self.checked_at = time.time()
+
+    def snapshot(self) -> dict:
+        ready = self.ok and (not self.config or time.time() - self.checked_at < 45)
+        return {"media_ok": ready, "media_checked_at": self.checked_at,
+                "media_error": "" if ready else self.error or "media_probe_stale"}
+
+    def _run(self) -> None:
+        while True:
+            self.check()
+            time.sleep(15)
+
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=9800)
@@ -752,7 +806,10 @@ def main() -> None:
                             "LOADPROBE_SPEED_LOG",
                             "/var/log/nginx/mediadeck-speed.log"),
                         help="nginx mediadeck_speed log; empty disables")
+    parser.add_argument("--media-probes", default=os.environ.get("LOADPROBE_MEDIA_PROBES", ""),
+                        help="JSON file of loopback reader URLs for real byte readiness")
     args = parser.parse_args()
+    readiness = MediaReadiness(args.media_probes)
 
     ports = {int(p) for p in args.service_ports.split(",") if p.strip()}
     sampler = Sampler(args.iface, ports, SpeedLog(args.speed_log, ports))
@@ -800,7 +857,12 @@ def main() -> None:
                     self.send_response(401)
                     self.end_headers()
                     return
-            body = json.dumps(sampler.snapshot()).encode()
+            snapshot = sampler.snapshot()
+            media = readiness.snapshot()
+            snapshot.update(media)
+            if not media["media_ok"]:
+                snapshot.update(ok=False, error=media["media_error"])
+            body = json.dumps(snapshot).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

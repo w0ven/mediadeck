@@ -90,8 +90,19 @@ def page(server, browser):
     ctx.route("**/*", isolated)
     page = ctx.new_page()
     page.set_default_timeout(7000)
+    # The UI uses session-cookie login; HTTP Basic is only an API credential.
+    response = ctx.request.post(server + "/api/auth/login", data={
+        "username": "demo-admin", "password": "local-demo-only"})
+    assert response.ok
     page.goto(server + "/#/dashboard")
     page.wait_for_function("state.pageReady")
+    # This suite exercises navigation/save outcomes; route the async dialog
+    # boundary through Playwright's accept/dismiss controls used below.
+    page.evaluate("""() => {
+      window.deckConfirm = async message => window.confirm(message);
+      window.deckPrompt = async (message, value) => window.prompt(message, value);
+      window.deckAlert = async message => window.alert(message);
+    }""")
     page.evaluate("live.src?.close();live.pending.clear()")
     yield page
     ctx.close()

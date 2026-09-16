@@ -9,7 +9,7 @@ from test_admin_commands import bot as base_bot  # noqa: F401
 
 from app.core.db import Database
 from app.modules.stats import StatsService
-from app.modules.telegram import TelegramBot, GROUP_BRIEF_TTL
+from app.modules.telegram import GROUP_BRIEF_TTL, TelegramBot
 
 GROUP = -1003939238239
 OTHER = -1001111111111

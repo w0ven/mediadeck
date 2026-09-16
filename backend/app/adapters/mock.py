@@ -160,8 +160,9 @@ class MockEmby:
 
     async def report_playback(self, event: str, headers: dict[str, str],
                               query: dict[str, str], payload: dict[str, Any]) -> int:
-        from app.modules.playback import caller_token, caller_device
         from starlette.datastructures import Headers
+
+        from app.modules.playback import caller_device, caller_token
         hdr = Headers(headers)
         device = caller_device(hdr, query)
         uid = await self.user_for_token(caller_token(hdr, query), device)
