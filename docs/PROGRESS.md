@@ -2,6 +2,27 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-23 — v0.37.1 Telegram card generation format choice
+
+- The Bot's Generate Cards menu now offers visible choices for codes alone or
+  codes with registration links, before the existing group/days/count input.
+  `/code group days count links` uses the same output path; the three-argument
+  command keeps its original plain-code behavior.
+- Link requests require a ready Bot identity before minting. Format callbacks
+  are tied to the current prompt, recheck administrator authority, and cannot
+  mint cards. Successful generation consumes the pending input state; group
+  chats remain excluded from credential generation.
+- Large batches return one complete text attachment instead of oversized
+  Telegram messages. Small batches include each usable link alongside its
+  card. Audit entries contain counts and mode, without codes or links.
+- Validation: **306** related menu, command, admin, group, card and receipt
+  regressions passed; Ruff passed. An isolated Bot canary reproduced the menu
+  sequence, command links, plain compatibility, stale callbacks, unavailable
+  identity and a large complete attachment with a temporary DB and no network
+  sends or production card writes.
+
+---
+
 ## 2026-09-22 — v0.37.0 registration announcements and card links
 
 - Operators can select an existing interaction group, with an optional forum

@@ -145,7 +145,7 @@ ADMIN_HELP = """🛠 <b>管理员命令</b>
 
 <b>账号</b>
 <code>/rm 用户</code> 删号（默认只删本人；连带邀请人需单独确认）
-<code>/code 套餐id 天数 数量</code> 生成卡密
+<code>/code 套餐id 天数 数量 [links]</code> 生成卡密（links 附领取链接）
 <code>/auth TelegramID</code> 预授权注册
 
 <i>用户可写 Emby 用户名或 @Telegram 用户名。</i>"""
@@ -2518,7 +2518,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if kind == "admin_code":
             parts = text.split()
-            await self._cmd_code(chat_id, actor, parts)
+            await self._cmd_code(chat_id, actor, parts,
+                                 include_links=bool(extra.get("include_links")))
             return
         if kind == "admin_auth":
             await self._cmd_auth(chat_id, actor, [text.strip()])
@@ -3364,21 +3365,79 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         notice = await self._after_member_change(target)
         await self.send(chat_id, f"🎁 已发放给 <b>{escape(str(target.get('username')))}</b>：{note}{notice}")
 
+    async def _code_prompt(self, chat_id: Any, message_id: int, *,
+                           include_links: bool = False, nonce: str = "") -> None:
+        nonce = nonce or secrets.token_hex(6)
+        self._pending[self._pkey(chat_id)] = (
+            "admin_code", time.time() + PENDING_TTL,
+            {"include_links": include_links, "nonce": nonce, "message_id": message_id})
+        keyboard = [[
+            {"text": ("✓ " if not include_links else "") + "仅卡密",
+             "callback_data": f"admin_code_mode:{nonce}:plain"},
+            {"text": ("✓ " if include_links else "") + "卡密＋领取链接",
+             "callback_data": f"admin_code_mode:{nonce}:links"},
+        ], [{"text": "◀ 返回管理", "callback_data": "admin"}]]
+        mode = "卡密＋领取链接" if include_links else "仅卡密"
+        await self._edit(
+            chat_id, message_id,
+            f"🎟 <b>生成卡密</b>\n\n输出格式：<b>{mode}</b>\n"
+            "可点下方按钮切换，再发送：<code>套餐id 天数 数量</code>\n"
+            "例如 <code>standard 30 5</code>", keyboard)
+
     async def _cmd_code(self, chat_id: Any, actor: str,
-                        args: list[str]) -> None:
-        if len(args) < 3 or not args[1].isdigit() or not args[2].isdigit():
-            await self.send(chat_id, "用法：<code>/code 套餐id 天数 数量</code>")
+                        args: list[str], *, include_links: bool = False) -> None:
+        if _GROUP.get():
+            await self.send(chat_id, "请私聊生成卡密。")
+            return
+        if (len(args) not in (3, 4) or not args[1].isdigit() or not args[2].isdigit()
+                or (len(args) == 4 and args[3].lower() not in ("links", "plain"))):
+            await self.send(chat_id, "用法：<code>/code 套餐id 天数 数量 [links]</code>\n"
+                            "加上 <code>links</code> 可附领取链接；管理菜单也可直接选择格式。")
             return
         if self._registration is None:
             await self.send(chat_id, "注册服务不可用。")
             return
-        issued = self._registration.generate_redeem(
-            args[0], int(args[1]), int(args[2]), note=f"tg:{actor}")
+        if len(args) == 4:
+            include_links = args[3].lower() == "links"
+        if include_links:
+            self._check_bot_identity()
+            if not self.enabled or not self._start_link("preview"):
+                await self.send(chat_id, "机器人链接尚未就绪，未生成卡密。请稍后重新打开生成卡密。")
+                return
+        try:
+            issued = self._registration.generate_redeem(
+                args[0], int(args[1]), int(args[2]), note=f"tg:{actor}")
+        except ConfigError as exc:
+            await self.send(chat_id, f"❌ {_public_error(exc)}")
+            return
+        waiting = self._pending.get(self._pkey(chat_id))
+        if waiting and waiting[0] == "admin_code":
+            self._pending.pop(self._pkey(chat_id), None)
         self._members.audit(actor, "redeem.generate", "",
-                            f"group={args[0]} days={args[1]} count={args[2]}")
-        lines = [f"🎟 已生成 {len(issued)} 张卡密（{args[1]} 天）：\n"]
-        lines.extend(f"<code>{row.get('code')}</code>" for row in issued)
-        await self.send(chat_id, "\n".join(lines))
+                            f"group={args[0]} days={args[1]} count={args[2]} links={include_links}")
+        heading = f"🎟 已生成 {len(issued)} 张卡密（{args[1]} 天）：\n"
+        entries, plain_entries = [], []
+        for row in issued:
+            code = str(row["code"])
+            link = self._start_link(code) if include_links else ""
+            entries.append(f"<code>{escape(code)}</code>" + ("\n" + escape(link) if link else ""))
+            plain_entries.append(code + ("\n" + link if link else ""))
+        body = heading + "\n" + "\n\n".join(entries)
+        if len(body) <= 3800:
+            sent = await self.send(chat_id, body)
+        else:
+            # One document avoids truncating credentials/links or flooding the
+            # chat with a large batch of separate Telegram messages.
+            name = "cards-with-links.txt" if include_links else "cards.txt"
+            caption = heading.strip() + "\n完整结果见附件" + ("（含领取链接）" if include_links else "")
+            result = await self._call_multipart(
+                "sendDocument", {"chat_id": str(chat_id), "caption": caption},
+                {"document": (name, "\n\n".join(plain_entries).encode(), "text/plain; charset=utf-8")})
+            sent = isinstance(result, dict) and bool(result.get("message_id"))
+        if not sent:
+            batch = escape(str(issued[0].get("batch") or "")) if issued else ""
+            await self.send(chat_id, "卡密已生成，但结果未确认送达。请在网页卡密管理导出该批次，勿重复生成。\n"
+                            f"批次：<code>{batch}</code>")
 
     async def _cmd_invite(self, chat_id: Any, actor: str,
                           args: list[str]) -> None:
@@ -4089,17 +4148,24 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             actor = self._admin_actor(member, "")
             await self._cmd_req(chat_id, actor, ["active"])
             return
-        if data == "admin_code":
+        if data == "admin_code" or data.startswith("admin_code_mode:"):
             if not self.is_admin(member):
                 await self._edit(chat_id, message_id, "⛔ 无权限。")
                 return
-            self._pending[self._pkey(chat_id)] = (
-                "admin_code", time.time() + PENDING_TTL, {})
-            await self._edit(
-                chat_id, message_id,
-                "🎟 <b>生成卡密</b>\n\n请发送：<code>套餐id 天数 数量</code>\n"
-                "例如 <code>standard 30 5</code>",
-                [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
+            if data == "admin_code":
+                await self._code_prompt(chat_id, message_id)
+                return
+            parts = data.split(":")
+            waiting = self._pending.get(self._pkey(chat_id))
+            if (len(parts) != 3 or parts[2] not in ("plain", "links")
+                    or not waiting or waiting[0] != "admin_code" or waiting[1] <= time.time()
+                    or waiting[2].get("nonce") != parts[1]
+                    or waiting[2].get("message_id") != message_id):
+                await self._edit(chat_id, message_id, "这次生成操作已结束，请重新打开生成卡密。",
+                                 [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
+                return
+            await self._code_prompt(chat_id, message_id,
+                                    include_links=parts[2] == "links", nonce=parts[1])
             return
         if data == "admin_auth":
             if not self.is_admin(member):
