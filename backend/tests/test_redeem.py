@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import csv
 import io
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi.testclient import TestClient
 
@@ -42,6 +43,42 @@ def test_a_batch_is_minted_whole_and_returned_once() -> None:
         assert all(len(v) == REDEEM_LENGTH for v in values)
         assert all(c["days"] == 90 for c in made["codes"])
         assert all(c["batch"] == "launch" for c in made["codes"])
+        assert all('link' not in c for c in made['codes'])
+
+
+def test_optional_card_links_and_csv_resolve_to_the_same_unused_cards(monkeypatch) -> None:
+    async def local_only(*args, **kwargs):
+        return None
+
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.telegram, '_call', local_only)
+        app.state.settings_service.save_telegram({'enabled': True, 'bot_token': '123:local-only'})
+        app.state.telegram._check_bot_identity()
+        app.state.telegram._bot_username = 'MediaDeckDemoBot'
+        made = _mint(client, count=2, batch='with-links', include_links=True)
+        for card in made['codes']:
+            parsed = urlsplit(card['link'])
+            assert parsed.scheme == 'https' and parsed.netloc == 't.me'
+            assert parsed.path == '/MediaDeckDemoBot'
+            admission = app.state.registration.resolve('765', parse_qs(parsed.query)['start'][0])
+            assert admission.allowed and admission.via == 'redeem'
+            assert admission.credential == card['code'] and card['status'] == 'unused'
+        exported = client.get('/api/redeem/export.csv?batch=with-links&include_links=true', auth=ADMIN)
+        assert exported.status_code == 200
+        rows = list(csv.DictReader(io.StringIO(exported.text)))
+        assert {row['registration_link'] for row in rows} == {c['link'] for c in made['codes']}
+        audit = str(client.get('/api/audit?limit=20', auth=ADMIN).json())
+        assert all(card['code'] not in audit and card['link'] not in audit for card in made['codes'])
+
+
+def test_requesting_links_without_a_ready_bot_mints_nothing() -> None:
+    with TestClient(app) as client:
+        payload = {'group_id': _group_id(client), 'days': 30, 'count': 2, 'include_links': True}
+        assert client.post('/api/redeem/generate', auth=ADMIN, json=payload).status_code == 409
+        assert client.get('/api/redeem', auth=ADMIN).json()['stats']['total'] == 0
+        payload['include_links'] = 'false'
+        assert client.post('/api/redeem/generate', auth=ADMIN, json=payload).status_code == 400
+        assert client.get('/api/redeem', auth=ADMIN).json()['stats']['total'] == 0
 
 
 def test_generated_cards_start_unused_and_are_counted() -> None:

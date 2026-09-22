@@ -725,6 +725,13 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           <span class="muted">0 = 不限；名额是防止链接外泄后被刷爆的唯一闸门</span></div>
         <div class="form-row"><label for="tg-group">默认用户组</label>
           <input id="tg-group" value="${esc(tg.default_group_id || '')}" placeholder="留空使用系统默认组"></div>
+        <div class="form-row"><label for="tg-registration-notify">注册通报群</label>
+          <select id="tg-registration-notify"><option value="">关闭统一通报</option>${
+  (tg.group_interaction_chats || []).map((chat) => `<option value="${esc(chat)}" ${chat === tg.registration_notify_chat_id ? 'selected' : ''}>${esc(chat)}</option>`).join('')}</select>
+          <span class="muted">成功注册后通报用户名、用户组和有效期</span></div>
+        <div class="form-row"><label for="tg-registration-topic">通报话题 ID</label>
+          <input id="tg-registration-topic" type="number" min="1" max="2147483647" value="${esc(tg.registration_notify_thread_id || '')}" placeholder="可选，留空发到群内"></div>
+        <p class="help">通报涵盖预授权、邀请码和卡密注册，不包含密码或卡密。关闭统一通报后，群内赠送仍保留原群回执。</p>
         <p class="help">加入群组/频道的要求只在「群组与频道」里配置，这里不再重复填写。</p>
         <div class="toolbar"><button class="btn primary" id="tg-save2">保存</button></div>
       </div>`)}
@@ -779,6 +786,8 @@ function telegramPagePayload() {
     register_days: num('tg-regdays', 30),
     max_users: num('tg-max', 0),
     default_group_id: str('tg-group'),
+    registration_notify_chat_id: str('tg-registration-notify'),
+    registration_notify_thread_id: str('tg-registration-topic') || null,
   };
 }
 async function sendRankingsNow() {
@@ -826,6 +835,9 @@ PAGES.redeem = async (context = pageContext('redeem')) => {
           <input id="rd-batch" placeholder="留空自动按时间生成"></div>
         <div class="form-row"><label for="rd-note">备注</label>
           <input id="rd-note" placeholder="给自己看的说明，例如「双十一活动」"></div>
+        <div class="form-row"><label for="rd-links">附带领取链接</label>
+          <input id="rd-links" type="checkbox">
+          <span class="muted">链接内含卡密，打开机器人即可继续注册；复制和 CSV 导出一起包含</span></div>
         <div class="toolbar"><button class="btn primary" id="rd-make">生成</button></div>
         <div id="rd-result"></div>
       </div>`)}
@@ -892,11 +904,16 @@ async function generateRedeem() {
     count: Number(($('#rd-count') || {}).value || 0),
     batch: (($('#rd-batch') || {}).value || '').trim(),
     note: (($('#rd-note') || {}).value || '').trim(),
+    include_links: Boolean(($('#rd-links') || {}).checked),
   };
   try {
     const r = await api('/api/redeem/generate', {
       method: 'POST', body: JSON.stringify(body) });
     const values = (r.codes || []).map((c) => c.code);
+    const links = (r.codes || []).map((c) => c.link || '');
+    const output = body.include_links
+      ? values.map((code, index) => `${code}\n${links[index]}`).join('\n\n')
+      : values.join('\n');
     state.lastRedeemBatch = values;
     const box = $('#rd-result');
     if (box) {
@@ -905,13 +922,15 @@ async function generateRedeem() {
           已生成 <b>${values.length}</b> 张（批次 ${esc((r.codes[0] || {}).batch || '')}）。
           <b>这是唯一一次完整显示</b>，列表里只会看到掩码。
         </div>
-        <div class="code-dump" id="rd-dump">${esc(values.join('\n'))}</div>
+        <div class="code-dump" id="rd-dump">${esc(output)}</div>
         <div class="toolbar" style="margin-top:10px">
           <button class="btn" id="rd-copy">复制全部</button>
+          ${body.include_links ? '<button class="btn" id="rd-copy-links">只复制领取链接</button>' : ''}
           <button class="btn" id="rd-dl">下载 CSV</button>
         </div>`;
-      $('#rd-copy').onclick = () => copyText(values.join('\n'), `已复制 ${values.length} 张`);
-      $('#rd-dl').onclick = () => downloadRedeemCsv((r.codes[0] || {}).batch || '');
+      $('#rd-copy').onclick = () => copyText(output, `已复制 ${values.length} 张`);
+      if (body.include_links) $('#rd-copy-links').onclick = () => copyText(links.join('\n'), `已复制 ${links.length} 条领取链接`);
+      $('#rd-dl').onclick = () => downloadRedeemCsv((r.codes[0] || {}).batch || '', body.include_links);
     }
     toast(`已生成 ${values.length} 张`);
   } catch (e) { toast('生成失败: ' + e.message, 1); }
@@ -938,12 +957,17 @@ function copyRedeem(value, el) {
     }
   });
 }
-function downloadRedeemCsv(batch) {
-  const qs = batch ? '?batch=' + encodeURIComponent(batch) : '';
-  window.open('/api/redeem/export.csv' + qs, '_blank');
+function downloadRedeemCsv(batch, includeLinks = false) {
+  const params = new URLSearchParams();
+  if (batch) params.set('batch', batch);
+  if (includeLinks) params.set('include_links', 'true');
+  const qs = params.toString();
+  window.open('/api/redeem/export.csv' + (qs ? '?' + qs : ''), '_blank');
 }
 function exportRedeem() {
-  const qs = redeemFilterQuery();
+  const params = new URLSearchParams(redeemFilterQuery());
+  if (($('#rd-links') || {}).checked) params.set('include_links', 'true');
+  const qs = params.toString();
   window.open('/api/redeem/export.csv' + (qs ? '?' + qs : ''), '_blank');
 }
 async function revokeRedeem(value) {

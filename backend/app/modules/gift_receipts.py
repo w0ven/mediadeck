@@ -1,4 +1,4 @@
-"""Delivery of committed gift registrations. Never creates or consumes accounts."""
+"""Durable receipts for committed registrations. Never consumes accounts."""
 from __future__ import annotations
 
 import asyncio
@@ -22,13 +22,26 @@ class GiftReceipts:
     def stage(self, conn: Any, admission: Any, member: dict, group_name: str,
               *, recipient_label: str | None = None) -> int | None:
         """Called inside the SAME transaction as binding + credential consumption."""
-        if not admission or admission.via != 'admin' or not admission.credential:
+        if not admission:
             return None
-        grant = conn.execute('SELECT * FROM admin_grants WHERE tg_user_id=? AND gift_code=?',
-                             (admission.tg_user_id, admission.credential)).fetchone()
-        if not grant or not grant['used_at'] or not grant['origin_chat_id']:
-            return None  # legacy/private gifts have no authorised group origin
-        tg_id = str(grant['tg_user_id'])
+        grant = None
+        if admission.via == 'admin' and admission.credential:
+            grant = conn.execute('SELECT * FROM admin_grants WHERE tg_user_id=? AND gift_code=?',
+                                 (admission.tg_user_id, admission.credential)).fetchone()
+        cfg = self.bot._cfg()
+        chat_id = str(cfg.get('registration_notify_chat_id') or '').strip()
+        thread_id = cfg.get('registration_notify_thread_id')
+        bot_id = self.bot_id()
+        origin_message_id = 0
+        grant_id = int(grant['id']) if grant else 0
+        if not chat_id:
+            if not grant or not grant['used_at'] or not grant['origin_chat_id']:
+                return None
+            chat_id = grant['origin_chat_id']
+            thread_id = grant['origin_thread_id']
+            bot_id = grant['origin_bot_id']
+            origin_message_id = grant['origin_message_id']
+        tg_id = str(admission.tg_user_id)
         expires = member.get('expires_at_effective', member.get('expires_at'))
         term = time.strftime('%Y-%m-%d 到期', time.localtime(expires)) if expires else '永久'
         label = escape(str(recipient_label).strip()) if str(recipient_label or '').strip() else f'TG {tg_id}'
@@ -36,12 +49,16 @@ class GiftReceipts:
                 f'账号：<b>{escape(str(member["username"]))}</b>\n'
                 f'{escape(group_name)} · {term}')
         now = int(time.time())
-        key = hashlib.sha256(admission.credential.encode()).hexdigest()
+        # Keep legacy gift keys stable; other channels have one receipt per
+        # created account even when an invite permits several registrations.
+        identity = (admission.credential if grant else
+                    f'registration:{bot_id}:{member["emby_user_id"]}')
+        key = hashlib.sha256(identity.encode()).hexdigest()
         conn.execute('INSERT INTO tg_gift_receipts(gift_key,grant_id,tg_user_id,emby_user_id,bot_id,chat_id,'
                      'origin_message_id,thread_id,body,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) '
                      'ON CONFLICT(gift_key) DO NOTHING',
-                     (key, grant['id'], tg_id, member['emby_user_id'], grant['origin_bot_id'],
-                      grant['origin_chat_id'], grant['origin_message_id'], grant['origin_thread_id'], body, now, now))
+                     (key, grant_id, tg_id, member['emby_user_id'], bot_id,
+                      chat_id, origin_message_id, thread_id, body, now, now))
         return int(conn.execute('SELECT id FROM tg_gift_receipts WHERE gift_key=?', (key,)).fetchone()[0])
 
     async def retry_menu(self, tg_id: str) -> list:

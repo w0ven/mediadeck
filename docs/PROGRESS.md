@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-22 — v0.37.0 registration announcements and card links
+
+- Operators can select an existing interaction group, with an optional forum
+  topic, for successful registrations through admin grants, invites and cards.
+  Receipts are staged in the account transaction and sent after it commits;
+  failed registrations never announce success. Existing delivery deduplication,
+  restart recovery and origin-group gift receipts remain supported. Public
+  notices contain the account name, group and expiry, with no password or card.
+- Card generation has an optional registration-link output. The same links
+  can be copied separately or included in CSV exports. Each uses the existing
+  Telegram start entrypoint and resolves to the issued card. An unavailable
+  bot identity rejects link generation before minting any cards.
+- Validation: Ruff and JavaScript syntax checks clean; backend regression
+  **2096 passed, 56 skipped, 1 deselected**. A separate 12-case API/lifecycle
+  batch passed, including the deselected shutdown case. Two Chromium tests
+  verified settings saves, link display, copying and CSV selection, for
+  **2099 distinct tests passed** across these runs.
+
+---
+
 ## 2026-09-22 — v0.36.5 unknown activity and atomic device registration
 
 ### Done
@@ -32,7 +52,6 @@ Newest entries first. Every working session appends one entry.
 - Preserve the existing timestamp correction and device identities during
   deployment; observe real new registrations independently of the stopped
   deployment snapshot.
-
 ---
 
 ## 2026-09-22 — v0.36.4 truthful device activity and identity display

@@ -42,6 +42,27 @@ def test_telegram_can_pause_without_erasing_channels_or_secret(service):
     assert "test-only-credential" not in str(resumed)
 
 
+def test_registration_notice_target_is_explicit_and_preserved_on_other_saves(service):
+    assert service.telegram_config()['registration_notify_chat_id'] == ''
+    service.save_telegram({'group_interaction_chats': ['-100700'],
+                           'registration_notify_chat_id': '-100700',
+                           'registration_notify_thread_id': 77})
+    saved = service.save_telegram({'max_users': 200})
+    assert saved['registration_notify_chat_id'] == '-100700'
+    assert saved['registration_notify_thread_id'] == 77
+    before = service._store.document()
+    with pytest.raises(ConfigError):
+        service.save_telegram({'registration_notify_chat_id': '-100900'})
+    assert service._store.document() == before
+    with pytest.raises(ConfigError):
+        service.save_telegram({'group_interaction_chats': []})
+    assert service._store.document() == before
+    cleared = service.save_telegram({'registration_notify_chat_id': '',
+                                     'registration_notify_thread_id': None,
+                                     'group_interaction_chats': []})
+    assert cleared['registration_notify_chat_id'] == ''
+
+
 @pytest.mark.parametrize("url", ["http://", "https://user:pw@host.invalid", "https://host.invalid:bad",
                                  "https://host.invalid\n/path", 123, "https://[broken"])
 def test_emby_rejects_invalid_or_credential_bearing_urls_before_save(service, url):

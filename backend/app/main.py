@@ -2794,9 +2794,23 @@ async def redeem_list(status: str | None = None, batch: str | None = None,
     }
 
 
+def _redeem_link_builder(include_links: bool) -> Any:
+    if not include_links:
+        return None
+    bot = app.state.telegram
+    bot._check_bot_identity()
+    if not bot.enabled or not bot._start_link("preview"):
+        raise HTTPException(409, "机器人尚未就绪，暂时无法生成领取链接")
+    return bot._start_link
+
+
 @app.post("/api/redeem/generate", dependencies=[Depends(_auth)])
 async def redeem_generate(payload: dict[str, Any] = Body(...),  # noqa: B008
                           user: str = Depends(_auth)) -> dict[str, Any]:
+    include_links = payload.get("include_links", False)
+    if not isinstance(include_links, bool):
+        raise HTTPException(400, "附带领取链接必须是开关值")
+    link_for = _redeem_link_builder(include_links)
     try:
         # Passed through as given: `or 1` here would turn an explicit count of
         # 0 into a card the operator never asked for. Validation belongs to
@@ -2816,6 +2830,8 @@ async def redeem_generate(payload: dict[str, Any] = Body(...),  # noqa: B008
         user, "redeem.generate", "",
         f"count={len(issued)} group={payload.get('group_id')} "
         f"days={payload.get('days')} batch={issued[0]['batch'] if issued else ''}")
+    if link_for:
+        issued = [{**card, "link": link_for(card["code"])} for card in issued]
     return {"codes": issued, "count": len(issued)}
 
 
@@ -2832,8 +2848,10 @@ async def redeem_revoke(code_value: str,
 
 @app.get("/api/redeem/export.csv", dependencies=[Depends(_auth)])
 async def redeem_export(batch: str | None = None,
-                        status: str | None = None) -> Response:
-    body = app.state.registration.export_redeem_csv(batch=batch, status=status)
+                        status: str | None = None,
+                        include_links: bool = False) -> Response:
+    body = app.state.registration.export_redeem_csv(
+        batch=batch, status=status, link_for=_redeem_link_builder(include_links))
     stamp = time.strftime("%Y%m%d-%H%M%S")
     return Response(
         content=body, media_type="text/csv; charset=utf-8",

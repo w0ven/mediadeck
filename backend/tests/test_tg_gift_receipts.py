@@ -28,6 +28,78 @@ def public_receipts(e):
             and str(p.get('chat_id')) == str(GROUP) and '注册成功' in p.get('text', '')]
 
 
+@pytest.mark.parametrize('channel', ['admin', 'invite', 'redeem'])
+@pytest.mark.parametrize('topic', [None, 77])
+def test_all_registration_channels_announce_committed_accounts_once(env, channel, topic):
+    env.cfg.update(registration_notify_chat_id=str(GROUP),
+                   registration_notify_thread_id=topic,
+                   allow_admin_grant=True, allow_invite=True, allow_redeem=True)
+    registration = env.bot._registration
+    credential = ''
+    if channel == 'admin':
+        registration.grant_admin(str(TARGET))
+    elif channel == 'invite':
+        credential = registration.issue_invite('u1')['code']
+    else:
+        credential = registration.generate_redeem('standard', 30, 1)[0]['code']
+    admission = registration.resolve(str(TARGET), credential)
+
+    async def run():
+        await env.bot._start_registration(TARGET, str(TARGET), credential=credential)
+        assert not public_receipts(env) and not receipts(env)
+        await command(env, 'ChannelReceipt', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
+        member = env.members.find_by_telegram(str(TARGET))
+        assert member and member['register_via'] == channel
+        posts = public_receipts(env)
+        assert len(posts) == 1 and posts[0].get('message_thread_id') == topic
+        assert 'ChannelReceipt' in posts[0]['text'] and '密码' not in posts[0]['text']
+        if credential:
+            assert credential not in posts[0]['text']
+        with env.db.write() as conn:
+            env.bot._gift_receipts.stage(conn, admission, member, '普通用户')
+        await env.bot._gift_receipts.recover()
+        assert len(public_receipts(env)) == 1 and len(receipts(env)) == 1
+        assert receipts(env)[0]['status'] == 'sent'
+    asyncio.run(run())
+
+
+def test_multi_use_invite_announces_each_created_account(env):
+    env.cfg.update(registration_notify_chat_id=str(GROUP), allow_invite=True)
+    code = env.bot._registration.issue_invite('u1', uses=2)['code']
+
+    async def run():
+        for target, name in ((TARGET, 'FirstReceipt'), (TARGET + 1, 'SecondReceipt')):
+            await env.bot._start_registration(target, str(target), credential=code)
+            await command(env, name, chat=target, user=target)
+            await confirm_registration_password(env, target=target)
+        assert len(public_receipts(env)) == 2
+        assert len({row['gift_key'] for row in receipts(env)}) == 2
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('failure', ['password', 'consume'])
+def test_failed_card_registration_never_announces_success(env, monkeypatch, failure):
+    env.cfg.update(registration_notify_chat_id=str(GROUP), allow_redeem=True)
+    code = env.bot._registration.generate_redeem('standard', 30, 1)[0]['code']
+
+    async def no(*args, **kwargs):
+        return False
+
+    async def run():
+        await env.bot._start_registration(TARGET, str(TARGET), credential=code)
+        if failure == 'password':
+            monkeypatch.setattr(env.bot._emby, 'set_user_password', no)
+        else:
+            monkeypatch.setattr(env.bot._registration, 'consume', lambda *a, **kw: False)
+        await command(env, 'FailedCardNotice', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
+        assert not env.members.find_by_telegram(str(TARGET))
+        assert env.bot._registration.get_redeem(code)['status'] == 'unused'
+        assert not receipts(env) and not public_receipts(env)
+    asyncio.run(run())
+
+
 def restart_bot(e):
     old = e.bot
     e.bot = TelegramBot(lambda: e.cfg, e.members, old._emby, db=e.db, groups=e.groups,
