@@ -61,6 +61,29 @@ def day_key(ts: float | None = None) -> str:
     return datetime.fromtimestamp(ts or time.time(), UTC).strftime("%Y-%m-%d")
 
 
+def session_activity_timestamp(session: dict[str, Any], observed_at: float) -> int:
+    """Use Emby's activity clock, not the sampler's polling clock.
+
+    ``/Sessions`` includes idle login sessions for a long time.  Refreshing a
+    device with every polling tick makes all of those old identities look
+    active *now*.  LastActivityDate is the actual device-side activity signal;
+    malformed or implausibly future values fall back to the observation time.
+    """
+    raw = str(session.get("LastActivityDate") or "").strip()
+    if raw:
+        try:
+            value = datetime.fromisoformat(
+                raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw)
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=UTC)
+            timestamp = int(value.timestamp())
+            if 0 < timestamp <= int(observed_at) + 300:
+                return timestamp
+        except (ValueError, OverflowError):
+            pass
+    return int(observed_at)
+
+
 def session_bitrate(session: dict[str, Any]) -> int:
     """Bits per second for this session.
 
@@ -415,6 +438,7 @@ class UsageSampler:
             app_version=session.get("ApplicationVersion") or "",
             last_ip=session.get("RemoteEndPoint") or "",
             now=int(now),
+            seen_at=session_activity_timestamp(session, now),
         )
 
     def _collect_overflow_kicks(self, sessions: list[dict[str, Any]], now: float) -> None:

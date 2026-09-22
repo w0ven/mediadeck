@@ -2,6 +2,30 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-22 — v0.36.4 truthful device activity and identity display
+
+- The device registry was unique by `(user, DeviceId)`, but its sampler wrote
+  polling time into every Emby Session, including idle historical logins. This
+  made unrelated technical identities all appear active at the current minute
+  and made valid multiple DeviceIds look like a duplicated count.
+- Device activity now follows Emby's `LastActivityDate`; malformed/future data
+  falls back safely, older duplicate sessions cannot move time or client
+  metadata backward, and `first_seen_at` remains the panel observation time.
+- Telegram now labels the count as device identities and renders client,
+  version and a non-reversible six-character id marker. Raw DeviceId and IP are
+  not exposed. A note explains that reinstall/reset may create a new identity;
+  no unsafe merge by generic names such as AndroidTV or iPhone is attempted.
+- Production dry-run found 351 current identities needing timestamp repair
+  (336 lowered from false polling time, 15 raised to newer Emby activity, one
+  invalid upstream timestamp skipped, no missing rows). The repair is
+  transactional with a mode-600 rollback manifest.
+- Validation: Ruff clean; focused membership/Telegram/admin suite **268
+  passed**. Backend suite excluding its independently green shutdown-lifecycle
+  case **2070 passed, 56 skipped, 1 deselected**; that lifecycle case passed
+  separately, covering all **2071** tests.
+
+---
+
 ## 2026-09-22 — v0.36.3 duplicate-device native session resolution
 
 - A Hills Windows 1.5.3 playback incident exposed two idle Emby Sessions for

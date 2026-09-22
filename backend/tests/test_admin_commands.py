@@ -222,7 +222,7 @@ def test_kk_reports_the_account_at_a_glance(bot) -> None:
         assert fragment in reply
     details = _tap(bot, 'admin_binding')
     for fragment in ("alice", "状态", "用户组", "有效期", "积分", "注册渠道",
-                     "邀请人", "下级", "Telegram", "设备数", "最近活跃", "求片剩余"):
+                     "邀请人", "下级", "Telegram", "设备标识", "最近活跃", "求片剩余"):
         assert fragment in details
     assert "120" in details
 

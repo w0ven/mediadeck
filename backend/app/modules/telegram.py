@@ -80,6 +80,22 @@ BACK_HOME: list[list[dict[str, str]]] = [
 ]
 
 
+def device_display_row(device: dict[str, Any]) -> str:
+    """Render one technical device identity without exposing its raw id."""
+    name = escape(str(device.get("device_name") or device.get("client") or "未知设备"))
+    client = str(device.get("client") or "").strip()
+    version = str(device.get("app_version") or "").strip()
+    software = escape(" ".join(value for value in (client, version) if value)
+                      or "未知客户端")
+    raw_id = str(device.get("device_id") or "")
+    marker = hashlib.sha256(raw_id.encode()).hexdigest()[:6] if raw_id else "------"
+    seen = device.get("last_seen_at")
+    when = time.strftime("%m-%d %H:%M", time.localtime(seen)) if seen else "—"
+    flag = "🚫 " if device.get("blocked") else ""
+    return (f"{flag}<b>{name}</b> · {software} · <code>#{marker}</code>\n"
+            f"最近活跃：{when}")
+
+
 def looks_like_credential(raw: str) -> bool:
     """True when the text is the shape of an invite code or a card.
 
@@ -1746,7 +1762,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         streams = member.get('max_streams')
         if streams not in (None, ''):
             lines.append(f"同时播放：{streams} 路" if int(streams or 0) else "同时播放：不限")
-        lines.append(f"已登记设备：{member.get('device_count', 0)}")
+        lines.append(f"已登记设备标识：{member.get('device_count', 0)}")
         lines.extend([f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}", "", self._watch_text(member)])
         return '\n'.join(lines)
 
@@ -2255,7 +2271,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             f"邀请人：{escape(str(inviter.get('username') or '—'))}\n"
             f"下级：{invitee_count} 人\n"
             f"Telegram：{escape(str(target.get('tg_user_id') or '未关联'))}\n"
-            f"设备数：{devices}\n"
+            f"设备标识：{devices}\n"
             f"最近活跃："
             f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}\n"
             f"求片剩余：{self._remaining_text(left)}\n\n"
@@ -4242,13 +4258,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             if not devices:
                 text = "📺 <b>我的设备</b>\n\n还没有记录到设备。"
             else:
-                rows = []
-                for d in devices[:8]:
-                    seen = d.get("last_seen_at")
-                    when = time.strftime("%m-%d %H:%M", time.localtime(seen)) if seen else "—"
-                    flag = "🚫 " if d.get("blocked") else ""
-                    rows.append(f"{flag}{escape(str(d.get('device_name') or d.get('device_id')))} · {when}")
-                text = "📺 <b>我的设备</b>\n\n" + "\n".join(rows)
+                rows = [device_display_row(device) for device in devices[:8]]
+                text = ("📺 <b>我的设备</b>\n\n" + "\n\n".join(rows)
+                        + "\n\n<i>按客户端上报的设备标识统计；重装或重置客户端可能生成新标识。</i>")
             await self._edit(chat_id, message_id, text, self.info_menu())
             return
         if data == "usage":
