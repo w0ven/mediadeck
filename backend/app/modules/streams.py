@@ -56,6 +56,33 @@ def overflow_session_ids(sessions: list[dict[str, Any]], user_id: str,
     return [str(s["Id"]) for s in ordered[cap:] if s.get("Id")]
 
 
+def matching_sessions(rows: list[dict[str, Any]], uid: str, device: str = "",
+                      sid: str = "", profile: dict[str, str] | None = None,
+                      ) -> list[dict[str, Any]]:
+    """Resolve one session without merging same-device playback identities.
+
+    An explicit SessionId remains authoritative.  Without one, DeviceId is the
+    primary key.  If Emby has duplicate sessions for that device, exact
+    non-secret client-profile fields may narrow them to one.  Zero or multiple
+    exact matches remain unresolved: never guess, pick by list order, or merge
+    two sessions into one playback seat.
+    """
+    matches = [s for s in rows if str(s.get("UserId")) == uid
+               and (not device or str(s.get("DeviceId")) == device)
+               and (not sid or str(s.get("Id")) == sid)]
+    if sid or len(matches) <= 1:
+        return matches
+    hints = {key: str(value).strip().casefold()
+             for key, value in (profile or {}).items()
+             if key in {"Client", "ApplicationVersion", "DeviceName"}
+             and str(value).strip()}
+    if not hints:
+        return matches
+    return [session for session in matches
+            if all(str(session.get(key) or "").strip().casefold() == expected
+                   for key, expected in hints.items())]
+
+
 class StreamAdmission:
     """Single Deck worker; serialized fresh snapshots and durable SQLite leases.
 
@@ -91,25 +118,30 @@ class StreamAdmission:
         return rows
 
     async def inspect(self, user_id: str | None, device_id: str = "",
-                      token: str = "", session_id: str = "", play_id: str = "") -> Admission:
+                      token: str = "", session_id: str = "", play_id: str = "",
+                      session_profile: dict[str, str] | None = None) -> Admission:
         async with self._lock:
             try:
                 sessions = await self._snapshot()
             except Exception:  # noqa: BLE001 - unavailable is never an empty snapshot
                 return Admission(False, "sessions-unavailable")
-            return self._admit(user_id, device_id, session_id, sessions, play_id)
+            return self._admit(user_id, device_id, session_id, sessions, play_id,
+                               session_profile)
 
     async def admit(self, *, user_id: str | None, device_id: str = "",
                     token: str = "", session_id: str = "",
-                    sessions: list[dict[str, Any]] | None = None) -> Admission:
+                    sessions: list[dict[str, Any]] | None = None,
+                    session_profile: dict[str, str] | None = None) -> Admission:
         """Explicit snapshot seam for deterministic tests; HTTP uses inspect."""
         async with self._lock:
             if sessions is None:
                 return Admission(False, "sessions-unavailable")
-            return self._admit(user_id, device_id, session_id, sessions)
+            return self._admit(user_id, device_id, session_id, sessions,
+                               session_profile=session_profile)
 
     def _admit(self, user_id: str | None, device: str, session_id: str,
-               sessions: list[dict[str, Any]], play_id: str = "") -> Admission:
+               sessions: list[dict[str, Any]], play_id: str = "",
+               session_profile: dict[str, str] | None = None) -> Admission:
         uid = str(user_id or "").strip()
         if not uid:
             return Admission(False, "unresolved")
@@ -127,8 +159,7 @@ class StreamAdmission:
                                    "WHERE user_id=? AND play_id=?", (uid, play_id))
             if len(bound) == 1:
                 session_id = bound[0]["session_id"]
-        matches = [s for s in rows if (not device or str(s.get("DeviceId")) == device)
-                   and (not session_id or str(s["Id"]) == session_id)]
+        matches = matching_sessions(rows, uid, device, session_id, session_profile)
         if len(matches) != 1:
             return Admission(False, "session-unresolved")
         sid = str(matches[0]["Id"])
@@ -169,13 +200,14 @@ class StreamAdmission:
             return Admission(True, "granted")
 
     def _matching(self, rows: list[dict[str, Any]], uid: str, device: str,
-                  sid: str = "") -> list[dict[str, Any]]:
-        return [s for s in rows if str(s.get("UserId")) == uid
-                and (not device or str(s.get("DeviceId")) == device)
-                and (not sid or str(s.get("Id")) == sid)]
+                  sid: str = "", profile: dict[str, str] | None = None,
+                  ) -> list[dict[str, Any]]:
+        return matching_sessions(rows, uid, device, sid, profile)
 
     async def issue_info(self, uid: str, device: str, session_id: str,
-                         issue: Any) -> tuple[Admission, int, dict[str, Any]]:
+                         issue: Any,
+                         session_profile: dict[str, str] | None = None,
+                         ) -> tuple[Admission, int, dict[str, Any]]:
         """Keep admission + upstream issuance + PlaySessionId binding atomic.
 
         The metadata proxy is necessary: nginx auth_request cannot see the
@@ -184,10 +216,11 @@ class StreamAdmission:
         """
         async with self._lock:
             rows = await self._snapshot()
-            result = self._admit(uid, device, session_id, rows)
+            result = self._admit(uid, device, session_id, rows,
+                                 session_profile=session_profile)
             if not result.allowed:
                 return result, 403, {}
-            matches = self._matching(rows, uid, device, session_id)
+            matches = self._matching(rows, uid, device, session_id, session_profile)
             def release_failed_start():
                 # Only this request's newly acquired seat; never release a
                 # previous play when replacement metadata fails.

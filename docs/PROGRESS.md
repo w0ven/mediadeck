@@ -2,6 +2,30 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-22 — v0.36.3 duplicate-device native session resolution
+
+- A Hills Windows 1.5.3 playback incident exposed two idle Emby Sessions for
+  one user and DeviceId (`Client=Hills Windows` and `Client=Hills`). Hills omits
+  SessionId from PlaybackInfo, so device-only matching found two rows and
+  correctly failed closed as `session-unresolved`; the media itself was valid.
+- Playback requests now extract only non-secret client identity fields (client
+  name, application version and device name). When DeviceId is duplicated and
+  SessionId is absent, admission accepts only one exact profile match. No
+  profile, no exact match, or multiple exact matches still fails closed.
+- Explicit SessionId remains authoritative. Same-device sessions are never
+  merged, active sessions still count independently, and stream limits,
+  device blocking, PlaySessionId binding and delayed-stop protection remain in
+  the existing admission path.
+- Regression coverage includes both PlaybackInfo and direct-stream admission
+  with the observed Hills query-carried authorization shape, unique profile
+  resolution, ambiguous identical profiles, explicit SessionId precedence and
+  credential exclusion. Validation: Ruff clean; targeted **35 passed**; full
+  backend **2068 passed, 56 skipped**. A read-only production-snapshot canary
+  changed the incident from two device candidates to exactly one
+  `Hills Windows` candidate without mutating leases.
+
+---
+
 ## 2026-09-17 — v0.36.2 isolated media readers and outage semantics
 
 - FUSE open/stat can stall every nginx worker despite `aio threads`. Node

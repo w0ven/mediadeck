@@ -50,7 +50,12 @@ from app.modules.metering import UNIT as METER_UNIT
 from app.modules.metering import MeasuredMeteringService
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
-from app.modules.playback import PlaybackRouter, caller_device, caller_token
+from app.modules.playback import (
+    PlaybackRouter,
+    caller_device,
+    caller_session_profile,
+    caller_token,
+)
 from app.modules.plugins import PluginRegistry
 from app.modules.plugins_builtin import (
     PluginContext,
@@ -1422,7 +1427,8 @@ async def _admit_playback(request: Request, item_id: str,
     admission = await app.state.streams.inspect(
         uid, device_id=device, token=token,
         session_id=query.get("SessionId", query.get("sessionId", "")),
-        play_id=query.get("PlaySessionId", query.get("playSessionId", "")))
+        play_id=query.get("PlaySessionId", query.get("playSessionId", "")),
+        session_profile=caller_session_profile(request.headers, query))
     if not admission.allowed:
         code = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(code, "playback admission refused", headers={
@@ -1443,12 +1449,14 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
             raise HTTPException(400, "PlaybackInfo body must be an object")
     uid = await _admit_playback(request, item_id, query, reserve=False)
     device = caller_device(request.headers, query)
+    session_profile = caller_session_profile(request.headers, query)
     async def issue():
         return await app.state.emby.playback_info(item_id, request.method,
                                                  dict(request.headers), query, payload)
     try:
         admission, code, data = await app.state.streams.issue_info(
-            uid, device, query.get("SessionId", query.get("sessionId", "")), issue)
+            uid, device, query.get("SessionId", query.get("sessionId", "")), issue,
+            session_profile=session_profile)
     except Exception:  # noqa: BLE001 - never return a partially checked URL
         raise HTTPException(503, "PlaybackInfo unavailable") from None
     if not admission.allowed:
