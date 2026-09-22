@@ -23,6 +23,7 @@ from app.modules.settings import mask_secret
 from app.modules.telegram import (
     USERNAME_RE,
     TelegramBot,
+    device_display_row,
     generate_password,
     looks_like_credential,
 )
@@ -1489,8 +1490,20 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
     assert "⚡ <b>带宽</b>" in text and "上限：<b>20 Mbps</b>" in text
     assert "同时播放：2" in text
-    assert "已登记设备：1" in text
-    assert "已登记设备：1 /" not in text
+    assert "已登记设备标识：1" in text
+    assert "已登记设备标识：1 /" not in text
+
+
+def test_device_rows_show_client_version_and_safe_distinguishing_marker() -> None:
+    first = {"device_id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+             "device_name": "AndroidTV", "client": "chaichai",
+             "app_version": "0.3.1-alpha3", "last_seen_at": 1_790_054_349}
+    second = {**first, "device_id": "ffffffff-bbbb-cccc-dddd-eeeeeeeeeeee"}
+    one, two = device_display_row(first), device_display_row(second)
+    assert "AndroidTV" in one and "chaichai 0.3.1-alpha3" in one
+    assert "最近活跃" in one and "<code>#" in one
+    assert first["device_id"] not in one
+    assert one != two
 
 
 def test_broadcast_rankings_sends_poster_then_overflow_text(monkeypatch) -> None:

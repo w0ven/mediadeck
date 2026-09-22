@@ -982,7 +982,8 @@ class MemberService:
     def register_device(self, user_id: str, device_id: str, *,
                         device_name: str = "", client: str = "",
                         app_version: str = "", last_ip: str = "",
-                        now: int | None = None) -> bool:
+                        now: int | None = None,
+                        seen_at: int | None = None) -> bool:
         """Record a device. Registration is uncapped.
 
         Existing devices always refresh. A blocked device still refreshes its
@@ -993,14 +994,18 @@ class MemberService:
         if not device_id:
             return True
         now = now or int(time.time())
+        seen_at = int(seen_at if seen_at is not None else now)
         existing = self._db.one(
-            "SELECT blocked FROM devices WHERE emby_user_id=? AND device_id=?",
+            "SELECT blocked,last_seen_at FROM devices "
+            "WHERE emby_user_id=? AND device_id=?",
             (user_id, device_id))
         if existing:
-            self._db.execute(
-                "UPDATE devices SET device_name=?,client=?,app_version=?,"
-                "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=?",
-                (device_name, client, app_version, last_ip, now, user_id, device_id))
+            if seen_at >= int(existing.get("last_seen_at") or 0):
+                self._db.execute(
+                    "UPDATE devices SET device_name=?,client=?,app_version=?,"
+                    "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=?",
+                    (device_name, client, app_version, last_ip, seen_at,
+                     user_id, device_id))
             if existing.get("blocked"):
                 self.audit("system", "device.blocked", user_id,
                            encode_audit_detail({
@@ -1013,7 +1018,8 @@ class MemberService:
             "INSERT INTO devices (emby_user_id,device_id,device_name,client,"
             "app_version,last_ip,first_seen_at,last_seen_at,blocked) "
             "VALUES (?,?,?,?,?,?,?,?,0)",
-            (user_id, device_id, device_name, client, app_version, last_ip, now, now))
+            (user_id, device_id, device_name, client, app_version, last_ip,
+             now, seen_at))
         return True
 
     # -- lifecycle actions ---------------------------------------------------

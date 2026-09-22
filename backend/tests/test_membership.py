@@ -30,7 +30,12 @@ from app.modules.members import (
     validate_overrides,
 )
 from app.modules.stats import StatsService
-from app.modules.usage import UsageSampler, is_playing, session_bitrate
+from app.modules.usage import (
+    UsageSampler,
+    is_playing,
+    session_activity_timestamp,
+    session_bitrate,
+)
 
 GIB = 1024 ** 3
 
@@ -451,6 +456,33 @@ def test_devices_are_tracked_from_sessions(stack) -> None:
     stack["emby"].set_sessions([_session("s1", "u1", 8_000_000)])
     asyncio.run(sampler.tick())
     assert stack["members"].get("u1")["device_count"] == 1
+
+
+def test_device_last_seen_uses_emby_activity_not_sampler_poll_time(stack) -> None:
+    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
+    stack["members"].upsert("u1", "alice", {"group_id": "standard"})
+    session = _session("s1", "u1", 8_000_000)
+    session["LastActivityDate"] = "2026-09-22T05:19:09.4560713Z"
+    observed = 1_790_087_095
+    sampler._track_device(session, "u1", observed)
+    device = stack["members"].devices("u1")[0]
+    assert device["first_seen_at"] == observed
+    assert device["last_seen_at"] == 1_790_054_349
+
+    # A stale duplicate session cannot move the real activity clock backward.
+    session["LastActivityDate"] = "2026-09-20T05:19:09Z"
+    session["Client"] = "StaleClient"
+    sampler._track_device(session, "u1", observed + 60)
+    unchanged = stack["members"].devices("u1")[0]
+    assert unchanged["last_seen_at"] == 1_790_054_349
+    assert unchanged["client"] == "TestClient"
+
+
+def test_invalid_or_future_session_activity_falls_back_to_observation_time() -> None:
+    now = 1_790_087_095
+    assert session_activity_timestamp({"LastActivityDate": "not-a-date"}, now) == now
+    assert session_activity_timestamp(
+        {"LastActivityDate": "2099-01-01T00:00:00Z"}, now) == now
 
 
 def test_device_registration_is_uncapped_and_blocked_still_refused(stack) -> None:
