@@ -573,8 +573,8 @@ def test_rankings_say_so_when_there_is_nothing_yet() -> None:
         def top_users(self, **k):
             return []
 
-        def top_titles(self, **k):
-            return []
+        def top_titles_split(self, **k):
+            return [], []
 
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_Empty())
@@ -586,12 +586,12 @@ def test_a_broken_stats_source_does_not_crash_the_bot() -> None:
         def top_users(self, **k):
             raise RuntimeError("db down")
 
-        def top_titles(self, **k):
+        def top_titles_split(self, **k):
             raise RuntimeError("db down")
 
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_Broken())
-    assert "还没有排行数据" in bot._rankings_text(1)
+    assert "排行统计暂时不可用" in bot._rankings_text(1)
 
 
 # -- disabled bot behaves ---------------------------------------------------

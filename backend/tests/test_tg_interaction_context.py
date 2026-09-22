@@ -84,6 +84,11 @@ def env(tmp_path):
     tg = FakeTelegram()
     tg.bot = bot
     bot._call = tg.call
+
+    async def multipart(method, fields, files, timeout=40):
+        return await tg.call(method, fields, timeout)
+
+    bot._call_multipart = multipart
     yield SimpleNamespace(bot=bot, tg=tg, db=db, members=members, cfg=cfg, groups=groups)
     db.close()
 

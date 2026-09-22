@@ -657,6 +657,13 @@ class LiveEmby:
 
     async def item_primary_image(self, item_id: str) -> bytes | None:
         """Primary poster bytes for a ranking card. Best-effort, never raises."""
+        return await self._ranking_image(item_id, 'Primary', 600)
+
+    async def item_backdrop_image(self, item_id: str) -> bytes | None:
+        """Optional real title artwork for the ranking header."""
+        return await self._ranking_image(item_id, 'Backdrop/0', 1200)
+
+    async def _ranking_image(self, item_id: str, kind: str, width: int) -> bytes | None:
         item_id = str(item_id or "").strip()
         if not item_id:
             return None
@@ -671,10 +678,10 @@ class LiveEmby:
                     items = (info.json() or {}).get("Items") or []
                     if items:
                         poster_id = str(items[0].get("SeriesId") or items[0].get("Id") or item_id)
-                for candidate in (poster_id, item_id):
+                for candidate in dict.fromkeys((poster_id, item_id)):
                     r = await client.get(
-                        f"{base}/emby/Items/{candidate}/Images/Primary",
-                        headers=headers, params={"maxWidth": "420", "quality": "80"})
+                        f"{base}/emby/Items/{candidate}/Images/{kind}",
+                        headers=headers, params={"maxWidth": str(width), "quality": "85"})
                     ctype = str(r.headers.get("content-type") or "")
                     if r.status_code == 200 and r.content and ctype.startswith("image/"):
                         return r.content
