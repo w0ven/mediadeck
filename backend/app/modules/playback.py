@@ -151,6 +151,46 @@ def caller_device(headers: Any, query: dict[str, str]) -> str:
     return ""
 
 
+def caller_session_profile(headers: Any, query: dict[str, str]) -> dict[str, str]:
+    """Return non-secret client fields that may disambiguate an Emby session.
+
+    Some clients (notably Hills) omit ``SessionId`` from PlaybackInfo while
+    Emby keeps more than one login session for the same ``DeviceId``.  Device
+    id alone is then ambiguous, but the request and session snapshot both carry
+    the client name, version and device name.  Preserve those exact fields as
+    secondary evidence; credentials are deliberately never returned.
+    """
+    auth = (headers.get("authorization") or headers.get("x-emby-authorization")
+            or query.get("X-Emby-Authorization")
+            or query.get("X-MediaBrowser-Authorization") or "")
+
+    def auth_value(name: str) -> str:
+        match = re.search(rf'{name}\s*=\s*"?([^",]+)"?', str(auth), re.IGNORECASE)
+        return match.group(1).strip() if match else ""
+
+    def value(header_names: tuple[str, ...], query_names: tuple[str, ...],
+              auth_name: str) -> str:
+        for name in header_names:
+            if headers.get(name):
+                return str(headers[name]).strip()
+        for name in query_names:
+            if query.get(name):
+                return str(query[name]).strip()
+        return auth_value(auth_name)
+
+    fields = {
+        "Client": value(("x-emby-client", "x-mediabrowser-client"),
+                        ("X-Emby-Client", "X-MediaBrowser-Client"), "Client"),
+        "ApplicationVersion": value(
+            ("x-emby-client-version", "x-mediabrowser-client-version"),
+            ("X-Emby-Client-Version", "X-MediaBrowser-Client-Version"), "Version"),
+        "DeviceName": value(("x-emby-device-name", "x-mediabrowser-device-name"),
+                            ("X-Emby-Device-Name", "X-MediaBrowser-Device-Name"),
+                            "Device"),
+    }
+    return {key: value for key, value in fields.items() if value}
+
+
 def is_transcode_request(path: str, query: dict[str, str]) -> bool:
     """Decide whether Emby is generating this response rather than serving a file.
 

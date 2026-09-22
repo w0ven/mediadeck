@@ -11,6 +11,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import AsyncMock
+from urllib.parse import urlencode
 
 import httpx
 import pytest
@@ -108,6 +109,44 @@ def test_same_device_sessions_are_not_merged(stack):
     assert not asyncio.run(guard.inspect("u1", "shared", session_id="c")).allowed
     assert asyncio.run(guard.inspect("u1", "shared", session_id="a")).allowed
     assert not asyncio.run(guard.inspect("u1", "shared")).allowed
+
+
+def test_same_device_duplicate_is_resolved_only_by_exact_client_profile(stack):
+    _, emby, guard = stack
+    emby.set_sessions([
+        {**row("hills-windows", "shared"), "Client": "Hills Windows",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+        {**row("hills", "shared"), "Client": "Hills",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+    ])
+    profile = {"Client": "hills windows", "ApplicationVersion": "1.5.3",
+               "DeviceName": "pc-202309131322"}
+    result = asyncio.run(guard.inspect("u1", "shared", session_profile=profile))
+    assert result.allowed and result.reason == "granted"
+    leases = guard._db.query("SELECT session_id FROM stream_leases")
+    assert [lease["session_id"] for lease in leases] == ["hills-windows"]
+
+
+def test_same_device_duplicate_stays_unresolved_when_profile_is_not_unique(stack):
+    _, emby, guard = stack
+    duplicate = {"Client": "Hills Windows", "ApplicationVersion": "1.5.3",
+                 "DeviceName": "same-pc"}
+    emby.set_sessions([{**row(sid, "shared"), **duplicate} for sid in ("a", "b")])
+    result = asyncio.run(guard.inspect("u1", "shared", session_profile=duplicate))
+    assert not result.allowed and result.reason == "session-unresolved"
+    assert guard._db.query("SELECT * FROM stream_leases") == []
+
+
+def test_explicit_session_id_remains_authoritative_over_profile(stack):
+    _, emby, guard = stack
+    emby.set_sessions([
+        {**row("a", "shared"), "Client": "Hills"},
+        {**row("b", "shared"), "Client": "Hills Windows"},
+    ])
+    result = asyncio.run(guard.inspect("u1", "shared", session_id="a",
+                                      session_profile={"Client": "other"}))
+    assert result.allowed
+    assert guard._db.one("SELECT session_id FROM stream_leases")["session_id"] == "a"
 
 
 def test_premature_playing_report_cannot_admit_third(stack):
@@ -220,6 +259,47 @@ def test_query_only_playbackinfo_post_preserves_empty_body(client):
     assert args[4] is None
     assert client.post("/api/playback/info/item42", headers=headers("b"),
                        content="not-json").status_code == 400
+
+
+def test_hills_playbackinfo_without_session_id_resolves_duplicate_device(client):
+    app.state.emby.set_sessions([
+        {**row("hills-windows", "shared"), "Client": "Hills Windows",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+        {**row("hills", "shared"), "Client": "Hills",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+    ])
+    authorization = ('MediaBrowser Token="tok:u1", Client="Hills Windows", '
+                     'Device="PC-202309131322", DeviceId="shared", Version="1.5.3"')
+    response = client.post("/api/playback/info/item42", params={
+        "UserId": "u1", "X-Emby-Authorization": authorization,
+        "X-Emby-Client": "Hills Windows", "X-Emby-Client-Version": "1.5.3",
+        "X-Emby-Device-Id": "shared", "X-Emby-Device-Name": "PC-202309131322",
+    }, json={})
+    assert response.status_code == 200
+    lease = app.state.db.one("SELECT session_id,play_id FROM stream_leases")
+    assert lease["session_id"] == "hills-windows"
+    assert lease["play_id"] == response.json()["PlaySessionId"]
+
+
+def test_hills_direct_admission_uses_profile_from_original_query(client):
+    app.state.emby.set_sessions([
+        {**row("hills-windows", "shared"), "Client": "Hills Windows",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+        {**row("hills", "shared"), "Client": "Hills",
+         "ApplicationVersion": "1.5.3", "DeviceName": "PC-202309131322"},
+    ])
+    authorization = ('MediaBrowser Token="tok:u1", Client="Hills Windows", '
+                     'Device="PC-202309131322", DeviceId="shared", Version="1.5.3"')
+    query = urlencode({
+        "UserId": "u1", "X-Emby-Authorization": authorization,
+        "X-Emby-Client": "Hills Windows", "X-Emby-Client-Version": "1.5.3",
+        "X-Emby-Device-Id": "shared", "X-Emby-Device-Name": "PC-202309131322",
+    })
+    response = client.get("/api/playback/admit", headers={
+        "X-Original-URI": "/Videos/item42/stream.mkv?Static=true&" + query,
+    })
+    assert response.status_code == 204
+    assert app.state.db.one("SELECT session_id FROM stream_leases")["session_id"] == "hills-windows"
 
 
 def test_live_metadata_keeps_caller_profile_and_stop_does_not_hide_session(monkeypatch):

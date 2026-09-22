@@ -6,7 +6,7 @@ from test_stream_admission import client as client  # noqa: PLC0414
 from test_stream_admission import headers
 
 from app.main import app
-from app.modules.playback import caller_device, caller_token
+from app.modules.playback import caller_device, caller_session_profile, caller_token
 
 
 @pytest.mark.parametrize('event', ['started', 'progress', 'stopped'])
@@ -45,6 +45,27 @@ def test_query_emby_authorization_extracts_real_identity_not_userid():
     assert caller_token({}, {'UserId': 'untrusted'}) == ''
     assert caller_token({'x-emby-token': 'header-token'}, query) == 'header-token'
     assert caller_device({'x-emby-device-id': 'header-device'}, query) == 'header-device'
+
+
+def test_query_emby_authorization_extracts_non_secret_session_profile():
+    query = {'X-Emby-Authorization':
+             'MediaBrowser Token="synthetic-caller", Client="Hills Windows", '
+             'Device="PC-202309131322", DeviceId="shared", Version="1.5.3"'}
+    assert caller_session_profile({}, query) == {
+        'Client': 'Hills Windows',
+        'ApplicationVersion': '1.5.3',
+        'DeviceName': 'PC-202309131322',
+    }
+    assert 'synthetic-caller' not in repr(caller_session_profile({}, query))
+    assert caller_session_profile({
+        'x-emby-client': 'Header Client',
+        'x-emby-client-version': '9.1',
+        'x-emby-device-name': 'Header Device',
+    }, query) == {
+        'Client': 'Header Client',
+        'ApplicationVersion': '9.1',
+        'DeviceName': 'Header Device',
+    }
 
 
 def test_invalid_query_token_cannot_report_for_forged_user(client):
