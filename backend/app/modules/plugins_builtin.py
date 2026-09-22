@@ -22,6 +22,7 @@ weeks to notice.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import html
 import json
@@ -413,7 +414,7 @@ class ViewingReportPlugin(Plugin):
 
     @staticmethod
     def _text(label: str, days: int, hours: float, plays: int,
-              total_bytes: int, detail: dict[str, Any]) -> str:
+              total_bytes: int | None, detail: dict[str, Any]) -> str:
         lines = [f"📊 <b>你的{label}</b>（近 {days} 天）\n",
                  f"观看时长：{hours} 小时",
                  f"播放次数：{plays} 次",
@@ -428,50 +429,48 @@ class ViewingReportPlugin(Plugin):
         return "\n".join(lines)
 
     async def _poster(self, member: dict[str, Any], label: str, days: int,
-                      hours: float, plays: int, total_bytes: int,
+                      hours: float, plays: int, total_bytes: int | None,
                       detail: dict[str, Any]) -> bytes | None:
         titles = _top_titles(detail, 5)
-        covers: dict[str, bytes] = {}
-        fetch = getattr(getattr(self.ctx, "emby", None), "item_primary_image", None)
-        if callable(fetch):
-            for item in titles:
-                item_id = str(item.get("item_id") or "")
-                if not item_id or item_id in covers:
-                    continue
-                with contextlib.suppress(Exception):
-                    blob = await fetch(item_id)
-                    if blob:
-                        covers[item_id] = blob
+        from app.modules.rank_poster import fetch_rank_images, render_viewing_poster
+        emby = getattr(self.ctx, 'emby', None)
+        covers, backdrops = await asyncio.gather(
+            fetch_rank_images(getattr(emby, 'item_primary_image', None), titles, limit=5),
+            fetch_rank_images(getattr(emby, 'item_backdrop_image', None), titles[:2], limit=2))
         display = str(member.get("tg_display_name") or "").strip()
         handle = str(member.get("tg_username") or "").strip().lstrip("@")
         name = display or (f"@{handle}" if handle else str(member.get("username") or "会员"))
         try:
-            from app.modules.rank_poster import render_viewing_poster
-            return render_viewing_poster(
+            return await asyncio.to_thread(render_viewing_poster,
                 name=name, label=label, days=days, hours=hours, plays=plays,
-                traffic=_fmt_bytes(total_bytes), titles=titles, covers=covers,
+                traffic=_fmt_bytes(total_bytes), titles=titles, covers=covers, backdrops=backdrops,
                 whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID)
         except Exception:  # noqa: BLE001 - caption still goes out
             return None
 
 
-def _summarise(detail: dict[str, Any]) -> tuple[float, int, int]:
+def _summarise(detail: dict[str, Any]) -> tuple[float, int, int | None]:
     hours = plays = 0.0
     total_bytes = 0
-    for point in detail.get("series") or []:
+    points = detail.get("series") or []
+    measured = bool(points) and all(point.get('bytes') is not None for point in points)
+    for point in points:
         hours += float(point.get("hours") or 0)
         plays += int(point.get("plays") or 0)
         total_bytes += int(point.get("bytes") or 0)
-    return round(hours, 1), int(plays), total_bytes
+    return round(hours, 1), int(plays), total_bytes if measured else None
 
 
 def _top_titles(detail: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
-    counts: dict[str, dict[str, Any]] = {}
+    counts: dict[tuple[str, str], dict[str, Any]] = {}
     for play in detail.get("recent_plays") or []:
-        name = str(play.get("series_name") or play.get("item_name") or "").strip()
+        kind = str(play.get('item_type') or '').lower()
+        family = 'show' if kind in ('episode', 'series') else kind
+        name = str((play.get('item_name') if kind == 'movie' else
+                    play.get('series_name') or play.get('item_name')) or '').strip()
         if not name:
             continue
-        row = counts.setdefault(name, {"title": name, "plays": 0, "item_id": ""})
+        row = counts.setdefault((family, name), {"title": name, "plays": 0, "item_id": ""})
         row["plays"] += 1
         item_id = str(play.get("item_id") or "")
         if item_id and not row["item_id"]:
@@ -479,7 +478,9 @@ def _top_titles(detail: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
     return sorted(counts.values(), key=lambda item: item["plays"], reverse=True)[:limit]
 
 
-def _fmt_bytes(n: int) -> str:
+def _fmt_bytes(n: int | None) -> str:
+    if n is None:
+        return '暂无实测'
     size = float(n or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024 or unit == "TB":

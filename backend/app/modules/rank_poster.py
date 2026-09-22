@@ -1,353 +1,399 @@
-"""Daily/weekly ranking posters: hard-glass cards over a collage of Emby covers."""
+"""COLA EMBY posters shared by title charts, member charts and personal reports."""
 from __future__ import annotations
 
+import asyncio
 import io
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
-ASSETS = Path(__file__).resolve().parent / "rank_assets"
-CANVAS = (1080, 1920)
-WHITELIST_GROUP_ID = "whitelist"
-_DATA_FONT = Path(__file__).resolve().parents[2] / "data" / "fonts" / "NotoSansCJK-Bold.ttc"
+ASSETS = Path(__file__).resolve().parent / 'rank_assets'
+CANVAS = (1200, 2400)
+BRAND = 'COLA EMBY'
+WHITELIST_GROUP_ID = 'whitelist'
 FONT_PATHS = (
-    str(ASSETS / "font" / "PingFang-Bold.ttf"),
-    str(_DATA_FONT),
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    ASSETS / 'font' / 'PingFang-Bold.ttf',
+    Path(__file__).resolve().parents[2] / 'data/fonts/NotoSansCJK-Bold.ttc',
+    Path('/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc'),
+    Path('/usr/share/fonts/truetype/wqy/wqy-microhei.ttc'),
+    Path('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'),
 )
-
-TEXT = (237, 240, 247, 255)
-TEXT2 = (171, 182, 205, 255)
-MUTED = (135, 149, 173, 255)
-ACCENT = (177, 193, 255, 255)
-WL_NAME = (227, 217, 255, 255)
-
-
-def _font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    for path in FONT_PATHS:
-        if Path(path).is_file():
-            try:
-                return ImageFont.truetype(path, size=size, index=0)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+BG = (8, 22, 27)
+GOLD = (230, 205, 147)
+TEXT = (238, 238, 226)
+MUTED = (151, 166, 163)
+UP = (211, 129, 108)
+DOWN = (130, 169, 148)
+_FONT_CACHE = threading.local()
 
 
-def _fit(cover: Image.Image, size: tuple[int, int]) -> Image.Image:
-    cover = cover.convert("RGB")
-    tw, th = size
-    scale = max(tw / cover.width, th / cover.height)
-    resized = cover.resize(
-        (max(1, int(cover.width * scale)), max(1, int(cover.height * scale))),
-        Image.Resampling.LANCZOS)
-    left = max(0, (resized.width - tw) // 2)
-    top = max(0, (resized.height - th) // 2)
-    return resized.crop((left, top, left + tw, top + th))
+def _font(size: int) -> Any:
+    # FreeType faces are kept per rendering thread, not shared between workers.
+    if not hasattr(_FONT_CACHE, 'fonts'):
+        _FONT_CACHE.fonts = {}
+    if size not in _FONT_CACHE.fonts:
+        for path in FONT_PATHS:
+            if path.is_file():
+                try:
+                    _FONT_CACHE.fonts[size] = ImageFont.truetype(str(path), size=size)
+                    break
+                except OSError:
+                    continue
+        else:
+            _FONT_CACHE.fonts[size] = ImageFont.load_default()
+    return _FONT_CACHE.fonts[size]
 
 
-def _clip(text: str, limit: int) -> str:
-    value = (text or "—").strip() or "—"
-    return value if len(value) <= limit else value[: max(1, limit - 1)] + "…"
+def _line(value: Any) -> str:
+    return ' '.join(str(value or '').split()).strip()
 
 
-def _open_cover(blob: bytes | None, size: tuple[int, int]) -> Image.Image | None:
+def _visible_label(value: Any) -> str:
+    label = _line(value).strip(' \u200b\u200c\u200d\ufeff\u3164\u2800\u115f\u1160')
+    return label if label and _font(32).getmask(label).getbbox() else ''
+
+
+def _clip(value: str, width: int, size: int) -> str:
+    value = _line(value) or '—'
+    if _font(size).getlength(value) <= width:
+        return value
+    while value and _font(size).getlength(value + '…') > width:
+        value = value[:-1]
+    return value + '…'
+
+
+def _wrap(value: str, width: int, size: int, limit: int = 4) -> list[str]:
+    lines, current = [], ''
+    for char in _line(value) or '—':
+        if current and _font(size).getlength(current + char) > width:
+            lines.append(current)
+            current = char
+        else:
+            current += char
+    if current:
+        lines.append(current)
+    if len(lines) > limit:
+        lines = lines[:limit]
+        lines[-1] = _clip(lines[-1] + '…', width, size)
+    return lines
+
+
+def _open(blob: bytes | None, size: tuple[int, int], *, center=(0.5, 0.35)) -> Image.Image | None:
     if not blob:
         return None
     try:
-        return _fit(Image.open(io.BytesIO(blob)), size)
-    except OSError:
+        with Image.open(io.BytesIO(blob)) as image:
+            image.load()
+            return ImageOps.fit(image.convert('RGB'), size, Image.Resampling.LANCZOS,
+                                centering=center).convert('RGBA')
+    except (OSError, ValueError, Image.DecompressionBombError):
         return None
 
 
-def _glass_bg(size: tuple[int, int] = CANVAS) -> Image.Image:
-    width, height = size
-    canvas = Image.new("RGB", (width, height), (11, 13, 19))
-    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse(
-        (int(width * 0.2), -int(height * 0.22), int(width * 0.95), int(height * 0.34)),
-        fill=(57, 68, 102, 90))
-    glow = glow.filter(ImageFilter.GaussianBlur(radius=80))
-    return Image.alpha_composite(canvas.convert("RGBA"), glow).convert("RGB")
-
-
-def _poster_wall(covers: dict[str, bytes] | None, size: tuple[int, int] = CANVAS) -> Image.Image:
-    """Collage of ranking posters, darkened so glass cards stay readable."""
-    blobs = [b for b in (covers or {}).values() if b]
-    if not blobs:
-        return _glass_bg(size).convert("RGBA")
-    width, height = size
-    canvas = Image.new("RGB", (width, height), (11, 13, 19))
-    tile_w, tile_h = 420, 620
-    slots = (
-        (-80, -40), (300, -80), (700, -30),
-        (-60, 380), (340, 340), (720, 400),
-        (-40, 820), (360, 860), (740, 800),
-        (-40, 1280), (360, 1320), (740, 1260),
-    )
-    opened: list[Image.Image] = []
-    for blob in blobs:
-        cover = _open_cover(blob, (tile_w, tile_h))
-        if cover is not None:
-            opened.append(ImageEnhance.Color(cover).enhance(0.92))
-    if not opened:
-        return _glass_bg(size).convert("RGBA")
-    for i, (x, y) in enumerate(slots):
-        canvas.paste(opened[i % len(opened)], (x, y))
-    canvas = canvas.filter(ImageFilter.GaussianBlur(radius=3.2)).convert("RGBA")
-    veil = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(veil)
-    for y in range(height):
-        t = y / max(1, height - 1)
-        draw.line([(0, y), (width, y)], fill=(11, 13, 19, int(88 + 100 * t)))
-    glow = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse(
-        (int(width * 0.18), -int(height * 0.2), int(width * 0.92), int(height * 0.3)),
-        fill=(57, 68, 102, 50))
-    glow = glow.filter(ImageFilter.GaussianBlur(radius=70))
-    return Image.alpha_composite(Image.alpha_composite(canvas, veil), glow)
-
-
-def _frame(overlay: Image.Image) -> None:
-    draw = ImageDraw.Draw(overlay)
-    width, height = overlay.size
-    draw.rounded_rectangle((36, 36, width - 36, height - 36),
-                           radius=22, outline=(183, 203, 245, 46), width=1)
-    draw.line([(80, 42), (width - 80, 42)], fill=(230, 239, 255, 48), width=1)
-
-
-def _title_plate(overlay: Image.Image, title: str, when: str) -> None:
-    """Title over the poster wall, with a shadow so it stays readable."""
-    draw = ImageDraw.Draw(overlay)
-    title_font = _font(54)
-    date_font = _font(22)
-    draw.text((82, 76), title, font=title_font, fill=(11, 13, 19, 200))
-    draw.text((80, 72), title, font=title_font, fill=TEXT)
-    if when:
-        draw.text((82, 136), when, font=date_font, fill=(11, 13, 19, 180))
-        draw.text((80, 132), when, font=date_font, fill=TEXT2)
-
-
 def _watch_label(row: dict[str, Any] | None) -> str:
-    nick = str((row or {}).get("tg_display_name") or "").strip()
-    if nick:
-        return nick
-    handle = str((row or {}).get("tg_username") or "").strip().lstrip("@")
+    row = row or {}
+    if _visible_label(row.get('tg_display_name')):
+        return _visible_label(row['tg_display_name'])
+    handle = _visible_label(row.get('tg_username')).lstrip('@')
     if handle:
-        return f"@{handle}"
-    if str((row or {}).get("tg_user_id") or ""):
-        return "Telegram用户"
-    return "未绑定"
+        return '@' + handle
+    return 'Telegram用户' if str(row.get('tg_user_id') or '') else '未绑定'
 
 
 def _is_whitelist(row: dict[str, Any] | None) -> bool:
-    return str((row or {}).get("group_id") or "") == WHITELIST_GROUP_ID
+    return str((row or {}).get('group_id') or '') == WHITELIST_GROUP_ID
 
 
-def _duration(row: dict[str, Any] | None) -> str:
-    seconds = int((row or {}).get("seconds") or ((row or {}).get("hours") or 0) * 3600)
+def _duration(row: dict[str, Any]) -> str:
+    seconds = int(row.get('seconds') or (row.get('hours') or 0) * 3600)
+    if row.get('incomplete') and seconds <= 0:
+        return '记录不完整'
     hours, minutes = divmod(max(0, seconds) // 60, 60)
-    return f"{hours}小时{minutes}分" if hours else f"{minutes}分"
+    label = f'{hours}小时{minutes}分' if hours else f'{minutes}分钟'
+    return ('≥ ' if row.get('incomplete') else '') + label
 
 
-def _circle(cover: Image.Image | None, size: int, ring: tuple[int, int, int]) -> Image.Image:
-    if cover is None:
-        return _letter_avatar("?", size, ring)
-    fitted = _fit(cover.convert("RGB"), (size, size))
-    mask = Image.new("L", (size, size), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
-    out = Image.new("RGBA", (size + 12, size + 12), (0, 0, 0, 0))
-    ImageDraw.Draw(out).ellipse((0, 0, size + 11, size + 11), fill=ring + (255,))
-    out.paste(fitted, (6, 6), mask)
-    return out
+def _title_count(row: dict[str, Any]) -> str:
+    plays = max(0, int(row.get('plays') or 0))
+    viewers = row.get('viewers')
+    return f'{int(viewers)}人 · {plays}次' if viewers is not None and int(viewers) > 0 else f'{plays}次播放'
 
 
-def _letter_avatar(title: str, size: int, ring: tuple[int, int, int]) -> Image.Image:
-    canvas = Image.new("RGB", (size, size), (36, 48, 72))
-    draw = ImageDraw.Draw(canvas)
-    raw = (title or "").lstrip("@").strip() or "?"
-    glyph = _clip(raw, 1).upper()
-    font = _font(max(24, size // 2))
-    box = draw.textbbox((0, 0), glyph, font=font)
-    draw.text(((size - (box[2] - box[0])) / 2, (size - (box[3] - box[1])) / 2 - 4),
-              glyph, fill=(240, 246, 255), font=font)
-    return _circle(canvas, size, ring)
+async def fetch_rank_images(fetch: Callable | None, rows: list[dict[str, Any]], *,
+                            limit: int = 20, timeout: float = 12.0) -> dict[str, bytes]:
+    """Bound both image concurrency and total wait; optional art may be missing."""
+    if not callable(fetch):
+        return {}
+    ids = list(dict.fromkeys(str(row.get('item_id') or '') for row in rows))
+    ids = [item for item in ids if item][:limit]
+    semaphore = asyncio.Semaphore(4)
+    found: dict[str, bytes] = {}
+
+    async def one(item: str) -> None:
+        async with semaphore:
+            try:
+                blob = await fetch(item)
+                if blob:
+                    found[item] = blob
+            except Exception:  # noqa: BLE001 - optional image; no credential-bearing errors
+                return
+
+    tasks = [asyncio.create_task(one(item)) for item in ids]
+    if tasks:
+        try:
+            await asyncio.wait(tasks, timeout=timeout)
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    return {item: found[item] for item in ids if item in found}
 
 
-def _draw_shield(overlay: Image.Image, xy: tuple[int, int], scale: float = 1.15) -> None:
-    shield = Image.new("RGBA", (int(34 * scale), int(38 * scale)), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(shield)
-    s = scale
-    draw.polygon(
-        [(16 * s, 1.5 * s), (29 * s, 7 * s), (29 * s, 19.5 * s),
-         (16 * s, 34.5 * s), (3 * s, 19.5 * s), (3 * s, 7 * s)],
-        fill=(160, 169, 238, 48), outline=(210, 216, 255, 230))
-    draw.polygon(
-        [(16 * s, 5 * s), (25 * s, 9.2 * s), (25 * s, 18 * s),
-         (16 * s, 29 * s), (7 * s, 18 * s), (7 * s, 9.2 * s)],
-        fill=(185, 160, 250, 36), outline=(149, 189, 255, 210))
-    draw.polygon(
-        [(16 * s, 9 * s), (22 * s, 16 * s), (16 * s, 25 * s), (10 * s, 16 * s)],
-        fill=(214, 206, 255, 110), outline=(236, 231, 255, 240))
-    overlay.alpha_composite(shield, dest=(int(xy[0]), int(xy[1])))
+class _Poster:
+    def __init__(self, size: tuple[int, int] = CANVAS):
+        self.image = Image.new('RGBA', size, (*BG, 255))
+        self.width, self.height = size
+        self.draw = ImageDraw.Draw(self.image)
+
+    def text(self, x: int, y: int, value: Any, size: int = 30,
+             color: tuple = TEXT, anchor: str = 'lt') -> None:
+        self.draw.text((x, y), str(value), font=_font(size), fill=color, anchor=anchor)
+
+    def rule(self, x: int, y: int, end: int, alpha: int = 80) -> None:
+        self.draw.line((x, y, end, y), fill=(151, 153, 119, alpha), width=1)
+
+    def fade(self, x: int, y: int, width: int, height: int, start: int, end: int) -> None:
+        mask = Image.new('RGBA', (width, height))
+        draw = ImageDraw.Draw(mask)
+        for line in range(height):
+            opacity = round(start + (end - start) * line / max(1, height - 1))
+            draw.line((0, line, width, line), fill=(*BG, opacity))
+        self.image.alpha_composite(mask, (x, y))
+
+    def header(self, title: str, subtitle: str, when: str, heroes: list[bytes]) -> None:
+        tile_width = self.width if len(heroes) == 1 else self.width // 2
+        pictures = [_open(blob, (tile_width, 575)) for blob in heroes[:2]]
+        for index, picture in enumerate(pictures):
+            if picture is not None:
+                picture = ImageEnhance.Color(picture).enhance(0.82)
+                self.image.alpha_composite(picture, (index * tile_width, 0))
+        self.fade(0, 0, self.width, 250, 60, 25)
+        self.fade(0, 140, self.width, 440, 0, 255)
+        self.draw.rounded_rectangle((36, 34, 300, 106), radius=10, fill=(*BG, 185))
+        self.draw.rectangle((54, 54, 60, 84), fill=GOLD)
+        self.text(77, 52, BRAND, 34, GOLD)
+        self.text(600, 330, title, 75, TEXT, 'mt')
+        self.text(600, 427, subtitle, 27, GOLD, 'mt')
+        if when:
+            self.text(600, 478, when, 26, TEXT, 'mt')
+
+    def footer(self, note: str = '') -> None:
+        top = self.height - 325
+        path = ASSETS / 'cola-landscape.jpg'
+        try:
+            picture = _open(path.read_bytes(), (self.width, 325))
+        except OSError:
+            picture = None
+        if picture is not None:
+            picture = ImageEnhance.Color(picture).enhance(0.55)
+            picture = ImageEnhance.Brightness(picture).enhance(0.50)
+            self.image.alpha_composite(picture, (0, top))
+            self.fade(0, top, self.width, 190, 255, 65)
+            self.fade(0, top + 190, self.width, 135, 65, 205)
+        self.text(600, self.height - 183, '让每一部好片，都被看见。', 40, GOLD, 'mt')
+        self.text(600, self.height - 111, BRAND + '  ·  ENJOY THE SHOW', 24, MUTED, 'mt')
+        if note:
+            self.text(600, self.height - 48, note, 21, MUTED, 'mt')
+
+    def cover(self, blob: bytes | None, box: tuple[int, int, int, int]) -> None:
+        x, y, width, height = box
+        picture = _open(blob, (width, height))
+        if picture is None:
+            picture = Image.new('RGBA', (width, height), (30, 45, 48, 255))
+            mark = ImageDraw.Draw(picture)
+            mark.line((width // 3, height // 2, width * 2 // 3, height // 2), fill=GOLD, width=2)
+        self.draw.rectangle((x + 3, y + 5, x + width + 3, y + height + 5), fill=(0, 0, 0, 90))
+        self.image.alpha_composite(picture, (x, y))
+        self.draw.rectangle((x, y, x + width - 1, y + height - 1), outline=(184, 168, 121, 95), width=1)
+
+    def crown(self, x: int, y: int) -> None:
+        self.draw.polygon([(x, y + 6), (x + 9, y + 20), (x + 18, y), (x + 27, y + 20),
+                           (x + 37, y + 6), (x + 32, y + 31), (x + 5, y + 31)], fill=GOLD)
+
+    def avatar(self, blob: bytes | None, x: int, y: int, size: int, label: str) -> None:
+        face = _open(blob, (size, size), center=(0.5, 0.5))
+        if face is None:
+            face = Image.new('RGBA', (size, size), (34, 51, 53, 255))
+            draw = ImageDraw.Draw(face)
+            glyph = next((char for char in _line(label).lstrip('@')
+                          if _font(32).getmask(char).getbbox()), '?')
+            draw.text((size // 2, size // 2), glyph, font=_font(max(28, size // 2)), fill=GOLD, anchor='mm')
+        mask = Image.new('L', (size, size))
+        ImageDraw.Draw(mask).ellipse((0, 0, size - 1, size - 1), fill=255)
+        self.draw.ellipse((x - 3, y - 3, x + size + 2, y + size + 2), fill=GOLD)
+        self.image.paste(face, (x, y), mask)
+
+    def badge(self, x: int, y: int) -> None:
+        self.draw.rounded_rectangle((x, y, x + 158, y + 34), radius=5,
+                                    fill=(100, 91, 53, 65), outline=(196, 178, 120, 130), width=1)
+        self.text(x + 13, y + 5, '白名单 · 专属', 21, GOLD)
+
+    def movement(self, x: int, y: int, row: dict[str, Any]) -> None:
+        if not row.get('comparison_available'):
+            self.text(x, y, '—', 24, MUTED, 'rt')
+        elif row.get('previous_rank') is None:
+            self.text(x, y, '新上榜', 24, GOLD, 'rt')
+        else:
+            delta = int(row.get('rank_delta') or 0)
+            value = '持平' if not delta else ('↑ ' if delta > 0 else '↓ ') + str(abs(delta))
+            self.text(x, y, value, 25, MUTED if not delta else UP if delta > 0 else DOWN, 'rt')
+
+    def jpeg(self) -> bytes:
+        output = io.BytesIO()
+        self.image.convert('RGB').save(output, format='JPEG', quality=93, subsampling=0)
+        return output.getvalue()
 
 
-def _whitelist_badge(overlay: Image.Image, xy: tuple[int, int]) -> None:
-    draw = ImageDraw.Draw(overlay)
-    x, y = xy
-    draw.rounded_rectangle((x, y, x + 176, y + 36), radius=6,
-                           fill=(210, 221, 255, 28), outline=(194, 185, 250, 90), width=1)
-    _draw_shield(overlay, (x + 8, y + 4), 1.05)
-    draw.text((x + 44, y + 8), "白名单", font=_font(16), fill=WL_NAME)
-    draw.text((x + 114, y + 10), "专属", font=_font(13), fill=(184, 167, 223, 255))
+def _heroes(rows: list[dict[str, Any]], covers: dict[str, bytes], backdrops: dict[str, bytes]) -> list[bytes]:
+    result = []
+    for row in rows:
+        key = str(row.get('item_id') or '')
+        blob = backdrops.get(key) or covers.get(key)
+        if blob:
+            result.append(blob)
+        if len(result) >= 2:
+            break
+    if not result:
+        result = list(backdrops.values())[:2] or list(covers.values())[:2]
+    return result
 
 
-def _glass_card(draw: ImageDraw.ImageDraw, box: tuple[int, int, int, int],
-                whitelist: bool = False) -> None:
-    outline = (194, 185, 250, 95) if whitelist else (172, 191, 239, 50)
-    draw.rounded_rectangle(box, radius=12, fill=(22, 29, 43, 204), outline=outline, width=1)
-    x0, y0, x1, _y1 = box
-    draw.line([(x0 + 14, y0 + 1), (x1 - 14, y0 + 1)], fill=(204, 217, 252, 70), width=1)
-
-
-def _rounded_cover(blob: bytes | None, size: tuple[int, int], radius: int = 14,
-                   title: str = "") -> Image.Image:
-    cover = _open_cover(blob, size)
-    tile = (cover.convert("RGBA") if cover is not None
-            else Image.new("RGBA", size, (28, 36, 52, 220)))
-    if cover is None:
-        draw = ImageDraw.Draw(tile)
-        draw.text((10, size[1] // 2 - 12), _clip(title, 6), font=_font(18), fill=TEXT)
-    mask = Image.new("L", size, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, size[0] - 1, size[1] - 1),
-                                           radius=radius, fill=255)
-    out = Image.new("RGBA", size, (0, 0, 0, 0))
-    out.paste(tile, (0, 0), mask)
-    return out
-
-
-def _jpeg(canvas: Image.Image) -> bytes:
-    out = io.BytesIO()
-    canvas.convert("RGB").save(out, format="JPEG", quality=90)
-    return out.getvalue()
-
-
-def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
-                        avatars: dict[str, bytes] | None = None, when: str = "",
-                        covers: dict[str, bytes] | None = None) -> bytes:
-    avatars = avatars or {}
-    canvas = _poster_wall(covers)
-    overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    _frame(overlay)
-    _title_plate(overlay, "观影周榜" if weekly else "观影日榜", when)
-    name_font = _font(32)
-    meta_font = _font(24)
-    y = 214
-    height = 148
-    for i in range(10):
-        row = rows[i] if i < len(rows) else None
-        whitelist = _is_whitelist(row)
-        label = _watch_label(row)
-        box = (64, y, 1016, y + height)
-        _glass_card(draw, box, whitelist=whitelist)
-        size = 96
-        ax, ay = 88, y + 26
-        ring = (206, 190, 255) if whitelist else ((232, 197, 92) if i == 0 else (177, 193, 255))
-        blob = avatars.get(str((row or {}).get("tg_user_id") or "")) if row else None
-        face = _open_cover(blob, (size, size))
-        badge = _circle(face, size, ring) if face is not None else _letter_avatar(label, size, ring)
-        overlay.alpha_composite(badge, dest=(ax - 6, ay - 6))
-        nx = ax + size + 28
-        rank = f"{i + 1:02d}"
-        draw.text((nx, ay + 4), rank, font=_font(22), fill=ACCENT)
-        draw.text((nx + 56, ay), _clip(label, 14), font=name_font,
-                  fill=WL_NAME if whitelist else TEXT)
-        draw.text((nx + 56, ay + 46), _duration(row) if row else "—", font=meta_font, fill=ACCENT)
-        if whitelist:
-            _whitelist_badge(overlay, (760, ay + 36))
-        y += height + 14
-    return _jpeg(Image.alpha_composite(canvas, overlay))
-
-
-def _cover_grid(overlay: Image.Image, items: list[dict[str, Any]], covers: dict[str, bytes],
-                origin_y: int) -> None:
-    draw = ImageDraw.Draw(overlay)
-    xs = (64, 248, 432, 616, 800)
-    tile = (168, 248)
-    for i, item in enumerate(items[:10]):
-        col, row = i % 5, i // 5
-        x, y = xs[col], origin_y + row * 330
-        overlay.alpha_composite(
-            _rounded_cover(covers.get(str(item.get("item_id") or "")), tile,
-                           title=str(item.get("title") or "—")), (x, y))
-        draw.text((x, y + 256), _clip(str(item.get("title") or "—"), 8),
-                  font=_font(22), fill=TEXT)
-        draw.text((x, y + 288), f"{int(item.get('plays') or 0)} 次播放",
-                  font=_font(18), fill=TEXT2)
+def _period_title(kind: str, weekly: bool, days: int | None) -> str:
+    period = days if days is not None else 7 if weekly else 1
+    return ('每日' if period == 1 else '每周' if period == 7 else f'近{period}天') + kind
 
 
 def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]], *,
                        weekly: bool = False, covers: dict[str, bytes] | None = None,
-                       when: str = "") -> bytes:
-    covers = covers or {}
-    canvas = _poster_wall(covers)
-    overlay = Image.new("RGBA", CANVAS, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    _frame(overlay)
-    _title_plate(overlay, "播放周榜" if weekly else "播放日榜", when)
-    draw.text((64, 214), "▎电影", font=_font(32), fill=ACCENT)
-    _cover_grid(overlay, movies, covers, 262)
-    draw.text((64, 980), "▎电视剧", font=_font(32), fill=ACCENT)
-    _cover_grid(overlay, shows, covers, 1028)
-    return _jpeg(Image.alpha_composite(canvas, overlay))
+                       when: str = '', backdrops: dict[str, bytes] | None = None,
+                       days: int | None = None) -> bytes:
+    covers, backdrops = covers or {}, backdrops or {}
+    movies, shows = list(movies[:10]), list(shows[:10])
+    poster = _Poster()
+    leads = movies[:1] + shows[:1]
+    poster.header(_period_title('观影榜', weekly, days), '电影与剧集 · 按播放次数排序', when,
+                  _heroes(leads, covers, backdrops))
+    poster.draw.line((600, 567, 600, 2060), fill=(122, 132, 111, 70), width=1)
+    for column, (rows, label) in enumerate(((movies, '电影'), (shows, '剧集'))):
+        x = column * 600
+        heading = f'{label} TOP {len(rows)}' if rows else label
+        poster.text(x + 42, 560, heading, 39, GOLD)
+        poster.rule(x + 40, 615, x + 571, 130)
+        if not rows:
+            poster.text(x + 300, 847, f'本期暂无{label}播放记录', 30, MUTED, 'mt')
+            continue
+        first = rows[0]
+        poster.crown(x + 43, 644)
+        poster.text(x + 35, 690, '01', 62, GOLD)
+        poster.cover(covers.get(str(first.get('item_id') or '')), (x + 124, 646, 218, 327))
+        for index, line in enumerate(_wrap(first.get('title') or '—', 208, 35)):
+            poster.text(x + 365, 682 + 45 * index, line, 35)
+        poster.text(x + 365, 873, _title_count(first), 25)
+        poster.movement(x + 571, 932, first)
+        poster.rule(x + 40, 996, x + 571)
+        for rank, row in enumerate(rows[1:], 2):
+            y = 1021 + (rank - 2) * 116
+            poster.text(x + 40, y + 23, f'{rank:02d}', 35)
+            poster.cover(covers.get(str(row.get('item_id') or '')), (x + 119, y, 70, 100))
+            poster.text(x + 209, y + 9, _clip(row.get('title') or '—', 353, 31), 31)
+            poster.text(x + 209, y + 58, _title_count(row), 24, MUTED)
+            poster.movement(x + 571, y + 59, row)
+            poster.rule(x + 40, y + 110, x + 571, 60)
+        if len(rows) < 10:
+            y = 1040 if len(rows) == 1 else 1040 + (len(rows) - 1) * 116
+            poster.text(x + 300, y, f'本期共 {len(rows)} 部 · 展示全部', 24, MUTED, 'mt')
+    poster.footer('人数为去重观众；升降比较上一等长周期的同类榜单')
+    return poster.jpeg()
+
+
+def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
+                        avatars: dict[str, bytes] | None = None, when: str = '',
+                        covers: dict[str, bytes] | None = None,
+                        backdrops: dict[str, bytes] | None = None,
+                        days: int | None = None) -> bytes:
+    rows, avatars = list(rows[:10]), avatars or {}
+    poster = _Poster()
+    poster.header(_period_title('观影达人榜', weekly, days), '把时间，留给喜欢的故事 · 按观影时长排序', when,
+                  list((backdrops or {}).values())[:2] or list((covers or {}).values())[:2])
+    poster.text(48, 560, f'观影时长 TOP {len(rows)}' if rows else '观影时长', 38, GOLD)
+    poster.rule(48, 615, 1152, 130)
+    if rows:
+        first = rows[0]
+        name = _watch_label(first)
+        poster.crown(54, 662)
+        poster.text(45, 719, '01', 75, GOLD)
+        poster.avatar(avatars.get(str(first.get('tg_user_id') or '')), 177, 660, 186, name)
+        poster.text(413, 678, _clip(name, 700, 47), 47)
+        poster.text(413, 756, _duration(first), 43, GOLD)
+        poster.text(413, 822, f"{int(first.get('plays') or 0)} 次播放", 26, MUTED)
+        if _is_whitelist(first):
+            poster.badge(964, 827)
+        poster.rule(48, 927, 1152)
+        for rank, row in enumerate(rows[1:], 2):
+            y = 967 + (rank - 2) * 119
+            name = _watch_label(row)
+            poster.text(48, y + 22, f'{rank:02d}', 36)
+            poster.avatar(avatars.get(str(row.get('tg_user_id') or '')), 142, y + 5, 76, name)
+            poster.text(254, y + 7, _clip(name, 565, 33), 33)
+            poster.text(1147, y + 9, _duration(row), 32, GOLD, 'rt')
+            poster.text(254, y + 58, f"{int(row.get('plays') or 0)} 次播放", 24, MUTED)
+            if _is_whitelist(row):
+                poster.badge(986, y + 54)
+            poster.rule(48, y + 107, 1152, 60)
+    else:
+        poster.text(600, 986, '本期暂无观影时长记录', 38, MUTED, 'mt')
+    poster.footer('使用 Telegram 昵称展示；记录不完整时标明已知时长')
+    return poster.jpeg()
 
 
 def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
                           plays: int, traffic: str,
                           titles: list[dict[str, Any]] | None = None,
                           covers: dict[str, bytes] | None = None,
-                          whitelist: bool = False) -> bytes:
-    size = (1080, 1350)
-    canvas = _poster_wall(covers, size)
-    overlay = Image.new("RGBA", size, (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-    _frame(overlay)
-    _title_plate(overlay, f"你的{label}", f"近 {days} 天")
-    who = _clip((name or "会员").strip() or "会员", 16)
-    draw.text((80, 214), who, font=_font(42), fill=WL_NAME if whitelist else TEXT)
+                          whitelist: bool = False,
+                          backdrops: dict[str, bytes] | None = None) -> bytes:
+    titles, covers, backdrops = list((titles or [])[:5]), covers or {}, backdrops or {}
+    height = max(1440, 1270 + len(titles) * 166) if titles else 1500
+    poster = _Poster((1200, height))
+    poster.header('我的观影' + label, _clip(_visible_label(name) or '会员', 920, 32), f'近 {int(days)} 天 · 你的私人片单',
+                  _heroes(titles, covers, backdrops))
     if whitelist:
-        _whitelist_badge(overlay, (80 + 8 * len(who) + 36, 220))
-    stats = (
-        (80, 292, f"{hours:g}", "小时"),
-        (400, 292, str(int(plays)), "次播放"),
-        (720, 292, traffic or "0 B", "流量"),
-    )
-    for x, y, value, caption in stats:
-        _glass_card(draw, (x, y, x + 260, y + 150), whitelist=whitelist)
-        draw.text((x + 24, y + 28), _clip(str(value), 8), font=_font(36), fill=TEXT)
-        draw.text((x + 24, y + 92), caption, font=_font(22), fill=ACCENT)
-    titles = list(titles or [])[:5]
-    if not titles:
-        _glass_card(draw, (80, 490, 1000, 820), whitelist=whitelist)
-        draw.text((112, 560), "这段时间还没有观看记录", font=_font(32), fill=TEXT)
-        draw.text((112, 620), "报告照样送给你，下次有片单再填上。", font=_font(22), fill=TEXT2)
-        return _jpeg(Image.alpha_composite(canvas, overlay))
-    draw.text((80, 478), "看得最多", font=_font(28), fill=ACCENT)
-    y = 528
-    for i, item in enumerate(titles, 1):
-        _glass_card(draw, (80, y, 1000, y + 128), whitelist=False)
-        cover = _rounded_cover(
-            (covers or {}).get(str(item.get("item_id") or "")),
-            (72, 108), radius=10, title=str(item.get("title") or "—"))
-        overlay.alpha_composite(cover, (100, y + 10))
-        draw.text((192, y + 22), f"{i:02d}", font=_font(22), fill=ACCENT)
-        draw.text((252, y + 18), _clip(str(item.get("title") or "—"), 16),
-                  font=_font(30), fill=TEXT)
-        draw.text((252, y + 70), f"{int(item.get('plays') or 0)} 次",
-                  font=_font(22), fill=TEXT2)
-        y += 142
-    return _jpeg(Image.alpha_composite(canvas, overlay))
+        poster.badge(998, 54)
+    metrics = ((225, f'{hours:g}', '小时观影'), (600, str(int(plays)), '次播放'), (975, traffic or '暂无实测', '流量用量'))
+    for x, value, caption in metrics:
+        size = 60
+        while size > 32 and _font(size).getlength(value) > 320:
+            size -= 2
+        poster.rule(x - 153, 569, x + 153, 110)
+        poster.text(x, 620, value, size, GOLD, 'mt')
+        poster.text(x, 706, caption, 27, MUTED, 'mt')
+    poster.text(58, 808, '这段时间，看得最多', 38, GOLD)
+    poster.rule(58, 864, 1142, 100)
+    if titles:
+        for rank, row in enumerate(titles, 1):
+            y = 897 + (rank - 1) * 166
+            poster.text(57, y + 37, f'{rank:02d}', 36, GOLD if rank == 1 else TEXT)
+            poster.cover(covers.get(str(row.get('item_id') or '')), (135, y, 96, 142))
+            for index, line in enumerate(_wrap(row.get('title') or '—', 864, 35, 2)):
+                poster.text(267, y + 13 + index * 43, line, 35)
+            poster.text(267, y + 108, f"{int(row.get('plays') or 0)} 次播放", 27, MUTED)
+            poster.rule(58, y + 156, 1142, 55)
+    else:
+        poster.text(600, 1015, '本期暂无观影记录', 40, TEXT, 'mt')
+        poster.text(600, 1085, '下一段好故事，等你开启。', 29, MUTED, 'mt')
+    poster.footer('私人观影报告 · 仅发送给本人')
+    return poster.jpeg()

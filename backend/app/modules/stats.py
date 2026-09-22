@@ -363,6 +363,10 @@ class StatsService:
 
     def top_titles(self, days: int = 30, limit: int = 20, *,
                    calendar: bool = False, now: float | None = None) -> list[dict[str, Any]]:
+        return self._title_rows(days, limit, calendar=calendar, now=now)
+
+    def _title_rows(self, days: int, limit: int, *, calendar: bool = False,
+                    now: float | None = None, kind: str | None = None) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
         if calendar:
             since, until = ranking_bounds(days, now=now)
@@ -370,15 +374,24 @@ class StatsService:
         else:
             since = int(time.time() if now is None else now) - days * 86400
             where, args = "started_at >= ?", (since,)
+        if kind == 'movie':
+            where += " AND LOWER(item_type)='movie'"
+        elif kind == 'show':
+            where += " AND LOWER(item_type) IN ('episode','series')"
+        family = ("CASE WHEN LOWER(item_type)='movie' THEN 'movie' "
+                  "WHEN LOWER(item_type) IN ('episode','series') THEN 'show' "
+                  "ELSE 'other:'||LOWER(COALESCE(item_type,'')) END")
+        title = ("CASE WHEN LOWER(item_type)='movie' THEN item_name "
+                 "ELSE COALESCE(NULLIF(series_name,''),item_name) END")
         rows = self._db.query(
-            "SELECT item_name, series_name, item_type, COUNT(*) AS plays,"
-            " COUNT(DISTINCT emby_user_id) AS viewers, SUM(seconds) AS secs,"
+            f"SELECT {title} AS title, MAX(item_type) AS item_type, COUNT(*) AS plays,"
+            " COUNT(DISTINCT NULLIF(emby_user_id,'')) AS viewers, SUM(seconds) AS secs,"
             " SUM(bytes) AS bytes, MAX(item_id) AS item_id FROM play_events WHERE " + where +
-            " GROUP BY COALESCE(NULLIF(series_name,''), item_name)"
-            " ORDER BY plays DESC, secs DESC LIMIT ?",
+            f" AND COALESCE({title},'')<>'' GROUP BY {family}, {title}"
+            " ORDER BY plays DESC, secs DESC, title COLLATE BINARY ASC LIMIT ?",
             (*args, max(1, min(limit, 200))))
         return [{
-            "title": r["series_name"] or r["item_name"],
+            "title": r["title"],
             "type": r["item_type"],
             "item_id": str(r["item_id"] or ""),
             "plays": int(r["plays"] or 0),
@@ -390,17 +403,34 @@ class StatsService:
     def top_titles_split(self, days: int = 1, limit: int = 10, *,
                           calendar: bool = False, now: float | None = None
                           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Movie vs series heat, using the same play_events grouping as top_titles."""
-        movies: list[dict[str, Any]] = []
-        shows: list[dict[str, Any]] = []
-        for row in self.top_titles(days=days, limit=max(limit * 4, 40),
-                                   calendar=calendar, now=now):
-            kind = str(row.get("type") or "").lower()
-            bucket = movies if kind == "movie" else shows
-            if len(bucket) >= limit:
-                continue
-            bucket.append(row)
-        return movies, shows
+        """Limit each category independently; busy series cannot hide movies."""
+        limit = max(1, min(int(limit), 200))
+        now = time.time() if now is None else now
+        return (
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='movie'),
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='show'),
+        )
+
+    def title_rankings(self, days: int = 1, limit: int = 10, *,
+                       now: float | None = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Calendar charts with movement against the preceding equal-length chart.
+
+        No previous category chart means unknown comparison, not invented
+        movement. A title absent from an existing previous Top N is new to
+        that chart, not necessarily new to the library.
+        """
+        now = time.time() if now is None else now
+        current = self.top_titles_split(days, limit, calendar=True, now=now)
+        since, _until = ranking_bounds(days, now=now)
+        previous = self.top_titles_split(days, limit, calendar=True, now=since)
+        for rows, old_rows in zip(current, previous, strict=True):
+            old_ranks = {row['title']: index for index, row in enumerate(old_rows, 1)}
+            for index, row in enumerate(rows, 1):
+                previous_rank = old_ranks.get(row['title'])
+                row.update(rank=index, previous_rank=previous_rank,
+                           comparison_available=bool(old_rows),
+                           rank_delta=previous_rank - index if previous_rank is not None else None)
+        return current
 
     def client_breakdown(self, days: int = 30) -> list[dict[str, Any]]:
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400

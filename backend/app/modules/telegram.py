@@ -2031,9 +2031,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         movies: list[dict[str, Any]] = []
         shows: list[dict[str, Any]] = []
         if self._stats is not None:
-            with contextlib.suppress(Exception):
+            try:
                 movies, shows = self._stats.top_titles_split(
                     days=days, limit=10, calendar=True)
+            except Exception:  # noqa: BLE001 - unavailable is not an empty chart
+                lines.append("排行统计暂时不可用。")
+                return "\n".join(lines)
         if movies:
             lines.append("<b>▎电影</b>")
             for i, row in enumerate(movies, 1):
@@ -2063,8 +2066,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         heading = f"▎🏆 <b>{days} 天观影榜</b>"
         rows: list[dict[str, Any]] = []
         if self._stats is not None:
-            with contextlib.suppress(Exception):
+            try:
                 rows = self._stats.top_users(days=days, limit=5000, calendar=True)
+            except Exception:  # noqa: BLE001 - unavailable is not zero viewing
+                return [f"{heading}\n\n观影统计暂时不可用。\n\n#UPlaysRank  {stamp}"]
         for row in rows:
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
             if not profile:
@@ -2086,7 +2091,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 # Telegram counts caption length after HTML parsing. Bound
                 # labels, not raw HTML, so ten clickable names fit without
                 # cutting an entity or closing tag (including emoji names).
-                label = str(row.get('tg_display_name') or row.get('tg_username') or '')
+                invisible = ' \u200b\u200c\u200d\ufeff\u3164\u2800\u115f\u1160'
+                label = (str(row.get('tg_display_name') or '').strip(invisible)
+                         or str(row.get('tg_username') or '').strip(invisible)
+                         or ('Telegram用户' if row.get('tg_user_id') else '未绑定'))
                 visible = dict(row)
                 if len(label.encode('utf-16-le')) // 2 > 40:
                     visible['tg_display_name'] = label.encode('utf-16-le')[:76].decode('utf-16-le', errors='ignore') + '…'
@@ -2129,7 +2137,17 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 extra.append({"text": "⏮️ -5", "callback_data": f"urank:{page - 5}_{days}"})
             if page + 5 <= total:
                 extra.append({"text": "⏭️ +5", "callback_data": f"urank:{page + 5}_{days}"})
-        return [row, extra]
+        navigation = []
+        if _SESSION.get() is not None:
+            navigation = [
+                [{'text': '日观影榜', 'callback_data': 'rank:24'},
+                 {'text': '周观影榜', 'callback_data': 'rank:168'}],
+                [{'text': '电影/剧集日榜', 'callback_data': 'heat:1'},
+                 {'text': '电影/剧集周榜', 'callback_data': 'heat:7'}],
+            ]
+            if not _GROUP.get():
+                navigation += BACK_HOME
+        return [*navigation, row, extra]
 
     @staticmethod
     def _split_bulletin(text: str, limit: int = 1000) -> list[str]:
@@ -2787,10 +2805,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     def _watch_rankings_keyboard(self, hours: int, *, heat: bool = False
                                   ) -> list[list[dict[str, str]]]:
         hours = self._rank_hours(hours)
-        day = "● 今日观影" if hours <= 24 and not heat else "今日观影"
-        week = "● 本周观影" if hours > 24 and not heat else "本周观影"
-        heat_day = "● 今日热度" if heat and hours <= 24 else "今日热度"
-        heat_week = "● 本周热度" if heat and hours > 24 else "本周热度"
+        day = "● 日观影榜" if hours <= 24 and not heat else "日观影榜"
+        week = "● 周观影榜" if hours > 24 and not heat else "周观影榜"
+        heat_day = "● 日热度榜" if heat and hours <= 24 else "日热度榜"
+        heat_week = "● 周热度榜" if heat and hours > 24 else "周热度榜"
         rows = [
             [{"text": day, "callback_data": "rank:24"},
              {"text": week, "callback_data": "rank:168"}],
@@ -4189,24 +4207,18 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
                     days = 7 if int(tail) >= 3 else 1
-            hours = 168 if days >= 3 else 24
-            await self._fill_rank_profiles(hours)
-            await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
-                             self._watch_rankings_keyboard(hours))
+            await self._open_ranking_card(chat_id, message_id, days)
             return
         if data.startswith("heat:"):
             tail = data.split(":", 1)[1]
             days = 7 if tail.isdigit() and int(tail) >= 3 else 1
-            hours = 168 if days >= 3 else 24
-            await self._edit(chat_id, message_id, self._heat_rankings_text(days),
-                             self._watch_rankings_keyboard(hours, heat=True))
+            await self._open_ranking_card(chat_id, message_id, days, heat=True)
             return
         if data in ('points_rank', 'titles_rank'):
             if in_group:
                 return
             if data == 'titles_rank':
-                await self._edit(chat_id, message_id, self._heat_rankings_text(7),
-                                 self._watch_rankings_keyboard(168, heat=True))
+                await self._open_ranking_card(chat_id, message_id, 7, heat=True)
                 return
             lines = ['💰 <b>积分榜</b>\n']
             rows = self._points.top(limit=10) if self._points else []
@@ -4221,9 +4233,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 tail = data.split(":", 1)[1]
                 if tail.isdigit():
                     hours = 168 if int(tail) >= 48 else 24
-            await self._fill_rank_profiles(hours)
-            await self._edit(chat_id, message_id, self._watch_rankings_text(hours),
-                             self._watch_rankings_keyboard(hours))
+            await self._open_ranking_card(chat_id, message_id, 7 if hours >= 168 else 1)
             return
 
         if not member:
@@ -4521,6 +4531,21 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             sent += 1 if ok else 0
         return sent
 
+    async def _open_ranking_card(self, chat_id: Any, message_id: int, days: int,
+                                 *, heat: bool = False) -> None:
+        """Interactive buttons use the same poster and period as scheduled charts."""
+        sent = await (self.broadcast_rankings(chat_id, days) if heat
+                      else self.broadcast_watch_rank(chat_id, days))
+        if sent:
+            latest = self._panel.get(self._pkey(chat_id))
+            if latest and int(latest) != int(message_id):
+                self._retired_panels[(str(chat_id), int(message_id))] = time.time() + PENDING_TTL
+                await self._retire_menu(chat_id, int(message_id))
+            return
+        body = self._rankings_text(days) if heat else self._watch_rank_pages(days)[0]
+        await self._edit(chat_id, message_id, body,
+                         self._watch_rankings_keyboard(168 if days >= 7 else 24, heat=heat))
+
     async def broadcast_rankings(self, chat_id: str, days: int = 1) -> bool:
         """Scheduled heat bulletin with poster when covers can be drawn."""
         if not chat_id or not self.enabled:
@@ -4528,19 +4553,28 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         caption = self._rankings_text(days)
         photo = await self._rankings_poster(days)
         parts = self._split_bulletin(caption)
+        keyboard = self._watch_rankings_keyboard(168 if days >= 7 else 24, heat=True) if _SESSION.get() is not None else None
         if photo:
+            payload = {"chat_id": str(chat_id), "caption": parts[0], "parse_mode": "HTML"}
+            if keyboard:
+                payload['reply_markup'] = {'inline_keyboard': keyboard}
+            if _THREAD.get() and self._in_bound_chat(chat_id):
+                payload['message_thread_id'] = _THREAD.get()
             result = await self._call_multipart(
-                "sendPhoto",
-                {"chat_id": str(chat_id), "caption": parts[0], "parse_mode": "HTML"},
+                "sendPhoto", payload,
                 {"photo": ("ranks.jpg", photo, "image/jpeg")})
             if result is not None:
+                if isinstance(result, dict) and result.get('message_id') and _SESSION.get() is not None:
+                    self._photo_panels.add((str(chat_id), int(result['message_id'])))
+                    self._touch_panel(chat_id, result['message_id'])
+                    self._remember_menu(chat_id, result['message_id'], keyboard)
                 rest_ok = True
                 for extra in parts[1:]:
                     rest_ok = await self.send(chat_id, extra) and rest_ok
                 return rest_ok
         sent = True
-        for part in parts:
-            sent = await self.send(chat_id, part) and sent
+        for index, part in enumerate(parts):
+            sent = await self.send(chat_id, part, keyboard if index == len(parts) - 1 else None) and sent
         return sent
 
     async def _present_watch_rank(self, chat_id: Any, hours: int = 24) -> bool:
@@ -4701,11 +4735,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
 
     async def _watch_rank_poster(self, days: int) -> bytes | None:
         days = max(1, int(days or 1))
+        moment = time.time()
         rows: list[dict[str, Any]] = []
         if self._stats is not None:
-            with contextlib.suppress(Exception):
-                rows = self._stats.top_users(days=days, limit=10, calendar=True)
-        if not rows:
+            try:
+                rows = self._stats.top_users(days=days, limit=10, calendar=True, now=moment)
+            except Exception:  # noqa: BLE001 - unavailable is not an empty chart
+                return None
+        else:
             return None
         for row in rows:
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
@@ -4714,63 +4751,56 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             row["tg_username"] = profile.get("username", "")
             if profile.get("display_name"):
                 row["tg_display_name"] = profile["display_name"]
-        avatars: dict[str, bytes] = {}
-        for row in rows:
-            tg_id = str(row.get("tg_user_id") or "")
-            if not tg_id or tg_id in avatars:
-                continue
-            with contextlib.suppress(Exception):
-                blob = await self._tg_avatar_bytes(tg_id)
-                if blob:
-                    avatars[tg_id] = blob
-        covers = await self._ranking_covers(days)
-        from app.modules.rank_poster import render_watch_poster
+        from app.modules.rank_poster import fetch_rank_images, render_watch_poster
+        avatars, art = await asyncio.gather(
+            fetch_rank_images(self._tg_avatar_bytes,
+                              [{'item_id': row.get('tg_user_id')} for row in rows], limit=10),
+            self._ranking_art(days, now=moment))
+        covers, backdrops = art
         try:
-            return render_watch_poster(
+            return await asyncio.to_thread(render_watch_poster,
                 rows, weekly=days >= 3, avatars=avatars, covers=covers,
-                when=ranking_stamp(days))
+                backdrops=backdrops, days=days, when=ranking_stamp(days, now=moment))
         except Exception:  # noqa: BLE001 - fall back to text
             return None
 
     async def _ranking_covers(self, days: int) -> dict[str, bytes]:
-        covers: dict[str, bytes] = {}
-        if self._stats is None:
-            return covers
-        fetch = getattr(self._emby, "item_primary_image", None)
-        if not callable(fetch):
-            return covers
-        try:
-            movies, shows = self._stats.top_titles_split(
-                days=days, limit=10, calendar=True)
-        except Exception:  # noqa: BLE001 - covers are optional
-            return covers
-        for row in [*movies, *shows]:
-            item_id = str(row.get("item_id") or "")
-            if not item_id or item_id in covers:
-                continue
-            with contextlib.suppress(Exception):
-                blob = await fetch(item_id)
-                if blob:
-                    covers[item_id] = blob
-        return covers
+        return (await self._ranking_art(days))[0]
+
+    async def _ranking_art(self, days: int, board: Any = None, *, now: float | None = None) -> tuple[dict[str, bytes], dict[str, bytes]]:
+        from app.modules.rank_poster import fetch_rank_images
+        if board is None:
+            if self._stats is None:
+                return {}, {}
+            try:
+                board = self._stats.top_titles_split(days=days, limit=10, calendar=True, now=now)
+            except Exception:  # noqa: BLE001 - art is optional
+                return {}, {}
+        movies, shows = board
+        covers, backdrops = await asyncio.gather(
+            fetch_rank_images(getattr(self._emby, 'item_primary_image', None), [*movies, *shows]),
+            fetch_rank_images(getattr(self._emby, 'item_backdrop_image', None), movies[:1] + shows[:1], limit=2))
+        return covers, backdrops
 
     async def _rankings_poster(self, days: int) -> bytes | None:
         if self._stats is None:
             return None
         days = max(1, int(days or 1))
+        moment = time.time()
         try:
-            movies, shows = self._stats.top_titles_split(
-                days=days, limit=10, calendar=True)
+            comparison = getattr(self._stats, 'title_rankings', None)
+            if callable(comparison):
+                movies, shows = comparison(days=days, limit=10, now=moment)
+            else:
+                movies, shows = self._stats.top_titles_split(days=days, limit=10, calendar=True, now=moment)
         except Exception:  # noqa: BLE001 - poster is optional
             return None
-        if not movies and not shows:
-            return None
-        covers = await self._ranking_covers(days)
+        covers, backdrops = await self._ranking_art(days, (movies, shows))
         from app.modules.rank_poster import render_rank_poster
         try:
-            return render_rank_poster(
+            return await asyncio.to_thread(render_rank_poster,
                 movies, shows, weekly=days >= 3,
-                covers=covers, when=ranking_stamp(days))
+                covers=covers, backdrops=backdrops, days=days, when=ranking_stamp(days, now=moment))
         except Exception:  # noqa: BLE001 - fall back to text bulletin
             return None
 

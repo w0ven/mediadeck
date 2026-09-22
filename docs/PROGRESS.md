@@ -2,6 +2,35 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-23 — v0.38.0 COLA EMBY charts and complete category rankings
+
+- Movie/series daily and weekly charts, member watch-time charts and private
+  viewing reports share the approved dark/gold COLA EMBY design. Headers use
+  real title artwork, leaders receive larger cards, and short personal reports
+  shrink to their actual lineup. Telegram names, whitelist badges, paging and
+  private report delivery remain intact. Interactive menu buttons use the
+  same poster paths as scheduled messages; period switches replace the card.
+- The old title query selected a global Top 40 before splitting categories.
+  A read-only production audit found 13 movie titles on September 22 but only
+  four daily rows, and 57 movie titles during September 16–22 but only three
+  weekly rows. Each category now has its own aggregation and Top 10 limit.
+  Equal movie/series names stay separate; non-series types are not classified
+  as series. Actual short charts are displayed without invented entries.
+- Sorting remains by play count, with unique viewers displayed separately.
+  Movement compares the preceding equal-length calendar chart, uses stable
+  ties and one frozen clock, and remains unknown when no previous chart exists.
+  Failed statistics and unavailable traffic are not rendered as empty/zero.
+- Artwork has bounded concurrency and an overall deadline; missing art falls
+  back locally. Rendering runs off the event loop, and the footer is bundled
+  rather than fetched from an external service at delivery time.
+- Validation: **2128 passed, 56 skipped, 1 deselected** in the final backend
+  batch; a separate 12-case API/lifecycle batch passed and includes the omitted
+  shutdown case (11 cases overlap). Ruff passed. A temporary-DB Bot canary
+  validated nine images across four scheduled paths, four actual menu paths
+  and a private weekly report, without real Telegram sends or production writes.
+
+---
+
 ## 2026-09-23 — v0.37.1 Telegram card generation format choice
 
 - The Bot's Generate Cards menu now offers visible choices for codes alone or
