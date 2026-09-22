@@ -8,7 +8,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import tempfile
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -478,50 +481,80 @@ def test_device_last_seen_uses_emby_activity_not_sampler_poll_time(stack) -> Non
     assert unchanged["client"] == "TestClient"
 
 
-@pytest.mark.parametrize("activity", [None, "", "not-a-date", "2099-01-01T00:00:00Z",
-                                     "0001-01-01T00:00:00Z"])
-def test_unknown_session_activity_never_becomes_sampler_time(stack, activity) -> None:
-    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
-    members = stack["members"]
-    members.upsert("u1", "alice", {"group_id": "standard"})
-    session = _session("s1", "u1", 8_000_000)
-    session["LastActivityDate"] = activity
+@pytest.mark.parametrize("raw", [None, "", "not-a-date", "2099-01-01T00:00:00Z",
+                                 "1969-01-01T00:00:00Z", "9999-12-31T23:59:59Z"])
+def test_invalid_or_future_session_activity_stays_unknown(raw) -> None:
     now = 1_790_087_095
-    assert session_activity_timestamp(session, now) == 0
-
-    for observed in (now, now + 60):
-        sampler._track_device(session, "u1", observed)
-    device = members.devices("u1")[0]
-    assert device["first_seen_at"] == now
-    assert device["last_seen_at"] == 0
-    assert members.get("u1")["device_count"] == 1
-
-    # A real authenticated request still records its actual observation time.
-    members.register_device("u1", device["device_id"], client="TrustedClient", now=now + 120)
-    sampler._track_device(session, "u1", now + 180)
-    device = members.devices("u1")[0]
-    assert device["last_seen_at"] == now + 120
-    assert device["client"] == "TrustedClient"
+    assert session_activity_timestamp({"LastActivityDate": raw}, now) == 0
 
 
-def test_device_activity_preserves_a_concurrent_newer_registration(stack, monkeypatch) -> None:
+@pytest.mark.parametrize("raw", [None, "", "not-a-date", "2099-01-01T00:00:00Z",
+                                 "1969-01-01T00:00:00Z", "9999-12-31T23:59:59Z"])
+def test_unknown_session_activity_never_refreshes_or_replaces_trusted_device(stack, raw) -> None:
+    members = stack["members"]
+    sampler = UsageSampler(stack["db"], members, stack["emby"])
+    session = _session("s1", "u1", 8_000_000)
+    session["LastActivityDate"] = raw
+    observed = 1_790_087_095
+    sampler._track_device(session, "u1", observed)
+    unknown = members.devices("u1")[0]
+    assert unknown["first_seen_at"] == observed
+    assert unknown["last_seen_at"] == 0
+    session["Client"] = "UntrustedLaterSession"
+    sampler._track_device(session, "u1", observed + 60)
+    assert members.devices("u1")[0] == unknown
+
+    # Explicit requests retain the default real-request clock.
+    assert members.register_device("u1", session["DeviceId"], client="AuthenticatedClient",
+                                   now=observed + 120)
+    trusted = members.devices("u1")[0]
+    assert trusted["last_seen_at"] == observed + 120
+    sampler._track_device(session, "u1", observed + 180)
+    assert members.devices("u1")[0] == trusted
+
+
+@pytest.mark.parametrize("already_registered", [False, True])
+def test_delayed_device_write_preserves_newer_registration(stack, monkeypatch, already_registered) -> None:
+    """Pause an older writer before SQL; a newer request wins the write race."""
     members, db = stack["members"], stack["db"]
-    members.upsert("u1", "alice", {"group_id": "standard"})
-    members.register_device("u1", "phone", client="Baseline", now=10)
-    read = db.one
+    if already_registered:
+        members.register_device("u1", "phone", client="Initial", now=100)
+    entered, resume = threading.Event(), threading.Event()
+    original_write = db.write
+    caller = threading.current_thread()
 
-    def read_then_register_newer(sql, params=()):
-        row = read(sql, params)
-        if "blocked,last_seen_at" in sql and params == ("u1", "phone"):
-            monkeypatch.setattr(db, "one", read)
-            members.register_device("u1", "phone", client="Newer", now=30)
-        return row
+    @contextmanager
+    def delayed_write():
+        if threading.current_thread() is not caller:
+            entered.set()
+            assert resume.wait(5), "newer device write did not complete"
+        with original_write() as conn:
+            yield conn
 
-    monkeypatch.setattr(db, "one", read_then_register_newer)
-    members.register_device("u1", "phone", client="Older", now=20)
-    device = members.devices("u1")[0]
-    assert device["last_seen_at"] == 30
-    assert device["client"] == "Newer"
+    monkeypatch.setattr(db, "write", delayed_write)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        older = pool.submit(members.register_device, "u1", "phone",
+                            client="OldSession", now=200, seen_at=200)
+        try:
+            assert entered.wait(5), "older device write did not start"
+            assert members.register_device("u1", "phone", client="NewRequest", now=300)
+        finally:
+            resume.set()
+        assert older.result(timeout=5)
+    rows = members.devices("u1")
+    assert len(rows) == 1
+    assert rows[0]["last_seen_at"] == 300
+    assert rows[0]["client"] == "NewRequest"
+    assert rows[0]["first_seen_at"] == (100 if already_registered else 300)
+
+
+def test_unknown_activity_does_not_unblock_or_change_a_blocked_device(stack) -> None:
+    members = stack["members"]
+    members.register_device("u1", "phone", client="Trusted", now=100)
+    members.set_device_blocked("u1", "phone", True)
+    before = members.devices("u1")[0]
+    assert members.register_device("u1", "phone", client="Unknown", now=200, seen_at=0) is False
+    assert members.devices("u1")[0] == before
 
 
 def test_device_registration_is_uncapped_and_blocked_still_refused(stack) -> None:

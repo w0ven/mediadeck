@@ -986,41 +986,41 @@ class MemberService:
                         seen_at: int | None = None) -> bool:
         """Record a device. Registration is uncapped.
 
-        Existing devices refresh when the activity is at least as recent.
-        A blocked device still records activity, but playback must not treat
-        that as accepted. Device count is observational; concurrent-play
-        limits live on max_streams, not here.
+        A positive, non-stale activity timestamp refreshes an existing row.
+        Explicit zero means unknown activity; omitting seen_at records an
+        actual request at now. Blocking does not suppress valid observations,
+        but playback must not treat a blocked device as accepted. Device count
+        is observational; concurrent-play limits live on max_streams.
         """
         if not device_id:
             return True
         now = now or int(time.time())
         seen_at = int(seen_at if seen_at is not None else now)
-        existing = self._db.one(
-            "SELECT blocked,last_seen_at FROM devices "
-            "WHERE emby_user_id=? AND device_id=?",
-            (user_id, device_id))
-        if existing:
-            if seen_at >= int(existing.get("last_seen_at") or 0):
-                self._db.execute(
-                    "UPDATE devices SET device_name=?,client=?,app_version=?,"
-                    "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=? "
-                    "AND (last_seen_at IS NULL OR last_seen_at<=?)",
-                    (device_name, client, app_version, last_ip, seen_at,
-                     user_id, device_id, seen_at))
-            if existing.get("blocked"):
-                self.audit("system", "device.blocked", user_id,
-                           encode_audit_detail({
-                               "device_id": {"from": device_id, "to": device_id},
-                           }), ok=False)
-                return False
-            return True
-
-        self._db.execute(
-            "INSERT INTO devices (emby_user_id,device_id,device_name,client,"
-            "app_version,last_ip,first_seen_at,last_seen_at,blocked) "
-            "VALUES (?,?,?,?,?,?,?,?,0)",
-            (user_id, device_id, device_name, client, app_version, last_ip,
-             now, seen_at))
+        # Compare inside SQLite, so an older writer cannot overwrite a newer
+        # request between a Python-side read and write. The same statement
+        # also makes simultaneous first registration safe.
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO devices (emby_user_id,device_id,device_name,client,"
+                "app_version,last_ip,first_seen_at,last_seen_at,blocked) "
+                "VALUES (?,?,?,?,?,?,?,?,0) "
+                "ON CONFLICT(emby_user_id,device_id) DO UPDATE SET "
+                "device_name=excluded.device_name,client=excluded.client,"
+                "app_version=excluded.app_version,last_ip=excluded.last_ip,"
+                "last_seen_at=excluded.last_seen_at "
+                "WHERE excluded.last_seen_at>0 "
+                "AND excluded.last_seen_at>=devices.last_seen_at",
+                (user_id, device_id, device_name, client, app_version, last_ip,
+                 now, seen_at))
+            device = conn.execute(
+                "SELECT blocked FROM devices WHERE emby_user_id=? AND device_id=?",
+                (user_id, device_id)).fetchone()
+        if device["blocked"]:
+            self.audit("system", "device.blocked", user_id,
+                       encode_audit_detail({
+                           "device_id": {"from": device_id, "to": device_id},
+                       }), ok=False)
+            return False
         return True
 
     # -- lifecycle actions ---------------------------------------------------

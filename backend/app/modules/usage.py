@@ -67,8 +67,8 @@ def session_activity_timestamp(session: dict[str, Any], observed_at: float) -> i
     ``/Sessions`` includes idle login sessions for a long time.  Refreshing a
     device with every polling tick makes all of those old identities look
     active *now*.  LastActivityDate is the actual device-side activity signal;
-    Missing, malformed or implausibly future values are unknown (zero).
-    They must not advance a previously trusted device activity timestamp.
+    missing, malformed or implausibly future values remain unknown (zero).
+    Polling a session is not evidence of new device activity.
     """
     raw = str(session.get("LastActivityDate") or "").strip()
     if raw:
@@ -80,7 +80,7 @@ def session_activity_timestamp(session: dict[str, Any], observed_at: float) -> i
             timestamp = int(value.timestamp())
             if 0 < timestamp <= int(observed_at) + 300:
                 return timestamp
-        except (ValueError, OverflowError):
+        except (ValueError, OverflowError, OSError):
             pass
     return 0
 

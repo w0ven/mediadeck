@@ -14,15 +14,44 @@ Newest entries first. Every working session appends one entry.
   can be copied separately or included in CSV exports. Each uses the existing
   Telegram start entrypoint and resolves to the issued card. An unavailable
   bot identity rejects link generation before minting any cards.
-- Invalid or missing Emby activity timestamps now remain unknown, while a
-  previously observed activity remains intact. A conditional database update
-  also prevents an older sampler write from overwriting a concurrent newer
-  authenticated request.
 - Validation: Ruff and JavaScript syntax checks clean; backend regression
-  **2087 passed, 56 skipped, 1 deselected**. The shutdown lifecycle test passed
-  independently and two Chromium tests verified settings saves, link display,
-  copying and CSV selection, for **2090 passed** across these runs.
+  **2096 passed, 56 skipped, 1 deselected**. A separate 12-case API/lifecycle
+  batch passed, including the deselected shutdown case. Two Chromium tests
+  verified settings saves, link display, copying and CSV selection, for
+  **2099 distinct tests passed** across these runs.
 
+---
+
+## 2026-09-22 — v0.36.5 unknown activity and atomic device registration
+
+### Done
+
+- A missing, malformed, pre-epoch or implausibly future `LastActivityDate`
+  previously fell back to the polling clock. It now produces zero (unknown):
+  a newly observed identity can be registered without inventing activity, and
+  invalid sessions cannot replace an existing device's trusted time or metadata.
+  Registration without an explicit activity timestamp still records a real
+  request at `now`.
+- Device registration uses a conditional SQLite upsert and reads the blocked
+  flag in the same write transaction. An older writer cannot overwrite a newer
+  observation, concurrent first registrations do not conflict, and blocking
+  and `first_seen_at` remain intact. The current sampler already serializes its
+  own ticks; this also protects the registration method's write boundary.
+- Added regressions for all invalid activity shapes, repeated polling,
+  authenticated request refresh, blocked devices, and controlled interleavings
+  of new/existing registration. These reproduced 14 failures before the fix.
+- Validation: Ruff over `app` and `tests` passed; focused device/Telegram/admin
+  suite **282 passed**, admission suite **28 passed**. Backend main batch
+  **2084 passed, 56 skipped, 1 deselected**; its shutdown lifecycle case passed
+  separately (**1 passed**). These were separate test invocations.
+
+### Next
+
+- Publish the new release without rewriting v0.36.4, then verify two completed
+  production sampler rounds and the installed unknown-activity helper.
+- Preserve the existing timestamp correction and device identities during
+  deployment; observe real new registrations independently of the stopped
+  deployment snapshot.
 ---
 
 ## 2026-09-22 — v0.36.4 truthful device activity and identity display
