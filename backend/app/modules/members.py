@@ -986,8 +986,8 @@ class MemberService:
                         seen_at: int | None = None) -> bool:
         """Record a device. Registration is uncapped.
 
-        Existing devices always refresh. A blocked device still refreshes its
-        last-seen row so the operator can see it, but playback must not treat
+        Existing devices refresh when the activity is at least as recent.
+        A blocked device still records activity, but playback must not treat
         that as accepted. Device count is observational; concurrent-play
         limits live on max_streams, not here.
         """
@@ -1003,9 +1003,10 @@ class MemberService:
             if seen_at >= int(existing.get("last_seen_at") or 0):
                 self._db.execute(
                     "UPDATE devices SET device_name=?,client=?,app_version=?,"
-                    "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=?",
+                    "last_ip=?,last_seen_at=? WHERE emby_user_id=? AND device_id=? "
+                    "AND (last_seen_at IS NULL OR last_seen_at<=?)",
                     (device_name, client, app_version, last_ip, seen_at,
-                     user_id, device_id))
+                     user_id, device_id, seen_at))
             if existing.get("blocked"):
                 self.audit("system", "device.blocked", user_id,
                            encode_audit_detail({

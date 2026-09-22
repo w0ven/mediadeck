@@ -478,11 +478,50 @@ def test_device_last_seen_uses_emby_activity_not_sampler_poll_time(stack) -> Non
     assert unchanged["client"] == "TestClient"
 
 
-def test_invalid_or_future_session_activity_falls_back_to_observation_time() -> None:
+@pytest.mark.parametrize("activity", [None, "", "not-a-date", "2099-01-01T00:00:00Z",
+                                     "0001-01-01T00:00:00Z"])
+def test_unknown_session_activity_never_becomes_sampler_time(stack, activity) -> None:
+    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
+    members = stack["members"]
+    members.upsert("u1", "alice", {"group_id": "standard"})
+    session = _session("s1", "u1", 8_000_000)
+    session["LastActivityDate"] = activity
     now = 1_790_087_095
-    assert session_activity_timestamp({"LastActivityDate": "not-a-date"}, now) == now
-    assert session_activity_timestamp(
-        {"LastActivityDate": "2099-01-01T00:00:00Z"}, now) == now
+    assert session_activity_timestamp(session, now) == 0
+
+    for observed in (now, now + 60):
+        sampler._track_device(session, "u1", observed)
+    device = members.devices("u1")[0]
+    assert device["first_seen_at"] == now
+    assert device["last_seen_at"] == 0
+    assert members.get("u1")["device_count"] == 1
+
+    # A real authenticated request still records its actual observation time.
+    members.register_device("u1", device["device_id"], client="TrustedClient", now=now + 120)
+    sampler._track_device(session, "u1", now + 180)
+    device = members.devices("u1")[0]
+    assert device["last_seen_at"] == now + 120
+    assert device["client"] == "TrustedClient"
+
+
+def test_device_activity_preserves_a_concurrent_newer_registration(stack, monkeypatch) -> None:
+    members, db = stack["members"], stack["db"]
+    members.upsert("u1", "alice", {"group_id": "standard"})
+    members.register_device("u1", "phone", client="Baseline", now=10)
+    read = db.one
+
+    def read_then_register_newer(sql, params=()):
+        row = read(sql, params)
+        if "blocked,last_seen_at" in sql and params == ("u1", "phone"):
+            monkeypatch.setattr(db, "one", read)
+            members.register_device("u1", "phone", client="Newer", now=30)
+        return row
+
+    monkeypatch.setattr(db, "one", read_then_register_newer)
+    members.register_device("u1", "phone", client="Older", now=20)
+    device = members.devices("u1")[0]
+    assert device["last_seen_at"] == 30
+    assert device["client"] == "Newer"
 
 
 def test_device_registration_is_uncapped_and_blocked_still_refused(stack) -> None:

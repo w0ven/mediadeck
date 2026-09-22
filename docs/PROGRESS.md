@@ -2,6 +2,29 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-09-22 — v0.37.0 registration announcements and card links
+
+- Operators can select an existing interaction group, with an optional forum
+  topic, for successful registrations through admin grants, invites and cards.
+  Receipts are staged in the account transaction and sent after it commits;
+  failed registrations never announce success. Existing delivery deduplication,
+  restart recovery and origin-group gift receipts remain supported. Public
+  notices contain the account name, group and expiry, with no password or card.
+- Card generation has an optional registration-link output. The same links
+  can be copied separately or included in CSV exports. Each uses the existing
+  Telegram start entrypoint and resolves to the issued card. An unavailable
+  bot identity rejects link generation before minting any cards.
+- Invalid or missing Emby activity timestamps now remain unknown, while a
+  previously observed activity remains intact. A conditional database update
+  also prevents an older sampler write from overwriting a concurrent newer
+  authenticated request.
+- Validation: Ruff and JavaScript syntax checks clean; backend regression
+  **2087 passed, 56 skipped, 1 deselected**. The shutdown lifecycle test passed
+  independently and two Chromium tests verified settings saves, link display,
+  copying and CSV selection, for **2090 passed** across these runs.
+
+---
+
 ## 2026-09-22 — v0.36.4 truthful device activity and identity display
 
 - The device registry was unique by `(user, DeviceId)`, but its sampler wrote

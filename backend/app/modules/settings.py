@@ -140,6 +140,10 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # list is not "every group", it is none. Numeric chat ids preferred;
     # @public handles are accepted for the same operator convenience.
     "group_interaction_chats": [],
+    # Optional target for every committed registration. Empty keeps the
+    # existing origin-group receipt for gifts issued inside a group.
+    "registration_notify_chat_id": "",
+    "registration_notify_thread_id": None,
     "membership_rules": RULE_DEFAULTS,
     # Shown to a new member alongside their credentials; without it they have
     # a username and password and nowhere to use them.
@@ -668,8 +672,14 @@ class SettingsService:
             cfg["max_users"] = max(0, int(cfg["max_users"]))
         except (TypeError, ValueError, OverflowError):
             cfg["max_users"] = 0
-        for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url"):
+        for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url",
+                    "registration_notify_chat_id"):
             cfg[key] = str(cfg[key] or "").strip()
+        try:
+            topic = cfg.get("registration_notify_thread_id")
+            cfg["registration_notify_thread_id"] = int(topic) if topic else None
+        except (TypeError, ValueError, OverflowError):
+            cfg["registration_notify_thread_id"] = None
         try:
             cfg["playback_lines"] = normalize_playback_lines(cfg.get("playback_lines"))
             cfg["playback_lines_note"] = normalize_playback_lines_note(
@@ -775,6 +785,26 @@ class SettingsService:
         else:
             chats = list(current.get("group_interaction_chats") or [])
 
+        notify_chat = str(payload.get("registration_notify_chat_id",
+                                     current["registration_notify_chat_id"]) or "").strip()
+        if notify_chat:
+            targets = parse_group_interaction_chats([notify_chat])
+            if len(targets) != 1 or targets[0] not in chats:
+                raise ConfigError("注册通报群必须选择已绑定的互动群")
+            notify_chat = targets[0]
+        topic = payload.get("registration_notify_thread_id", current["registration_notify_thread_id"])
+        if topic not in (None, ""):
+            try:
+                if isinstance(topic, bool) or str(int(topic)) != str(topic).strip():
+                    raise ValueError
+                topic = int(topic)
+            except (TypeError, ValueError, OverflowError):
+                raise ConfigError("注册通报话题 ID 必须是正整数") from None
+            if not 0 < topic < 2**31 or not notify_chat:
+                raise ConfigError("请先选择注册通报群，再填写有效话题 ID")
+        else:
+            topic = None
+
         rules = current['membership_rules']
         if 'membership_rules' in payload:
             rules = normalize_rules(payload['membership_rules'], verified=membership_verified)
@@ -796,6 +826,8 @@ class SettingsService:
             "require_group": str(payload.get(
                 "require_group", current["require_group"]) or "").strip(),
             "group_interaction_chats": chats,
+            "registration_notify_chat_id": notify_chat,
+            "registration_notify_thread_id": topic,
             "emby_public_url": emby_url,
             "menu_logo_url": logo,
             "playback_lines": lines,

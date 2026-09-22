@@ -30,6 +30,7 @@ import secrets
 import sqlite3
 import string
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -573,11 +574,14 @@ class RegistrationService:
     # -- reporting ------------------------------------------------------------
 
     def export_redeem_csv(self, batch: str | None = None,
-                          status: str | None = None) -> str:
+                          status: str | None = None,
+                          link_for: Callable[[str], str] | None = None) -> str:
         """Plain CSV. The full code is present: this is the operator's own
         download, and a masked export would be useless for handing cards out."""
         rows = self.list_redeem(status=status, batch=batch, limit=5000)
         lines = ["code,group_id,group_name,days,status,batch,used_by,used_at,created_at"]
+        if link_for:
+            lines[0] += ",registration_link"
         for row in rows:
             used_at = row.get("used_at") or ""
             when = time.strftime(
@@ -590,6 +594,8 @@ class RegistrationService:
                 row.get("status", ""), row.get("batch", ""),
                 row.get("used_by", ""), when, made,
             ]
+            if link_for:
+                cells.append(link_for(str(row.get("code") or "")))
             lines.append(",".join(_csv_cell(c) for c in cells))
         return "\n".join(lines) + "\n"
 
