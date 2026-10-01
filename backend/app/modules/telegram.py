@@ -1066,13 +1066,29 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
              {'text': '◀ 功能首页', 'callback_data': 'home'}],
         ]
 
+    def nodes_menu(self) -> list[list[dict[str, str]]]:
+        """Keep the line page compact; configured rules have their own view."""
+        actions = [{"text": "🔄 刷新线路", "callback_data": "me_nodes"}]
+        if str(self._cfg().get("playback_routing_rules") or "").strip():
+            actions.append({"text": "📋 分流规则", "callback_data": "me_routing"})
+        return [actions, [{"text": "◀ 功能首页", "callback_data": "home"}]]
+
     @staticmethod
-    def nodes_menu() -> list[list[dict[str, str]]]:
-        """Line page is not the account card; keep only refresh and home."""
-        return [
-            [{"text": "🔄 刷新线路", "callback_data": "me_nodes"}],
-            [{"text": "◀ 功能首页", "callback_data": "home"}],
-        ]
+    def routing_menu() -> list[list[dict[str, str]]]:
+        return [[{"text": "◀ 播放线路", "callback_data": "me_nodes"},
+                 {"text": "🏠 功能首页", "callback_data": "home"}]]
+
+    def _routing_text(self) -> str:
+        rules = str(self._cfg().get("playback_routing_rules") or "").strip()
+        if not rules:
+            return "📋 <b>分流规则</b>\n\n暂未配置分流规则。"
+        return (
+            "📋 <b>分流规则</b>\n\n"
+            "以下为 <b>Clash 规则示例</b>。请根据自己的代理软件、内核及策略组名称调整配置，"
+            "勿直接覆盖原配置。\n\n"
+            f'<pre><code class="language-yaml">{escape(rules)}</code></pre>\n\n'
+            "<i>使用规则模式；GEOSITE 规则需内核及 GeoSite 数据支持。</i>"
+        )
 
     def bag_menu(self) -> list[list[dict[str, str]]]:
         """What the member owns or can spend; don't advertise disabled plugins."""
@@ -4064,7 +4080,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         owner = self._card_owner(chat_id, message_id)
         if in_group and owner and owner != str(tg_user_id):
             return
-        if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes",
+        if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes", "me_routing",
                                  "req_new", "request_center", "watch_recent", "transfer", "shop", "invites"):
             return
         if in_group and data.startswith("resetpw"):
@@ -4083,7 +4099,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # submit a request after the member has returned to the parent menu.
         if data in ('home', 'me', 'bag', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
-                    'me_status', 'me_points', 'me_nodes', 'devices', 'expiry'):
+                    'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry'):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
@@ -4265,6 +4281,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if data == "me_nodes":
             await self._edit(chat_id, message_id, await self._nodes_text(),
                              self.nodes_menu())
+            return
+        if data == "me_routing":
+            await self._edit(chat_id, message_id, self._routing_text(), self.routing_menu())
             return
         if data == "bag":
             await self._edit(

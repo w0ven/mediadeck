@@ -43,6 +43,7 @@ MAX_PLAYBACK_LINES = 16
 PLAYBACK_LINE_LABEL_MAX = 40
 PLAYBACK_LINE_HINT_MAX = 80
 PLAYBACK_LINES_NOTE_MAX = 1500
+PLAYBACK_ROUTING_RULES_MAX = 2000
 MAX_POOLS = 12
 
 
@@ -92,6 +93,16 @@ def normalize_playback_lines_note(raw: Any) -> str:
 # Used until the node calls home. `.invalid` is reserved and never resolves.
 PENDING_BASE_URL = "https://pending.invalid"
 PENDING_PROBE_URL = "http://127.0.0.1:9800/load"
+
+
+def normalize_playback_routing_rules(raw: Any) -> str:
+    rules = str(raw or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(rules) > PLAYBACK_ROUTING_RULES_MAX:
+        raise ConfigError(f"分流规则最长 {PLAYBACK_ROUTING_RULES_MAX} 字")
+    if any(ord(c) < 32 and c != "\n" for c in rules):
+        raise ConfigError("分流规则含有非法字符")
+    return rules
+
 
 # Playback interception is opt-in: it changes where clients fetch bytes from,
 # so it must never switch itself on during an upgrade.
@@ -155,6 +166,8 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # member-facing ingress names, not the internal node pool.
     "playback_lines": [],
     "playback_lines_note": "",
+    # Operator-supplied example; empty hides the separate Bot rules button.
+    "playback_routing_rules": "",
     "playback_lines_show_load": True,
     # NOTE: the daily ranking post and the expiry reminder used to be
     # configured here (rankings_* / notify_expiring*). They are plugins now
@@ -687,6 +700,11 @@ class SettingsService:
         except ConfigError:
             cfg["playback_lines"] = []
             cfg["playback_lines_note"] = ""
+        try:
+            cfg["playback_routing_rules"] = normalize_playback_routing_rules(
+                cfg.get("playback_routing_rules"))
+        except ConfigError:
+            cfg["playback_routing_rules"] = ""
         cfg["playback_lines_show_load"] = bool(cfg.get("playback_lines_show_load", True))
         try:
             cfg["group_interaction_chats"] = parse_group_interaction_chats(
@@ -775,6 +793,8 @@ class SettingsService:
             lines_note = normalize_playback_lines_note(payload.get("playback_lines_note"))
         else:
             lines_note = str(current.get("playback_lines_note") or "")
+        routing_rules = normalize_playback_routing_rules(
+            payload.get("playback_routing_rules", current.get("playback_routing_rules")))
         if "playback_lines_show_load" in payload:
             show_load = _bool(payload.get("playback_lines_show_load"))
         else:
@@ -832,6 +852,7 @@ class SettingsService:
             "menu_logo_url": logo,
             "playback_lines": lines,
             "playback_lines_note": lines_note,
+            "playback_routing_rules": routing_rules,
             "playback_lines_show_load": show_load,
         })
         return self.telegram_public()
