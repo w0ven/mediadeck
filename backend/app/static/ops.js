@@ -692,8 +692,11 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           <div>
             <div id="tg-line-rows" class="line-rows"></div>
             <div class="toolbar"><button type="button" class="btn" id="tg-line-add">＋ 添加线路</button></div>
-            <div class="form-row"><label for="tg-lines-note">页脚说明</label>
-              <textarea id="tg-lines-note" rows="4" maxlength="1500" placeholder="例如：主线路建议挂梯；优选请按自己的运营商选择">${esc(tg.playback_lines_note || '')}</textarea></div>
+            <div class="form-row"><label for="tg-lines-note">线路页简短提示</label>
+              <textarea id="tg-lines-note" rows="2" maxlength="1500" placeholder="例如：主线路建议代理；国内盘资源请直连">${esc(tg.playback_lines_note || '')}</textarea></div>
+            <div class="form-row"><label for="tg-routing-rules">分流规则（Clash）</label>
+              <textarea id="tg-routing-rules" rows="8" maxlength="2000" spellcheck="false" aria-describedby="tg-routing-help" placeholder="粘贴规则示例；留空隐藏按钮">${esc(tg.playback_routing_rules || '')}</textarea></div>
+            <p id="tg-routing-help" class="help">单独显示在 Bot「📋 分流规则」按钮中，可复制；会提示会员按自己的代理软件、内核及策略组调整配置。</p>
             <div class="form-row"><label for="tg-lines-load">显示节点水位</label>
               <input id="tg-lines-load" type="checkbox" ${tg.playback_lines_show_load !== false ? 'checked' : ''}>
               <span class="muted">水位是内部调度状态，可选附在地址后面</span></div>

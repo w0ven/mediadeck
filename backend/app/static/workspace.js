@@ -197,6 +197,7 @@ function initPlaybackLinesEditor() {
   configureSave('tg-save-lines', '/api/settings/telegram', 'POST', () => ({
     playback_lines: JSON.parse(field.value || '[]').filter(item => item.label && item.url),
     playback_lines_note: ($('#tg-lines-note')?.value || '').trim(),
+    playback_routing_rules: ($('#tg-routing-rules')?.value || '').trim(),
     playback_lines_show_load: $('#tg-lines-load')?.checked !== false,
   }), result => {
     lines = result.playback_lines || [];

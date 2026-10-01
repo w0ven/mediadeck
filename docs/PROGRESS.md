@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-01 — compact playback lines and separate routing help
+
+- Playback lines keep their short operator note, live playback count and node
+  watermarks. A configured routing example adds a separate button; opening the
+  rules and returning edits the same private card instead of sending more messages.
+- Routing help uses an escaped, copyable YAML code block and reminds members to
+  adapt the example to their proxy application, core and policy-group names.
+  Empty settings hide the button; stale callbacks still offer a return path.
+- The Bot settings form stores the example separately from the short line note.
+  Partial saves retain it; validation bounds message size and rejects control
+  characters. Member checks and group-chat privacy match the playback-line page.
+- Validation: 2140 tests passed, 56 skipped; Ruff and JavaScript syntax checks
+  passed. New cases cover navigation, escaping, access boundaries, settings
+  round trips, empty rules and message limits.
+- Next / open questions: none for this change.
+
+---
+
 ## 2026-09-23 — v0.38.0 COLA EMBY charts and complete category rankings
 
 - Movie/series daily and weekly charts, member watch-time charts and private
