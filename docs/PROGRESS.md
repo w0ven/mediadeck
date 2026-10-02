@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-03 — bounded per-recipient viewing-report delivery
+
+- Viewing reports persist recipient snapshots, acknowledgements, safe failure
+  reasons and retry schedules. Successful recipients never re-enter the same
+  batch, including after restart, configuration edits or new registrations.
+- Temporary failures use 5/15/60-minute backoff (four attempts maximum); Telegram
+  retry-after pauses the batch. Blocked/deleted/unreachable accounts stop automatic
+  retry, and uncertain network outcomes require operator review instead of a
+  possibly duplicate photo-to-text fallback. Pending work closes after 24 hours.
+- The automation card shows partial success and recipient receipts, supports an
+  authenticated, batch-checked "retry failed only" action, and refreshes background
+  results without saving or replacing form drafts. Existing legacy batches keep
+  their success records and cannot be blindly retried against current members.
+- Verification: full local suite passed (environment-dependent tests skipped),
+  plus targeted transport, restart, cross-midnight, retry-limit and Chromium
+  interaction checks. No live broadcast is needed for deployment verification.
+- No playback, membership, registration, ranking or expiry-reminder policy changes.
+
 ## 2026-10-03 — movie and series charts ranked by watch time
 
 - Movie/series daily and weekly Telegram charts now rank by exact accumulated

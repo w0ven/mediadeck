@@ -2980,6 +2980,25 @@ async def plugin_run(plugin_id: str, user: str = Depends(_auth)) -> dict[str, An
     return {**result, "card": registry.card(plugin_id)}
 
 
+@app.post("/api/plugins/{plugin_id}/retry-failed", dependencies=[Depends(_auth)])
+async def plugin_retry_failed(plugin_id: str, payload: dict[str, Any] = Body(...),  # noqa: B008
+                              user: str = Depends(_auth)) -> dict[str, Any]:
+    registry = _plugin_or_404(plugin_id)
+    plugin = registry.get(plugin_id)
+    if not callable(getattr(plugin, "run_failed", None)):
+        raise HTTPException(400, "此任务不支持按收件人重试")
+    delivery = plugin.delivery_status()
+    batch = payload.get("batch")
+    if not isinstance(batch, str) or not batch or batch != delivery.get("batch"):
+        raise HTTPException(409, "批次已变化或为旧格式，请刷新后查看")
+    if not delivery.get("retryable"):
+        raise HTTPException(409, "没有可重试的失败对象")
+    result = await registry.run_now(plugin_id, trigger="retry_failed", retry_batch=batch)
+    app.state.members.audit(user, "plugin.retry_failed", plugin_id,
+                            f"batch={batch}; accepted={result.get('ok')}")
+    return {**result, "card": registry.card(plugin_id)}
+
+
 @app.get("/api/plugins/{plugin_id}/history", dependencies=[Depends(_auth)])
 async def plugin_history(plugin_id: str, limit: int = 20) -> list[dict[str, Any]]:
     return _plugin_or_404(plugin_id).history(plugin_id, limit)

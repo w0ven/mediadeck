@@ -299,6 +299,7 @@ class PluginRegistry:
             "hidden": bool(spec.hidden),
             "running": plugin_id in self._running,
             "last_run": last,
+            **({"delivery": plugin.delivery_status()} if hasattr(plugin, "delivery_status") else {}),
         }
 
     def cards(self, category: str | None = None) -> list[dict[str, Any]]:
@@ -313,7 +314,8 @@ class PluginRegistry:
 
     # -- execution -------------------------------------------------------------
 
-    async def run_now(self, plugin_id: str, trigger: str = "manual") -> dict[str, Any]:
+    async def run_now(self, plugin_id: str, trigger: str = "manual", *,
+                      retry_batch: str | None = None) -> dict[str, Any]:
         """Run one plugin regardless of schedule or enabled state.
 
         Enabled-state is deliberately ignored for manual runs: the point of the
@@ -323,21 +325,23 @@ class PluginRegistry:
         if plugin_id in self._running:
             return {"ok": False, "error": "already running"}
         started = time.time()
-        if trigger == "manual" and plugin.spec.background:
+        if trigger in {"manual", "retry_failed"} and plugin.spec.background:
             self._running.add(plugin_id)
-            asyncio.create_task(self._execute(plugin_id, trigger, started))
+            asyncio.create_task(self._execute(plugin_id, trigger, started, retry_batch))
             return {"ok": True, "结果": "已开始后台发送，完成后写入运行历史"}
-        return await self._execute(plugin_id, trigger, started)
+        return await self._execute(plugin_id, trigger, started, retry_batch)
 
-    async def _execute(self, plugin_id: str, trigger: str, started: float) -> dict[str, Any]:
+    async def _execute(self, plugin_id: str, trigger: str, started: float,
+                       retry_batch: str | None = None) -> dict[str, Any]:
         plugin = self._plugins[plugin_id]
         self._running.add(plugin_id)
         owner = asyncio.current_task()
         if owner is not None:
             self._active.add(owner)
         try:
-            summary = await asyncio.wait_for(
-                plugin.run(self.config(plugin_id)), timeout=RUN_TIMEOUT)
+            work = (plugin.run_failed(self.config(plugin_id), retry_batch)
+                    if retry_batch is not None else plugin.run(self.config(plugin_id)))
+            summary = await asyncio.wait_for(work, timeout=RUN_TIMEOUT)
             summary = dict(summary or {})
             ok = bool(summary.pop("ok", True))
         except asyncio.CancelledError:
@@ -394,6 +398,15 @@ class PluginRegistry:
             retry = self._last_retry.get(plugin_id)
             if retry is not None and now - retry < RETRY_INTERVAL:
                 return False
+            # A bounded report retry may cross midnight; do not make it wait
+            # for the next day's daily hour (or the next weekly report).
+            retry_due = getattr(plugin, "retry_due", None)
+            if callable(retry_due):
+                try:
+                    if retry_due(now):
+                        return True
+                except Exception:  # noqa: BLE001 - isolate a broken retry gate
+                    return False
             # Daily job: once per calendar day, at or after the given time.
             today = time.strftime("%Y-%m-%d", time.localtime(now))
             if self._last_daily.get(plugin_id) == today:
