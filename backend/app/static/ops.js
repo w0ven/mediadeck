@@ -1302,6 +1302,22 @@ function pluginField(pid, f, value) {
 /* A result the operator can check: when it ran, whether it worked, what it did
    and how long it took. A job reporting nothing is indistinguishable from a job
    that never ran, which is the failure mode that goes unnoticed for weeks. */
+function pluginResultTag(last) {
+  const partial = last?.summary?.['结果'] === '部分成功';
+  return `<span class="tag ${partial ? 'warn' : last?.ok ? 'ok' : 'bad'}">${partial ? '部分成功' : last?.ok ? '成功' : '失败'}</span>`;
+}
+
+function pluginDelivery(c) {
+  const d = c.delivery;
+  if (!d || !Object.keys(d).length) return '';
+  if (d.legacy) return `<p class="help">${esc(d.note)} 已确认送达 ${esc(d.sent)} 人。</p>`;
+  const names = {sent:'已送达',failed:'失败待处理',unknown:'结果不明',retry:'等待重试',pending:'待发送',sending:'发送中'};
+  return `<details><summary>收件人明细 · ${esc(d.batch)} · 已送达 ${Number(d.summary?.['已送达'] || 0)} 人</summary>
+    <div style="overflow:auto;max-height:360px"><table><thead><tr><th>用户</th><th>状态</th><th>尝试</th><th>原因／下次重试</th></tr></thead><tbody>
+    ${(d.recipients || []).map(r => `<tr><td>${esc(r.username)}</td><td>${esc(names[r.state] || r.state)}</td><td>${Number(r.attempts || 0)}</td><td>${esc(r.reason || '—')}${r.next_at ? ' · ' + esc(new Date(r.next_at*1000).toLocaleString()) : ''}</td></tr>`).join('')}</tbody></table></div>
+    </details>`;
+}
+
 function pluginLastRun(c) {
   const last = c.last_run;
   if (!last) return '<div class="muted">尚未运行过</div>';
@@ -1310,9 +1326,9 @@ function pluginLastRun(c) {
     `<span class="kv"><b>${esc(k)}</b>${esc(String(summary[k]))}</span>`).join('');
   return `<div class="plugin-last">
     <div>
-      ${last.ok ? '<span class="tag ok">成功</span>' : '<span class="tag bad">失败</span>'}
+      ${pluginResultTag(last)}
       <span class="muted">${esc(fmtAgeTs(last.started_at))} ·
-        ${esc(last.trigger === 'manual' ? '手动' : '定时')} ·
+        ${esc(last.trigger === 'retry_failed' ? '失败重试' : last.trigger === 'manual' ? '手动' : '定时')} ·
         ${esc(Math.round(Number(last.duration_ms || 0)))} ms</span>
     </div>
     ${kv ? `<div class="kv-row">${kv}</div>` : ''}
@@ -1320,7 +1336,7 @@ function pluginLastRun(c) {
 }
 
 function pluginCard(c) {
-  const busy = automation.busy[c.id];
+  const busy = automation.busy[c.id] || (c.id === 'viewing_report' && c.running);
   const open = automation.open[c.id];
   return `<div class="card plugin-card" data-plugin="${esc(c.id)}">
     <div class="card-head">
@@ -1344,8 +1360,10 @@ function pluginCard(c) {
         <button class="btn" data-act="run" ${busy ? 'disabled' : ''}>
           ${busy ? '运行中…' : '立即运行'}</button>
         <button class="btn sm" data-act="history">${open ? '收起历史' : '历史'}</button>
+        ${c.id === 'viewing_report' ? `<button class="btn" data-act="retry-failed" ${busy || !c.delivery?.retryable ? 'disabled' : ''}>仅重试失败对象</button><button class="btn sm" data-act="refresh-delivery">刷新结果</button>` : ''}
       </div>
       <div class="plugin-result" style="margin-top:12px">${pluginLastRun(c)}</div>
+      <div class="plugin-delivery" style="margin-top:12px">${pluginDelivery(c)}</div>
       <div class="plugin-history" data-history="${esc(c.id)}">
         ${open ? '<div class="muted">读取中…</div>' : ''}
       </div>
@@ -1363,6 +1381,11 @@ function bindPluginCard(c) {
   el.querySelector('[data-act="save"]').onclick = () => savePlugin(c);
   el.querySelector('[data-act="run"]').onclick = () => runPlugin(c);
   el.querySelector('[data-act="history"]').onclick = () => togglePluginHistory(c);
+  const retry = el.querySelector('[data-act="retry-failed"]');
+  if (retry) retry.onclick = () => retryPluginFailed(c);
+  const refresh = el.querySelector('[data-act="refresh-delivery"]');
+  if (refresh) refresh.onclick = () => refreshPluginDelivery(c);
+  if (c.id === 'viewing_report' && c.running) refreshPluginDelivery(c);
   if (automation.open[c.id]) loadPluginHistory(c.id);
 }
 
@@ -1401,7 +1424,8 @@ async function savePlugin(c, run = false) {
     if (!el.isConnected) return;
     el.querySelector('.plugin-switch span').textContent = c.enabled ? '已启用' : '已停用';
     el.querySelector('.card-head .sub').textContent = pluginScheduleText(c);
-    configFeedback(el, run ? '运行完成' : '已保存；其他草稿仍保留。');
+    configFeedback(el, run ? (c.id === 'viewing_report' ? '已开始后台运行' : '运行完成') : '已保存；其他草稿仍保留。');
+    if (run && c.id === 'viewing_report') refreshPluginDelivery(c);
     if (automation.open[c.id] && el.isConnected) loadPluginHistory(c.id);
   } catch (e) {
     if (el.isConnected) configFeedback(el, (run ? '运行失败：' : '保存失败：') + e.message + '。输入已保留，可重试。', true);
@@ -1411,7 +1435,52 @@ async function savePlugin(c, run = false) {
     buttons.forEach(button => { button.disabled = false; });
   }
 }
-function runPlugin(c) { return savePlugin(c, true); }
+async function runPlugin(c) {
+  if (c.id === 'viewing_report' && !(await deckConfirm('将运行观影报告：当日已有批次会保留成功记录；没有当日批次时将向当前绑定成员发送。仅补发失败对象请用专用按钮。继续？'))) return;
+  return savePlugin(c, true);
+}
+
+async function refreshPluginDelivery(c) {
+  const el = pluginCardEl(c.id);
+  if (!el) return;
+  clearTimeout(el._deliveryPoll);
+  try {
+    const fresh = await api(`/api/plugins/${encodeURIComponent(c.id)}`);
+    if (!el.isConnected) return;
+    Object.assign(c, fresh);
+    el.querySelector('.plugin-result').innerHTML = pluginLastRun(c);
+    const detailsOpen = el.querySelector('.plugin-delivery details')?.open;
+    el.querySelector('.plugin-delivery').innerHTML = pluginDelivery(c);
+    if (detailsOpen && el.querySelector('.plugin-delivery details')) el.querySelector('.plugin-delivery details').open = true;
+    el.querySelectorAll('[data-act="run"],[data-act="save"]').forEach(b => { b.disabled = Boolean(c.running || automation.busy[c.id]); });
+    el.querySelector('[data-act="retry-failed"]').disabled = Boolean(c.running || automation.busy[c.id] || !c.delivery?.retryable);
+    configFeedback(el, c.running ? '后台发送中，结果自动更新…' : '结果已更新；输入草稿未修改。');
+    if (c.running) el._deliveryPoll = setTimeout(() => { if (el.isConnected) refreshPluginDelivery(c); }, 2000);
+  } catch (e) {
+    if (el.isConnected) configFeedback(el, '结果刷新失败：' + e.message + '。可手动刷新，不会重复发送。', true);
+  }
+}
+
+async function retryPluginFailed(c) {
+  const el = pluginCardEl(c.id);
+  if (!el || automation.busy[c.id] || c.running || !c.delivery?.retryable) return;
+  const batch = c.delivery.batch;
+  if (!(await deckConfirm('仅重试当前批次的失败／结果不明对象，不向已确认成功者重复发送，也不会加入新用户。结果不明可能已送达，请先核实；此操作不保存表单草稿。继续？'))) return;
+  automation.busy[c.id] = true;
+  el.querySelector('[data-act="retry-failed"]').disabled = true;
+  try {
+    const r = await api(`/api/plugins/${encodeURIComponent(c.id)}/retry-failed`, {
+      method:'POST', body:JSON.stringify({batch}) });
+    if (!r.ok) throw new Error(r.error || '未开始重试');
+    Object.assign(c, r.card || {});
+    configFeedback(el, '已开始后台重试；不是已完成，结果将自动更新。');
+  } catch (e) {
+    if (el.isConnected) configFeedback(el, '重试未开始：' + e.message, true);
+  } finally {
+    automation.busy[c.id] = false;
+    if (el.isConnected) refreshPluginDelivery(c);
+  }
+}
 
 function togglePluginHistory(c) {
   const el = pluginCardEl(c.id);
@@ -1432,8 +1501,8 @@ async function loadPluginHistory(pid) {
       ? `<table><thead><tr><th>时间</th><th>结果</th><th>触发</th><th>耗时</th><th>摘要</th></tr></thead>
          <tbody>${rows.map((r) => `<tr>
            <td>${esc(fmtAgeTs(r.started_at))}</td>
-           <td>${r.ok ? '<span class="tag ok">成功</span>' : '<span class="tag bad">失败</span>'}</td>
-           <td>${esc(r.trigger === 'manual' ? '手动' : '定时')}</td>
+           <td>${pluginResultTag(r)}</td>
+           <td>${esc(r.trigger === 'retry_failed' ? '失败重试' : r.trigger === 'manual' ? '手动' : '定时')}</td>
            <td>${esc(Math.round(Number(r.duration_ms || 0)))} ms</td>
            <td class="muted">${esc(JSON.stringify(r.summary || {}))}</td>
          </tr>`).join('')}</tbody></table>`

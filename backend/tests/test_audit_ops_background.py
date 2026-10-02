@@ -250,7 +250,13 @@ async def test_partial_delivery_retries_only_unfinished_recipients(plugin_cls, t
     fail[0] = False
     ctx.store = SettingsStore(tmp_path / "settings.json")
     plugin = plugin_cls(ctx)  # reconstruct after the interrupted/failed batch
-    assert (await plugin.run(plugin.defaults()))["ok"] is True
+    if plugin_cls is ViewingReportPlugin:
+        # A bare False supplies no Telegram acknowledgement: reports now need
+        # explicit operator retry rather than automatically duplicating a send.
+        result = await plugin.run_failed(plugin.defaults(), plugin.delivery_status()['batch'])
+    else:
+        result = await plugin.run(plugin.defaults())
+    assert result["ok"] is True
     assert calls == ["one", "two", "two"]
 
 

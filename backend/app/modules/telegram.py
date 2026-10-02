@@ -54,6 +54,8 @@ from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
+from app.modules.report_delivery import CALL_DELIVERY
+from app.modules.report_delivery import failure as delivery_failure
 from app.modules.requests import RequestError
 from app.modules.settings import parse_group_interaction_chats
 from app.modules.shop import ShopError
@@ -405,6 +407,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     async def _call(self, method: str, payload: dict[str, Any] | None = None,
                     timeout: float = 20) -> Any:
         _CALL_ERROR.set('')
+        CALL_DELIVERY.set(None)
         auth_part = self._token()
         if not auth_part:
             return None
@@ -417,12 +420,15 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             body = r.json()
         except Exception as exc:  # noqa: BLE001 - surfaced through status
             # The token is in the URL, so raw exception text is not safe to keep.
+            CALL_DELIVERY.set(delivery_failure(exc=exc))
             self._record_call_error(f"{type(exc).__name__}: 请求失败")
             return None
         if not isinstance(body, dict):
+            CALL_DELIVERY.set(delivery_failure())
             self._record_call_error('Telegram 返回格式无效')
             return None
         if not body.get("ok"):
+            CALL_DELIVERY.set(delivery_failure(body))
             from app.modules.member_ops import redact
             self._record_call_error(redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
@@ -433,6 +439,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                                files: dict[str, tuple[str, bytes, str]],
                                timeout: float = 40) -> Any:
         _CALL_ERROR.set('')
+        CALL_DELIVERY.set(None)
         auth_part = self._token()
         if not auth_part:
             return None
@@ -451,11 +458,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             r = await client.post(url, data=payload, files=files, timeout=timeout)
             body = r.json()
         except Exception as exc:  # noqa: BLE001 - token lives in the URL
+            CALL_DELIVERY.set(delivery_failure(exc=exc))
             self._record_call_error(f"{type(exc).__name__}: 请求失败")
             return None
         if not isinstance(body, dict) or not body.get("ok"):
+            CALL_DELIVERY.set(delivery_failure(body))
             from app.modules.member_ops import redact
-            self._record_call_error(redact(str((body or {}).get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
+            description = body.get("description") if isinstance(body, dict) else None
+            self._record_call_error(redact(str(description or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
         self._record_call_error('')
         return body.get("result")

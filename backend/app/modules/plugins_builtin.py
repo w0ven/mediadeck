@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.modules import report_delivery
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
@@ -360,57 +361,127 @@ class ViewingReportPlugin(Plugin):
         ],
     )
 
+    def delivery_status(self) -> dict[str, Any]:
+        return report_delivery.public_status(self.ctx.state(self.spec.id))
+
+    def retry_due(self, now: float) -> bool:
+        return report_delivery.is_due(self.ctx.state(self.spec.id), now)
+
     def due_today(self, config: dict[str, Any], now: float) -> bool:
+        state = self.ctx.state(self.spec.id)
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        if str(state.get("batch", ""))[:10] == today:
+            return report_delivery.is_due(state, now)
         local = time.localtime(now)
-        if str(config.get("period") or "weekly") == "monthly":
-            return local.tm_mday == 1
-        return local.tm_wday == 0  # Monday
+        scheduled = (local.tm_mday == 1 if config.get("period") == "monthly"
+                     else local.tm_wday == 0)
+        return scheduled or report_delivery.is_due(state, now)
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
+        return await self._deliver(config)
+
+    async def run_failed(self, config: dict[str, Any], batch: str) -> dict[str, Any]:
+        return await self._deliver(config, retry_batch=batch)
+
+    async def _deliver(self, config: dict[str, Any], *,
+                       retry_batch: str | None = None) -> dict[str, Any]:
         if not _telegram_ready(self.ctx):
             return {"ok": False, "错误": "机器人未启用，无法发送报告"}
         if self.ctx.stats is None or self.ctx.members is None:
             return {"ok": False, "错误": "统计服务不可用"}
-        monthly = str(config.get("period") or "weekly") == "monthly"
-        days = 30 if monthly else 7
-        label = "月报" if monthly else "周报"
-
-        sent = empty = errors = 0
-        delivery = _delivery_state(self, config)
-        linked = list(self.ctx.members.linked_telegram())
-        for member in linked:
-            uid = str(member.get("emby_user_id") or "")
-            if not uid or uid in delivery["sent"]:
+        now = time.time()
+        today = time.strftime("%Y-%m-%d", time.localtime(now))
+        delivery = self.ctx.state(self.spec.id)
+        linked = {str(m["emby_user_id"]): m for m in self.ctx.members.linked_telegram()}
+        if retry_batch is not None:
+            if delivery.get("version") != 1 or delivery.get("batch") != retry_batch:
+                return {"ok": False, "error": "批次已变化或为旧格式，请刷新后查看"}
+        elif (str(delivery.get("batch", ""))[:10] != today
+              and not report_delivery.is_due(delivery, now)):
+            # Never reinterpret a legacy batch against today's membership.
+            delivery = report_delivery.new_batch(list(linked.values()), config, now)
+        if delivery.get("version") != 1:
+            return {"ok": False, "结果": "旧批次保留，不自动补发", "已送达": len(delivery.get("sent") or [])}
+        if retry_batch is None and now - delivery["created_at"] >= 86400:
+            for row in delivery["recipients"].values():
+                if row["state"] in {"pending", "retry", "sending"}:
+                    row.update(state="unknown" if row["state"] == "sending" else "failed",
+                               reason="自动重试窗口已结束，请核实后手动处理", next_at=0)
+            self.ctx.set_state(self.spec.id, delivery)
+            return report_delivery.summary(delivery)
+        if now < delivery.get("pause_until", 0):
+            return {"ok": False, "error": "Telegram 限流等待中，请稍后重试"}
+        config = delivery["config"]  # changing the form must not invalidate receipts
+        days = 30 if config.get("period") == "monthly" else 7
+        label = "月报" if days == 30 else "周报"
+        sent = empty = 0
+        self.ctx.set_state(self.spec.id, delivery)
+        for uid, row in delivery["recipients"].items():
+            if row["state"] == "sending":
+                row.update(state="unknown", reason="上次发送中断，结果不明；请核实后手动重试")
+                self.ctx.set_state(self.spec.id, delivery)
                 continue
+            if row["state"] == "sent":
+                continue
+            if retry_batch is None:
+                if row["state"] not in {"pending", "retry"} or now < row.get("next_at", 0):
+                    continue
+            elif row["state"] not in {"retry", "failed", "unknown"}:
+                continue
+            member = linked.get(uid)
+            if not member or str(member.get("tg_user_id")) != row["tg_user_id"]:
+                row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
+                self.ctx.set_state(self.spec.id, delivery)
+                continue
+            row["attempts"] += 1
             try:
                 detail = self.ctx.stats.member_detail(uid, days=days) or {}
                 hours, plays, total_bytes = _summarise(detail)
-            except Exception:  # noqa: BLE001 - not the same as no watch records
-                errors += 1
+                caption = self._text(label, days, hours, plays, total_bytes, detail)
+                photo = await self._poster(member, label, days, hours, plays, total_bytes, detail)
+            except Exception:  # noqa: BLE001 - no Telegram send has happened yet
+                report_delivery.record_failure(row, {"state": "retry", "reason": "报告生成失败"}, time.time())
+                self.ctx.set_state(self.spec.id, delivery)
+                continue
+            get_member = getattr(self.ctx.members, "get", None)
+            current = get_member(uid) if callable(get_member) else linked.get(uid)
+            if not current or str(current.get("tg_user_id")) != row["tg_user_id"]:
+                row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
+                self.ctx.set_state(self.spec.id, delivery)
                 continue
             if plays <= 0:
                 empty += 1
-            caption = self._text(label, days, hours, plays, total_bytes, detail)
+            row.update(state="sending", updated_at=int(time.time()))
+            self.ctx.set_state(self.spec.id, delivery)  # crash-safe: uncertain != unsent
             ok = False
-            photo = await self._poster(
-                member, label, days, hours, plays, total_bytes, detail)
-            notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
-            if photo and callable(notify_photo):
-                with contextlib.suppress(Exception):
+            token = report_delivery.CALL_DELIVERY.set(None)
+            try:
+                notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
+                if photo and callable(notify_photo):
                     ok = await notify_photo(member, photo, caption)
-            if not ok:
-                with contextlib.suppress(Exception):
+                error = report_delivery.CALL_DELIVERY.get()
+                # Only a known content rejection may fall back immediately. A
+                # lost photo ACK must not cause a duplicate text notification.
+                if not ok and (not photo or not callable(notify_photo) or
+                               (error and error.get("content_error"))):
                     ok = await self.ctx.telegram.notify_member(member, caption)
+                error = report_delivery.CALL_DELIVERY.get() or report_delivery.failure()
+            except Exception as exc:  # noqa: BLE001 - safe structured reason only
+                error = report_delivery.failure(exc=exc)
+            finally:
+                report_delivery.CALL_DELIVERY.reset(token)
             if ok:
                 sent += 1
-                delivery["sent"].append(uid)
-                self.ctx.set_state(self.spec.id, delivery)
+                row.update(state="sent", reason="", next_at=0, updated_at=int(time.time()))
             else:
-                errors += 1
-        if not errors:
-            self.ctx.set_state(self.spec.id, {})
-        return {"ok": errors == 0, "失败": errors,
-                "周期": label, "已发送": sent, "无记录仍发送": empty}
+                report_delivery.record_failure(row, error, time.time())
+                if error.get("retry_after"):
+                    delivery["pause_until"] = int(time.time() + error["retry_after"])
+            self.ctx.set_state(self.spec.id, delivery)
+            if delivery.get("pause_until", 0) > time.time():
+                break  # rate limit applies to this batch, not only one recipient
+        result = report_delivery.summary(delivery)
+        return {**result, "周期": label, "已发送": sent, "无记录仍发送": empty}
 
     @staticmethod
     def _text(label: str, days: int, hours: float, plays: int,
