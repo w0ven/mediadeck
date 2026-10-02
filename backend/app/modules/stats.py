@@ -366,7 +366,8 @@ class StatsService:
         return self._title_rows(days, limit, calendar=calendar, now=now)
 
     def _title_rows(self, days: int, limit: int, *, calendar: bool = False,
-                    now: float | None = None, kind: str | None = None) -> list[dict[str, Any]]:
+                    now: float | None = None, kind: str | None = None,
+                    watch_time: bool = False) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
         if calendar:
             since, until = ranking_bounds(days, now=now)
@@ -383,12 +384,17 @@ class StatsService:
                   "ELSE 'other:'||LOWER(COALESCE(item_type,'')) END")
         title = ("CASE WHEN LOWER(item_type)='movie' THEN item_name "
                  "ELSE COALESCE(NULLIF(series_name,''),item_name) END")
+        # Telegram's movie/series charts rank by exact watched seconds. Keep
+        # the generic popularity endpoint unchanged; play count is display-only
+        # in these charts, including ties, which use the existing stable title key.
+        order = ('secs DESC, title COLLATE BINARY ASC' if watch_time
+                 else 'plays DESC, secs DESC, title COLLATE BINARY ASC')
         rows = self._db.query(
             f"SELECT {title} AS title, MAX(item_type) AS item_type, COUNT(*) AS plays,"
             " COUNT(DISTINCT NULLIF(emby_user_id,'')) AS viewers, SUM(seconds) AS secs,"
             " SUM(bytes) AS bytes, MAX(item_id) AS item_id FROM play_events WHERE " + where +
             f" AND COALESCE({title},'')<>'' GROUP BY {family}, {title}"
-            " ORDER BY plays DESC, secs DESC, title COLLATE BINARY ASC LIMIT ?",
+            f" ORDER BY {order} LIMIT ?",
             (*args, max(1, min(limit, 200))))
         return [{
             "title": r["title"],
@@ -396,6 +402,7 @@ class StatsService:
             "item_id": str(r["item_id"] or ""),
             "plays": int(r["plays"] or 0),
             "viewers": int(r["viewers"] or 0),
+            "seconds": int(r["secs"] or 0),
             "hours": round(int(r["secs"] or 0) / 3600, 1),
             "bytes": int(r["bytes"] or 0),
         } for r in rows]
@@ -403,12 +410,12 @@ class StatsService:
     def top_titles_split(self, days: int = 1, limit: int = 10, *,
                           calendar: bool = False, now: float | None = None
                           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        """Limit each category independently; busy series cannot hide movies."""
+        """Watch-time charts per category; busy series cannot hide movies."""
         limit = max(1, min(int(limit), 200))
         now = time.time() if now is None else now
         return (
-            self._title_rows(days, limit, calendar=calendar, now=now, kind='movie'),
-            self._title_rows(days, limit, calendar=calendar, now=now, kind='show'),
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='movie', watch_time=True),
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='show', watch_time=True),
         )
 
     def title_rankings(self, days: int = 1, limit: int = 10, *,

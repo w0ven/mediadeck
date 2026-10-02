@@ -27,12 +27,12 @@ def chart(tmp_path):
     now = datetime(2026, 9, 23, 1, 30).timestamp()  # noqa: DTZ001 - host-local calendar contract
     since, until = ranking_bounds(1, now=now)
 
-    def add(title, kind='Movie', count=1, at=None, series='', user_prefix='user'):
+    def add(title, kind='Movie', count=1, at=None, series='', user_prefix='user', seconds=600):
         at = since + 3600 if at is None else at
         with db.write() as conn:
             conn.executemany('INSERT INTO play_events(emby_user_id,item_id,item_name,item_type,series_name,seconds,started_at,ended_at) '
                              'VALUES(?,?,?,?,?,?,?,?)',
-                             [(f'{user_prefix}-{i % 4}', f'{kind}-{title}', title, kind, series, 600, at, at + 600)
+                             [(f'{user_prefix}-{i % 4}', f'{kind}-{title}', title, kind, series, seconds, at, at + seconds)
                               for i in range(count)])
     yield StatsService(db), add, now, since, until
     db.close()
@@ -74,6 +74,57 @@ def test_real_shortage_remains_short_and_calendar_boundaries_exclude_future_even
     movies, shows = stats.top_titles_split(1, 10, calendar=True, now=now)
     assert [row['title'] for row in movies] == ['First', 'Second']
     assert shows == []
+
+
+@pytest.mark.parametrize('days', [1, 7])
+@pytest.mark.parametrize('kind', ['Movie', 'Episode'])
+def test_title_charts_rank_watch_time_before_limiting_not_play_count(chart, days, kind):
+    stats, add, now, _, _ = chart
+    add('Many short starts', kind, count=20, seconds=60)
+    add('Long viewing', kind, seconds=3600)
+    movies, shows = stats.top_titles_split(days, 1, calendar=True, now=now)
+    rows = movies if kind == 'Movie' else shows
+    assert [row['title'] for row in rows] == ['Long viewing']
+    assert rows[0]['seconds'] == 3600 and rows[0]['plays'] == 1
+    # The generic popularity endpoint is outside the Telegram chart change.
+    assert stats.top_titles(days, 1, calendar=True, now=now)[0]['title'] == 'Many short starts'
+
+
+def test_title_charts_use_exact_seconds_and_play_count_does_not_break_time_ties(chart):
+    stats, add, now, _, _ = chart
+    add('Shorter', count=20, seconds=3)
+    add('Longer', seconds=61)
+    rows = stats.top_titles_split(1, calendar=True, now=now)[0]
+    assert [row['title'] for row in rows] == ['Longer', 'Shorter']
+    assert rows[0]['hours'] == rows[1]['hours'] == 0.0
+    add('A equal-time title', seconds=120)
+    add('B equal-time title', count=2, seconds=60)
+    rows = stats.top_titles_split(1, calendar=True, now=now)[0]
+    assert [row['title'] for row in rows[:2]] == ['A equal-time title', 'B equal-time title']
+    assert rows[0]['seconds'] == rows[1]['seconds'] == 120
+
+
+def test_series_watch_time_accumulates_across_episodes_and_viewers(chart):
+    stats, add, now, _, _ = chart
+    add('First episode', 'Episode', count=2, series='Long series', seconds=1000)
+    add('Second episode', 'Episode', series='Long series', seconds=600, user_prefix='other')
+    add('Short episode', 'Episode', count=20, series='Many starts', seconds=60)
+    rows = stats.top_titles_split(1, calendar=True, now=now)[1]
+    assert rows[0]['title'] == 'Long series' and rows[0]['seconds'] == 2600
+    assert rows[0]['plays'] == 3 and rows[0]['viewers'] == 3
+
+
+@pytest.mark.parametrize('days', [1, 7])
+def test_title_rank_movement_uses_watch_time_for_both_periods(chart, days):
+    stats, add, now, _, _ = chart
+    since, _ = ranking_bounds(days, now=now)
+    add('A', at=since - 3600, seconds=600)
+    add('B', at=since - 3600, count=10, seconds=1)
+    add('A', at=since + 3600, seconds=400)
+    add('B', at=since + 3600, count=10, seconds=60)
+    rows = stats.title_rankings(days, now=now)[0]
+    assert [row['title'] for row in rows] == ['B', 'A']
+    assert [row['rank_delta'] for row in rows] == [1, -1]
 
 
 def test_movement_uses_previous_equal_calendar_window_with_stable_ties(chart):
@@ -148,8 +199,9 @@ def decoded(data, size):
 @pytest.mark.parametrize('weekly', [False, True])
 def test_title_posters_use_cola_brand_real_counts_and_no_padding(drawn, weekly):
     data = render_rank_poster([
-        {'title': 'A film with a long name 测试电影名称', 'item_id': 'one', 'plays': 8, 'viewers': 3},
-        {'title': 'Another film', 'plays': 3, 'viewers': 2}], [], weekly=weekly,
+        {'title': 'A film with a long name 测试电影名称', 'item_id': 'one', 'plays': 8, 'viewers': 3,
+         'seconds': 3900, 'hours': 1.1},
+        {'title': 'Another film', 'plays': 3, 'viewers': 2, 'seconds': 61, 'hours': 0.0}], [], weekly=weekly,
         when='2026-09-22', covers={'one': b'broken image'})
     decoded(data, (1200, 2400))
     assert BRAND in drawn
@@ -157,6 +209,9 @@ def test_title_posters_use_cola_brand_real_counts_and_no_padding(drawn, weekly):
     assert '电影 TOP 2' in drawn and '本期暂无剧集播放记录' in drawn
     assert '本期共 2 部 · 展示全部' in drawn and '03' not in drawn
     assert '3人 · 8次' in drawn and '新上榜' not in drawn
+    assert '1小时5分' in drawn and '1分钟' in drawn
+    assert '电影与剧集 · 按累计观看时长排序' in drawn
+    assert not any('按播放次数排序' in item for item in drawn)
     assert ('每周观影榜' if weekly else '每日观影榜') in drawn
 
 
@@ -290,3 +345,32 @@ def test_actual_bot_daily_weekly_member_charts_and_private_report_use_the_new_re
     assert len(delivered) == 8
     for photo in delivered:
         decoded(photo, (1200, 2400))
+
+
+@pytest.mark.parametrize('days', [1, 7])
+def test_bot_title_text_and_poster_share_real_watch_time_order(chart, request, monkeypatch, drawn, days):
+    stats, add, now, _, until = chart
+    add('Many starts', count=20, seconds=60, at=until - 3600)
+    add('Long', seconds=3900, at=until - 3600)
+    env = request.getfixturevalue('interaction_env')
+    env.bot._stats = stats
+    monkeypatch.setattr('app.modules.stats.time.time', lambda: now)
+    text = env.bot._rankings_text(days)
+    heat = env.bot._heat_rankings_text(days)
+    for value in (text, heat):
+        assert value.index('Long') < value.index('Many starts')
+        assert '按累计观看时长排序' in value and '播放次数仅作参考' in value
+        assert '1小时5分' in value
+    assert '观看时长: 1小时5分  播放次数: 1' in text
+    photo = asyncio.run(env.bot._rankings_poster(days))
+    decoded(photo, (1200, 2400))
+    assert drawn.index('Long') < drawn.index('Many starts')
+    assert '1小时5分' in drawn
+    assert not env.tg.calls  # rendering and formatting do not publish anything
+
+
+def test_title_duration_does_not_invent_missing_time_or_replace_exact_zero(drawn):
+    render_rank_poster([{'title': 'Unknown duration', 'plays': 1},
+                        {'title': 'Exact zero', 'plays': 1, 'seconds': 0, 'hours': 2}], [])
+    assert '时长未记录' in drawn and '0分钟' in drawn
+    assert '2小时0分' not in drawn

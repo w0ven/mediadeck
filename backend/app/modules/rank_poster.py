@@ -116,6 +116,13 @@ def _duration(row: dict[str, Any]) -> str:
     return ('≥ ' if row.get('incomplete') else '') + label
 
 
+def _title_duration(row: dict[str, Any]) -> str:
+    if row.get('seconds') is None and row.get('hours') is None:
+        return '时长未记录'
+    seconds = int(row['seconds']) if row.get('seconds') is not None else int(row['hours'] * 3600)
+    return _duration({'seconds': seconds})
+
+
 def _title_count(row: dict[str, Any]) -> str:
     plays = max(0, int(row.get('plays') or 0))
     viewers = row.get('viewers')
@@ -285,7 +292,7 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
     movies, shows = list(movies[:10]), list(shows[:10])
     poster = _Poster()
     leads = movies[:1] + shows[:1]
-    poster.header(_period_title('观影榜', weekly, days), '电影与剧集 · 按播放次数排序', when,
+    poster.header(_period_title('观影榜', weekly, days), '电影与剧集 · 按累计观看时长排序', when,
                   _heroes(leads, covers, backdrops))
     poster.draw.line((600, 567, 600, 2060), fill=(122, 132, 111, 70), width=1)
     for column, (rows, label) in enumerate(((movies, '电影'), (shows, '剧集'))):
@@ -302,7 +309,8 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
         poster.cover(covers.get(str(first.get('item_id') or '')), (x + 124, 646, 218, 327))
         for index, line in enumerate(_wrap(first.get('title') or '—', 208, 35)):
             poster.text(x + 365, 682 + 45 * index, line, 35)
-        poster.text(x + 365, 873, _title_count(first), 25)
+        poster.text(x + 365, 854, _title_duration(first), 30, GOLD)
+        poster.text(x + 365, 901, _title_count(first), 22, MUTED)
         poster.movement(x + 571, 932, first)
         poster.rule(x + 40, 996, x + 571)
         for rank, row in enumerate(rows[1:], 2):
@@ -310,13 +318,14 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
             poster.text(x + 40, y + 23, f'{rank:02d}', 35)
             poster.cover(covers.get(str(row.get('item_id') or '')), (x + 119, y, 70, 100))
             poster.text(x + 209, y + 9, _clip(row.get('title') or '—', 353, 31), 31)
-            poster.text(x + 209, y + 58, _title_count(row), 24, MUTED)
+            poster.text(x + 209, y + 47, _title_duration(row), 25, GOLD)
+            poster.text(x + 209, y + 79, _title_count(row), 20, MUTED)
             poster.movement(x + 571, y + 59, row)
             poster.rule(x + 40, y + 110, x + 571, 60)
         if len(rows) < 10:
             y = 1040 if len(rows) == 1 else 1040 + (len(rows) - 1) * 116
             poster.text(x + 300, y, f'本期共 {len(rows)} 部 · 展示全部', 24, MUTED, 'mt')
-    poster.footer('人数为去重观众；升降比较上一等长周期的同类榜单')
+    poster.footer('累计观看时长排名；人数去重；升降比较上一等长周期')
     return poster.jpeg()
 
 

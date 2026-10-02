@@ -2029,11 +2029,19 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
-    def _rankings_text(self, days: int = 1) -> str:
-        """Scheduled heat bulletin: movie/episode plays, not watch-time.
+    @staticmethod
+    def _title_watch_time(row: dict[str, Any]) -> str:
+        if row.get('seconds') is not None:
+            return duration(int(row['seconds']))
+        if row.get('hours') is not None:
+            return duration(int(row['hours'] * 3600))
+        return '时长未记录'
 
-        Watch-time is a separate post covering every member with sampled
-        seconds. days=1 is yesterday's complete local calendar day.
+    def _rankings_text(self, days: int = 1) -> str:
+        """Movie/series bulletin ranked by accumulated watched seconds.
+
+        The separate watcher chart ranks members, not titles.
+        days=1 is yesterday's complete local calendar day.
         """
         days = max(1, int(days or 1))
         stamp = ranking_stamp(days)
@@ -2053,21 +2061,23 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             except Exception:  # noqa: BLE001 - unavailable is not an empty chart
                 lines.append("排行统计暂时不可用。")
                 return "\n".join(lines)
+        if movies or shows:
+            lines.append('按累计观看时长排序；播放次数仅作参考。\n')
         if movies:
             lines.append("<b>▎电影</b>")
             for i, row in enumerate(movies, 1):
                 lines.append(
                     f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                    f"播放次数: {int(row.get('plays') or 0)}  时长: "
-                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+                    f"观看时长: {self._title_watch_time(row)}  "
+                    f"播放次数: {int(row.get('plays') or 0)}")
             lines.append("")
         if shows:
             lines.append("<b>▎电视剧</b>")
             for i, row in enumerate(shows, 1):
                 lines.append(
                     f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                    f"播放次数: {int(row.get('plays') or 0)}  时长: "
-                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+                    f"观看时长: {self._title_watch_time(row)}  "
+                    f"播放次数: {int(row.get('plays') or 0)}")
             lines.append("")
         while lines and not lines[-1]:
             lines.pop()
@@ -2792,7 +2802,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     def _heat_rankings_text(self, days: int = 1) -> str:
         days = 7 if int(days) >= 3 else 1
         window = "今日" if days <= 1 else "本周"
-        lines = [f"🎞 <b>{window}热度排行</b>\n"]
+        lines = [f"🎞 <b>{window}热度排行</b>\n", '按累计观看时长排序；播放次数仅作参考。\n']
         movies: list[dict[str, Any]] = []
         shows: list[dict[str, Any]] = []
         if self._stats is not None:
@@ -2805,15 +2815,15 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             lines.append("<b>▎电影</b>")
             for i, row in enumerate(movies, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))} · {int(row.get('plays') or 0)} 次 · "
-                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+                    f"{i}. {escape(str(row.get('title') or '—'))} · {self._title_watch_time(row)} · "
+                    f"{int(row.get('plays') or 0)} 次")
             lines.append("")
         if shows:
             lines.append("<b>▎电视剧</b>")
             for i, row in enumerate(shows, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))} · {int(row.get('plays') or 0)} 次 · "
-                    f"{duration(int((row.get('hours') or 0) * 3600))}")
+                    f"{i}. {escape(str(row.get('title') or '—'))} · {self._title_watch_time(row)} · "
+                    f"{int(row.get('plays') or 0)} 次")
         while lines and not lines[-1]:
             lines.pop()
         return "\n".join(lines)
