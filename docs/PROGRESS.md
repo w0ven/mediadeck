@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-03 — movie and series charts ranked by watch time
+
+- Movie/series daily and weekly Telegram charts now rank by exact accumulated
+  watched seconds before applying each category's limit. Play counts remain
+  auxiliary display data and no longer influence even equal-time ties.
+- Previous-period movement uses the same duration ordering. Calendar windows,
+  category isolation and deterministic title-name ties are unchanged.
+- Posters and both text representations lead with recorded watch duration;
+  exact seconds avoid rounded-hour drift and missing time is not fabricated.
+  The existing visual theme, chart layout and ancillary counts remain intact.
+- User watch-time rankings, generic popularity statistics, viewing records,
+  collection logic, scheduler configuration and notification targets are unchanged.
+- Validation: 2160 tests passed, 56 skipped; Ruff and diff checks passed.
+  Regression cases cover frequent short starts versus sustained viewing, both
+  categories and periods, exact-second ties, series aggregation, movement and
+  real Bot text/poster agreement without sending notifications.
+- Next / open questions: none for this change.
+
+---
+
 ## 2026-10-02 — traceable linked-membership task results
 
 - The existing Telegram progress card now identifies deleted accounts and the
