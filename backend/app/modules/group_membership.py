@@ -92,6 +92,33 @@ def presence(row: Any, uid: str) -> str:
     return 'unknown'
 
 
+def result_counts(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts = {'deleted': 0, 'kept': 0, 'cancelled': 0, 'failed_retained': 0,
+              'unknown': 0, 'noncompliant': 0}
+    for row in rows:
+        action = row.get('action') or 'kept'
+        counts[action if action in ('deleted', 'cancelled', 'failed_retained') else 'kept'] += 1
+        counts['unknown'] += row.get('state') == 'unknown'
+        counts['noncompliant'] += row.get('state') == 'absent' and action == 'detected'
+    return counts
+
+
+def result_reason(row: dict[str, Any]) -> str:
+    """Describe saved evidence, not an inferred leave event or raw transport error."""
+    if row.get('action') == 'cancelled':
+        return '账号绑定、规则或执行前复核条件变化，已取消删除'
+    missing = [str(t.get('title') or t.get('chat_id') or '关联目标')
+               for t in row.get('targets') or [] if t.get('state') == 'absent']
+    if row.get('action') == 'failed_retained':
+        return '删除未确认成功，本地账号保留' + ('；未满足：' + '、'.join(missing) if missing else '')
+    if row.get('state') == 'absent':
+        return '未加入/未关注：' + '、'.join(missing) if missing else '关联群组/频道要求未满足'
+    if row.get('state') == 'unknown':
+        return '成员状态或管理员身份无法核实，不作为删除依据'
+    return {'present': '所有启用的关联项均已满足', 'exempt': 'Deck/Emby管理员豁免',
+            'unbound': '未绑定TG，不执行成员删除'}.get(row.get('state'), '未执行删除')
+
+
 class GroupMembership:
     def __init__(self, bot: Any) -> None:
         self.bot = bot
@@ -344,7 +371,12 @@ class GroupMembership:
             return row
 
     def status(self) -> dict[str, Any]:
-        return copy.deepcopy(self._latest)
+        latest = copy.deepcopy(self._latest)
+        rows = latest.get('rows') or []
+        latest['counts'] = result_counts(rows)
+        for row in rows:
+            row['reason'] = result_reason(row)
+        return latest
 
     def start_scan(self, source: str = 'manual') -> dict[str, Any]:
         if not self.bot.enabled or not any(t['enabled'] for t in self.rules()['targets']):
@@ -363,24 +395,57 @@ class GroupMembership:
         total = int(latest.get('total') or 0)
         processed = int(latest.get('processed') or 0)
         rows = latest.get('rows') or []
-        counts: dict[str, int] = {}
-        for row in rows:
-            action = str((row or {}).get('action') or 'kept')
-            counts[action] = counts.get(action, 0) + 1
+        counts = result_counts(rows)
         current = (latest.get('current') or {}).get('username') or ''
         if latest.get('running'):
             stage = '开始运行…' if processed == 0 else f'运行中 {processed}/{total}'
         elif latest.get('cancelled'):
             stage = '已取消'
+        elif latest.get('interrupted'):
+            stage = '已中断'
         elif latest.get('error'):
             stage = '失败：' + str(latest.get('error'))
         else:
             stage = '已完成'
-        extra = f'\n当前：{escape(str(current))}' if current else ''
-        return (f'⚑ <b>关联群组/频道成员检测</b>\n{stage}{extra}\n'
-                f'已核 {processed}/{total} · 删除 {counts.get("deleted", 0)} · '
-                f'保留 {counts.get("kept", 0) + counts.get("detected", 0)} · '
-                f'取消 {counts.get("cancelled", 0)}')
+        def safe(value: Any, limit: int) -> str:
+            text = ' '.join(str(value or '').split())
+            return escape(text[:limit] + ('…' if len(text) > limit else ''))
+
+        extra = f'\n当前：{safe(current, 120)}' if current else ''
+        text = (f'⚑ <b>关联群组/频道成员检测</b>\n{safe(stage, 120)}{extra}\n'
+                f'已核 {processed}/{total} · 删除 {counts["deleted"]} · '
+                f'保留 {counts["kept"]} · 取消 {counts["cancelled"]} · '
+                f'失败保留 {counts["failed_retained"]}\n'
+                f'无法核实 {counts["unknown"]} · 不合规仅检测 {counts["noncompliant"]}')
+        if latest.get('started_at'):
+            elapsed = max(0, int((latest.get('finished_at') or time.time()) - latest['started_at']))
+            text += f'\n耗时 {elapsed} 秒'
+        groups = [('deleted', '已删除账号'), ('failed_retained', '删除失败，本地保留'),
+                  ('cancelled', '取消删除'), ('detected', '不合规，仅检测未删除')]
+        detailed = [row for action, _ in groups for row in rows
+                    if row.get('action') == action and (action != 'detected' or row.get('state') == 'absent')]
+        shown = 0
+        for action, title in groups:
+            matching = [row for row in detailed if row.get('action') == action]
+            if not matching:
+                continue
+            heading = f'\n\n<b>{title}（{len(matching)}）</b>'
+            added = False
+            for row in matching:
+                name = safe(row.get('username') or row.get('user_id') or '未命名账号', 120)
+                line = f'\n• <b>{name}</b>：{safe(result_reason(row), 300)}'
+                # Reserve space for explicit overflow and the full-results locator.
+                # Bound the raw HTML as well as visible text; never split entities/tags.
+                if len(text) + len(heading if not added else '') + len(line) > 3500:
+                    break
+                text += (heading if not added else '') + line
+                shown += 1
+                added = True
+        if len(detailed) > shown:
+            text += f'\n\n另有 {len(detailed) - shown} 条处理明细，群消息未展开。'
+        if not latest.get('running') and not counts['deleted']:
+            text += '\n本次未删除账号。'
+        return text + '\n\n完整逐人结果：面板 → 群组核查（可筛选已删除/失败/取消）'
 
     async def _announce(self) -> None:
         post = getattr(self.bot, 'post_job_progress', None)

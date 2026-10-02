@@ -2,6 +2,25 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-02 — traceable linked-membership task results
+
+- The existing Telegram progress card now identifies deleted accounts and the
+  saved unmet-chat evidence. Failed, cancelled and detection-only outcomes are
+  reported separately, with duration and explicit overflow/full-results guidance.
+  Group cards do not add Telegram user identifiers or raw transport errors.
+- The authenticated results page prioritizes deleted/failed/cancelled rows and
+  supports outcome filters and account/Telegram-ID search. Saved legacy results
+  gain derived explanations without rewriting history or repeating a scan.
+- Membership requirements, administrator exemptions, final deletion rechecks,
+  target scope and notification recipients are unchanged.
+- Validation: 2149 tests passed, 56 skipped; Ruff and JavaScript syntax checks
+  passed. Browser checks cover sorting, all result filters and search. New tests
+  cover edited completion cards, failure retention, detection-only results,
+  historical reports, HTML escaping, message limits and interrupted tasks.
+- Next / open questions: none for this change.
+
+---
+
 ## 2026-10-01 — compact playback lines and separate routing help
 
 - Playback lines keep their short operator note, live playback count and node

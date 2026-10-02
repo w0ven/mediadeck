@@ -1148,7 +1148,9 @@ async function showMemberInvites(id, username) {
 PAGES.tggroup = async (context = pageContext('tggroup')) => {
   $('#view').innerHTML = `${card('群组与频道成员检测','所有启用关联项都必须满足；仅核查Deck已绑定TG会员，不枚举群/频道全员', `<div class="card-body">
     <div class="toolbar"><button class="btn" onclick="go('tgbot?section=membership')">关联设置</button><button class="btn primary" id="gm-scan">开始检测并按开关处理</button><span id="gm-scan-state" role="status"></span></div>
-    <p class="help" id="gm-scan-policy"></p><div id="gm-scan-progress"></div><div id="gm-scan-results"></div><div id="gm-event-result"></div></div>`)}
+    <p class="help" id="gm-scan-policy"></p><div id="gm-scan-progress"></div><div id="gm-scan-summary" role="status"></div>
+    <div class="toolbar"><label for="gm-result-filter">结果筛选</label><select id="gm-result-filter"><option value="all">全部结果</option><option value="deleted">已删除</option><option value="failed_retained">删除失败</option><option value="cancelled">取消删除</option><option value="noncompliant">不合规，未删除</option><option value="unknown">无法核实</option></select><input id="gm-result-search" aria-label="搜索账号或TG ID" placeholder="搜索账号或TG ID"></div>
+    <div id="gm-scan-results"></div><div id="gm-event-result"></div></div>`)}
     <details><summary>旧注册要求群核查（只报告，保持原行为）</summary>${card('群组核查','只检查原require_group，不执行本次关联删除规则',`<div class="card-body"><button class="btn" id="ga-run">开始旧核查</button><span id="ga-status"></span><div id="ga-result"></div></div>`)}</details>`;
   bindAsyncButton('ga-run', runGroupAudit);
   let data = null;
@@ -1159,10 +1161,15 @@ PAGES.tggroup = async (context = pageContext('tggroup')) => {
     const scan=value.scan||{}, rows=scan.rows||[], on=value.rules?.delete_enabled;
     $('#gm-scan-policy').textContent=on?'删除开关已开启：包括未观测离群的存量会员，明确不符合时立即再次核实并删除本人。仅Deck/Emby管理员豁免，白名单适用；历史保留、不连带。':'删除开关关闭：手动/定时只检测，不删除账号。查询未知始终保留账号。';
     $('#gm-scan').disabled=!!scan.running;
-    $('#gm-scan-state').textContent=scan.running?(scan.current?(scan.current.action==='rechecking'?'执行前复核：':'正在检测：')+scan.current.username:'检测进行中'):scan.id?(scan.cancelled||scan.interrupted?'已中止':'检测已结束'):'尚未检测';
+    $('#gm-scan-state').textContent=scan.running?(scan.current?(scan.current.action==='rechecking'?'执行前复核：':'正在检测：')+scan.current.username:'检测进行中'):scan.id?(scan.error?'检测异常':scan.cancelled||scan.interrupted?'已中止':'检测已结束'):'尚未检测';
     const counts=Object.keys(labels).map(key=>`${labels[key]} ${rows.filter(r=>r.state===key).length}`).join(' · ');
     $('#gm-scan-progress').innerHTML=`<p>${esc(counts)}</p><p>进度 ${Number(scan.processed||0)} / ${Number(scan.total||0)} ${scan.started_at?'· 开始于 '+esc(new Date(scan.started_at*1000).toLocaleString()):''}</p>${scan.running?`<progress max="${Math.max(1,Number(scan.total||0))}" value="${Number(scan.processed||0)}" style="width:100%"></progress>`:''}${scan.error?`<p class="danger-text">检测异常：${esc(scan.error)}；未完成账号保持原状</p>`:''}`;
-    $('#gm-scan-results').innerHTML=rows.length?`<div class="table-wrap"><table><thead><tr><th>账号 / TG</th><th>用户组</th><th>逐项核查</th><th>检测结果</th><th>删除动作</th></tr></thead><tbody>${rows.map(row=>`<tr><td><b>${esc(row.username)}</b><small class="muted"> ${esc(row.tg_user_id||'未绑定')}</small></td><td>${esc(row.group_id==='whitelist'?'💠 白名单':row.group_id)}</td><td>${(row.targets||[]).map(t=>`${esc(t.title||t.chat_id)}：${esc(labels[t.state]||'无法核实')}`).join('<br>')}</td><td>${esc(labels[row.state]||'无法核实')}</td><td>${esc(actions[row.action]||row.action||'未删除')}</td></tr>`).join('')}</tbody></table></div>`:'<div class="empty">尚无成员检测结果</div>';
+    const actionCount=action=>rows.filter(r=>r.action===action).length;
+    $('#gm-scan-summary').textContent=`处理结果：已删除 ${actionCount('deleted')} · 保留 ${rows.filter(r=>!['deleted','failed_retained','cancelled'].includes(r.action)).length} · 取消 ${actionCount('cancelled')} · 失败保留 ${actionCount('failed_retained')}；已删除、失败和取消记录优先展示。`;
+    const filter=$('#gm-result-filter').value, query=$('#gm-result-search').value.trim().toLowerCase();
+    const priority=row=>row.action==='deleted'?0:row.action==='failed_retained'?1:row.action==='cancelled'?2:row.state==='absent'?3:row.state==='unknown'?4:5;
+    const visible=rows.filter(row=>(filter==='all'||(filter==='noncompliant'?row.state==='absent'&&row.action==='detected':filter==='unknown'?row.state==='unknown':row.action===filter))&&(!query||[row.username,row.tg_user_id,row.user_id].some(x=>String(x||'').toLowerCase().includes(query)))).sort((a,b)=>priority(a)-priority(b));
+    $('#gm-scan-results').innerHTML=visible.length?`<p class="muted">显示 ${visible.length} / ${rows.length} 条结果</p><div class="table-wrap"><table><thead><tr><th>账号 / TG</th><th>用户组</th><th>逐项核查</th><th>检测结果 / 原因</th><th>删除动作</th></tr></thead><tbody>${visible.map(row=>`<tr><td><b>${esc(row.username||row.user_id||'未命名账号')}</b><small class="muted"> ${esc(row.tg_user_id||'未绑定')}</small></td><td>${esc(row.group_id==='whitelist'?'💠 白名单':row.group_id)}</td><td>${(row.targets||[]).map(t=>`${esc(t.title||t.chat_id)}：${esc(labels[t.state]||'无法核实')}`).join('<br>')}</td><td>${esc(labels[row.state]||'无法核实')}<small class="muted"> ${esc(row.reason||'')}</small></td><td>${esc(actions[row.action]||row.action||'未删除')}</td></tr>`).join('')}</tbody></table></div>`:rows.length?'<div class="empty">没有符合当前筛选或搜索的结果</div>':'<div class="empty">尚无成员检测结果</div>';
     const event=value.last_event;
     $('#gm-event-result').textContent=event?'最近事件处理：'+event.username+' · '+(labels[event.state]||'无法核实')+' · '+(actions[event.action]||event.action):'尚无离群事件处理记录；旧通知不会迁移为删除任务。';
   };
@@ -1176,6 +1183,8 @@ PAGES.tggroup = async (context = pageContext('tggroup')) => {
     try{await api('/api/telegram/membership/scan',{method:'POST'});if(context.isCurrent())await refresh();}
     catch(err){if(context.isCurrent()){$('#gm-scan-state').textContent=err.message;$('#gm-scan').disabled=false;}}
   };
+  $('#gm-result-filter').onchange=()=>{if(data)render(data);};
+  $('#gm-result-search').oninput=()=>{if(data)render(data);};
   await refresh();
 };
 async function runGroupAudit() {

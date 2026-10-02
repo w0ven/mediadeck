@@ -19,7 +19,7 @@ def api(request):
 
 
 def test_formal_settings_dirty_permissions_save_and_scan_results(api, tmp_path):
-    client, _bot, state = api
+    client, bot, state = api
     static = Path(__file__).parents[1] / 'app/static'
     server = ThreadingHTTPServer(('127.0.0.1', 0), functools.partial(SimpleHTTPRequestHandler, directory=str(static)))
     thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -107,6 +107,39 @@ def test_formal_settings_dirty_permissions_save_and_scan_results(api, tmp_path):
             state.block_user = False
             expect(page.locator('#gm-scan-state')).to_have_text('检测已结束')
             expect(page.locator('#gm-scan-results')).to_contain_text('已删除本人')
+            assert state.deleted == ['group-test-user']
+            expect(page.locator('#gm-scan-summary')).to_contain_text('已删除 1')
+            expect(page.locator('#gm-scan-results')).to_contain_text('未加入/未关注：Actual <channel>')
+            # Saved outcomes stay inspectable without repeating a destructive scan.
+            bot.membership._latest['rows'].insert(0, {'username': 'KeptFirst', 'user_id': 'kept',
+                'tg_user_id': '9100', 'state': 'present', 'action': 'detected', 'targets': []})
+            bot.membership._latest['rows'].extend([
+                {'username': 'FailedUser', 'user_id': 'failed', 'tg_user_id': '9101',
+                 'state': 'absent', 'action': 'failed_retained', 'targets': []},
+                {'username': 'CancelledUser', 'user_id': 'cancelled', 'tg_user_id': '9102',
+                 'state': 'present', 'action': 'cancelled', 'targets': []},
+                {'username': 'UnknownUser', 'user_id': 'unknown', 'tg_user_id': '9103',
+                 'state': 'unknown', 'action': 'detected', 'targets': []},
+                {'username': 'DetectedUser', 'user_id': 'detected', 'tg_user_id': '9104',
+                 'state': 'absent', 'action': 'detected', 'targets': []}])
+            page.reload(wait_until='domcontentloaded')
+            page.wait_for_function('state.pageReady')
+            expect(page.locator('#gm-scan-results tbody tr').first).to_contain_text('GroupUser')
+            expect(page.locator('#gm-scan-summary')).to_contain_text('失败保留 1')
+            for value, name in [('deleted', 'GroupUser'), ('failed_retained', 'FailedUser'),
+                                ('cancelled', 'CancelledUser'), ('unknown', 'UnknownUser'),
+                                ('noncompliant', 'DetectedUser')]:
+                page.locator('#gm-result-filter').select_option(value)
+                expect(page.locator('#gm-scan-results tbody tr')).to_have_count(1)
+                expect(page.locator('#gm-scan-results')).to_contain_text(name)
+            page.locator('#gm-result-filter').select_option('all')
+            page.locator('#gm-result-search').fill('9101')
+            expect(page.locator('#gm-scan-results tbody tr')).to_have_count(1)
+            expect(page.locator('#gm-scan-results')).to_contain_text('FailedUser')
+            page.locator('#gm-result-search').fill('no-such-account')
+            expect(page.locator('#gm-scan-results')).to_contain_text('没有符合当前筛选或搜索的结果')
+            page.locator('#gm-result-search').fill('')
+            page.locator('#gm-result-filter').select_option('deleted')
             assert state.deleted == ['group-test-user']
             page.screenshot(path=str(artifacts / 'membership-scan-results.png'), full_page=True)
             (artifacts / 'membership-browser-evidence.json').write_text(json.dumps({
