@@ -283,8 +283,9 @@ class LiveEmby:
           from the token alone and must be identified by the ``DeviceId``
           the playback request carried.
 
-        Anything still ambiguous returns None and the caller signs uncapped:
-        guessing would apply one member's cap to another member's stream.
+        Anything still ambiguous returns None; playback admission refuses an
+        unresolved caller. Guessing would apply one member's cap or punishment
+        to another member's stream. DeviceId itself is not a secret credential.
         """
         token = (token or "").strip()
         if not token:
@@ -306,16 +307,17 @@ class LiveEmby:
         if not isinstance(sessions, list):
             return None
 
-        # Exact match first: it is the only branch that stays correct when the
-        # credential can see more than its own sessions.
+        # A shared credential may see several users with the same DeviceId.
+        # List order cannot authenticate one of them; every exact match must
+        # agree on one owner. Same-owner duplicate sessions remain resolvable.
         if device_id:
-            for session in sessions:
-                if not isinstance(session, dict):
-                    continue
-                if str(session.get("DeviceId") or "") == device_id:
-                    uid = session.get("UserId")
-                    if uid:
-                        return str(uid)
+            matches = [session for session in sessions if isinstance(session, dict)
+                       and str(session.get("DeviceId") or "") == device_id]
+            if matches:
+                owners = {str(session["UserId"]) for session in matches if session.get("UserId")}
+                if len(owners) == 1 and all(session.get("UserId") for session in matches):
+                    return owners.pop()
+                return None
 
         uids = {
             str(session["UserId"]) for session in sessions
@@ -440,6 +442,11 @@ class LiveEmby:
         async with self._client(timeout, verify) as client:
             r = await client.request(method, f"{base}/emby/Items/{quote(item, safe='')}/PlaybackInfo",
                                      headers=forwarded, params=query, json=payload)
+            # HEAD has no representation body, including successful responses.
+            # Preserve its status without inventing a PlaySessionId or parsing
+            # empty JSON. The admission layer still guards this entrance.
+            if method.upper() == "HEAD":
+                return r.status_code, {}
             try:
                 data = r.json()
             except ValueError:

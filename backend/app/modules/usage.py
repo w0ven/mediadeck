@@ -159,6 +159,8 @@ class UsageSampler:
         # This is a safety net for traffic that never hits the panel edge;
         # admission refusal on the stream path is the actual guarantee.
         self._pending_kicks: list[tuple[str, str]] = []
+        self.concurrency_handler: Any = None
+        self._concurrency_kicks: set[tuple[str, str]] = set()
         # Clients that ignore Playback/Stop would otherwise be retried every
         # tick (~5s), hammering Emby session writes. Back off per session id.
         self._kick_failures: dict[str, int] = {}
@@ -482,6 +484,7 @@ class UsageSampler:
                     continue
                 queued.add(sid)
                 self._pending_kicks.append((sid, user_id))
+                self._concurrency_kicks.add((sid, user_id))
 
     # -- enforcement hooks ---------------------------------------------------
     async def _kick_overflow_streams(self) -> int:
@@ -489,7 +492,10 @@ class UsageSampler:
         now = time.time()
         for sid, user_id in self._pending_kicks:
             try:
-                stopped = await self._emby.stop_session(sid, "同时播放路数已达上限")
+                if self.concurrency_handler and (sid, user_id) in self._concurrency_kicks:
+                    stopped = await self.concurrency_handler(user_id, sid)
+                else:
+                    stopped = await self._emby.stop_session(sid, "同时播放路数已达上限")
             except Exception:  # noqa: BLE001 - a flaky node must not abort the rest
                 stopped = False
             if stopped:
@@ -502,6 +508,7 @@ class UsageSampler:
             await run_usage_io(self._members.audit,
                                "system", "stream.kick", user_id, f"session={sid}")
         self._pending_kicks = []
+        self._concurrency_kicks.clear()
         return kicked
 
     async def _enforce_exhausted(self, user_ids: list[str]) -> int:

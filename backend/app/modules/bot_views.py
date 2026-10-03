@@ -96,8 +96,6 @@ def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
     remaining = ('不限' if not quota else bytes_label(quota) if no_records else
                  bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
     lines = [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
-    if measured and (sample.get('coverage') or {}).get('degraded'):
-        lines.append('⚠ 数据不完整')
     return lines
 
 

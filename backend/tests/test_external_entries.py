@@ -61,7 +61,10 @@ def client():
 def entry_headers(entry_id="friend-a", token="client-emby-token"):
     entry = next(e for e in app.state.settings_service.integration_config()["external_entries"]
                  if e["id"] == entry_id)
-    return {ENTRY_HEADER: entry_id, KEY_HEADER: entry["proxy_key"], "X-Emby-Token": token}
+    # Limited accounts require device evidence (or an already bound play id),
+    # not merely a token and a guessed existing SessionId.
+    return {ENTRY_HEADER: entry_id, KEY_HEADER: entry["proxy_key"], "X-Emby-Token": token,
+            "X-Emby-Device-Id": "entry-client"}
 
 
 def request(client, headers, path=PATH, method="GET"):

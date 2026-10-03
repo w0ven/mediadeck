@@ -73,7 +73,9 @@ class MeasuredMeteringService:
                  ) -> None:
         self._db = db
         self._tag_to_user = tag_to_user or dict
-        self._expected_nodes = expected_nodes or list
+        # A supplied provider is authoritative, including an empty inventory.
+        # Only standalone callers without an inventory infer nodes from reports.
+        self._expected_nodes = expected_nodes
 
     # -- ingest --------------------------------------------------------------
     def ingest(self, envelope: dict[str, Any]) -> dict[str, Any]:
@@ -421,13 +423,11 @@ class MeasuredMeteringService:
             "ORDER BY observed_at, updated_at"
         )
         by_name = {r["node"]: r for r in rows}
-        expected = list(self._expected_nodes() or [])
-        names = list(expected) if expected else list(by_name)
-        # A previously reporting node remains visible: disabling scheduling
-        # does not prove old direct links or established connections ended.
-        for name in by_name:
-            if name not in names:
-                names.append(name)
+        # Coverage describes the current enabled inventory, not every node
+        # that has ever reported. Retired-node bytes and ingest watermarks stay
+        # in the ledger; only the current health expectation changes.
+        expected = (self._expected_nodes() or []) if self._expected_nodes is not None else by_name
+        names = list(dict.fromkeys(expected))
         out = []
         for name in names:
             row = by_name.get(name)

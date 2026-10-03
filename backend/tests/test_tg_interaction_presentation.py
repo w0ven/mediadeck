@@ -178,7 +178,7 @@ def test_card_has_compact_sections_and_truthful_unknown(env, chat, used):
     text = next(p['text'] for m, p in env.tg.calls if m == 'sendMessage')
     for section in ('📊 <b>本月流量</b>', '⚡ <b>带宽</b>', '🎬 <b>观看记录</b>', '💰 <b>积分：50</b>'):
         assert section in text
-    assert '数据不完整' in text
+    assert '数据不完整' not in text
     for forbidden in ('来源', '采集', '更新于', 'hidden-node', '这是本人', '请选择', '《'):
         assert forbidden not in text
     if used is None:

@@ -111,7 +111,7 @@ def test_group_measurement_unknown_is_not_zero_or_legacy_estimate(env, used):
     env.members.add_traffic('u1', 987654)
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
-    assert '本月流量' in text and '数据不完整' in text
+    assert '本月流量' in text and '数据不完整' not in text
     assert '来源' not in text and 'private-node-label' not in text
     assert '987654' not in text and '估算' not in text
     if used is None:
