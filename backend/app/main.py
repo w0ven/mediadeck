@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import secrets
 import threading
@@ -71,6 +72,8 @@ from app.modules.provisioning import (
 )
 from app.modules.registration import RegistrationService
 from app.modules.requests import RequestError, RequestService, parse_status
+from app.modules.restriction_http import login_request
+from app.modules.restrictions import RestrictionService, is_web_client
 from app.modules.scheduler import PROBE_INTERVAL, Scheduler
 from app.modules.settings import SettingsService
 from app.modules.sharing import SharingDetector
@@ -78,7 +81,7 @@ from app.modules.shop import ShopError, ShopService
 from app.modules.signing import user_tag
 from app.modules.stats import StatsService
 from app.modules.storage import MockStorage, StorageManager
-from app.modules.streams import StreamAdmission
+from app.modules.streams import StreamAdmission, matching_sessions
 from app.modules.tasks import MockTasks, TasksReader
 from app.modules.telegram import TelegramBot
 from app.modules.tmdb import TmdbClient
@@ -473,6 +476,18 @@ async def _startup() -> None:
         on_password_changed=lambda: app.state.cache.drop_prefix('panelauth:'),
         on_member_changed=_telegram_member_changed)
     app.state.telegram.start()
+    app.state.restrictions = RestrictionService(
+        app.state.db, store, app.state.members, app.state.emby,
+        app.state.telegram, app.state.settings_service.telegram_config)
+    app.state.usage.concurrency_handler = app.state.restrictions.sampled_concurrency
+
+    async def restriction_notice_loop() -> None:
+        while True:
+            with contextlib.suppress(Exception):
+                await app.state.restrictions.deliver()
+            await asyncio.sleep(5)
+
+    app.state.restriction_notice_task = asyncio.create_task(restriction_notice_loop())
 
     # ---- plugins ---------------------------------------------------------
     # Everything that used to be a bespoke background loop is a plugin now.
@@ -567,7 +582,7 @@ async def _startup() -> None:
 async def _shutdown() -> None:
     """Join background writers before releasing their shared database."""
     tasks = [getattr(app.state, name, None) for name in
-             ("usage_task", "probe_task", "intake_prime_task")]
+             ("usage_task", "probe_task", "intake_prime_task", "restriction_notice_task")]
     tasks = [task for task in tasks if task is not None]
     for task in tasks:
         task.cancel()
@@ -1408,6 +1423,103 @@ async def enroll_script(token: str) -> PlainTextResponse:
                              media_type="text/x-shellscript")
 
 
+async def _restrict_concurrency(uid: str, admission: Any) -> None:
+    if not getattr(admission, "punishable", False):
+        return
+    async def confirm():
+        return await app.state.streams.confirm_violation(admission)
+    # A failed sanction must never turn the refused playback into a URL.
+    with contextlib.suppress(Exception):
+        await app.state.restrictions.apply("concurrency", uid, confirm)
+
+
+async def _restrict_web_playback(uid: str, request: Request, query: dict[str, str]) -> None:
+    service = app.state.restrictions
+    if not service.config()["web_play"]["enabled"]:
+        return
+    device = caller_device(request.headers, query)
+    sid = query.get("SessionId", query.get("sessionId", ""))
+    profile = caller_session_profile(request.headers, query)
+    play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
+    if not device:
+        bound = app.state.db.query("SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?", (uid, play_id)) if play_id else []
+        if len(bound) != 1 or (sid and sid != bound[0]["session_id"]):
+            raise HTTPException(503, "playback client identity unavailable")
+        sid = bound[0]["session_id"]
+
+    async def confirm():
+        rows = await app.state.emby.active_sessions_raw()
+        matched = matching_sessions(rows, uid, device, sid, profile)
+        if len(matched) != 1:
+            raise HTTPException(503, "playback client identity unavailable")
+        session = matched[0]
+        if not is_web_client(session):
+            return None
+        return {"session_id": str(session["Id"]), "playing": bool(session.get("NowPlayingItem"))}
+    try:
+        evidence = await confirm()
+        if not evidence:
+            return
+        user = await service.user(uid)
+        if not user:
+            raise HTTPException(503, "account verification unavailable")
+        if service.exempt(uid, user):
+            return
+        await service.apply("web_play", uid, confirm)
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - unverifiable identity never authorizes punishment
+        raise HTTPException(503, "web playback verification unavailable") from None
+    raise HTTPException(403, "web playback restricted", headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/api/access/emby-login", include_in_schema=False)
+@app.post("/api/access/emby-login/{user_id}", include_in_schema=False)
+async def restricted_emby_login(request: Request, user_id: str = "") -> Response:
+    try:
+        payload = await request.json()
+    except ValueError:
+        raise HTTPException(400, "invalid authentication body") from None
+    if not isinstance(payload, dict):
+        raise HTTPException(400, "invalid authentication body")
+    try:
+        code, data = await login_request(app.state.emby, request.headers,
+                                         dict(request.query_params), payload, user_id)
+    except Exception:  # noqa: BLE001 - do not disclose credential-bearing upstream errors
+        raise HTTPException(503, "authentication unavailable") from None
+    headers = {"Cache-Control": "private, no-store"}
+    # A failed password attempt or unauthenticated visit never creates an event.
+    if not 200 <= code < 300:
+        return JSONResponse(data, status_code=code, headers=headers)
+    service = app.state.restrictions
+    session = data.get("SessionInfo") or {}
+    user = data.get("User") or {}
+    uid = str(user.get("Id") or "")
+    if service.config()["web_login"]["enabled"] and is_web_client(session):
+        if not uid or str(session.get("UserId") or "") != uid:
+            raise HTTPException(503, "authenticated identity unavailable", headers=headers)
+        try:
+            live_user = await service.user(uid)
+            if not live_user:
+                raise HTTPException(503, "account verification unavailable", headers=headers)
+            if service.exempt(uid, live_user):
+                return JSONResponse(data, status_code=code, headers=headers)
+            async def confirm():
+                # Exact authenticated upstream login identity, not body UserId.
+                rows = await app.state.emby.active_sessions_raw()
+                matched = [s for s in rows if str(s.get("Id") or "") == str(session.get("Id") or "")
+                           and str(s.get("UserId") or "") == uid and is_web_client(s)]
+                return {"session_id": str(session["Id"]), "playing": bool(matched[0].get("NowPlayingItem"))} if len(matched) == 1 else None
+            await service.apply("web_login", uid, confirm)
+        except HTTPException:
+            raise
+        except Exception:  # noqa: BLE001 - fail closed without disclosing credentials
+            raise HTTPException(503, "login restriction verification unavailable", headers=headers) from None
+        # Never expose the newly issued AccessToken of a denied browser login.
+        raise HTTPException(403, "web login restricted", headers=headers)
+    return JSONResponse(data, status_code=code, headers=headers)
+
+
 async def _admit_playback(request: Request, item_id: str,
                           query: dict[str, str], *, reserve: bool = True) -> str:
     token = caller_token(request.headers, query)
@@ -1422,6 +1534,7 @@ async def _admit_playback(request: Request, item_id: str,
         raise HTTPException(503, "playback authentication unavailable", headers=headers) from None
     if not uid or not permitted:
         raise HTTPException(403, "playback access denied", headers=headers)
+    await _restrict_web_playback(uid, request, query)
     if not reserve:
         return uid
     admission = await app.state.streams.inspect(
@@ -1430,6 +1543,7 @@ async def _admit_playback(request: Request, item_id: str,
         play_id=query.get("PlaySessionId", query.get("playSessionId", "")),
         session_profile=caller_session_profile(request.headers, query))
     if not admission.allowed:
+        await _restrict_concurrency(uid, admission)
         code = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(code, "playback admission refused", headers={
             **headers, "X-Mediadeck-Decision": admission.reason})
@@ -1460,6 +1574,7 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
     except Exception:  # noqa: BLE001 - never return a partially checked URL
         raise HTTPException(503, "PlaybackInfo unavailable") from None
     if not admission.allowed:
+        await _restrict_concurrency(uid, admission)
         status = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(status, "playback admission refused", headers={
             "Cache-Control": "private, no-store", "X-Mediadeck-Decision": admission.reason})
@@ -2293,6 +2408,22 @@ async def members_retry_remote(user_id: str, user: str = Depends(_auth)
     remote = await app.state.enforcement.enforce_now(user_id, "retry")
     fresh = app.state.members.get(user_id) or member
     return member_ops.merge_action(fresh, remote)
+
+
+@app.get("/api/access/restrictions", dependencies=[Depends(_auth)])
+async def restriction_get() -> dict[str, Any]:
+    return {"config": app.state.restrictions.config(), "events": app.state.restrictions.events()}
+
+
+@app.put("/api/access/restrictions", dependencies=[Depends(_auth)])
+async def restriction_save(payload: dict[str, Any] = Body(...),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    try:
+        result = app.state.restrictions.save(payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    app.state.members.audit(user, "restriction.config", detail=json.dumps(result))
+    return result
 
 
 @app.get("/api/access/rules", dependencies=[Depends(_auth)])

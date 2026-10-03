@@ -1518,11 +1518,137 @@ async function loadPluginHistory(pid) {
    refuse, which is why the block log is shown right next to them -- a refusal
    that leaves no trace is indistinguishable from a broken node. */
 
+const ACCESS_RESTRICTION_RULES = [
+  { key: 'concurrency', label: '同播超限', help: '关闭只停止自动处罚，用户组 max_streams 的同播准入限制仍然生效。' },
+  { key: 'web_login', label: 'Emby 网页登录', help: '暂停播放在这里表示拒绝此次登录，不影响已有合规播放。' },
+  { key: 'web_play', label: 'Emby 网页观看', help: '暂停播放只拒绝／停止本次违规播放，不影响已有合规播放。' },
+];
+const ACCESS_RESTRICTION_ACTIONS = { pause: '暂停播放', disable: '禁用账号', delete: '删除账号' };
+
+function validAccessRestrictions(config) {
+  return config && ACCESS_RESTRICTION_RULES.every(({ key }) =>
+    typeof config[key]?.enabled === 'boolean' && Object.hasOwn(ACCESS_RESTRICTION_ACTIONS, config[key]?.action));
+}
+
+function accessRestrictionTag(value, notice = false) {
+  const statuses = notice
+    ? { sent: ['ok', '已送达'], retry: ['warn', '等待重试'], failed: ['bad', '发送失败'],
+      unknown: ['warn', '结果不明'], pending: ['idle', '待发送'], sending: ['idle', '发送中'], skipped: ['idle', '已跳过'] }
+    : { done: ['ok', '已执行'], failed: ['bad', '执行失败'], unknown: ['warn', '结果不明'], pending: ['idle', '待执行'] };
+  const [style, label] = Object.hasOwn(statuses, value) ? statuses[value] : ['warn', value || '结果不明'];
+  return `<span class="tag ${style}">${esc(label)}</span>`;
+}
+
+function accessRestrictionEventsHtml(events) {
+  if (!events.length) return '<div class="empty">暂无处罚记录</div>';
+  return `<table><thead><tr>${['时间 / 记录', '用户', '触发规则', '处罚动作', '执行状态', '执行结果', '群 / 私信通知'].map(c => `<th>${esc(c)}</th>`).join('')}</tr></thead>
+    <tbody>${events.map(event => {
+      const result = event.result == null ? '-' : typeof event.result === 'object' ? JSON.stringify(event.result) : event.result;
+      const notices = Array.isArray(event.notices) ? event.notices : [];
+      return `<tr>
+        <td>${esc(fmtAgeTs(event.created_at))}<div class="muted">#${esc(event.id)}</div></td>
+        <td>${esc(event.username || '-')}<div class="muted">ID: ${esc(event.user_id || '-')}</div></td>
+        <td>${esc(ACCESS_RESTRICTION_RULES.find(r => r.key === event.rule)?.label || event.rule || '-')}</td>
+        <td>${esc(Object.hasOwn(ACCESS_RESTRICTION_ACTIONS, event.action) ? ACCESS_RESTRICTION_ACTIONS[event.action] : event.action || '-')}</td>
+        <td>${accessRestrictionTag(event.status)}</td>
+        <td class="muted" style="overflow-wrap:anywhere">${esc(result)}</td>
+        <td>${notices.length ? notices.map(notice => `<div>
+          ${esc(notice.kind === 'private' ? 'TG 私信' : String(notice.kind || '').startsWith('group:') ? '互动群' : '通知')}
+          ${accessRestrictionTag(notice.state, true)}
+          <span class="muted">尝试 ${esc(notice.attempts ?? 0)} 次${notice.error ? ` · ${esc(notice.error)}` : ''}</span>
+        </div>`).join('') : '<span class="muted">暂无通知记录（不代表已送达）</span>'}</td>
+      </tr>`;
+    }).join('')}</tbody></table>`;
+}
+
+function accessRestrictionsHtml(data, error) {
+  if (!validAccessRestrictions(data?.config) || !Array.isArray(data?.events)) {
+    return card('账号访问限制', '同播超限 / Emby 网页登录 / Emby 网页观看',
+      `<div class="card-body"><p class="danger-text" role="status">无法读取账号访问限制：${esc(error || '服务返回的数据无效')}。请刷新页面后重试；未读取配置时不可保存。</p></div>`);
+  }
+  return card('账号访问限制', '三种规则独立启用，处罚与通知结果见下方记录',
+    `<div class="card-body" id="ac-restrictions">
+      ${ACCESS_RESTRICTION_RULES.map(({ key, label, help }) => `<div class="form-row">
+        <label for="acr-${key}-enabled">${esc(label)}</label>
+        <input id="acr-${key}-enabled" type="checkbox" ${data.config[key].enabled ? 'checked' : ''} aria-label="启用${esc(label)}自动处罚" aria-describedby="acr-${key}-help">
+        <select id="acr-${key}-action" aria-label="${esc(label)}处罚动作" aria-describedby="acr-${key}-help">
+          ${Object.entries(ACCESS_RESTRICTION_ACTIONS).map(([value, text]) => `<option value="${value}" ${data.config[key].action === value ? 'selected' : ''}>${esc(text)}</option>`).join('')}
+        </select><span class="muted" id="acr-${key}-help">${esc(help)}</span>
+      </div>`).join('')}
+      <div class="help">
+        <b>暂停播放</b>只拒绝／停止超出限制的那次播放，已有合规播放不动；网页登录时只拒绝此次登录。<br>
+        Emby 管理员或 Deck admin 豁免；白名单仍按自身规则处理。网页识别依据已验证的 Emby 客户端身份（Emby Web），不只凭浏览器 UA。<b>密码错误／未登录访问不处罚。</b><br>
+        通知发送到已配置互动群＋用户绑定 TG 私信；未绑定 TG／Bot 被屏蔽会记录失败，不会当作成功。<b>已发云盘 URL 不可回收。</b>
+      </div>
+      <div class="toolbar"><button class="btn primary" id="ac-restrictions-save">保存账号访问限制</button></div>
+    </div>`)
+    + card('账号处罚记录', '执行状态与通知状态分别记录；待执行、发送中或结果不明均不代表成功',
+      `<div class="card-body flush" id="ac-restriction-events" style="overflow-x:auto">${accessRestrictionEventsHtml(data.events)}</div>`,
+      '<button class="btn sm" id="ac-restrictions-refresh">刷新处罚与通知结果</button>');
+}
+
+async function saveAccessRestrictions(section, context) {
+  if (!context.isCurrent() || !section?.isConnected || section.dataset.saving) return;
+  const config = Object.fromEntries(ACCESS_RESTRICTION_RULES.map(({ key }) => [key, {
+    enabled: section.querySelector(`#acr-${key}-enabled`).checked,
+    action: section.querySelector(`#acr-${key}-action`).value,
+  }]));
+  if (!validAccessRestrictions(config)) { toast('请选择合法的处罚动作', 1); return; }
+  const controls = [...section.querySelectorAll('input,select')].map(el => [el, el.disabled]);
+  section.dataset.saving = 'true';
+  controls.forEach(([el]) => { el.disabled = true; });
+  try {
+    const deletions = ACCESS_RESTRICTION_RULES.filter(({ key }) => config[key].action === 'delete');
+    if (deletions.length && !(await deckConfirm(`删除账号是危险操作：保存后，启用的删除规则将自动删除后续确认违规账号，不是仅拒绝一次请求。选择删除的规则：${deletions.map(r => r.label).join('、')}。已发云盘 URL 不可回收。确认保存？`))) {
+      if (context.isCurrent() && section.isConnected) configFeedback(section, '已取消，未保存；输入草稿仍保留。');
+      return;
+    }
+    if (!context.isCurrent() || !section.isConnected) return;
+    configFeedback(section, '正在保存账号访问限制…');
+    const saved = await api('/api/access/restrictions', { method: 'PUT', body: JSON.stringify(config) });
+    if (!context.isCurrent() || !section.isConnected) return;
+    if (!validAccessRestrictions(saved)) throw new Error('服务返回的配置无效，请刷新后核实保存结果');
+    ACCESS_RESTRICTION_RULES.forEach(({ key }) => {
+      section.querySelector(`#acr-${key}-enabled`).checked = saved[key].enabled;
+      section.querySelector(`#acr-${key}-action`).value = saved[key].action;
+    });
+    configFeedback(section, '账号访问限制已保存；其他规则草稿未修改。');
+    toast('账号访问限制已保存');
+  } catch (e) {
+    if (context.isCurrent() && section.isConnected) {
+      configFeedback(section, '保存失败：' + e.message + '。输入已保留，可重试。', true);
+      toast('保存失败: ' + e.message, 1);
+    }
+  } finally {
+    delete section.dataset.saving;
+    controls.forEach(([el, disabled]) => { el.disabled = disabled; });
+  }
+}
+
+async function refreshAccessRestrictionEvents(box, context) {
+  if (!context.isCurrent() || !box?.isConnected) return;
+  const section = box.closest('.card');
+  try {
+    const data = await api('/api/access/restrictions');
+    if (!context.isCurrent() || !box.isConnected) return;
+    if (!Array.isArray(data?.events)) throw new Error('服务返回的记录无效');
+    box.innerHTML = accessRestrictionEventsHtml(data.events);
+    configFeedback(section, '处罚与通知结果已刷新；配置草稿未修改。');
+  } catch (e) {
+    if (context.isCurrent() && box.isConnected) {
+      configFeedback(section, '结果刷新失败：' + e.message + '。原有记录仍保留，可重试。', true);
+      toast('结果刷新失败: ' + e.message, 1);
+    }
+  }
+}
+
 PAGES.access = async (context = pageContext('access')) => {
   $('#view').innerHTML = pageLoading();
-  const [rules, blocks] = await Promise.all([
+  let restrictionsError = '';
+  const [rules, blocks, restrictions] = await Promise.all([
     api('/api/access/rules').catch(() => null),
     api('/api/access/blocks?limit=100'),
+    api('/api/access/restrictions').catch(e => { restrictionsError = e.message; return null; }),
   ]);
   if (!context.isCurrent()) return;
   if (!rules) { $('#view').innerHTML = pageError('无法读取访问规则'); return; }
@@ -1532,8 +1658,9 @@ PAGES.access = async (context = pageContext('access')) => {
   const kindLabel = (k) => (k === 'network' ? '网段' : '客户端');
 
   $('#view').innerHTML = `
+    ${accessRestrictionsHtml(restrictions, restrictionsError)}
     <div class="help">
-      规则只在播放请求上生效。<b>出错一律放行</b>：面板挡在播放链路上，
+      以下通用 UA / IP 规则只在播放请求上生效。<b>出错一律放行</b>：面板挡在播放链路上，
       写错一条正则不能让所有人看不了片。被拒的请求都会记录在下面。
     </div>
     <div class="stat-grid">
@@ -1581,6 +1708,10 @@ PAGES.access = async (context = pageContext('access')) => {
         <td class="muted">${esc(b.reason || '')}${b.rule_id ? ` (#${esc(b.rule_id)})` : ''}</td>
       </tr>`).join(''))}`;
   bindAsyncButton('ac-add', addAccessRule);
+  const restrictionSection = $('#ac-restrictions');
+  const restrictionEvents = $('#ac-restriction-events');
+  bindAsyncButton('ac-restrictions-save', () => saveAccessRestrictions(restrictionSection, context));
+  bindAsyncButton('ac-restrictions-refresh', () => refreshAccessRestrictionEvents(restrictionEvents, context));
 };
 
 async function addAccessRule() {

@@ -12,14 +12,15 @@ from app.main import app
 from app.modules.stats import legacy_watch_fingerprint
 
 
-def test_known_retired_reporter_remains_degraded_until_resolved(tmp_path):
+def test_retired_reporter_does_not_degrade_current_inventory(tmp_path):
     now = time.time()
     svc = _svc(tmp_path, expected=["active"])
     svc.ingest(_env("active", "boot", 1, [], observed_at=now))
     svc.ingest(_env("retired", "old", 1, [], observed_at=now - 86400))
     snap = svc.snapshot("u", now=now)
-    assert snap["coverage"]["degraded"]
-    assert any(n["name"] == "retired" and not n["ok"] for n in snap["coverage"]["nodes"])
+    assert not snap["coverage"]["degraded"]
+    assert [n["name"] for n in snap["coverage"]["nodes"]] == ["active"]
+    assert svc._db.one("SELECT COUNT(*) AS n FROM measured_node_seq WHERE node='retired'")["n"] == 1
 
 
 def test_healthy_expected_nodes_without_user_data_is_not_fake_zero(tmp_path):

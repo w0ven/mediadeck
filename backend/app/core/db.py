@@ -599,6 +599,37 @@ CREATE TABLE IF NOT EXISTS meter_policy_ack (
     applied_at  REAL NOT NULL DEFAULT 0
 );
 
+-- Confirmed rule violations survive account deletion and process restarts.
+CREATE TABLE IF NOT EXISTS restriction_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    tg_user_id TEXT NOT NULL DEFAULT '',
+    rule TEXT NOT NULL,
+    action TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',
+    result TEXT NOT NULL DEFAULT '',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_restriction_event_user
+    ON restriction_events(user_id, rule, created_at);
+CREATE TABLE IF NOT EXISTS restriction_notices (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER NOT NULL REFERENCES restriction_events(id),
+    kind TEXT NOT NULL,
+    chat_id TEXT NOT NULL DEFAULT '',
+    state TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    next_at INTEGER NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    UNIQUE(event_id, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_restriction_notice_due
+    ON restriction_notices(state, next_at);
+
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL

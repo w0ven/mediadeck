@@ -850,10 +850,10 @@ def test_member_rate_cap_is_signed_into_the_node_url() -> None:
                    json={"group_id": "standard"})
         client.put("/api/members/u1/overrides", headers=_basic(),
                    json={"bandwidth_limit_kbps": 8000})
-        app.state.emby.set_sessions([{"Id": "rate-session", "UserId": "u1"}])
+        app.state.emby.set_sessions([{"Id": "rate-session", "UserId": "u1", "DeviceId": "smoke-client"}])
 
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
-                       headers=_play(), follow_redirects=False)
+                       headers={**_play(), "X-Emby-Device-Id": "smoke-client"}, follow_redirects=False)
         location = r.headers["location"]
         # kbps -> bytes/s is *125, and nginx reads that as limit_rate.
         assert "r=1000000" in location, location
@@ -941,10 +941,10 @@ def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> Non
         kbps = round(15 * 1048576 / 125)
         client.put("/api/groups/standard", headers=_basic(),
                    json={"bandwidth_limit_kbps": kbps})
-        app.state.emby.set_sessions([{"Id": "live-u1", "UserId": "u1"}])
+        app.state.emby.set_sessions([{"Id": "live-u1", "UserId": "u1", "DeviceId": "smoke-client"}])
 
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
-                       headers=_play(), follow_redirects=False)
+                       headers={**_play(), "X-Emby-Device-Id": "smoke-client"}, follow_redirects=False)
         assert f"r={kbps * 125}" in r.headers["location"], r.headers["location"]
 
         # Saving the same group again with a new cap must kick the live session
@@ -967,9 +967,9 @@ def test_redirected_viewer_is_not_shown_as_estimate() -> None:
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
         client.put("/api/members/u1", headers=_basic(),
                    json={"group_id": "standard"})
-        app.state.emby.set_sessions([{"Id": "attribution-session", "UserId": "u1"}])
+        app.state.emby.set_sessions([{"Id": "attribution-session", "UserId": "u1", "DeviceId": "smoke-client"}])
         r = client.get("/emby/Videos/item42/stream.mkv?Static=true",
-                       headers=_play(), follow_redirects=False)
+                       headers={**_play(), "X-Emby-Device-Id": "smoke-client"}, follow_redirects=False)
         assert r.status_code == 302 and "u=" in r.headers["location"]
         sessions = client.get("/api/emby/sessions", headers=_basic()).json()
         assert sessions

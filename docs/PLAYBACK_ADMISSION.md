@@ -3,8 +3,12 @@
 Device registration is observational: no registration-count cap exists in the
 panel or Bot. Counts, device history, manual block and forget remain available.
 `max_streams` is the effective member concurrency setting; this change does not
-rewrite existing users' values. Native Emby `SimultaneousStreamLimit` remains a
-second layer, not the evidence that the third URL was withheld.
+rewrite existing users' values. Deck members with the `admin` role are exempt
+from the concurrency cap (not from caller/item authentication, dependency
+failure or existing manual device blocks). Whitelist members still use their
+own effective group/member cap. Native Emby `SimultaneousStreamLimit` remains a
+second layer, not the evidence that the third URL was withheld. Its policy and
+any separate advisory Stop handler must respect the same administrator exemption.
 
 ## Entrance wiring
 
@@ -51,7 +55,10 @@ Normal clients keep their original Emby URLs:
 
 PlaybackInfo POST accepts either a JSON object or an empty body with query
 parameters. Caller headers, query and device profile are forwarded, without a
-configured admin key. Video data is **not** proxied through Deck.
+configured admin key. HEAD forwards HEAD and preserves its status without
+parsing an empty JSON body or inventing a PlaySessionId; a successful HEAD may
+hold the normal bounded pending seat but supplies no playback URLs.
+Video data is **not** proxied through Deck.
 Lifecycle JSON objects are parsed independently of Content-Type: native clients
 using `text/plain` are supported, as are empty query-only reports. Query-carried
 `X-Emby-Device-Id` and `X-Emby-Authorization` retain caller identity; `UserId`
@@ -64,11 +71,25 @@ are rechecked before admission or URL routing. Missing/ambiguous identity,
 malformed session responses and dependency outages do not fail open.
 
 Use the same token and DeviceId across login, PlaybackInfo, Playing, stream and
-Stopped. Admission counts distinct authenticated **Emby Session Ids**, not
-DeviceIds. If several Sessions have the same DeviceId, a SessionId must identify
-the caller; ambiguity is refused rather than merged into one stream. HLS can
-also resolve its session through the previously bound PlaySessionId when it
-omits DeviceId. A request-supplied UserId is never used as authentication.
+Stopped. Admission counts distinct **Emby Session Ids** resolved for the
+authenticated user, not DeviceIds. Same-device duplicates require an exact
+SessionId or a unique exact client profile; ambiguity is refused, not merged.
+For capped users, a caller-supplied SessionId alone, without DeviceId, is not
+session evidence and is refused. HLS can omit DeviceId only with a uniquely
+bound PlaySessionId belonging to this user; a conflicting explicit SessionId is
+refused. Stopped also resolves a unique current PlaySessionId binding when the
+client omits SessionId, so a successful same-device duplicate stop can release
+its pending seat immediately. Wrong-user/device/session/play or failed delivery
+never releases another seat. A request-supplied UserId is never authentication.
+
+Shared credentials whose exact DeviceId matches several different user owners
+resolve to no user, regardless of list order. All exact matches must agree on
+one owner. DeviceId, SessionId and profile headers are **not cryptographic
+device binding**: a holder of the full token/password can imitate all of them.
+This prevents the token-plus-asserted-SessionId/no-device bypass, not deliberate
+full client-identity imitation. `/Auth/Keys` is not assumed to map ordinary user
+tokens to users. HTTP integrations must pass the authenticated user id, never a
+query UserId, to the admission coordinator.
 
 ## Lease lifecycle
 
@@ -83,13 +104,22 @@ omits DeviceId. A request-supplied UserId is never used as authentication.
   releases its lease. An observed play also releases when a fresh snapshot is
   idle, including a bound PlaySessionId. Start/progress acknowledgements update
   observation even if nobody requests another URL during the entire play.
-- A newly bound replacement resets observation so delayed old events cannot
-  release or mark the new pending play. Failed metadata issuance releases only
-  the seat newly acquired by that failed request, not an existing play.
+- A newly bound replacement resets observation and persists a `snapshot_guard`.
+  An old or play-unidentified NowPlayingItem can continue occupying a seat but
+  cannot mark this new lease observed. Only a successful current-play activity
+  report or an exact snapshot PlaySessionId removes the guard. Thus an old
+  Stopped followed by an idle snapshot cannot prematurely release the new
+  pending start, including across Deck restarts. Initial idle starts can still
+  be observed by ordinary playing snapshots and recovered after becoming idle.
+  Failed metadata issuance releases only the seat newly acquired by that failed
+  request, not an existing play.
 - An unobserved pending start has a **120-second grace period**. Only a fresh
   snapshot showing neither playing nor paused may expire it. Snapshot failure
   never means idle. A recheck/seek does not renew the deadline; a genuinely new
   PlaySessionId starts a new grace period. Deadline state persists on restart.
+  This is a deadline per bound play, not an absolute deadline per device or
+  retry episode: metadata retries returning fresh play ids can renew it. Those
+  pending claims may refuse new URLs, but are not real-play punishment evidence.
 - Legacy rows without issuance timestamps receive one 120-second migration
   grace period; restarting again does not renew it. Missing lifecycle reports
   no longer hold an idle account forever. A client resuming after expiry must
@@ -104,6 +134,55 @@ omits DeviceId. A request-supplied UserId is never used as authentication.
 
 Already-issued direct-link reuse is outside the requested protection. This is
 not a video proxy or a promise to revoke a cloud URL after issuance.
+
+## Safe post-admission action interface
+
+`Admission` retains `allowed` and `reason` and adds:
+
+- `user_id`: the upstream-authenticated caller supplied by the HTTP layer;
+- `session_id` and `device_id`: the unique resolved session and its device,
+  empty when unresolved;
+- `cap`, `playing_count`, `paused_count`, `pending_count`;
+- `live_count` property (`playing_count + paused_count`), `live_session_ids`
+  tuple, and `snapshot_at`;
+- `punishable`, **False by default**.
+
+Counts distinguish real NowPlayingItem sessions (including pauses) from idle
+pending leases. `over-limit` alone is never punishment proof. Only an idle,
+unadmitted, device-resolved newcomer against a known real baseline at the cap
+gets `punishable=True`. Pending-only/mixed shortfalls, cold snapshots already
+over cap, an already-playing unidentified offender, ambiguous identities,
+malformed snapshots and outages only refuse URLs. Existing admitted sessions
+remain allowed; the coordinator performs no Stop, restriction or notification.
+
+After receiving a refused admission, the action owner must call:
+
+```python
+proof = await streams.confirm_violation(admission)
+if proof is not None:
+    # Idempotent incident handling outside the admission lock.
+    # Target proof["session_id"] only; never disable the whole account
+    # or stop the existing compliant sessions.
+    ...
+```
+
+The async method fetches a fresh snapshot, rechecks the same user/exact session
+and device, unchanged positive cap, non-admin status and no intervening legal
+seat grant. All original baseline SessionIds must still be playing or paused,
+and other real sessions must still meet the cap. If an original session became
+idle/disappeared/changed owner, identity/policy changed or a dependency failed,
+it returns `None` even if stale leases remain. It never creates/releases seats.
+A proof dict contains `user_id`, `session_id`, `device_id`, `reason`,
+`punishable=True`, `cap`, `playing_count`, `paused_count`, `live_count`,
+`other_live_count`, `pending_count`, `live_session_ids` and `snapshot_at`.
+
+The proof is a point-in-time check, not a lock held across an external action;
+call it immediately before action. The main incident service owns persistent
+cross-entrance/retry deduplication and notification idempotency. Do not key an
+incident only by request path or a client-generated/reissued PlaySessionId.
+Do not infer an offender from session list order, activity timestamps, HTTP
+Stop acceptance or the old advisory Stop audit. Native Emby/client state hidden
+from snapshots, and already-issued cloud URL reuse, remain outside this proof.
 
 ## Acceptance
 

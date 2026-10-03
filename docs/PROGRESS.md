@@ -2,6 +2,44 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-03 — verified access restrictions and configurable sanctions
+
+- Added independent concurrency, Web-login and Web-playback sanction settings
+  with pause/refusal, disable and non-cascading delete actions. Emby and Deck
+  administrators are protected; whitelist accounts retain their own limits.
+- Web login is checked only after caller-password authentication and a matching
+  server session. Browser UA, failed passwords and page visits cannot sanction
+  accounts. Login metadata routes are included in the versioned nginx template.
+- Fixed replacement-play observation, unique bound-play Stopped resolution,
+  shared-key duplicate-device ambiguity and HEAD metadata compatibility.
+  Unproven/pending overflow is refused without punishment; fresh proof cancels
+  when the original play exits or account authority/limits change.
+- Unified the ordered polling fallback with verified sanctions. Persisted
+  incident/recipient receipts survive deletion and restart, with bounded retries
+  and no blind replay after uncertain outcomes. The access page exposes config,
+  real action results and separate group/private delivery status.
+- Validation: full suite 2309 passed, 56 environment-dependent skips; ruff and
+  diff checks passed, with real local nginx transport tests and desktop/mobile
+  Chromium interactions. Existing rate/routing tests now carry explicit device
+  evidence instead of relying on token-only seat inference; their rate and
+  signature assertions remain unchanged. No real members were used for penalties.
+- Operational limits and deployment instructions: `docs/ACCESS_RESTRICTIONS.md`.
+
+## 2026-10-03 — current-inventory metering coverage
+
+- Current measurement health follows the enabled node inventory on every read;
+  retained reports from removed or disabled nodes no longer produce ghost
+  missing-node warnings. Re-enabling or adding a node immediately restores
+  freshness/never-reported checks without a process restart.
+- An explicitly empty inventory no longer falls back to historical reporters.
+  Standalone callers without an inventory provider retain reporter discovery.
+- Historical measured bytes, credits, watermarks and per-node totals are retained;
+  missing current measurements remain unavailable rather than becoming zero.
+- Removed the generic incomplete-data line from Bot quota views while retaining
+  unavailable/no-records distinctions and unchanged amount formatting.
+- Added regression coverage for dynamic inventory changes, API wiring, retained
+  ledger data, unknown values and private/public Bot quota rendering.
+
 ## 2026-10-03 — bounded per-recipient viewing-report delivery
 
 - Viewing reports persist recipient snapshots, acknowledgements, safe failure

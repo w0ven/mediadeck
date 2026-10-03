@@ -14,7 +14,7 @@ def _svc(tmp_path: Path, tags: dict[str, str] | None = None,
     return MeasuredMeteringService(
         Database(tmp_path / "m.db"),
         tag_to_user=lambda: dict(tags or {}),
-        expected_nodes=(lambda: list(expected or [])),
+        expected_nodes=(lambda: list(expected)) if expected is not None else None,
     )
 
 
