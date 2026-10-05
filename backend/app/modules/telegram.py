@@ -124,6 +124,12 @@ REQUEST_STATUS_ICONS = {
 SELF_ANSWERING_CALLBACKS = (
     "rq:", "req_claim:", "req_done:", "req_fail:", "tg_rebind_review:", "urank:", "urank_close")
 
+RANK_HELP = ('<b>榜单口令</b>\n'
+             '<code>/rank</code> 昨日观影榜；<code>/today</code> 今日观影榜\n'
+             '<code>/rank 影片</code> 昨日电影/剧集榜；<code>/today 影片</code> 今日电影/剧集榜\n'
+             '今日从北京时间00:00统计至查看时，按最近有效采样，暂停不计。\n'
+             '旧 <code>/rank 7</code> 周榜继续可用（前7个完整自然日）。')
+
 ADMIN_HELP = """🛠 <b>管理员命令</b>
 
 <b>查询</b>
@@ -213,8 +219,8 @@ RULES_TEXT = """📜 <b>行为准则</b>
 
 发送 /start 回到菜单。"""
 
-MEMBER_COMMANDS = {"start", "help", "me", "myinfo", "rules", "rank"}
-GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "usage", "rank", "rules", "help")
+MEMBER_COMMANDS = {"start", "help", "me", "myinfo", "rules", "rank", "today"}
+GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "usage", "rank", "today", "rules", "help")
 GROUP_ADMIN_COMMANDS = (
     "kk", "renew", "score", "prouser", "revuser", "rmemby", "rm",
 )
@@ -282,6 +288,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # A request that keeps adding replies is what made 求片 feel messy.
         self._panel: dict[str, int] = {}
         self._photo_panels: set[tuple[str, int]] = set()
+        # Today's pager reuses the exact snapshot already drawn on its poster.
+        self._today_rank_boards: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
         # Only interactive panels may be cleaned up, never unrelated notices.
         self._menu_panel: dict[str, int] = {}
         self._chat_commands: dict[str, tuple] = {}
@@ -489,7 +497,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 {"command": "start", "description": "打开私聊"},
                 {"command": "me", "description": "我的简卡"},
                 {"command": "usage", "description": "用量与观看"},
-                {"command": "rank", "description": "观看排行"},
+                {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
+                {"command": "today", "description": "今日榜 · 截至查看时"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
             ]
@@ -508,7 +517,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             {"command": "me", "description": "我的账号"},
             {"command": "usage", "description": "用量与观看时长"},
             {"command": "rebind", "description": "TG 换绑申请"},
-            {"command": "rank", "description": "观看排行"},
+            {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
+            {"command": "today", "description": "今日榜 · 截至查看时"},
             {"command": "help", "description": "使用说明"},
             {"command": "rules", "description": "行为准则"},
         ]
@@ -627,6 +637,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             self._offset = 0
             self._panel.clear()
             self._photo_panels.clear()
+            self._today_rank_boards.clear()
             self._menu_panel.clear()
             self._pending.clear()
             self._gift_claims.clear()
@@ -1137,7 +1148,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 "· <b>求片</b>：发送 TMDB 链接即可提交\n"
                 "· <b>准则</b>：账号使用约定\n"
                 "· 发送 /start 随时回到菜单\n\n"
-                "遇到问题请联系管理员。"
+                + RANK_HELP + "\n\n遇到问题请联系管理员。"
             )
         cfg = self._cfg()
         channels = []
@@ -1227,6 +1238,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             if panel['expires'] <= now:
                 self._admin_panels.pop(key, None)
                 self._retired_panels[key] = now + PENDING_TTL
+        for key, (deadline, _) in list(self._today_rank_boards.items()):
+            if deadline <= now:
+                self._today_rank_boards.pop(key, None)
         for key, deadline in list(self._retired_panels.items()):
             if deadline <= now:
                 self._retired_panels.pop(key, None)
@@ -2044,6 +2058,38 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         ]
 
     @staticmethod
+    def _rank_command_period(args: list[str]) -> tuple[int, bool] | None:
+        if not args:
+            return 1, False
+        if len(args) != 1:
+            return None
+        token = args[0].casefold()
+        if token in ('今日', '今天', '当日', 'today', '0'):
+            return 1, True
+        if token in ('昨日', '昨天', '日', 'yesterday', 'day', '1', '24'):
+            return 1, False
+        if token in ('周', '周榜', '近7天', 'week', 'weekly', '7', '168', '30', '720'):
+            return 7, False
+        return None
+
+    def _today_board(self) -> dict[str, Any]:
+        moment = time.time()
+        if self._stats is not None:
+            try:
+                return self._stats.today_snapshot(now=moment)
+            except Exception:  # noqa: BLE001 - failure is not an empty chart
+                return {'now': moment, 'stamp': ranking_stamp(1, now=moment, today=True),
+                        'users': [], 'movies': [], 'shows': [], 'unavailable': True}
+        return {'now': moment, 'stamp': ranking_stamp(1, now=moment, today=True),
+                'users': [], 'movies': [], 'shows': [], 'unavailable': True}
+
+    def _remember_today_board(self, chat_id: Any, message_id: int, board: dict) -> None:
+        self._sweep_pending()
+        if len(self._today_rank_boards) >= 128:
+            self._today_rank_boards.pop(next(iter(self._today_rank_boards)))
+        self._today_rank_boards[(str(chat_id), int(message_id))] = (time.time()+PENDING_TTL, board)
+
+    @staticmethod
     def _title_watch_time(row: dict[str, Any]) -> str:
         if row.get('seconds') is not None:
             return duration(int(row['seconds']))
@@ -2051,15 +2097,18 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return duration(int(row['hours'] * 3600))
         return '时长未记录'
 
-    def _rankings_text(self, days: int = 1) -> str:
+    def _rankings_text(self, days: int = 1, *, today: bool = False, board: dict | None = None) -> str:
         """Movie/series bulletin ranked by accumulated watched seconds.
 
         The separate watcher chart ranks members, not titles.
         days=1 is yesterday's complete local calendar day.
         """
         days = max(1, int(days or 1))
-        stamp = ranking_stamp(days)
-        if days <= 1:
+        board = (board or self._today_board()) if today else None
+        stamp = board['stamp'] if today else ranking_stamp(days)
+        if today:
+            title = '今日影片榜'
+        elif days <= 1:
             title = "播放日榜"
         elif days <= 7:
             title = "播放周榜"
@@ -2068,7 +2117,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         lines = [f"🏆 <b>{title}</b>  {stamp}\n"]
         movies: list[dict[str, Any]] = []
         shows: list[dict[str, Any]] = []
-        if self._stats is not None:
+        if today:
+            if board.get('unavailable'):
+                return '\n'.join([*lines, '排行统计暂时不可用。'])
+            movies, shows = board['movies'], board['shows']
+            lines.append('按最近有效采样，暂停不计；今日不比较昨日全天涨跌。\n')
+        elif self._stats is not None:
             try:
                 movies, shows = self._stats.top_titles_split(
                     days=days, limit=10, calendar=True)
@@ -2095,17 +2149,23 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             lines.append("")
         while lines and not lines[-1]:
             lines.pop()
-        if len(lines) == 1:
+        if not movies and not shows:
             lines.append("暂时还没有排行数据。")
         return "\n".join(lines)
 
-    def _watch_rank_pages(self, days: int = 1, page_size: int = 10) -> list[str]:
+    def _watch_rank_pages(self, days: int = 1, page_size: int = 10, *,
+                          today: bool = False, board: dict | None = None) -> list[str]:
         """Every member with watch time, ten names per page like EmbyBoss."""
         days = max(1, int(days or 1))
-        stamp = ranking_stamp(days)
-        heading = f"▎🏆 <b>{days} 天观影榜</b>"
+        board = (board or self._today_board()) if today else None
+        stamp = board['stamp'] if today else ranking_stamp(days)
+        heading = '▎🏆 <b>今日观影榜</b>\n按最近有效采样，暂停不计。' if today else f"▎🏆 <b>{days} 天观影榜</b>"
         rows: list[dict[str, Any]] = []
-        if self._stats is not None:
+        if today:
+            if board.get('unavailable'):
+                return [f'{heading}\n\n观影统计暂时不可用。\n\n#UPlaysRank  {stamp}']
+            rows = [dict(r) for r in board['users']]
+        elif self._stats is not None:
             try:
                 rows = self._stats.top_users(days=days, limit=5000, calendar=True)
             except Exception:  # noqa: BLE001 - unavailable is not zero viewing
@@ -2150,7 +2210,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         return pages
 
     @staticmethod
-    def _watch_rank_keyboard(page: int, total: int, days: int) -> list[list[dict[str, str]]]:
+    def _watch_rank_keyboard(page: int, total: int, days: int, *, today: bool = False) -> list[list[dict[str, str]]]:
         """Numbered pager like EmbyBoss plays_list_button."""
         page = max(1, int(page or 1))
         total = max(1, int(total or 1))
@@ -2164,29 +2224,23 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 numbers = [1, 0] + [n for n in numbers if n != 1]
             if page < total - 3:
                 numbers = [n for n in numbers if n != total] + [0, total]
+        suffix = '_today' if today else ''
         row: list[dict[str, str]] = []
         for n in numbers:
             if n == 0:
-                row.append({"text": "…", "callback_data": f"urank:{page}_{days}"})
+                row.append({"text": "…", "callback_data": f"urank:{page}_{days}{suffix}"})
                 continue
             label = f"·{n}·" if n == page else str(n)
-            row.append({"text": label, "callback_data": f"urank:{n}_{days}"})
+            row.append({"text": label, "callback_data": f"urank:{n}_{days}{suffix}"})
         extra = [{"text": "❌ 关闭", "callback_data": "urank_close"}]
         if total > 5:
             if page - 5 >= 1:
-                extra.append({"text": "⏮️ -5", "callback_data": f"urank:{page - 5}_{days}"})
+                extra.append({"text": "⏮️ -5", "callback_data": f"urank:{page - 5}_{days}{suffix}"})
             if page + 5 <= total:
-                extra.append({"text": "⏭️ +5", "callback_data": f"urank:{page + 5}_{days}"})
+                extra.append({"text": "⏭️ +5", "callback_data": f"urank:{page + 5}_{days}{suffix}"})
         navigation = []
-        if _SESSION.get() is not None:
-            navigation = [
-                [{'text': '日观影榜', 'callback_data': 'rank:24'},
-                 {'text': '周观影榜', 'callback_data': 'rank:168'}],
-                [{'text': '电影/剧集日榜', 'callback_data': 'heat:1'},
-                 {'text': '电影/剧集周榜', 'callback_data': 'heat:7'}],
-            ]
-            if not _GROUP.get():
-                navigation += BACK_HOME
+        if _SESSION.get() is not None and not _GROUP.get():
+            navigation += BACK_HOME
         return [*navigation, row, extra]
 
     @staticmethod
@@ -2792,7 +2846,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             "",
             "· /me 我的账号卡",
             "· /usage 用量与观看",
-            "· /rank 日 / 周观影榜（海报）",
+            RANK_HELP,
             "· /rules 行为准则",
             "· /start 打开私聊菜单",
         ]
@@ -2918,16 +2972,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     def _watch_rankings_keyboard(self, hours: int, *, heat: bool = False
                                   ) -> list[list[dict[str, str]]]:
         hours = self._rank_hours(hours)
-        day = "● 日观影榜" if hours <= 24 and not heat else "日观影榜"
-        week = "● 周观影榜" if hours > 24 and not heat else "周观影榜"
-        heat_day = "● 日热度榜" if heat and hours <= 24 else "日热度榜"
-        heat_week = "● 周热度榜" if heat and hours > 24 else "周热度榜"
-        rows = [
-            [{"text": day, "callback_data": "rank:24"},
-             {"text": week, "callback_data": "rank:168"}],
-            [{"text": heat_day, "callback_data": "heat:1"},
-             {"text": heat_week, "callback_data": "heat:7"}],
-        ]
+        rows = []
         if not _GROUP.get():
             rows.append([{"text": "💰 积分榜", "callback_data": "points_rank"}])
             rows += BACK_HOME
@@ -3062,12 +3107,20 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if command == "cancel":
             await self._show(chat_id, "已取消，未执行任何变更。", BACK_HOME)
             return
-        if command == "rank":
-            hours = 24
-            if args and args[0] in ("7", "168", "30", "720"):
-                hours = 168
-            shown = await self._present_watch_rank(chat_id, hours)
-            return shown
+        if command in ('rank', 'today'):
+            titles = bool(args and args[0].casefold() in ('影片', 'titles'))
+            period_args = args[1:] if titles else args
+            period = (1, True) if command == 'today' and not period_args else (
+                self._rank_command_period(period_args) if command == 'rank' else None)
+            if period is None:
+                await self._show(chat_id, '口令参数无效，请按下方用法查询。\n\n' + RANK_HELP)
+                return
+            days, today = period
+            if titles:
+                return await self.broadcast_rankings(chat_id, days, **({'today': True} if today else {}))
+            if today:
+                return await self.broadcast_watch_rank(chat_id, days, today=True)
+            return await self._present_watch_rank(chat_id, 168 if days == 7 else 24)
         if command == "manage" and self.is_admin(member):
             if in_group:
                 await self._show(chat_id, "请私聊打开管理菜单，或直接使用 /kk /renew 等命令。")
@@ -3075,7 +3128,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             await self._show(chat_id, "🛠 <b>用户管理</b>\n\n请选择操作。", self.admin_menu())
             return
         if command == "help" and self.is_admin(member) and not in_group:
-            await self._show(chat_id, ADMIN_HELP, self.admin_menu())
+            await self._show(chat_id, ADMIN_HELP + '\n\n' + RANK_HELP, self.admin_menu())
             return
         if command in ("help", "rules"):
             if in_group:
@@ -3959,7 +4012,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             shown = await self._handle_command(
                 chat_id, tg_user_id, tg_username, text, display_name=tg_name)
             command = text.split()[0].lower().split('@', 1)[0]
-            if shown and command in ('/kk', '/me', '/rank', '/renew', '/score'):
+            if shown and command in ('/kk', '/me', '/rank', '/today', '/renew', '/score'):
                 await self._delete_trigger_command(chat_id, message.get('message_id'))
             return
 
@@ -4016,24 +4069,37 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # a replay of registration or an administrative operation.
         if data == 'urank_close' or data.startswith('urank:'):
             if data == 'urank_close':
+                self._today_rank_boards.pop((str(chat_id), int(message_id)), None)
                 await self._answer_callback(callback_id)
                 await self._call("editMessageReplyMarkup", {
                     "chat_id": chat_id, "message_id": message_id,
                     "reply_markup": {"inline_keyboard": []}})
                 return
             try:
-                page_s, days_s = data.split(":", 1)[1].split("_", 1)
-                page, days = int(page_s), int(days_s)
+                tokens = data.split(':', 1)[1].split('_')
+                if len(tokens) not in (2, 3) or (len(tokens) == 3 and tokens[2] != 'today'):
+                    raise ValueError('invalid pager')
+                page, days = int(tokens[0]), int(tokens[1])
+                today = len(tokens) == 3
             except (ValueError, IndexError):
                 await self._answer_callback(callback_id, "页码无效。")
                 return
-            await self._fill_watch_profiles(days, page)
-            pages = self._watch_rank_pages(days)
+            board = None
+            if today:
+                cached = self._today_rank_boards.get((str(chat_id), int(message_id)))
+                if not cached or cached[0] <= time.time():
+                    self._today_rank_boards.pop((str(chat_id), int(message_id)), None)
+                    await self._answer_callback(callback_id, '此榜单快照已过期，请重新发送 /today。')
+                    return
+                board = cached[1]
+            options = {'today': True, 'board': board} if today else {}
+            await self._fill_watch_profiles(days, page, **options)
+            pages = self._watch_rank_pages(days, **options)
             if page < 1 or page > len(pages):
                 await self._answer_callback(callback_id, "没有这一页。")
                 return
             await self._answer_callback(callback_id, f"第 {page} 页")
-            keyboard = self._watch_rank_keyboard(page, len(pages), days)
+            keyboard = self._watch_rank_keyboard(page, len(pages), days, today=today)
             if message.get("photo") or (str(chat_id), int(message_id)) in self._photo_panels:
                 await self._call("editMessageCaption", {
                     "chat_id": chat_id, "message_id": message_id,
@@ -4662,12 +4728,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         await self._edit(chat_id, message_id, body,
                          self._watch_rankings_keyboard(168 if days >= 7 else 24, heat=heat))
 
-    async def broadcast_rankings(self, chat_id: str, days: int = 1) -> bool:
+    async def broadcast_rankings(self, chat_id: str, days: int = 1, *,
+                                 today: bool = False, board: dict | None = None) -> bool:
         """Scheduled heat bulletin with poster when covers can be drawn."""
         if not chat_id or not self.enabled:
             return False
-        caption = self._rankings_text(days)
-        photo = await self._rankings_poster(days)
+        options = {'today': True, 'board': board or self._today_board()} if today else {}
+        caption = self._rankings_text(days, **options)
+        photo = await self._rankings_poster(days, **options)
         parts = self._split_bulletin(caption)
         keyboard = self._watch_rankings_keyboard(168 if days >= 7 else 24, heat=True) if _SESSION.get() is not None else None
         if photo:
@@ -4697,14 +4765,17 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         """Commands share the scheduled calendar board, poster and pager."""
         return await self.broadcast_watch_rank(chat_id, 7 if hours >= 168 else 1)
 
-    async def broadcast_watch_rank(self, chat_id: str, days: int = 1) -> bool:
+    async def broadcast_watch_rank(self, chat_id: str, days: int = 1, *,
+                                   today: bool = False, board: dict | None = None) -> bool:
         """Scheduled watch-time board: podium photo plus a numbered pager."""
         if not chat_id or not self.enabled:
             return False
-        await self._fill_watch_profiles(days, 1)
-        pages = self._watch_rank_pages(days)
-        keyboard = self._watch_rank_keyboard(1, len(pages), days)
-        photo = await self._watch_rank_poster(days)
+        board = (board or self._today_board()) if today else None
+        options = {'today': True, 'board': board} if today else {}
+        await self._fill_watch_profiles(days, 1, **options)
+        pages = self._watch_rank_pages(days, **options)
+        keyboard = self._watch_rank_keyboard(1, len(pages), days, today=today)
+        photo = await self._watch_rank_poster(days, **options)
         if photo:
             payload = {"chat_id": str(chat_id), "caption": pages[0],
                        "parse_mode": "HTML",
@@ -4716,12 +4787,23 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 {"photo": ("watch-rank.jpg", photo, "image/jpeg")})
             if isinstance(result, dict) and result.get("message_id"):
                 self._photo_panels.add((str(chat_id), int(result["message_id"])))
+                if today:
+                    self._remember_today_board(chat_id, result['message_id'], board)
                 if _SESSION.get() is not None:
                     self._touch_panel(chat_id, result['message_id'])
                     self._remember_menu(chat_id, result['message_id'], keyboard)
                 return True
             if result is not None:
                 return True
+        if today:
+            # Self-answering pagers deliberately do not become ordinary menus.
+            # Keep the actual message id rather than looking up an unrelated panel.
+            mid = await self.send_message(chat_id, pages[0], keyboard)
+            if mid:
+                self._remember_today_board(chat_id, mid, board)
+                if _SESSION.get() is not None:
+                    self._touch_panel(chat_id, mid)
+            return bool(mid)
         return await self.send(chat_id, pages[0], keyboard)
 
     @staticmethod
@@ -4809,9 +4891,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 rows = self._stats.top_watchers(hours=self._rank_hours(hours), limit=10)
         await self._remember_watch_profiles(rows)
 
-    async def _fill_watch_profiles(self, days: int, page: int, page_size: int = 10) -> None:
+    async def _fill_watch_profiles(self, days: int, page: int, page_size: int = 10, *,
+                                   today: bool = False, board: dict | None = None) -> None:
         rows: list[dict[str, Any]] = []
-        if self._stats is not None:
+        if today:
+            rows = (board or self._today_board())['users']
+        elif self._stats is not None:
             with contextlib.suppress(Exception):
                 rows = self._stats.top_users(days=days, limit=5000, calendar=True)
         size = max(1, int(page_size or 10))
@@ -4849,11 +4934,17 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return None
         return self._image_bytes(r.content or b"", str(r.headers.get("content-type") or ""))
 
-    async def _watch_rank_poster(self, days: int) -> bytes | None:
+    async def _watch_rank_poster(self, days: int, *, today: bool = False,
+                                 board: dict | None = None) -> bytes | None:
         days = max(1, int(days or 1))
-        moment = time.time()
+        board = (board or self._today_board()) if today else None
+        moment = board['now'] if today else time.time()
         rows: list[dict[str, Any]] = []
-        if self._stats is not None:
+        if today:
+            if board.get('unavailable'):
+                return None
+            rows = [dict(r) for r in board['users'][:10]]
+        elif self._stats is not None:
             try:
                 rows = self._stats.top_users(days=days, limit=10, calendar=True, now=moment)
             except Exception:  # noqa: BLE001 - unavailable is not an empty chart
@@ -4871,12 +4962,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         avatars, art = await asyncio.gather(
             fetch_rank_images(self._tg_avatar_bytes,
                               [{'item_id': row.get('tg_user_id')} for row in rows], limit=10),
-            self._ranking_art(days, now=moment))
+            self._ranking_art(days, now=moment, **({'board': (board['movies'], board['shows'])} if today else {})))
         covers, backdrops = art
         try:
             return await asyncio.to_thread(render_watch_poster,
                 rows, weekly=days >= 3, avatars=avatars, covers=covers,
-                backdrops=backdrops, days=days, when=ranking_stamp(days, now=moment))
+                backdrops=backdrops, days=days, when=board['stamp'] if today else ranking_stamp(days, now=moment),
+                **({'today': True} if today else {}))
         except Exception:  # noqa: BLE001 - fall back to text
             return None
 
@@ -4898,14 +4990,20 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             fetch_rank_images(getattr(self._emby, 'item_backdrop_image', None), movies[:1] + shows[:1], limit=2))
         return covers, backdrops
 
-    async def _rankings_poster(self, days: int) -> bytes | None:
+    async def _rankings_poster(self, days: int, *, today: bool = False,
+                               board: dict | None = None) -> bytes | None:
         if self._stats is None:
             return None
         days = max(1, int(days or 1))
-        moment = time.time()
+        board = (board or self._today_board()) if today else None
+        moment = board['now'] if today else time.time()
         try:
             comparison = getattr(self._stats, 'title_rankings', None)
-            if callable(comparison):
+            if today:
+                if board.get('unavailable'):
+                    return None
+                movies, shows = board['movies'], board['shows']
+            elif callable(comparison):
                 movies, shows = comparison(days=days, limit=10, now=moment)
             else:
                 movies, shows = self._stats.top_titles_split(days=days, limit=10, calendar=True, now=moment)
@@ -4916,7 +5014,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         try:
             return await asyncio.to_thread(render_rank_poster,
                 movies, shows, weekly=days >= 3,
-                covers=covers, backdrops=backdrops, days=days, when=ranking_stamp(days, now=moment))
+                covers=covers, backdrops=backdrops, days=days,
+                when=board['stamp'] if today else ranking_stamp(days, now=moment),
+                **({'today': True} if today else {}))
         except Exception:  # noqa: BLE001 - fall back to text bulletin
             return None
 

@@ -364,7 +364,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
                        if m == "setMyCommands" and p["scope"]["type"] == "chat")
     admin_cmds = next(p["commands"] for m, p in bot.calls
                       if m == "setMyCommands" and p["scope"]["type"] == "chat_member")
-    assert {c["command"] for c in member_cmds} == {"start", "me", "usage", "rank", "rules", "help"}
+    assert {c["command"] for c in member_cmds} == {"start", "me", "usage", "rank", "today", "rules", "help"}
     assert {"kk", "renew", "rmemby", "score"} <= {c["command"] for c in admin_cmds}
     bot.calls.clear()
     bot.invalidate_commands()

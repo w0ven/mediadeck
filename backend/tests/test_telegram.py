@@ -1696,12 +1696,13 @@ def test_rankings_offer_today_and_thirty_days() -> None:
     assert "播放周榜" in bot._rankings_text(7)
 
 
-def test_member_rankings_use_daily_weekly_watch_and_heat() -> None:
+def test_member_rankings_keep_scores_and_home_without_period_switches() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_FakeStats())
     keys = bot._watch_rankings_keyboard(24)
     actions = {b.get("callback_data") for row in keys for b in row}
-    assert {"rank:24", "rank:168", "heat:1", "heat:7", "points_rank", "home"} <= actions
+    assert {"points_rank", "home"} <= actions
+    assert not any(str(action).startswith(("rank:", "heat:", "top:")) for action in actions)
     assert "resetpw" not in actions
     assert "今日观影榜" in bot._watch_rankings_text(24)
     assert "本周观影榜" in bot._watch_rankings_text(168)

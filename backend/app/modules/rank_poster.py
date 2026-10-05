@@ -287,12 +287,12 @@ def _period_title(kind: str, weekly: bool, days: int | None) -> str:
 def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]], *,
                        weekly: bool = False, covers: dict[str, bytes] | None = None,
                        when: str = '', backdrops: dict[str, bytes] | None = None,
-                       days: int | None = None) -> bytes:
+                       days: int | None = None, today: bool = False) -> bytes:
     covers, backdrops = covers or {}, backdrops or {}
     movies, shows = list(movies[:10]), list(shows[:10])
     poster = _Poster()
     leads = movies[:1] + shows[:1]
-    poster.header(_period_title('观影榜', weekly, days), '电影与剧集 · 按累计观看时长排序', when,
+    poster.header('今日观影榜' if today else _period_title('观影榜', weekly, days), '电影与剧集 · 按累计观看时长排序', when,
                   _heroes(leads, covers, backdrops))
     poster.draw.line((600, 567, 600, 2060), fill=(122, 132, 111, 70), width=1)
     for column, (rows, label) in enumerate(((movies, '电影'), (shows, '剧集'))):
@@ -311,7 +311,8 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
             poster.text(x + 365, 682 + 45 * index, line, 35)
         poster.text(x + 365, 854, _title_duration(first), 30, GOLD)
         poster.text(x + 365, 901, _title_count(first), 22, MUTED)
-        poster.movement(x + 571, 932, first)
+        if not today:
+            poster.movement(x + 571, 932, first)
         poster.rule(x + 40, 996, x + 571)
         for rank, row in enumerate(rows[1:], 2):
             y = 1021 + (rank - 2) * 116
@@ -320,12 +321,14 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
             poster.text(x + 209, y + 9, _clip(row.get('title') or '—', 353, 31), 31)
             poster.text(x + 209, y + 47, _title_duration(row), 25, GOLD)
             poster.text(x + 209, y + 79, _title_count(row), 20, MUTED)
-            poster.movement(x + 571, y + 59, row)
+            if not today:
+                poster.movement(x + 571, y + 59, row)
             poster.rule(x + 40, y + 110, x + 571, 60)
         if len(rows) < 10:
             y = 1040 if len(rows) == 1 else 1040 + (len(rows) - 1) * 116
             poster.text(x + 300, y, f'本期共 {len(rows)} 部 · 展示全部', 24, MUTED, 'mt')
-    poster.footer('累计观看时长排名；人数去重；升降比较上一等长周期')
+    poster.footer('今日截至查看时；按最近有效采样；暂停不计；不比较全天涨跌' if today else
+                  '累计观看时长排名；人数去重；升降比较上一等长周期')
     return poster.jpeg()
 
 
@@ -333,10 +336,10 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
                         avatars: dict[str, bytes] | None = None, when: str = '',
                         covers: dict[str, bytes] | None = None,
                         backdrops: dict[str, bytes] | None = None,
-                        days: int | None = None) -> bytes:
+                        days: int | None = None, today: bool = False) -> bytes:
     rows, avatars = list(rows[:10]), avatars or {}
     poster = _Poster()
-    poster.header(_period_title('观影达人榜', weekly, days), '把时间，留给喜欢的故事 · 按观影时长排序', when,
+    poster.header('今日观影达人榜' if today else _period_title('观影达人榜', weekly, days), '把时间，留给喜欢的故事 · 按观影时长排序', when,
                   list((backdrops or {}).values())[:2] or list((covers or {}).values())[:2])
     poster.text(48, 560, f'观影时长 TOP {len(rows)}' if rows else '观影时长', 38, GOLD)
     poster.rule(48, 615, 1152, 130)
@@ -365,7 +368,8 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
             poster.rule(48, y + 107, 1152, 60)
     else:
         poster.text(600, 986, '本期暂无观影时长记录', 38, MUTED, 'mt')
-    poster.footer('使用 Telegram 昵称展示；记录不完整时标明已知时长')
+    poster.footer('今日截至查看时；按最近有效采样；暂停不计' if today else
+                  '使用 Telegram 昵称展示；记录不完整时标明已知时长')
     return poster.jpeg()
 
 
