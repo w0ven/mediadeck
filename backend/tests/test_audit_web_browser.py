@@ -522,7 +522,8 @@ def test_visible_form_controls_have_names(page):
 
 
 @pytest.mark.parametrize('action,path,answer', [
-    ('status','/api/members/audit-viewer/status',''),
+    ('actions/disable','/api/members/audit-viewer/actions/disable',''),
+    ('actions/enable','/api/members/audit-viewer/actions/enable',''),
     ('password','/api/members/audit-viewer/password','demo-pass-only'),
     ('kick','/api/members/audit-viewer/kick',''),
     ('reset-traffic','/api/members/audit-viewer/reset-traffic',''),
@@ -537,7 +538,7 @@ def test_member_actions_cancel_failure_keep_ui(page,action,path,answer,accept):
     button=page.locator('[data-member-action="'+action+'"]')
     button.click()
     if accept:
-        expect(page.locator('#toast')).to_contain_text('操作失败')
+        expect(page.locator('#toast')).to_contain_text('操作结果未确认' if action.startswith('actions/') else '操作失败')
         assert len(sent)==1
         expect(button).to_be_enabled()
     else:

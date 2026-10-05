@@ -229,11 +229,12 @@ def test_remote_failure_keeps_successful_order_and_reports_partial(integrated, m
     assert 'private-example-value' not in str(bot.calls)
 
 
-def test_manual_web_policy_route_keeps_admin_edit_semantics(integrated):
+def test_manual_web_policy_route_protects_admin_from_disable(integrated):
     client, _bot = integrated
     result = client.post('/api/emby/users/admin/policy', auth=ADMIN, json={'IsDisabled': True})
     assert result.status_code == 200
-    assert app.state.emby._users['admin']['Policy']['IsDisabled'] is True
+    assert result.json()['ok'] is False
+    assert app.state.emby._users['admin']['Policy']['IsDisabled'] is False
 
 
 @pytest.mark.parametrize('mode', ['false', 'exception'])

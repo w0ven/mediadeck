@@ -250,6 +250,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         self._config = config_provider
         self._members = members
         self._emby = emby
+        self._restrictions: Any = None  # shared manual/sanction service wired at startup
         self._online_plays_cache = TTLCache(ttl=PLAYBACK_COUNT_TTL, max_entries=1)
         self._stats = stats
         self._db = db
@@ -2292,6 +2293,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             [{'text': '◀ 管理入口', 'callback_data': 'admin_root'},
              {'text': '关闭卡片', 'callback_data': 'panel_close'}],
         ]
+        rows.insert(0, [{'text': '⛔ 禁用账号', 'callback_data': 'admin_disable'},
+                        {'text': '🔓 解除禁用', 'callback_data': 'admin_enable'}])
         rows.insert(1, [{'text': '💠 直接授予白名单', 'callback_data': 'admin_prouser'}])
         if _GROUP.get():
             rows += self._private_button('manage_' + user_id, '完整管理 · 私聊')
@@ -2299,8 +2302,16 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             rows.insert(2, [{'text': '📋 详细资料 / 绑定', 'callback_data': 'admin_binding'}])
         return rows
 
+    @staticmethod
+    def _admin_access_text(access: dict[str, Any]) -> str:
+        local = '已封禁' if access.get('status') == 'suspended' else '未封禁'
+        remote = ('未知，请刷新核实' if access.get('emby_disabled') is None else
+                  '已禁用' if access['emby_disabled'] else '未禁用')
+        limits = '、'.join(access.get('remaining_restrictions') or []) or '无额外到期/额度/待开通限制'
+        return f"\n本地封禁：{local} · Emby：{remote}\n剩余权益限制：{escape(limits)}\n"
+
     def _user_card(self, target: dict[str, Any]) -> str:
-        return self._account_card(target, public=_GROUP.get(), managing=True)
+        return self._account_card(target, public=_GROUP.get(), managing=True) + target.get('_access_text', '')
 
     def _admin_details(self, target: dict[str, Any]) -> str:
         if _GROUP.get():
@@ -2497,6 +2508,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
 
     async def _admin_show_user(self, chat_id: Any, target: dict[str, Any],
                                actor: str, notice: str = '') -> bool:
+        if self._restrictions is not None:
+            uid = str(target.get('emby_user_id') or '')
+            try:
+                remote = await self._restrictions.user(uid)
+                access = self._restrictions.access_state(uid, remote, available=remote is not None)
+            except Exception:  # noqa: BLE001 - never imply enabled on read failure
+                access = self._restrictions.access_state(uid, None, available=False)
+            target = {**target, '_access_text': self._admin_access_text(access)}
         previous = self._admin_panel(chat_id)
         if previous and previous['user_id'] != str(target.get('emby_user_id') or ''):
             # A card is never silently retargeted; late buttons still name the
@@ -2591,6 +2610,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         actor = actor or self._admin_actor(member or {}, "")
         user_id = str(target.get("emby_user_id"))
+        if data in ('admin_disable', 'admin_enable') or data.startswith('admin_access_ok:'):
+            await self._admin_manual_access(chat_id, message_id, member, target, actor, data)
+            return
         if data == "admin_prouser":
             await self._grant_whitelist(chat_id, actor, target)
             return
@@ -2657,6 +2679,58 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if data == "admin_rm":
             await self._cmd_rm(chat_id, actor, [str(target.get("username") or "")])
+
+    async def _admin_manual_access(self, chat_id: Any, message_id: int,
+                                   member: dict[str, Any], target: dict[str, Any],
+                                   actor: str, data: str) -> None:
+        panel = self._admin_panel(chat_id, message_id)
+        uid = str(target.get('emby_user_id') or '')
+        tg_id = _ACTOR.get() or str(chat_id)
+        if (not panel or panel['user_id'] != uid or not self._admin_panel_authorized(panel, tg_id)
+                or self._restrictions is None):
+            await self._edit(chat_id, message_id, '管理卡或权限已失效，请重新 /kk 查询。')
+            return
+        if data in ('admin_disable', 'admin_enable'):
+            action = 'disable' if data == 'admin_disable' else 'enable'
+            nonce = secrets.token_hex(12)
+            self._pending[self._pkey(chat_id)] = (
+                'admin_access_confirm', time.time() + PENDING_TTL,
+                {'nonce': nonce, 'action': action, 'user_id': uid, 'message_id': message_id})
+            self._save_admin_pending(chat_id)
+            label = '禁用账号' if action == 'disable' else '解除禁用'
+            await self._edit(chat_id, message_id,
+                f"确认{label} <b>{escape(str(target.get('username') or uid))}</b>？\n"
+                '管理员手动操作将立即同步本地与 Emby，不受自动执行开关影响。\n'
+                '解除不续期、不重置用量、不修改分组/角色；到期、耗尽、待开通限制仍适用。',
+                [[{'text': '确认' + label, 'callback_data': 'admin_access_ok:' + nonce}],
+                 *self._target_back()])
+            return
+        waiting = self._pending.get(self._pkey(chat_id))
+        if (not waiting or waiting[0] != 'admin_access_confirm' or waiting[1] <= time.time()
+                or data != 'admin_access_ok:' + waiting[2].get('nonce', '')
+                or waiting[2].get('user_id') != uid or waiting[2].get('message_id') != message_id):
+            await self._edit(chat_id, message_id, '确认已过期或已使用，未执行操作。', self._target_back())
+            return
+        saved = waiting[2]
+        # Consume before the first await, including the panel's saved copy.
+        self._pending.pop(self._pkey(chat_id), None)
+        panel['pending'] = None
+
+        def authorize():
+            return (self._admin_panel(chat_id, message_id) is panel
+                    and panel['expires'] > time.time() and panel['user_id'] == uid
+                    and self._admin_panel_authorized(panel, tg_id)
+                    and self._members.get(uid) is not None)
+
+        result = await self._restrictions.manual(
+            uid, saved['action'], actor=actor, actor_user_id=str(member.get('emby_user_id') or ''),
+            request_id='tg:' + saved['nonce'], authorize=authorize)
+        fresh = self._members.get(uid)
+        if fresh and authorize():
+            notice = '\n' + ('✅ ' if result['ok'] else '❌ ') + escape(result['result'])
+            if result['retryable']:
+                notice += '\n请刷新核实后重新选择明确动作并确认，可重试。'
+            await self._admin_show_user(chat_id, fresh, actor, notice)
 
     def _find_target(self, token: str) -> dict[str, Any] | None:
         """Resolve Telegram id, @handle or Emby username to a member."""
@@ -3999,9 +4073,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             await self._answer_callback(callback_id, '这不是你的操作卡片，请发送自己的命令。')
             return
         panel = self._admin_panel(chat_id, message_id)
-        targeted = data.startswith(('admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
+        targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
             'admin_card', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
-            'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser')
+            'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_disable', 'admin_enable')
         if panel:
             if not self._admin_panel_authorized(panel, tg_user_id):
                 await self._answer_callback(callback_id, '管理员身份或权限已变化，请重新查询。')
@@ -4026,8 +4100,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             public = data in ('membership_recheck', 'me', 'me_status', 'usage', 'home', 'help', 'rules', 'rank', 'top',
                               'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_renew', 'admin_score', 'admin_usage',
-                              'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift')
-            public = public or data.startswith(('admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
+                              'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift', 'admin_disable', 'admin_enable')
+            public = public or data.startswith(('admin_access_ok:', 'admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
                 await self._answer_callback(callback_id, '请使用卡片上的私聊入口继续此操作。')
                 return
@@ -4232,9 +4306,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 "✅ <b>预授权注册</b>\n\n请发送对方的 Telegram 数字 ID。",
                 [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
             return
-        if data.startswith(("admin_renew", "admin_group_pick:", "admin_group_apply:")) or data in (
+        if data.startswith(("admin_access_ok:", "admin_renew", "admin_group_pick:", "admin_group_apply:")) or data in (
                 "admin_pro", "admin_rev", "admin_prouser", "admin_score", "admin_rm",
-                "admin_usage", "admin_binding", "admin_groups", "admin_card"):
+                "admin_usage", "admin_binding", "admin_groups", "admin_card", "admin_disable", "admin_enable"):
             await self._admin_user_action(chat_id, message_id, member, data)
             return
         if data == "top" or data.startswith("top:"):

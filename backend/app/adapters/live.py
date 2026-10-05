@@ -194,11 +194,13 @@ class LiveEmby:
         return result['status'] == 'applied'
 
     async def apply_member_policy(self, user_id: str,
-                                  policy_patch: dict[str, Any]) -> MemberPolicyResult:
-        return await self._apply_policy(user_id, policy_patch, protect_admin=True)
+                                  policy_patch: dict[str, Any], *,
+                                  authorize: Any = None) -> MemberPolicyResult:
+        return await self._apply_policy(user_id, policy_patch, protect_admin=True,
+                                        authorize=authorize)
 
     async def _apply_policy(self, user_id: str, policy_patch: dict[str, Any], *,
-                            protect_admin: bool) -> MemberPolicyResult:
+                            protect_admin: bool, authorize: Any = None) -> MemberPolicyResult:
         base, headers, timeout, verify = self._conn()
         async with self._client(timeout, verify) as client:
             r = self._check(await client.get(f"{base}/emby/Users/{user_id}", headers=headers))
@@ -212,6 +214,13 @@ class LiveEmby:
             policy = dict(body.get('Policy') or {})
             if protect_admin and policy.get('IsAdministrator'):
                 return {'status': 'skipped_admin'}
+            if authorize is not None:
+                if str(body.get('Id') or '') != str(user_id):
+                    return {'status': 'failed'}
+                if not authorize():
+                    return {'status': 'skipped_authority'}
+                if policy_patch.get('IsDisabled') is True and policy.get('IsAdministrator') is not False:
+                    return {'status': 'failed'}
             policy.update(policy_patch)
             pr = self._check(
                 await client.post(

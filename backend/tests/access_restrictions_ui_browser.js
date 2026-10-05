@@ -25,6 +25,8 @@
   data.events.push({id: evil, created_at: 0, username: evil, user_id: evil, rule: evil,
     action: evil, status: evil, result: {detail: evil},
     notices: [{kind: 'private', state: evil, attempts: evil, error: evil}]});
+  data.events.push({id: 9, created_at: 0, username: 'manual-member', user_id: 'manual-user',
+    rule:'manual', action:'enable', status:'done', result:'管理员手动解除禁用：仍不可用：已过期', notices:[]});
   const legacyRules = [{id: 91, kind: 'client', pattern: 'curl|wget', action: 'deny', note: 'legacy rule', enabled: true}];
   const legacyBlocks = [{blocked_at: Date.now() / 1000, username: 'legacy-block', user_agent: 'curl',
     remote_ip: '203.0.113.3', reason: 'legacy rejection', rule_id: 91}];
@@ -77,7 +79,7 @@
     assert($('#ac-pattern') && $('#view').textContent.includes('curl|wget') &&
       $('#view').textContent.includes('legacy-block'), 'generic UA/IP rule form, rules and block log preserved');
     const events = $('#ac-restriction-events');
-    assert(events.querySelectorAll('tbody tr').length === 5, 'all returned events rendered');
+    assert(events.querySelectorAll('tbody tr').length === 6, 'all returned events rendered');
     assert(events.textContent.includes('TG 私信') && events.textContent.includes('互动群') &&
       !events.textContent.includes('-100987654321'), 'notice destination labels do not expose chat ID');
     for (const text of ['已执行', '执行失败', '结果不明', '待执行', '已送达', '等待重试', '发送失败',
@@ -85,6 +87,7 @@
       assert(events.textContent.includes(text), 'event/notice state: ' + text);
     assert(events.textContent.includes(evil) && events.textContent.includes('only rejected excess playback') &&
       !events.querySelector('img') && !window.injected, 'event values, objects and errors are escaped plain text');
+    assert(events.textContent.includes('管理员手动操作') && events.textContent.includes('解除禁用') && events.textContent.includes('仍不可用：已过期'), 'manual receipt lost its distinct meaning or residual restriction');
     assert(getComputedStyle(events).overflowX === 'auto', 'wide event table is scrollable on narrow screens');
     assert([...$('#ac-restrictions').querySelectorAll('input,select,button')].every(el =>
       el.getBoundingClientRect().right <= window.innerWidth), 'configuration controls fit current viewport');

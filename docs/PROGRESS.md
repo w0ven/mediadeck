@@ -2,6 +2,34 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-05 — administrator manual account disable / release (local verification)
+
+- Proved the old automatic-enforcement-off defect before editing: status became
+  suspended locally while Emby stayed enabled and remote_ok was null. This is a
+  code regression, not a claim that the deployed enforcement switch was off.
+- Added visible, explicit disable/release buttons and confirmation in Web member
+  overview and administrator /kk cards (group/private). Show local suspension,
+  independent Emby disable state and remaining entitlement/policy restrictions.
+  Bot keeps owner/reviewer/target/message/topic binding and one-use confirmations,
+  with execution-time permission checks; Web retains stale-context/draft guards.
+- Unified manual, legacy status/bulk and Emby disable/enable policy paths. Manual
+  changes ignore the automatic switch, patch only IsDisabled, clear suspension
+  without renewal/quota reset and serialize with sanctions/reconcile. Pending,
+  expiry, measured exhaustion, original group/roles and other policy remain in
+  force. Protect administrators/self and fail closed on unknown remote identity.
+- Reused restriction events/notices with distinct administrator-manual receipts,
+  durable request identity and per-recipient delivery results. Successful retries
+  and no-ops do not repeat notifications; new real violations can sanction again
+  after release. Unconfirmed manual intent cannot use generic reconcile retry.
+- Validation: targeted 110 passed plus 2 Chromium subtests; full backend suite
+  2380 passed, 56 environment-dependent skips and 2 subtests passed (194.21s).
+  Full ruff and git diff --check passed. Updated older tests only for intentional
+  protected-admin/new explicit-action contracts and fresh identity/readback.
+- Updated docs/ACCESS_RESTRICTIONS.md with APIs, receipts and Emby transaction/
+  transport limitations. Validation uses isolated accounts and notification
+  transports, not real-user penalties or live broadcasts. This release needs
+  only the panel/Bot service update; no nginx or gateway changes.
+
 ## 2026-10-03 — verified access restrictions and configurable sanctions
 
 - Added independent concurrency, Web-login and Web-playback sanction settings

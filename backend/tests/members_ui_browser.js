@@ -22,6 +22,7 @@
   let lastGroup = null;
   let lastRetry = null;
   let failDetailRead = false;
+  let manualMode = '', manualGate = null;
   let meterConfig = {cutover:false, baseline_confirmed:false, report_interval_seconds:15};
 
   class FakeSource {
@@ -209,6 +210,21 @@
           available_cascade: available,
           objects,
         };
+      }
+      if ((rest === 'actions/disable' || rest === 'actions/enable') && method === 'POST') {
+        if (manualGate) return await manualGate;
+        if (manualMode === 'transport') { manualMode = ''; throw new Error('transport uncertain'); }
+        const member = DB.find(x=>x.emby_user_id===id);
+        if (manualMode === 'failed') {
+          Object.assign(member,{retryable:true,last_remote_action:'manual.enable',last_remote_ok:false});
+          return {ok:false, remote_ok:false, retryable:true, result:'Emby 操作失败，可重试'};
+        }
+        Object.assign(member,{retryable:false,last_remote_action:rest.replace('actions/','manual.'),last_remote_ok:true});
+        const disabling = rest === 'actions/disable';
+        member.status = disabling ? 'suspended' : 'active';
+        member.state = member.entitlement_state = disabling ? 'suspended' : 'active';
+        member.emby_disabled = disabling;
+        return {ok:true, remote_ok:true, result:disabling?'管理员手动禁用：账号已禁用':'管理员手动解除禁用：账号已可用'};
       }
       if (rest === 'roles' && method === 'POST') {
         const member = DB.find((x) => x.emby_user_id === id); member.roles = body.roles; return member;
@@ -492,9 +508,62 @@
     }
     document.querySelector('#member-detail [data-tab="overview"]').click();
     await waitFor(() => document.getElementById('md-renew'), 'overview actions missing');
-    ['password','kick','status','reset-traffic','telegram/unbind'].forEach((action) =>
+    ['password','kick','actions/disable','actions/enable','reset-traffic','telegram/unbind'].forEach((action) =>
       assert(document.querySelector(`[data-member-action="${action}"]`), 'account action removed: ' + action));
 
+    const manualWrites = () => requests.filter(r=>/\/actions\/(disable|enable)$/.test(r.path));
+    const manualButton = action=>document.querySelector(`[data-member-action="actions/${action}"]`);
+    assert(!manualButton('disable').closest('details') && !manualButton('enable').closest('details'), 'manual buttons hidden in more actions');
+    let beforeManual = manualWrites().length;
+    confirmAnswers.splice(0, confirmAnswers.length, false);
+    manualButton('disable').click(); await tick();
+    assert(manualWrites().length === beforeManual, 'cancelled disable was submitted');
+    confirmAnswers.splice(0, confirmAnswers.length, true);
+    manualButton('disable').click(); manualButton('disable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+1 && manualButton('disable') && !manualButton('disable').disabled, 'disable result missing');
+    assert(manualWrites().at(-1).path.endsWith('/actions/disable') && manualWrites().at(-1).body.request_id, 'disable not explicit or missing request identity');
+    assert(visibleText(document.getElementById('member-detail')).includes('已封禁') && visibleText(document.getElementById('md-emby-status')).includes('Emby 已禁用'), 'disable state not refreshed');
+    assert(confirms.at(-1).includes('不') && confirms.at(-1).includes('待开通'), 'confirmation omitted residual restrictions');
+    confirmAnswers.splice(0, confirmAnswers.length, true);
+    manualButton('enable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+2 && manualButton('enable') && !manualButton('enable').disabled, 'enable result missing');
+    assert(manualWrites().at(-1).path.endsWith('/actions/enable'), 'enable was inferred as a toggle');
+    assert(toasts.some(t=>!t.err && t.msg.includes('账号已可用')), 'release did not use actual result');
+    // Remote-only disabled account with active local state still has release.
+    observedMember.emby_disabled=true;
+    await go('members?id=u-alice&tab=overview');
+    await waitFor(()=>manualButton('enable'), 'remote-only release entry missing');
+    assert(visibleText(document.getElementById('md-emby-status')).includes('Emby 已禁用'), 'remote-only state hidden');
+    const dirtyDays=document.getElementById('md-days'); dirtyDays.value='47';
+    manualMode='failed'; toasts.length=0;
+    confirmAnswers.splice(0, confirmAnswers.length, true);
+    beforeManual=manualWrites().length; manualButton('enable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+1 && manualButton('enable') && !manualButton('enable').disabled, 'failure did not refresh');
+    assert(toasts.some(t=>t.err && /可重试/.test(t.msg)) && !toasts.some(t=>!t.err), 'failure claimed success');
+    assert(document.getElementById('md-days').value==='47', 'manual refresh discarded unsaved draft');
+    assert(!document.getElementById('md-retry') && manualButton('enable'), 'manual failure left an ambiguous generic reconcile retry');
+    assert(visibleText(document.getElementById('md-emby-status')).includes('Emby 已禁用'), 'failure implied remotely enabled');
+    manualMode='transport'; confirmAnswers.splice(0, confirmAnswers.length, true);
+    beforeManual=manualWrites().length; manualButton('enable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+1 && manualButton('enable') && !manualButton('enable').disabled, 'transport failure missing');
+    const uncertainId=manualWrites().at(-1).body.request_id;
+    confirmAnswers.splice(0, confirmAnswers.length, true); manualButton('enable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+2 && manualButton('enable') && !manualButton('enable').disabled, 'retry missing');
+    assert(manualWrites().at(-1).body.request_id===uncertainId, 'uncertain transport replay changed intent identity');
+    document.getElementById('md-days').value='30';
+    // Late result from an old target must not toast success or overwrite a new drawer.
+    let releaseManual;
+    manualGate=new Promise(resolve=>{releaseManual=resolve;});
+    confirmAnswers.splice(0, confirmAnswers.length, true);
+    beforeManual=manualWrites().length; manualButton('disable').click();
+    await waitFor(()=>manualWrites().length===beforeManual+1, 'held action missing');
+    await go('members?id=u-dave&tab=overview');
+    await waitFor(()=>document.querySelector('#md-title')?.textContent==='dave', 'new target missing');
+    const lateToasts=toasts.length;
+    releaseManual({ok:true, result:'OLD TARGET SUCCESS'}); manualGate=null; await tick();
+    assert(toasts.length===lateToasts && document.querySelector('#md-title').textContent==='dave', 'late manual result changed new context');
+    await go('members?id=u-alice&tab=overview');
+    await waitFor(()=>document.getElementById('md-renew'), 'return target missing');
     confirmAnswers.splice(0, confirmAnswers.length, true);
     document.getElementById('md-renew').click();
     await waitFor(() => lastRenew && lastRenew.id === 'u-alice', 'renew was not posted');

@@ -332,12 +332,13 @@ def test_ungrouped_member_only_gets_the_block_flag(stack) -> None:
 
 def test_enforcement_never_touches_unenrolled_accounts(stack) -> None:
     """The whole safety story: hundreds of pre-existing accounts stay untouched."""
+    before = dict(stack["emby"]._users["u2"]["Policy"])
     stack["members"].upsert("u1", "demo-user-1", {"group_id": "standard"})
     result = asyncio.run(stack["enforcement"].reconcile(apply=True))
     touched = {c["user_id"] for c in result["changes"]}
     assert touched <= {"u1"}
     # u2 exists in Emby but was never enrolled.
-    assert stack["emby"]._users["u2"]["Policy"] == {"IsDisabled": True}
+    assert stack["emby"]._users["u2"]["Policy"] == before
 
 
 def test_administrators_are_never_disabled(stack) -> None:
