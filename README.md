@@ -20,6 +20,18 @@ One panel to operate what is usually scattered across many tools:
 - **Identify & scrape review** — AI identification audit queue, manual TMDB
   correction.
 
+## Telegram ranking commands
+
+- `/rank`: yesterday's user viewing-time ranking.
+- `/today`: today's user ranking, from 00:00 Beijing time to the request snapshot.
+- `/rank 影片` / `/today 影片`: movie and series viewing-time charts for the same periods.
+- `/rank 7`: the previous seven complete calendar days (legacy command retained).
+
+Today's posters, captions and numbered pages share one verified snapshot, display
+its cutoff time and exclude paused or invalid playback. There are no period
+switching buttons and no comparison against yesterday's full-day movement.
+Send `/today` again to refresh; expired paging snapshots request a fresh command.
+
 ## Design rules
 
 - **Zero data in repo.** All endpoints, tokens, paths come from environment /

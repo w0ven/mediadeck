@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-06 — today's verified rankings and separate Bot commands
+
+- Add `/today` for user viewing time and `/today 影片` for independent movie/series
+  charts, from Beijing midnight to a single request snapshot; retain `/rank` as
+  yesterday and the legacy `/rank 7` weekly command. Help and chat command scopes
+  describe both entry points. Remove period-switching buttons; keep the pager,
+  close and existing non-period navigation.
+- Today's poster, caption and pages reuse one verified interval snapshot, show
+  its Beijing cutoff and omit full-day rank movement. Snapshot expiry asks for a
+  fresh command; image-upload/text fallback retains the actual pager message id.
+- Reuse the existing strict sampling ledger without changing collection, schema,
+  historical data or scheduled completed-day defaults. Tests cover midnight and
+  cutoff clipping, user/title agreement, pause/resume/seek, group/private command
+  routing, invalid arguments, poster formatting, text/photo paging and failures.
+- Validation: full Ruff and backend regression passed (2422 tests, 56
+  environment-dependent skips, 2 subtests). No open design questions; publication
+  and the bounded panel-only deployment require operator confirmation.
+
 ## 2026-10-06 — verified normal viewing time
 
 - Replace wall-clock-only watch increments with fresh, advancing playback

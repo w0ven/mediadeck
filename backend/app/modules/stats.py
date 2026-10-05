@@ -18,7 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from app.core.db import Database
@@ -43,19 +43,27 @@ def _day_list(days: int, end: datetime | None = None) -> list[str]:
             for i in range(days - 1, -1, -1)]
 
 
-def ranking_bounds(days: int, *, now: float | None = None) -> tuple[float, float]:
+def ranking_bounds(days: int, *, now: float | None = None,
+                   today: bool = False) -> tuple[float, float]:
     """Complete local calendar days ending at today's midnight.
 
     days=1 is yesterday 00:00–today 00:00, not a rolling 24 hours.
     days=7 is the seven complete days before today.
     """
     days = max(1, min(int(days or 1), MAX_DAYS))
-    local = datetime.fromtimestamp(time.time() if now is None else float(now))  # noqa: DTZ006 - intentionally use host-local calendar days
+    moment = time.time() if now is None else float(now)
+    if today:
+        beijing = datetime.fromtimestamp(moment, timezone(timedelta(hours=8)))
+        return beijing.replace(hour=0, minute=0, second=0, microsecond=0).timestamp(), moment
+    local = datetime.fromtimestamp(moment)  # noqa: DTZ006 - intentionally use host-local calendar days
     today = local.replace(hour=0, minute=0, second=0, microsecond=0)
     return (today - timedelta(days=days)).timestamp(), today.timestamp()
 
 
-def ranking_stamp(days: int, *, now: float | None = None) -> str:
+def ranking_stamp(days: int, *, now: float | None = None, today: bool = False) -> str:
+    if today:
+        moment = time.time() if now is None else float(now)
+        return datetime.fromtimestamp(moment, timezone(timedelta(hours=8))).strftime('%Y-%m-%d · 截至 %H:%M（北京时间）')
     since, until = ranking_bounds(days, now=now)
     start = datetime.fromtimestamp(since).strftime("%Y-%m-%d")  # noqa: DTZ006 - intentionally use host-local calendar days
     end = datetime.fromtimestamp(max(since, until - 1)).strftime("%Y-%m-%d")  # noqa: DTZ006 - intentionally use host-local calendar days
@@ -282,12 +290,26 @@ class StatsService:
         rows = self._db.query("SELECT u.emby_user_id,MAX(0,SUM(u.bytes)-COALESCE(c.credit_bytes,0)) AS bytes FROM measured_usage_monthly u LEFT JOIN measured_credits c ON c.emby_user_id=u.emby_user_id AND c.month=u.month WHERE u.month=? AND u.emby_user_id<>'' GROUP BY u.emby_user_id", (month,))
         return {'period': month, 'by_user': {r['emby_user_id']: int(r['bytes']) for r in rows}}
 
+    def today_snapshot(self, *, now: float | None = None) -> dict[str, Any]:
+        """Freeze one evidence snapshot for a today's caption, poster and pager.
+
+        The existing reentrant DB lock excludes the sampler between these reads;
+        this scope performs no writes or schema changes.
+        """
+        moment = time.time() if now is None else float(now)
+        with self._db.write():
+            users = self.top_users(1, limit=5000, today=True, now=moment)
+            movies, shows = self.top_titles_split(1, limit=10, today=True, now=moment)
+        return {'now': moment, 'stamp': ranking_stamp(1, now=moment, today=True),
+                'users': users, 'movies': movies, 'shows': shows}
+
     def top_users(self, days: int = 30, limit: int = 20, *,
-                  calendar: bool = False, now: float | None = None) -> list[dict[str, Any]]:
+                  calendar: bool = False, now: float | None = None,
+                  today: bool = False) -> list[dict[str, Any]]:
         values = self.measured_month()
         days = max(1, min(int(days or 1), MAX_DAYS))
-        if calendar:
-            since, until = ranking_bounds(days, now=now)
+        if calendar or today:
+            since, until = ranking_bounds(days, now=now, today=today)
             rows = self.top_watchers(hours=days * 24, limit=limit, since=since, until=until)
         else:
             rows = self.top_watchers(hours=days * 24, limit=limit)
@@ -338,10 +360,10 @@ class StatsService:
 
     def _title_rows(self, days: int, limit: int, *, calendar: bool = False,
                     now: float | None = None, kind: str | None = None,
-                    watch_time: bool = False) -> list[dict[str, Any]]:
+                    watch_time: bool = False, today: bool = False) -> list[dict[str, Any]]:
         days = max(1, min(days, MAX_DAYS))
-        if calendar:
-            since, until = ranking_bounds(days, now=now)
+        if calendar or today:
+            since, until = ranking_bounds(days, now=now, today=today)
         else:
             until = time.time() if now is None else now
             since = until - days * 86400
@@ -382,14 +404,15 @@ class StatsService:
         } for r in rows]
 
     def top_titles_split(self, days: int = 1, limit: int = 10, *,
-                          calendar: bool = False, now: float | None = None
+                          calendar: bool = False, now: float | None = None,
+                          today: bool = False
                           ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Watch-time charts per category; busy series cannot hide movies."""
         limit = max(1, min(int(limit), 200))
         now = time.time() if now is None else now
         return (
-            self._title_rows(days, limit, calendar=calendar, now=now, kind='movie', watch_time=True),
-            self._title_rows(days, limit, calendar=calendar, now=now, kind='show', watch_time=True),
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='movie', watch_time=True, today=today),
+            self._title_rows(days, limit, calendar=calendar, now=now, kind='show', watch_time=True, today=today),
         )
 
     def title_rankings(self, days: int = 1, limit: int = 10, *,
