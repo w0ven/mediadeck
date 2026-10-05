@@ -13,9 +13,9 @@ class MockEmby:
     def __init__(self) -> None:
         stamp = time.strftime("%Y-%m-%dT%H:%M:%S.0000000Z", time.gmtime())
         self._users: dict[str, dict[str, Any]] = {
-            "u1": {"Id": "u1", "Name": "demo-user-1", "Policy": {"IsDisabled": False},
+            "u1": {"Id": "u1", "Name": "demo-user-1", "Policy": {"IsDisabled": False, "IsAdministrator": False},
                    "LastActivityDate": stamp},
-            "u2": {"Id": "u2", "Name": "demo-user-2", "Policy": {"IsDisabled": True},
+            "u2": {"Id": "u2", "Name": "demo-user-2", "Policy": {"IsDisabled": True, "IsAdministrator": False},
                    "LastActivityDate": stamp},
             "admin": {"Id": "admin", "Name": "demo-admin",
                       "Policy": {"IsDisabled": False, "IsAdministrator": True},
@@ -44,7 +44,7 @@ class MockEmby:
     async def create_user(self, name: str) -> dict[str, Any]:
         uid = f"u{self._next}"
         self._next += 1
-        user = {"Id": uid, "Name": name, "Policy": {"IsDisabled": False}}
+        user = {"Id": uid, "Name": name, "Policy": {"IsDisabled": False, "IsAdministrator": False}}
         self._users[uid] = user
         return user
 
@@ -92,12 +92,18 @@ class MockEmby:
         return True
 
     async def apply_member_policy(self, user_id: str,
-                                  policy_patch: dict[str, Any]) -> MemberPolicyResult:
+                                  policy_patch: dict[str, Any], *,
+                                  authorize: Any = None) -> MemberPolicyResult:
         user = self._users.get(user_id)
         if not user or not isinstance(user.get('Policy'), dict):
             return {'status': 'failed'}
         if user['Policy'].get('IsAdministrator'):
             return {'status': 'skipped_admin'}
+        if authorize is not None:
+            if not authorize():
+                return {'status': 'skipped_authority'}
+            if policy_patch.get('IsDisabled') is True and user['Policy'].get('IsAdministrator') is not False:
+                return {'status': 'failed'}
         ok = await self.apply_policy(user_id, policy_patch)
         return {'status': 'applied' if ok else 'failed'}
 

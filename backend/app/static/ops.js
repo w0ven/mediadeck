@@ -1548,8 +1548,8 @@ function accessRestrictionEventsHtml(events) {
       return `<tr>
         <td>${esc(fmtAgeTs(event.created_at))}<div class="muted">#${esc(event.id)}</div></td>
         <td>${esc(event.username || '-')}<div class="muted">ID: ${esc(event.user_id || '-')}</div></td>
-        <td>${esc(ACCESS_RESTRICTION_RULES.find(r => r.key === event.rule)?.label || event.rule || '-')}</td>
-        <td>${esc(Object.hasOwn(ACCESS_RESTRICTION_ACTIONS, event.action) ? ACCESS_RESTRICTION_ACTIONS[event.action] : event.action || '-')}</td>
+        <td>${esc(event.rule === 'manual' ? '管理员手动操作' : ACCESS_RESTRICTION_RULES.find(r => r.key === event.rule)?.label || event.rule || '-')}</td>
+        <td>${esc(event.action === 'enable' ? '解除禁用' : Object.hasOwn(ACCESS_RESTRICTION_ACTIONS, event.action) ? ACCESS_RESTRICTION_ACTIONS[event.action] : event.action || '-')}</td>
         <td>${accessRestrictionTag(event.status)}</td>
         <td class="muted" style="overflow-wrap:anywhere">${esc(result)}</td>
         <td>${notices.length ? notices.map(notice => `<div>

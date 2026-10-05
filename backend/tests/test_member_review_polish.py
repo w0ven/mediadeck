@@ -206,7 +206,8 @@ def test_web_pages_search_totals_and_remote_snapshot_invalidation(monkeypatch):
         for i in range(13):
             members.upsert(f'local{i:02}', f'name{i:02}', {'group_id': 'standard'})
         members.bind_telegram('local12', '123456789', 'TargetHandle')
-        remote = AsyncMock(return_value=[{'Id': f'local{i:02}', 'Name': f'name{i:02}'} for i in range(13)]
+        remote = AsyncMock(return_value=[{'Id': f'local{i:02}', 'Name': f'name{i:02}',
+                                        'Policy': {'IsAdministrator': False, 'IsDisabled': False}} for i in range(13)]
                           + [{'Id': 'outside', 'Name': 'unmanaged'}])
         monkeypatch.setattr(app.state.emby, 'list_users', remote)
         def get(**kw):
@@ -224,18 +225,23 @@ def test_web_pages_search_totals_and_remote_snapshot_invalidation(monkeypatch):
         members.set_status('local00', 'suspended')
         assert get(status='suspended')['total'] == 1
         assert remote.await_count == 2
-        # Explicit remote writes invalidate even without a member audit record.
-        monkeypatch.setattr(app.state.emby, 'set_user_disabled', AsyncMock(return_value=True))
-        client.post('/api/emby/users/local00/disable', auth=ADMIN_AUTH)
+        # Manual writes use fresh identity/readback, then invalidate list cache.
+        async def apply(uid, patch, **kwargs):
+            assert kwargs['authorize']()
+            remote.return_value[0]['Policy'].update(patch)
+            return {'status': 'applied'}
+        monkeypatch.setattr(app.state.emby, 'apply_member_policy', apply)
+        result = client.post('/api/emby/users/local00/disable', auth=ADMIN_AUTH).json()
+        assert result['ok'] and remote.await_count == 4
         get()
-        assert remote.await_count == 3
+        assert remote.await_count == 5
         app.state.cache.set('members:emby', app.state.cache.get('members:emby'), ttl=-1)
         remote.side_effect = RuntimeError('upstream unavailable')
         failed = get()
         assert all(m['emby_status'] == 'unknown' for m in failed['members'])
         assert failed['unmanaged_error']
         get(page=2)
-        assert remote.await_count == 4
+        assert remote.await_count == 6
 
 
 def test_web_paged_population_is_not_silently_capped_at_5000(monkeypatch):

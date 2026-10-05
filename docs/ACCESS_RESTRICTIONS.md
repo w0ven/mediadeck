@@ -38,8 +38,8 @@ when its automatic-sanction switch is disabled.
 
 ## Execution and notifications
 
-Account disable is reflected in local suspended state so quota reconciliation
-cannot re-enable the account. Remote failures are recorded as failures/unknown,
+Account disable is reflected in local suspended state (existing pending status
+is retained) so quota reconciliation cannot re-enable the account. Remote failures are recorded as failures/unknown,
 not success. Deletion removes only the confirmed account and its membership;
 restriction receipts and notification destinations survive it.
 
@@ -58,6 +58,51 @@ Temporary Telegram failures retry at most four total attempts, with bounded
 backoff; blocked users and unknown delivery outcomes are not retried blindly.
 Interrupted sending is marked unknown after restart. The access page exposes
 both sanction and individual notification outcomes.
+
+## Administrator manual disable / release
+
+- Web member overview and the administrator's `/kk` target card expose separate
+  **禁用账号** and **解除禁用** buttons, with confirmation. Group and private Bot
+  cards bind actor, reviewer account, target, message and forum topic; execution
+  rechecks authority and consumes a one-use nonce before awaiting dependencies.
+  Anonymous administrators and other card readers cannot execute the operation.
+- Manual intent is independent of `membership.enforcement_enabled`. Sanctions,
+  manual operations and reconciliation share the policy-apply lock. A confirmed
+  release clears suspended status (including automatic sanctions), not expiry,
+  quota, group, roles or other policy. Pending accounts remain pending. Only
+  `IsDisabled` is patched; an expired/exhausted/pending account stays disabled.
+  Known remote-access/playback/library restrictions are reported, not bypassed.
+  Release is not an exemption: a later freshly confirmed violation can sanction
+  the account again, including within the previous login deduplication window.
+- Emby/Deck administrators and the operator's own account are protected. Disable
+  requires affirmative remote non-administrator identity; the live adapter reads
+  the target policy again and checks target/authority immediately before POST.
+  Emby does not offer a cross-system transaction or conditional policy write:
+  external permission changes after that read and lost transport acknowledgments
+  cannot be made atomic. Failed/unknown outcomes never claim current availability;
+  refresh and explicitly confirm a retry. Stop-command failure is separate from
+  a confirmed disable and does not repeat successful result notifications.
+- Authenticated `POST /api/members/{id}/actions/disable|enable` accepts optional
+  `request_id` (1–64 ASCII letters/digits/`-_:`). Replies include `ok`, `local_ok`,
+  `remote_ok`, `retryable`, `result`, `event_id` and fresh `access` observation
+  (`status`, `state`, `emby_disabled`, `remaining_restrictions`,
+  `account_available`). Reusing an identity observes its receipt and current
+  state, never replays it; a different target/action is rejected. Web retains the
+  identity across an uncertain transport retry. A failed/unknown receipt needs
+  a new explicit confirmation/identity to execute again.
+- Legacy member status suspended/active, bulk suspend/activate and Emby
+  disable/enable use the same path. Bulk accepts a request identity and returns
+  individual `results`; unmanaged Emby accounts are not silently enrolled.
+  Legacy policy edits containing `IsDisabled` use this path too; mixed disable
+  and other policy edits must be submitted separately (422). Missing Emby users
+  retain 404. Generic retry-remote refuses an unconfirmed manual intent (409),
+  rather than accidentally reconciling a failed disable back to enabled.
+- Existing restriction tables/notices retain automatic incident meanings. Manual
+  events use `rule=manual`, `action=disable|enable` and explicit administrator
+  audit entries; identical successful intent/no-op does not resend notices.
+  Group/private delivery receipts and retry rules remain independent. A release
+  receipt states whether the account is usable and any remaining restriction.
+  Manual audit changes also invalidate Web observations after Bot-only edits.
 
 ## Deployment
 

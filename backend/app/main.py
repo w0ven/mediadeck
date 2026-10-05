@@ -478,7 +478,9 @@ async def _startup() -> None:
     app.state.telegram.start()
     app.state.restrictions = RestrictionService(
         app.state.db, store, app.state.members, app.state.emby,
-        app.state.telegram, app.state.settings_service.telegram_config)
+        app.state.telegram, app.state.settings_service.telegram_config,
+        enforcement=app.state.enforcement)
+    app.state.telegram._restrictions = app.state.restrictions
     app.state.usage.concurrency_handler = app.state.restrictions.sampled_concurrency
 
     async def restriction_notice_loop() -> None:
@@ -1849,17 +1851,15 @@ async def emby_create_user(name: str = Body(..., embed=True, min_length=1, max_l
 
 
 @app.post("/api/emby/users/{user_id}/disable", dependencies=[Depends(_auth)])
-async def emby_disable_user(user_id: str) -> dict[str, bool]:
-    if not await app.state.emby.set_user_disabled(user_id, True):
-        raise HTTPException(404, "unknown user")
-    return {"disabled": True}
+async def emby_disable_user(user_id: str, payload: dict[str, Any] = Body(default={}),  # noqa: B008
+                            user: str = Depends(_auth)) -> dict[str, Any]:
+    return await _manual_account_action(user_id, "disable", payload, user)
 
 
 @app.post("/api/emby/users/{user_id}/enable", dependencies=[Depends(_auth)])
-async def emby_enable_user(user_id: str) -> dict[str, bool]:
-    if not await app.state.emby.set_user_disabled(user_id, False):
-        raise HTTPException(404, "unknown user")
-    return {"disabled": False}
+async def emby_enable_user(user_id: str, payload: dict[str, Any] = Body(default={}),  # noqa: B008
+                           user: str = Depends(_auth)) -> dict[str, Any]:
+    return await _manual_account_action(user_id, "enable", payload, user)
 
 
 @app.post("/api/emby/users/{user_id}/password", dependencies=[Depends(_auth)])
@@ -1871,13 +1871,20 @@ async def emby_set_password(user_id: str, new_password: str = Body(..., embed=Tr
 
 
 @app.post("/api/emby/users/{user_id}/policy", dependencies=[Depends(_auth)])
-async def emby_apply_policy(user_id: str, policy: dict[str, Any] = Body(...)) -> dict[str, bool]:  # noqa: B008
+async def emby_apply_policy(user_id: str, policy: dict[str, Any] = Body(...),  # noqa: B008
+                            user: str = Depends(_auth)) -> dict[str, Any]:
     allowed = {"IsDisabled", "EnableRemoteAccess", "SimultaneousStreamLimit",
                "RemoteClientBitrateLimit", "InvalidLoginAttemptCount",
                "IsHidden", "EnableLiveTvAccess", "EnableContentDownloading"}
     patch = {k: v for k, v in policy.items() if k in allowed}
     if not patch:
         raise HTTPException(422, "no allowed policy fields in body")
+    if "IsDisabled" in patch:
+        if not isinstance(patch["IsDisabled"], bool):
+            raise HTTPException(422, "IsDisabled 必须是布尔值")
+        if len(patch) != 1:
+            raise HTTPException(422, "禁用操作请与其他策略修改分开提交")
+        return await _manual_account_action(user_id, "disable" if patch["IsDisabled"] else "enable", {}, user)
     if not await app.state.emby.apply_policy(user_id, patch):
         raise HTTPException(404, "unknown user")
     return {"ok": True}
@@ -2009,7 +2016,7 @@ async def _member_emby_snapshot() -> tuple[dict[str, Any] | None, str | None]:
     revision = await asyncio.to_thread(
         app.state.db.one, "SELECT MAX(id) AS id FROM audit_log WHERE "
         "action LIKE 'member.%' OR action LIKE 'group.%' OR action LIKE 'enforce.%' "
-        "OR action='telegram.prouser'")
+        "OR action='telegram.prouser' OR action LIKE 'restriction.%'")
     version = (id(app.state.emby), revision['id'], app.state.member_snapshot_revision)
     async with app.state.member_snapshot_lock:
         cached = app.state.cache.get('members:emby')
@@ -2208,8 +2215,8 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
     if not detail:
         raise HTTPException(404, "unknown member")
     emby_users, emby_error = await _member_emby_snapshot()
-    detail['member'] = member_ops.attach_observation(
-        [detail['member']], emby_users, emby_error=emby_error)[0]
+    detail['member'] = app.state.restrictions.access_state(
+        user_id, (emby_users or {}).get(user_id), available=emby_users is not None and not emby_error)
     days = max(1, min(int(days or 30), 400))
     stats = app.state.stats.member_detail(user_id, days)
     series = stats.get("series") or []
@@ -2401,6 +2408,8 @@ async def members_retry_remote(user_id: str, user: str = Depends(_auth)
     if not member:
         raise HTTPException(404, "unknown member")
     action = str(member.get("last_remote_action") or "enforce")
+    if action.startswith('manual.') and member.get('last_remote_ok') is False:
+        raise HTTPException(409, "手动操作未确认；请刷新后明确选择禁用账号或解除禁用，并重新确认")
     if action == "delete_emby":
         return await member_ops.execute_delete(
             app.state.members, app.state.emby, user_id, actor=user,
@@ -2526,15 +2535,22 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 
     ok: list[str] = []
     failed: list[dict[str, str]] = []
+    manual_results: list[dict[str, Any]] = []
     for raw in ids:
         user_id = str(raw)
         try:
             if action == "renew":
                 app.state.members.renew(user_id, days, actor=user)
-            elif action == "suspend":
-                app.state.members.set_status(user_id, "suspended", actor=user)
-            elif action == "activate":
-                app.state.members.set_status(user_id, "active", actor=user)
+            elif action in ("suspend", "activate"):
+                if not app.state.members.get(user_id):
+                    raise KeyError(user_id)
+                key = str(payload.get('request_id') or '')
+                intent = {'request_id': _digest('bulk:' + key + ':' + user_id)} if key else {}
+                result = await _manual_account_action(user_id, "disable" if action == "suspend" else "enable", intent, user)
+                manual_results.append({"user_id": user_id, **result})
+                if not result["ok"]:
+                    failed.append({"user_id": user_id, "error": result["error"]})
+                    continue
             else:
                 app.state.members.reset_traffic(user_id, actor=user)
             ok.append(user_id)
@@ -2547,10 +2563,10 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
         user, f"member.bulk.{action}", "",
         f"requested={len(ids)} ok={len(ok)} failed={len(failed)}")
 
-    # Enforcement runs once after the batch rather than per member: pushing the
-    # same policy change 200 times would hammer Emby for no extra correctness.
+    # Manual access actions already use the serialized, protected path above.
+    # Preserve the existing automatic-setting gate for unrelated bulk actions.
     remote_failed: list[dict[str, str]] = []
-    if ok and app.state.settings_service.membership_config()["enforcement_enabled"]:
+    if ok and action not in ("suspend", "activate") and app.state.settings_service.membership_config()["enforcement_enabled"]:
         for user_id in ok:
             remote = await app.state.enforcement.enforce_now(
                 user_id, f"bulk {action}")
@@ -2562,7 +2578,7 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 
     return {"action": action, "requested": len(ids),
             "ok": len(ok), "failed": failed, "remote_failed": remote_failed,
-            "ok_flag": not failed and not remote_failed}
+            "ok_flag": not failed and not remote_failed, "results": manual_results}
 
 
 @app.post("/api/members/{user_id}/reset-traffic", dependencies=[Depends(_auth)])
@@ -2579,10 +2595,54 @@ async def members_reset_traffic(user_id: str, user: str = Depends(_auth)) -> dic
         local_ok=True, remote_ok=None))
 
 
+async def _manual_account_action(user_id: str, action: str, payload: dict[str, Any],
+                                  actor: str) -> dict[str, Any]:
+    reviewer = app.state.members.find_by_username(actor) or {}
+    reviewer_id = str(reviewer.get("emby_user_id") or "")
+
+    def authorize():
+        if actor == settings().mediadeck_admin_user:
+            return True
+        fresh = app.state.members.find_by_username(actor) or {}
+        return (fresh.get("emby_user_id") == reviewer_id and reviewer_id
+                and "admin" in (fresh.get("roles") or []) and fresh.get("state") == "active")
+
+    try:
+        result = await app.state.restrictions.manual(
+            user_id, action, actor=actor, actor_user_id=reviewer_id,
+            request_id=str(payload.get("request_id") or ""), authorize=authorize)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    if result.get("skipped") == "emby_user_missing":
+        raise HTTPException(404, "unknown Emby user")
+    # Keep legacy member fields while exposing the authoritative action receipt.
+    return {**result["access"], **result, "disabled": result["access"]["emby_disabled"]}
+
+
+@app.post("/api/members/{user_id}/actions/disable", dependencies=[Depends(_auth)])
+async def members_disable(user_id: str, payload: dict[str, Any] = Body(default={}),  # noqa: B008
+                          user: str = Depends(_auth)) -> dict[str, Any]:
+    if not app.state.members.get(user_id):
+        raise HTTPException(404, "unknown member")
+    return await _manual_account_action(user_id, "disable", payload, user)
+
+
+@app.post("/api/members/{user_id}/actions/enable", dependencies=[Depends(_auth)])
+async def members_enable(user_id: str, payload: dict[str, Any] = Body(default={}),  # noqa: B008
+                         user: str = Depends(_auth)) -> dict[str, Any]:
+    if not app.state.members.get(user_id):
+        raise HTTPException(404, "unknown member")
+    return await _manual_account_action(user_id, "enable", payload, user)
+
+
 @app.post("/api/members/{user_id}/status", dependencies=[Depends(_auth)])
 async def members_status(user_id: str, payload: dict[str, Any] = Body(...),  # noqa: B008
                          user: str = Depends(_auth)) -> dict[str, Any]:
     status = str(payload.get("status") or "")
+    if status in ("suspended", "active"):
+        if not app.state.members.get(user_id):
+            raise HTTPException(404, "unknown member")
+        return await _manual_account_action(user_id, "disable" if status == "suspended" else "enable", payload, user)
     try:
         member = app.state.members.set_status(user_id, status, actor=user)
     except KeyError:

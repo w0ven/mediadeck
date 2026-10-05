@@ -28,6 +28,7 @@
     drawerScroll: 0,
     drawerInert: [],
     detailBaseline: new Map(),
+    manualRequests: new Map(),
   };
 
   function detailDirty() {
@@ -209,7 +210,8 @@
     })[sync] || sync;
     const syncCls = ['in_sync', 'policy_match'].includes(sync) ? 'ok'
       : (sync === 'drift' || sync === 'failed' || sync === 'emby_missing') ? 'bad' : 'idle';
-    const retry = m.retryable
+    const manualFailed = m.retryable && String(m.last_remote_action || '').startsWith('manual.');
+    const retry = manualFailed ? '<span class="tag bad">手动操作未确认，请重新选择禁用 / 解除禁用</span>' : m.retryable
       ? `<button class="btn sm" type="button" data-act="retry" data-id="${esc(m.emby_user_id)}">重试</button>`
       : '';
     const history = m.sync_recorded === false && !['never_applied','skipped_admin'].includes(sync)
@@ -355,8 +357,8 @@
       <div class="toolbar ${ms.selected.size?'':'hidden'}" id="members-bulk" aria-label="已选择用户的批量操作">
         <span class="muted" id="m-sel-count">已选当前页 ${ms.selected.size} 人（换页或筛选后清空）</span>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="renew">续期</button>
-        <button class="btn sm" type="button" data-act="bulk" data-bulk="suspend">停用</button>
-        <button class="btn sm" type="button" data-act="bulk" data-bulk="activate">启用</button>
+        <button class="btn sm" type="button" data-act="bulk" data-bulk="suspend">禁用账号</button>
+        <button class="btn sm" type="button" data-act="bulk" data-bulk="activate">解除禁用</button>
         <button class="btn sm" type="button" data-act="bulk" data-bulk="reset-traffic">重置用量</button>
         <button class="btn sm" type="button" data-act="clear-selection">取消选择</button>
 
@@ -625,7 +627,8 @@
         body = `${isWhitelistGroup(m.group_id)?`<div class="hg-whitelist-banner">${whitelistEmblem()}<div><b>白名单 · 专属成员</b><small>固定分组标识，实际权限以账号权益为准</small></div></div>`:''}<h4 class="hg-section-title">账号与权益</h4><dl class="member-kv">
           <dt>用户组</dt><dd>${groupBadge(m.group_id,m.group_name)}</dd>
           <dt>Telegram</dt><dd>${esc(m.tg_username ? '@'+m.tg_username : m.tg_user_id || '未绑定')}</dd>
-          <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')}</dd>
+          <dt>本地封禁</dt><dd>${m.status === 'suspended' ? '已封禁' : '未封禁'}</dd>
+          <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')} ${esc((m.remaining_restrictions || []).join('、'))}</dd>
           <dt>Emby / 同步</dt><dd id="md-emby-status">${embySyncCell(m)}</dd>
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
@@ -634,6 +637,8 @@
         <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计已记录</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
         <h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
+          <button class="btn sm danger" type="button" data-member-action="actions/disable">禁用账号</button>
+          <button class="btn sm" type="button" data-member-action="actions/enable">解除禁用</button>
           <label>续期 <input id="md-days" type="number" min="1" value="30" style="width:72px"> 天
             <button class="btn sm" type="button" id="md-renew">续期</button></label>
           <label>换组 <select id="md-group">${gopts}</select>
@@ -644,8 +649,7 @@
             </select>
             <button class="btn sm" type="button" id="md-group-go">换组</button></label>
           <details class="hg-account-more"><summary>更多账号操作</summary><div class="toolbar">
-          <button class="btn sm" type="button" id="md-retry">重试远端</button>
-          <button class="btn sm" type="button" data-member-action="status">${m.state === 'suspended' ? '解除手动停用' : '停用账号'}</button>
+          ${m.retryable && String(m.last_remote_action || '').startsWith('manual.') ? '<span class="help">手动操作未确认，请使用上方禁用 / 解除禁用按钮重试</span>' : '<button class="btn sm" type="button" id="md-retry">重试远端</button>'}
           <button class="btn sm" type="button" data-member-action="password">重置密码</button>
           <button class="btn sm" type="button" data-member-action="kick">结束当前播放</button>
           <button class="btn sm" type="button" data-member-action="reset-traffic">重置本月用量</button>
@@ -737,6 +741,12 @@
     return result;
   }
 
+  function manualRequestId(key) {
+    const id = ms.manualRequests.get(key) || Array.from(crypto.getRandomValues(new Uint8Array(16)), b=>b.toString(16).padStart(2,'0')).join('');
+    ms.manualRequests.set(key, id);
+    return id;
+  }
+
   async function runMemberAction(button, action) {
     if (button?.disabled) return;
     if (button) button.disabled = true;
@@ -794,6 +804,29 @@
     host.querySelectorAll('[data-member-action]').forEach((button) => {
       button.onclick = () => runMemberAction(button, async current => {
         const action = button.dataset.memberAction;
+        if (action === 'actions/disable' || action === 'actions/enable') {
+          const label = action === 'actions/disable' ? '禁用账号' : '解除禁用';
+          if (!(await deckConfirm(`确认${label} ${member.username || id}？管理员手动操作立即同步本地与 Emby。解除不会续期、重置用量或更改组/角色；到期、耗尽、待开通等限制仍适用。`))) return;
+          if (!current()) return;
+          const key = id + ':' + action;
+          const requestId = manualRequestId(key);
+          let result;
+          try {
+            result = await api(endpoint + '/' + action, {method:'POST', body:JSON.stringify({request_id:requestId})});
+            ms.manualRequests.delete(key); // a transport failure retains the same intent for retry
+          } catch (error) {
+            if (current()) {
+              toast('操作结果未确认，可刷新核实后重试: ' + error.message, 1);
+              await refreshActionDetail(id, tab, current);
+            }
+            return;
+          }
+          if (!current()) return;
+          toast(result.result || result.error || '操作结果未确认', result.ok !== true ? 1 : 0);
+          await refreshNow();
+          await refreshActionDetail(id, tab, current);
+          return;
+        }
         let body = {};
         if (action === 'password') {
           const value = await deckPrompt('新密码（至少6位；留空随机生成）', '');
@@ -801,11 +834,9 @@
           if (value && value.length < 6) throw new Error('密码至少6位');
           body = value ? {password:value} : {};
         } else {
-          const names = {status:member.state === 'suspended' ? '解除手动停用' : '停用账号',
-            kick:'结束当前所有播放','reset-traffic':'重置本月已用额度（保留历史账本）',
+          const names = {kick:'结束当前所有播放','reset-traffic':'重置本月已用额度（保留历史账本）',
             'telegram/unbind':'解除Telegram绑定'};
           if (!(await deckConfirm(`确认${names[action]}？`))) return;
-          if (action === 'status') body.status = member.state === 'suspended' ? 'active' : 'suspended';
         }
         const result = assertRemoteResult(await api(endpoint + '/' + action, {
           method:'POST', body:JSON.stringify(body),
@@ -937,7 +968,7 @@
     const stillSelected = () => state.page === 'members' && scope === selectionQuery()
       && ids.every(id => ms.selected.has(id) && (ms.listing?.members || []).some(m => m.emby_user_id === id));
     if (!ids.length) return toast('没有选中的用户', 1);
-    if (!(await deckConfirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'停用',activate:'启用','reset-traffic':'重置用量'})[action]}？`))) return;
+    if (!(await deckConfirm(`对已明确勾选的 ${ids.length} 人执行 ${({renew:'续期',suspend:'禁用账号',activate:'解除禁用','reset-traffic':'重置用量'})[action]}？`))) return;
     if (!stillSelected()) return;
     if (action === 'renew') {
       const days = Number((await deckPrompt('续期天数', '30')) || '0');
@@ -948,10 +979,14 @@
       if (r.ok_flag === false || (r.remote_failed || []).length) toast('部分失败', 1);
       else toast(`已续期 ${r.ok || 0} 人`);
     } else {
+      const key = 'bulk:' + action + ':' + [...ids].sort().join(',');
+      const request_id = ['suspend','activate'].includes(action) ? manualRequestId(key) : undefined;
       const r = await api('/api/members/bulk', {
-        method: 'POST', body: JSON.stringify({ action, user_ids: ids }),
+        method: 'POST', body: JSON.stringify({ action, user_ids: ids, request_id }),
       });
+      ms.manualRequests.delete(key);
       if (r.ok_flag === false || (r.remote_failed || []).length) toast('部分失败', 1);
+      else if (r.results?.length) toast(r.results.map(x=>`${x.user_id}: ${x.result}`).join('；'));
       else toast(`已更新 ${r.ok || 0} 人`);
     }
     if (scope === ms.selectionQuery) {

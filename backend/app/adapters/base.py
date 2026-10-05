@@ -9,7 +9,7 @@ from typing import Any, Literal, Protocol, TypedDict
 class MemberPolicyResult(TypedDict):
     """Automatic policy outcome; a protected admin is not an applied write."""
 
-    status: Literal["applied", "skipped_admin", "failed"]
+    status: Literal["applied", "skipped_admin", "skipped_authority", "failed"]
 
 
 class EmbyAdapter(Protocol):
@@ -19,7 +19,8 @@ class EmbyAdapter(Protocol):
     async def set_user_disabled(self, user_id: str, disabled: bool) -> bool: ...
     async def set_user_password(self, user_id: str, new_password: str) -> bool: ...
     async def apply_policy(self, user_id: str, policy_patch: dict[str, Any]) -> bool: ...
-    async def apply_member_policy(self, user_id: str, policy_patch: dict[str, Any]) -> MemberPolicyResult:
+    async def apply_member_policy(self, user_id: str, policy_patch: dict[str, Any], *,
+                                  authorize: Any = None) -> MemberPolicyResult:
         """Re-read current policy and skip administrators before any automatic write."""
         ...
     async def libraries(self) -> list[dict[str, Any]]: ...
