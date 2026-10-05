@@ -6,6 +6,7 @@ import time
 
 import pytest
 from test_admin_commands import bot as base_bot  # noqa: F401
+from watch_fixtures import verified
 
 from app.core.db import Database
 from app.modules.stats import StatsService
@@ -181,6 +182,8 @@ def test_group_rank_matches_scheduled_calendar_board(bot):
         "started_at,ended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ("admin1", "root", "i2", "Old", "Movie", "", "d", "app", "Direct",
          "n", "1.1.1.1", 1, 36000, now - 48 * 3600, now - 47 * 3600))
+    verified(bot.db, 'u1', now-7200, 7200)
+    verified(bot.db, 'admin1', now-48*3600, 36000)
     bot._stats = StatsService(bot.db)
     run(bot._handle_message(_msg("/rank", user=ALICE, username="alice_tg")))
     body = last_text(bot)
@@ -374,7 +377,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
                for m, p in bot.calls if m == "setMyCommands")
 
 
-def test_watch_ranking_uses_play_events_window(tmp_path):
+def test_watch_ranking_uses_verified_window(tmp_path):
     db = Database(tmp_path / "stats.db")
     now = int(time.time())
     db.execute("INSERT INTO members (emby_user_id,username,status,created_at,updated_at) "
@@ -399,6 +402,9 @@ def test_watch_ranking_uses_play_events_window(tmp_path):
         "started_at,ended_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
         ("u2", "bob", "i", "Old", "Movie", "", "", "", "", "", "", 10, 9999,
          now - 40 * 3600, now - 39 * 3600))
+    verified(db, 'u1', now-100, 100)
+    verified(db, 'u2', now-500, 500)
+    verified(db, 'u2', now-40*3600, 1000)
     rows = StatsService(db).top_watchers(hours=24, limit=10)
     assert [r["username"] for r in rows] == ["bob", "alice"]
     assert rows[0]["seconds"] == 500

@@ -73,52 +73,22 @@ class StatsService:
         self._db = db
         self._live_watch = list
         self._measured_cutover = measured_cutover
+        epoch = db.one("SELECT value FROM meta WHERE key='watch_verified_since'") or {}
+        self._verification_since = float(epoch.get('value') or 0)
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
 
     def watch_windows(self, since: float, until: float, user_id: str | None = None) -> dict[str, dict]:
-        """Three grouped queries, independent of member count. Old pauses are not inferred."""
+        """One verified interval ledger for profiles, user charts and daily series."""
         where = ' AND emby_user_id=?' if user_id is not None else ''
         args = (user_id,) if user_id is not None else ()
-        values: dict[str, dict] = {}
-
-        def add(uid: str, seconds: float = 0, uncertain: int = 0) -> None:
-            row = values.setdefault(uid, {'seconds': 0.0, 'uncertain_records': 0})
-            row['seconds'] += seconds
-            row['uncertain_records'] += uncertain
-
-        for table in ('play_events', 'watch_legacy_events'):
-            sampled = ' AND sampled=0' if table == 'play_events' else ''
-            rows = self._db.query(
-                'SELECT emby_user_id, '
-                'SUM(CASE WHEN ended_at>started_at THEN seconds * '
-                'MAX(0, MIN(ended_at, ?)-MAX(started_at, ?)) / (ended_at-started_at) '
-                'ELSE 0 END) AS seconds '
-                'FROM ' + table + ' WHERE ended_at>? AND started_at<? AND seconds>0' +
-                sampled + where + ' GROUP BY emby_user_id',
-                (until, since, since, until, *args))
-            for row in rows:
-                add(row['emby_user_id'], float(row['seconds'] or 0))
-        for row in self._db.query(
-                'SELECT emby_user_id,SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
-                'FROM watch_samples WHERE ended_at>? AND started_at<?' + where +
-                ' GROUP BY emby_user_id', (until, since, since, until, *args)):
-            add(row['emby_user_id'], float(row['seconds'] or 0))
-        for live in self._live_watch() or []:
-            uid = live.get('user_id')
-            if live.get('sampled') or (user_id is not None and uid != user_id):
-                continue
-            seconds = float(live.get('seconds') or 0)
-            start = float(live.get('started_at') or until)
-            end = float(live.get('last_ts') or until)
-            if seconds and end > since and start < until:
-                span = max(0.0, end - start)
-                overlap = max(0.0, min(end, until) - max(start, since))
-                add(uid, seconds if span <= 0 else seconds * overlap / span)
-        for row in values.values():
-            row['incomplete'] = bool(row['uncertain_records'])
-        return values
+        rows = self._db.query(
+            'SELECT emby_user_id,SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
+            'FROM watch_verified_samples WHERE ended_at>? AND started_at<?' + where +
+            ' GROUP BY emby_user_id', (until, since, since, until, *args))
+        return {row['emby_user_id']: {'seconds': float(row['seconds'] or 0),
+                                    'uncertain_records': 0, 'incomplete': False} for row in rows}
 
     def watch_window(self, since: float, until: float, user_id: str | None = None) -> dict[str, Any]:
         rows = self.watch_windows(since, until, user_id).values()
@@ -132,22 +102,26 @@ class StatsService:
         total = self._db.one('SELECT seconds,first_at FROM watch_totals WHERE emby_user_id=?', (user_id,)) or {}
         legacy = self._db.one('SELECT seconds,first_at FROM watch_legacy_baselines WHERE emby_user_id=?', (user_id,)) or {}
         sampled = self._db.one('SELECT seconds,first_at FROM watch_sample_totals WHERE emby_user_id=?', (user_id,)) or {}
-        recorded = sum(float(r.get('seconds') or 0) for r in (total, legacy, sampled))
-        starts = [r['first_at'] for r in (total, legacy, sampled) if r.get('first_at') is not None]
-        for live in self._live_watch() or []:
-            if live.get('user_id') == user_id and not live.get('sampled'):
-                recorded += float(live.get('seconds') or 0)
-                starts.append(live.get('started_at') or now)
+        verified = self._db.one('SELECT seconds,first_at FROM watch_verified_totals WHERE emby_user_id=?', (user_id,)) or {}
+        recorded = float(verified.get('seconds') or 0)
+        reference = max(0, sum(float(r.get('seconds') or 0) for r in (total, legacy, sampled)) - recorded)
+        unverified_now = any(row.get('user_id') == user_id and row.get('watch_reason') in
+                             ('progress_missing', 'progress_invalid', 'pause_unknown', 'rate_unknown', 'heartbeat_missing', 'heartbeat_stale')
+                             for row in self._live_watch() or [])
         day, month = self.watch_window(now-86400, now, user_id), self.watch_window(now-30*86400, now, user_id)
         return {'seconds_24h': day['seconds'], 'seconds_30d': month['seconds'],
                 'incomplete_24h': day['incomplete'], 'incomplete_30d': month['incomplete'],
-                'recorded_seconds': int(recorded), 'first_at': min(starts) if starts else None,
+                'recorded_seconds': int(recorded), 'first_at': verified.get('first_at'),
                 'legacy_seconds': int(legacy.get('seconds') or 0),
-                'window_basis': 'sample_intervals', 'source': 'sampled_playing_seconds'}
+                'historical_unverified_seconds': int(reference), 'history_excluded': True,
+                'verification_since': self._verification_since, 'unverified_playback_now': unverified_now,
+                'window_basis': 'sample_intervals', 'source': 'verified_playback_progress'}
 
     def recent_watches(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
-        return self._db.query("SELECT item_name,series_name,seconds,started_at FROM play_events "
-                              "WHERE emby_user_id=? ORDER BY started_at DESC LIMIT ?", (user_id, max(1,min(limit,10))))
+        return self._db.query(
+            'SELECT item_name,series_name,SUM(seconds) AS seconds,MIN(started_at) AS started_at '
+            'FROM watch_verified_samples WHERE emby_user_id=? GROUP BY run_key '
+            'ORDER BY MAX(ended_at) DESC LIMIT ?', (user_id, max(1,min(limit,10))))
 
     def import_legacy_watch(self, rows: list[dict[str, Any]], *, source: str) -> int:
         """Explicit one-source import of completed, non-overlapping old sessions.
@@ -324,7 +298,7 @@ class StatsService:
 
     def top_watchers(self, hours: int = 24, limit: int = 10, *,
                      since: float | None = None, until: float | None = None) -> list[dict[str, Any]]:
-        """Watch-time ranking from play_events, not bytes.
+        """Watch-time ranking from verified intervals, not old events or bytes.
 
         Default is a rolling window. Pass since/until for a closed calendar range.
         """
@@ -339,11 +313,8 @@ class StatsService:
             since = now - hours * 3600
         windows = self.watch_windows(since, until)
         counts = {r['emby_user_id']: int(r['n']) for r in self._db.query(
-            'SELECT emby_user_id,COUNT(*) AS n FROM ('
-            'SELECT emby_user_id FROM play_events WHERE started_at>=? AND started_at<? '
-            'UNION ALL SELECT emby_user_id FROM watch_legacy_events '
-            'WHERE started_at>=? AND started_at<?) GROUP BY emby_user_id',
-            (since, until, since, until))}
+            'SELECT emby_user_id,COUNT(DISTINCT run_key) AS n FROM watch_verified_samples '
+            'WHERE ended_at>? AND started_at<? GROUP BY emby_user_id', (since, until))}
         rows = []
         for member in self._db.query(
                 'SELECT emby_user_id,username,group_id,tg_user_id,tg_username,tg_display_name FROM members'):
@@ -371,10 +342,10 @@ class StatsService:
         days = max(1, min(days, MAX_DAYS))
         if calendar:
             since, until = ranking_bounds(days, now=now)
-            where, args = "started_at >= ? AND started_at < ?", (since, until)
         else:
-            since = int(time.time() if now is None else now) - days * 86400
-            where, args = "started_at >= ?", (since,)
+            until = time.time() if now is None else now
+            since = until - days * 86400
+        where, args = 'ended_at>? AND started_at<?', (since, until)
         if kind == 'movie':
             where += " AND LOWER(item_type)='movie'"
         elif kind == 'show':
@@ -390,12 +361,15 @@ class StatsService:
         order = ('secs DESC, title COLLATE BINARY ASC' if watch_time
                  else 'plays DESC, secs DESC, title COLLATE BINARY ASC')
         rows = self._db.query(
-            f"SELECT {title} AS title, MAX(item_type) AS item_type, COUNT(*) AS plays,"
-            " COUNT(DISTINCT NULLIF(emby_user_id,'')) AS viewers, SUM(seconds) AS secs,"
-            " SUM(bytes) AS bytes, MAX(item_id) AS item_id FROM play_events WHERE " + where +
-            f" AND COALESCE({title},'')<>'' GROUP BY {family}, {title}"
-            f" ORDER BY {order} LIMIT ?",
-            (*args, max(1, min(limit, 200))))
+            'WITH runs AS (SELECT run_key,emby_user_id,item_name,item_type,series_name,item_id,'
+            'SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
+            'FROM watch_verified_samples WHERE ' + where + ' GROUP BY run_key) '
+            f'SELECT {title} AS title, MAX(item_type) AS item_type, COUNT(*) AS plays,'
+            'COUNT(DISTINCT NULLIF(emby_user_id,\'\')) AS viewers, SUM(seconds) AS secs,'
+            'SUM(COALESCE((SELECT SUM(bytes) FROM play_events e WHERE e.watch_key=runs.run_key AND e.watch_key<>\'\'),0)) AS bytes,'
+            f'MAX(item_id) AS item_id FROM runs WHERE COALESCE({title},\'\')<>\'\' '
+            f'GROUP BY {family}, {title} ORDER BY {order} LIMIT ?',
+            (until, since, *args, max(1, min(limit, 200))))
         return [{
             "title": r["title"],
             "type": r["item_type"],
@@ -442,8 +416,10 @@ class StatsService:
     def client_breakdown(self, days: int = 30) -> list[dict[str, Any]]:
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400
         rows = self._db.query(
-            "SELECT client, COUNT(*) AS plays, SUM(seconds) AS secs"
-            " FROM play_events WHERE started_at >= ? AND client<>''"
+            "SELECT client, COUNT(*) AS plays, SUM(COALESCE(v.seconds,0)) AS secs"
+            " FROM play_events e LEFT JOIN (SELECT run_key,SUM(seconds) AS seconds"
+            " FROM watch_verified_samples GROUP BY run_key) v ON v.run_key=e.watch_key"
+            " WHERE e.started_at >= ? AND client<>''"
             " GROUP BY client ORDER BY plays DESC LIMIT 20", (since,))
         total = sum(int(r["plays"] or 0) for r in rows) or 1
         return [{
@@ -470,8 +446,10 @@ class StatsService:
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400
         rows = self._db.query(
             "SELECT LOWER(COALESCE(NULLIF(play_method,''),'(unknown)')) AS method,"
-            " COUNT(*) AS plays, SUM(seconds) AS secs, SUM(bytes) AS bytes"
-            " FROM play_events WHERE started_at >= ? GROUP BY method", (since,))
+            " COUNT(*) AS plays, SUM(COALESCE(v.seconds,0)) AS secs, SUM(bytes) AS bytes"
+            " FROM play_events e LEFT JOIN (SELECT run_key,SUM(seconds) AS seconds"
+            " FROM watch_verified_samples GROUP BY run_key) v ON v.run_key=e.watch_key"
+            " WHERE e.started_at >= ? GROUP BY method", (since,))
         transcode = 0
         direct = 0
         unknown = 0
@@ -521,15 +499,23 @@ class StatsService:
             "series": [{
                 "day": d,
                 "bytes": int((series.get(d) or {}).get("bytes") or 0),
-                "hours": round(int((series.get(d) or {}).get("seconds") or 0) / 3600, 2),
+                "hours": round(self.watch_window(datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp(),
+                                                datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()+86400,
+                                                user_id)['seconds'] / 3600, 2),
                 "plays": int((series.get(d) or {}).get("plays") or 0),
             } for d in _day_list(days)],
             "watch": self.watch_summary(user_id),
             "recent_plays": self._db.query(
-                "SELECT item_id, item_name, series_name, client, play_method, node, seconds,"
-                " bytes, started_at FROM play_events WHERE emby_user_id=?"
-                " AND started_at >= ? ORDER BY started_at DESC LIMIT 50",
-                (user_id, since_ts)),
+                "SELECT v.item_id,v.item_name,v.series_name,v.client,v.play_method,"
+                "COALESCE(e.node,'') AS node,SUM(v.seconds) AS seconds,"
+                "COALESCE(e.bytes,0) AS bytes,MIN(v.started_at) AS started_at "
+                "FROM watch_verified_samples v LEFT JOIN play_events e ON e.watch_key=v.run_key AND e.watch_key<>'' "
+                "WHERE v.emby_user_id=? AND v.started_at >= ? "
+                "GROUP BY v.run_key ORDER BY MAX(v.ended_at) DESC LIMIT 50", (user_id, since_ts)),
+            "historical_recent_plays": self._db.query(
+                "SELECT item_id,item_name,series_name,seconds,started_at FROM play_events "
+                "WHERE emby_user_id=? AND started_at>=? AND watch_key='' "
+                "ORDER BY started_at DESC LIMIT 50", (user_id, since_ts)),
             "devices": self._db.query(
                 "SELECT * FROM devices WHERE emby_user_id=?"
                 " ORDER BY last_seen_at DESC LIMIT 50", (user_id,)),
@@ -550,6 +536,7 @@ class StatsService:
             "DELETE FROM usage_daily WHERE day < ?", (cutoff_day,))
         self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
+        self._db.execute('DELETE FROM watch_verified_samples WHERE ended_at < ?', (cutoff_ts,))
         audit = self._db.execute(
             "DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
         return {"play_events": events, "usage_daily": usage, "audit_log": audit}

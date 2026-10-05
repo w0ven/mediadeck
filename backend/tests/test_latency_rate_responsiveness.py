@@ -125,15 +125,21 @@ def test_usage_cancellation_cannot_overlap_an_unfinished_commit(tmp_path, monkey
     members.upsert("u1", "viewer", {"group_id": "standard"})
     clock = [1800000000.0]
     monkeypatch.setattr("app.modules.usage.time.time", lambda: clock[0])
-    emby = SimpleNamespace(active_sessions_raw=AsyncMock(return_value=[
-        {"Id": "s", "UserId": "u1", "NowPlayingItem": {"Id": "item", "Bitrate": 8000000}, "PlayState": {}}]))
+    from datetime import UTC, datetime
+
+    async def fresh_sessions():
+        return [{'Id': 's', 'UserId': 'u1', 'NowPlayingItem': {'Id': 'item', 'Bitrate': 8000000},
+                 'LastActivityDate': datetime.fromtimestamp(clock[0], UTC).isoformat(),
+                 'PlayState': {'IsPaused': False, 'PositionTicks': int((clock[0]-1800000000)*10_000_000)}}]
+
+    emby = SimpleNamespace(active_sessions_raw=fresh_sessions)
     sampler = UsageSampler(db, members, emby)
     slow = SlowOperation(None)
     original = sampler._record_watch
 
-    def commit(*args):
+    def commit(*args, **kwargs):
         slow()
-        return original(*args)
+        return original(*args, **kwargs)
 
     async def check():
         await sampler.tick()

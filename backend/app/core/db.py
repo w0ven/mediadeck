@@ -323,6 +323,26 @@ CREATE TABLE IF NOT EXISTS watch_checkpoints (
     session_id TEXT PRIMARY KEY, state_json TEXT NOT NULL
 );
 
+-- Only intervals with fresh, advancing playback evidence enter normal watch time.
+-- Never backfill this ledger from older wall-clock or imported history.
+CREATE TABLE IF NOT EXISTS watch_verified_samples (
+    run_key TEXT NOT NULL, emby_user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL DEFAULT '', item_name TEXT NOT NULL DEFAULT '',
+    item_type TEXT NOT NULL DEFAULT '', series_name TEXT NOT NULL DEFAULT '',
+    client TEXT NOT NULL DEFAULT '', play_method TEXT NOT NULL DEFAULT '',
+    started_at REAL NOT NULL, ended_at REAL NOT NULL, seconds REAL NOT NULL,
+    position_start REAL NOT NULL, position_end REAL NOT NULL, playback_rate REAL NOT NULL,
+    PRIMARY KEY(run_key, ended_at),
+    CHECK(ended_at>started_at AND seconds>0 AND seconds<=ended_at-started_at+0.000001),
+    CHECK(position_end>position_start AND playback_rate>0)
+);
+CREATE INDEX IF NOT EXISTS idx_verified_watch_user_time ON watch_verified_samples(emby_user_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_verified_watch_time ON watch_verified_samples(ended_at, started_at);
+CREATE TABLE IF NOT EXISTS watch_verified_totals (
+    emby_user_id TEXT PRIMARY KEY, seconds REAL NOT NULL,
+    first_at REAL NOT NULL, last_at REAL NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          INTEGER NOT NULL,
@@ -760,6 +780,9 @@ class Database:
                     "MIN(started_at),MAX(ended_at) FROM play_events GROUP BY emby_user_id")
                 self._conn.execute("INSERT INTO meta(key,value) VALUES('watch_totals_seeded','1')")
             self._ensure_column('play_events', 'sampled', 'INTEGER NOT NULL DEFAULT 0')
+            self._ensure_column('play_events', 'watch_key', "TEXT NOT NULL DEFAULT ''")
+            self._conn.execute("CREATE INDEX IF NOT EXISTS idx_play_watch_key ON play_events(watch_key) WHERE watch_key<>''")
+            self._conn.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('watch_verified_since',strftime('%s','now'))")
             self._conn.execute('DROP TRIGGER IF EXISTS watch_event_recorded')
             self._conn.execute("""
                 CREATE TRIGGER watch_event_recorded AFTER INSERT ON play_events

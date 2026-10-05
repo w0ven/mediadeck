@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import contextvars
 import json
+import math
 import time
 import uuid
 from datetime import UTC, datetime
@@ -112,6 +113,75 @@ def is_playing(session: dict[str, Any]) -> bool:
     return not bool((session.get("PlayState") or {}).get("IsPaused"))
 
 
+WATCH_HEARTBEAT_MAX_AGE = 60
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        value = float(value)
+        return value if math.isfinite(value) else None
+    except (TypeError, ValueError):
+        return None
+
+
+def watch_observation(session: dict[str, Any], now: float) -> dict[str, Any]:
+    """Keep reported evidence, never turn a polling tick into a heartbeat."""
+    play = session.get('PlayState') or {}
+    position = _number(play.get('PositionTicks'))
+    position = position / TICKS_PER_SECOND if position is not None and position >= 0 else None
+    rate = _number(play.get('PlaybackRate', session.get('PlaybackRate', 1.0)))
+    runtime = _number((session.get('NowPlayingItem') or {}).get('RunTimeTicks'))
+    activity = None
+    try:
+        stamp = str(session.get('LastActivityDate') or '').strip()
+        parsed = datetime.fromisoformat(stamp)
+        activity = parsed.replace(tzinfo=UTC).timestamp() if parsed.tzinfo is None else parsed.timestamp()
+    except (ValueError, TypeError, OverflowError):
+        pass
+    reason = ('idle' if not session.get('NowPlayingItem') else
+              'paused' if play.get('IsPaused') is True else
+              'pause_unknown' if play.get('IsPaused') is not False else
+              'progress_missing' if position is None else
+              'progress_invalid' if runtime is not None and runtime > 0 and position > runtime / TICKS_PER_SECOND else
+              'rate_unknown' if rate is None or rate <= 0 else
+              'heartbeat_missing' if activity is None else
+              'heartbeat_stale' if not -2 <= now - activity <= WATCH_HEARTBEAT_MAX_AGE else '')
+    return {'position': position, 'activity': activity, 'rate': rate, 'anchor_floor': now,
+            'play_id': str(session.get('PlaySessionId') or play.get('PlaySessionId') or ''),
+            'device_id': str(session.get('DeviceId') or ''), 'reason': reason}
+
+
+def verified_watch_interval(before: dict | None, current: dict, observed_gap: float,
+                            since: float = 0) -> tuple[float, float, str]:
+    """Conservative continuous-play proof; uncertain intervals are not backfilled."""
+    if current['reason']:
+        return 0, 0, current['reason']
+    if not before or before.get('reason'):
+        return 0, 0, 'baseline'
+    if not 0 < observed_gap <= MAX_BILLABLE_GAP_SECONDS:
+        return 0, 0, 'observation_gap'
+    if (before.get('device_id') != current['device_id']
+            or before.get('play_id') != current['play_id']):
+        return 0, 0, 'identity_changed'
+    elapsed = current['activity'] - before['activity']
+    progress = current['position'] - before['position']
+    if not 0 < elapsed <= MAX_BILLABLE_GAP_SECONDS or progress <= 0:
+        return 0, 0, 'stalled_or_rewound'
+    if before['rate'] != current['rate']:
+        return 0, 0, 'rate_changed'
+    expected = elapsed * current['rate']
+    # Heartbeat clocks and decoded positions have bounded subsecond jitter.
+    # Never credit a position jump, buffering gap, or more than elapsed time.
+    if abs(progress - expected) > max(0.75, expected * 0.05):
+        return 0, 0, 'seek_or_buffering'
+    end = current['activity']
+    start = max(since, before.get('anchor_floor', before['activity']),
+                end - min(elapsed, progress / current['rate']))
+    return (start, end, '') if end > start else (0, 0, 'before_verification')
+
+
 async def run_usage_io(fn: Any, *args: Any, **kwargs: Any) -> Any:
     """Run a usage/housekeeping DB step without abandoning it on shutdown."""
     worker = asyncio.get_running_loop().run_in_executor(
@@ -145,11 +215,15 @@ class UsageSampler:
         self._sharing = sharing
         # Restore sampled time, but never charge the interval while this process was down.
         self._live: dict[str, dict[str, Any]] = {}
+        epoch = db.one("SELECT value FROM meta WHERE key='watch_verified_since'") or {}
+        self._verified_since = float(epoch.get('value') or 0)
         for row in db.query('SELECT session_id,state_json FROM watch_checkpoints'):
             value = json.loads(row['state_json'])
             value['last_ts'] = None
             value['was_playing'] = False
             value['speed_bps'] = 0
+            value['watch_observation'] = None
+            value.setdefault('verified_seconds', 0.0)
             self._live[row['session_id']] = value
         self._last_tick = 0.0
         self._last_error: str | None = None
@@ -183,6 +257,7 @@ class UsageSampler:
             self._last_error = str(exc)[:200]
             return {"ok": False, "error": self._last_error}
 
+        now = time.time()  # timestamp the returned snapshot, not request issuance
         result, billed_users = await run_usage_io(self._sample, sessions, now, node_of)
         if billed_users and self._enforcement:
             result["enforced"] = await self._enforce_exhausted(billed_users)
@@ -214,6 +289,7 @@ class UsageSampler:
             state = self._live.get(sid)
             playing = is_playing(session)
             item = session.get("NowPlayingItem") or {}
+            observation = watch_observation(session, now)
 
             if state is None:
                 # New session: start the clock but bill nothing yet. Billing a
@@ -233,6 +309,10 @@ class UsageSampler:
                     "started_at": int(now),
                     "watch_key": uuid.uuid4().hex,
                     "sampled": True,
+                    "verified_seconds": 0.0,
+                    "watch_observation": observation,
+                    "watch_reason": observation['reason'] or 'baseline',
+                    "play_id": observation['play_id'],
                     "last_ts": now,
                     "was_playing": playing,
                     "seconds": 0.0,
@@ -243,7 +323,9 @@ class UsageSampler:
 
             # A session that switched title is two plays, not one.
             current_item = str(item.get("Id") or "")
-            if user_id != state['user_id'] or current_item != state['item_id']:
+            if (user_id != state['user_id'] or current_item != state['item_id']
+                    or (state.get('play_id') and observation['play_id']
+                        and state['play_id'] != observation['play_id'])):
                 self._finish(sid, state, now)
                 self._live[sid] = {
                     **state,
@@ -263,6 +345,10 @@ class UsageSampler:
                     "started_at": int(now),
                     "watch_key": uuid.uuid4().hex,
                     "sampled": True,
+                    "verified_seconds": 0.0,
+                    "watch_observation": observation,
+                    "watch_reason": observation['reason'] or 'baseline',
+                    "play_id": observation['play_id'],
                     "last_ts": now,
                     "was_playing": playing,
                     "seconds": 0.0,
@@ -273,13 +359,23 @@ class UsageSampler:
             # Session endpoints/client metadata can change without a new Id.
             # Sharing observes this tick's network, never a stale first address.
             state.update({
+                "item_name": item.get('Name') or state.get('item_name') or '',
+                "item_type": item.get('Type') or state.get('item_type') or '',
+                "series_name": item.get('SeriesName') or state.get('series_name') or '',
                 "remote_ip": session.get("RemoteEndPoint") or "",
                 "device_id": session.get("DeviceId") or "",
                 "client": session.get("Client") or "",
                 "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
             })
             delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
-            was_playing = state.get('was_playing', False)
+            before = state.get('watch_observation')
+            start, end, reason = verified_watch_interval(before, observation, delta, self._verified_since)
+            watch_delta = end - start
+            if not reason:
+                observation['anchor_floor'] = observation['activity']
+            state['watch_observation'] = observation
+            state['watch_reason'] = reason
+            state['play_id'] = observation['play_id']
             state["last_ts"] = now
             state['was_playing'] = playing
             if not playing:
@@ -289,7 +385,6 @@ class UsageSampler:
                 continue
             # Clamp: a long gap means the sampler was down, not that the user
             # watched continuously through it.
-            watch_delta = delta if was_playing and delta <= MAX_BILLABLE_GAP_SECONDS else 0
             delta = min(delta, MAX_BILLABLE_GAP_SECONDS)
 
             rate = session_bitrate(session)
@@ -297,8 +392,10 @@ class UsageSampler:
             # Sample and resumable state commit together: a crash cannot leave
             # totals newer than the corresponding session history.
             updated = {**state, 'seconds': float(state['seconds']) + watch_delta,
+                       'verified_seconds': float(state.get('verified_seconds') or 0) + watch_delta,
                        'bytes': int(state['bytes']) + chunk}
-            self._record_watch(sid, updated, now - watch_delta, now)
+            self._record_watch(sid, updated, start if watch_delta else now, end if watch_delta else now,
+                               evidence=(before, observation) if watch_delta else None)
             state.update(updated)
             # Bytes/second over the last sampled window: what the dashboard
             # shows as the session's live bandwidth.
@@ -354,7 +451,8 @@ class UsageSampler:
         return result, list(billed_users)
 
     # -- persistence ---------------------------------------------------------
-    def _record_watch(self, sid: str, state: dict, start: float, end: float) -> None:
+    def _record_watch(self, sid: str, state: dict, start: float, end: float, *,
+                      evidence: tuple[dict, dict] | None = None) -> None:
         with self._db.write() as conn:
             key = state.setdefault('watch_key', uuid.uuid4().hex)
             if end > start:
@@ -367,6 +465,19 @@ class UsageSampler:
                         'ON CONFLICT(emby_user_id) DO UPDATE SET seconds=seconds+excluded.seconds,'
                         'first_at=MIN(first_at,excluded.first_at),last_at=MAX(last_at,excluded.last_at)',
                         (state['user_id'], end-start, start, end))
+            if end > start and evidence is not None:
+                before, current = evidence
+                added = conn.execute(
+                    'INSERT OR IGNORE INTO watch_verified_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                    (key, state['user_id'], state.get('item_id') or '', state.get('item_name') or '',
+                     state.get('item_type') or '', state.get('series_name') or '', state.get('client') or '',
+                     state.get('play_method') or '', start, end, end-start,
+                     before['position'], current['position'], current['rate'])).rowcount
+                if added:
+                    conn.execute('INSERT INTO watch_verified_totals VALUES(?,?,?,?) '
+                                 'ON CONFLICT(emby_user_id) DO UPDATE SET seconds=seconds+excluded.seconds,'
+                                 'first_at=MIN(first_at,excluded.first_at),last_at=MAX(last_at,excluded.last_at)',
+                                 (state['user_id'], end-start, start, end))
             conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) '
                          'ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
                          (sid, json.dumps(state)))
@@ -391,7 +502,7 @@ class UsageSampler:
         # Readers must never iterate the worker's mutable session dictionary
         # or wait on a mutex held during slow disk I/O.
         self._watch_view = tuple(
-            {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled')}
+            {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled', 'verified_seconds', 'watch_reason')}
             for state in self._live.values())
         self._speed_view = {sid: int(s.get("speed_bps") or 0) for sid, s in self._live.items()}
 
@@ -413,15 +524,16 @@ class UsageSampler:
             conn.execute(
                 "INSERT INTO play_events (emby_user_id,username,item_id,item_name,"
                 "item_type,series_name,device_id,client,play_method,node,remote_ip,"
-                "bytes,seconds,started_at,ended_at,sampled) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "bytes,seconds,started_at,ended_at,sampled,watch_key) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (state["user_id"], state.get("username", ""), state.get("item_id", ""),
                  state.get("item_name", ""), state.get("item_type", ""),
                  state.get("series_name", ""), state.get("device_id", ""),
                  state.get("client", ""), state.get("play_method", ""),
                  state.get("node", ""), state.get("remote_ip", ""),
                  int(state.get("bytes") or 0), seconds,
-                 int(state.get("started_at") or now), int(now), int(bool(state.get('sampled')))))
+                 int(state.get("started_at") or now), int(now), int(bool(state.get('sampled'))),
+                 state.get('watch_key') or ''))
             conn.execute(
                 "INSERT INTO usage_daily (day,emby_user_id,bytes,seconds,plays,transcodes)"
                 " VALUES (?,?,0,?,1,?) ON CONFLICT(day,emby_user_id) DO UPDATE SET "

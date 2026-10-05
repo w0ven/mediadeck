@@ -8,6 +8,7 @@ import pytest
 from PIL import Image, ImageDraw
 from test_tg_interaction_context import VIEWER, click, command
 from test_tg_interaction_context import env as interaction_env  # noqa: F401
+from watch_fixtures import verified
 
 from app.core.db import Database
 from app.modules.plugins_builtin import ViewingReportPlugin, _fmt_bytes, _summarise, _top_titles
@@ -34,6 +35,9 @@ def chart(tmp_path):
                              'VALUES(?,?,?,?,?,?,?,?)',
                              [(f'{user_prefix}-{i % 4}', f'{kind}-{title}', title, kind, series, seconds, at, at + seconds)
                               for i in range(count)])
+        for i in range(count):
+            verified(db, f'{user_prefix}-{i % 4}', at, seconds, title=title, kind=kind,
+                     series=series, item=f'{kind}-{title}')
     yield StatsService(db), add, now, since, until
     db.close()
 
@@ -69,7 +73,7 @@ def test_real_shortage_remains_short_and_calendar_boundaries_exclude_future_even
     stats, add, now, since, until = chart
     add('First', at=since)
     add('Second', at=until - 1)
-    add('Before', at=since - 1)
+    add('Before', at=since - 600)  # ends exactly at start: no overlap
     add('After', at=until)
     movies, shows = stats.top_titles_split(1, 10, calendar=True, now=now)
     assert [row['title'] for row in movies] == ['First', 'Second']
@@ -351,7 +355,7 @@ def test_actual_bot_daily_weekly_member_charts_and_private_report_use_the_new_re
 def test_bot_title_text_and_poster_share_real_watch_time_order(chart, request, monkeypatch, drawn, days):
     stats, add, now, _, until = chart
     add('Many starts', count=20, seconds=60, at=until - 3600)
-    add('Long', seconds=3900, at=until - 3600)
+    add('Long', seconds=3900, at=until - 3900)
     env = request.getfixturevalue('interaction_env')
     env.bot._stats = stats
     monkeypatch.setattr('app.modules.stats.time.time', lambda: now)
