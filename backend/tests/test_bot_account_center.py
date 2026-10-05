@@ -276,13 +276,14 @@ def test_personal_and_admin_watch_totals_survive_prune(bot):
             ("u1", seconds, start, start + seconds),
         )
     s = bot._stats.watch_summary("u1", now=now)
-    assert s["recorded_seconds"] == 600 and s["seconds_30d"] == 100
+    assert s['recorded_seconds'] == s['seconds_30d'] == 0
+    assert s['historical_unverified_seconds'] == 600
     bot._stats.prune(400)
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 600
-    assert "近30天：<b>1分</b>" in bot._user_card(bot.members.get("u1"))
-    assert "累计已记录：10分" in bot._admin_details(bot.members.get("u1"))
+    assert bot._stats.watch_summary('u1')['historical_unverified_seconds'] == 600
+    assert "近30天：<b>0秒</b>" in bot._user_card(bot.members.get("u1"))
+    assert "历史未核验参考：10分" in bot._admin_details(bot.members.get("u1"))
     assert "近30天观看" in bot._usage_text(bot.members.get("u1"))
     bot._stats.bind_live_watch(lambda: [{"user_id": "u1", "seconds": 70, "started_at": now - 100}])
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 670
+    assert bot._stats.watch_summary('u1')['recorded_seconds'] == 0  # unsupported live seconds never enter verified ledger
     bot.db._migrate()
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 670
+    assert bot._stats.watch_summary('u1')['recorded_seconds'] == 0  # unsupported live seconds never enter verified ledger

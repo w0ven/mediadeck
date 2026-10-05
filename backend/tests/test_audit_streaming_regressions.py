@@ -198,5 +198,5 @@ def test_sampler_only_passes_actually_playing_current_networks(tmp_path, monkeyp
     session["PlayState"] = {"IsPaused": True}
     assert asyncio.run(sampler.tick())["playing"] == 0
     assert not detector._seen
-    assert StatsService(db).watch_summary("u1", clock[0])["recorded_seconds"] == 30
+    assert StatsService(db).watch_summary('u1', clock[0])['recorded_seconds'] == 0  # no reported playback evidence
     db.close()

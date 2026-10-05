@@ -102,7 +102,8 @@ def test_sampled_only_history_supplies_safe_legacy_import_boundary(tmp_path):
     rows = [{"event_id": "old", "emby_user_id": "u1", "seconds": 20,
              "started_at": 1799999900, "ended_at": 1799999950}]
     assert stats.import_legacy_watch(rows, source=legacy_watch_fingerprint(rows)) == 1
-    assert stats.watch_summary("u1")["recorded_seconds"] == 50
+    assert stats.watch_summary('u1')['recorded_seconds'] == 0
+    assert stats.watch_summary('u1')['historical_unverified_seconds'] == 50
     assert stats.import_legacy_watch(rows, source=legacy_watch_fingerprint(rows)) == 0
     db.close()
 

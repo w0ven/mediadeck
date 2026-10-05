@@ -634,7 +634,8 @@
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
         </dl>
-        <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计已记录</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
+        <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计核验观看</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
+        ${d.watch?`<p class="help">历史未核验参考：${esc(fmtWatchSeconds(d.watch.historical_unverified_seconds||0))}（不计累计与榜单） · 核验起点：${esc(d.watch.verification_since?new Date(d.watch.verification_since*1000).toLocaleString():'尚无记录')}。仅计进度正常前进的播放，暂停、卡住、跳转和缺失证据不计。${d.watch.unverified_playback_now?'当前客户端缺少有效进度或心跳，暂不计时。':''}</p>`:''}
         <h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
           <button class="btn sm danger" type="button" data-member-action="actions/disable">禁用账号</button>

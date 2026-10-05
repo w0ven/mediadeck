@@ -2,6 +2,23 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-06 — verified normal viewing time
+
+- Replace wall-clock-only watch increments with fresh, advancing playback
+  evidence; exclude pause/resume baselines, stale/zero/missing progress, seeking,
+  buffering and restart/outage gaps. Playback rate converts content distance to
+  elapsed viewing time. Byte accounting and concurrent-stream policy are unchanged.
+- Give personal summaries, daily history, live/completed recent viewing, user
+  rankings and movie/series charts one verified interval ledger with exact window
+  clipping, replay deduplication and durable lifetime totals.
+- Preserve old records without guessing repairs. Web/Bot show historical
+  unverified totals separately; only post-upgrade verified time enters cumulative
+  normal viewing and rankings. Describe conservative limitations in WATCH_TIME.md.
+- Validation: full backend suite 2400 passed, 56 environment-dependent skips,
+  2 subtests passed; full Ruff passed. Added 20 evidence/transition/migration
+  regression cases and updated old fixtures for the intentional strict cutover.
+- Next: standard PR/tag release and bounded panel deployment; no open decisions.
+
 ## 2026-10-05 — administrator manual account disable / release (local verification)
 
 - Proved the old automatic-enforcement-off defect before editing: status became

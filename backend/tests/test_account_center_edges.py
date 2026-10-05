@@ -84,10 +84,11 @@ def test_legacy_history_disjoint_import_rollups_and_retry_after_prune(bot):  # n
     src = legacy_watch_fingerprint(rows)
     assert bot._stats.import_legacy_watch(rows, source=src) == 2
     s = bot._stats.watch_summary("u1", now=now)
-    assert s["recorded_seconds"] == 2000 and s["seconds_30d"] == 1000
-    assert bot._stats.top_watchers(hours=720)[0]["seconds"] == 1000
+    assert s['recorded_seconds'] == s['seconds_30d'] == 0
+    assert s['historical_unverified_seconds'] == 2000
+    assert bot._stats.top_watchers(hours=720) == []
     bot._stats.prune(400)
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 2000
+    assert bot._stats.watch_summary('u1')['historical_unverified_seconds'] == 2000
     assert bot._stats.import_legacy_watch(rows, source=src) == 0
     assert bot.db.one("SELECT COUNT(*) n FROM watch_legacy_events")["n"] == 1
     changed = [{**rows[0], "event_id": "another-source"}]
@@ -124,14 +125,14 @@ def test_invalid_legacy_data_never_partially_imports(bot, case):  # noqa: F811 -
 def test_live_time_appears_once_then_moves_to_finished_totals(bot):  # noqa: F811 - pytest fixture injection
     now, _boundary = seed_watch(bot)
     bot._stats.bind_live_watch(lambda: [{"user_id": "u1", "started_at": now - 100, "seconds": 80}])
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 380
-    assert bot._stats.top_watchers(hours=720)[0]["seconds"] == 380
+    assert bot._stats.watch_summary('u1')['recorded_seconds'] == 0
+    assert bot._stats.top_watchers(hours=720) == []
     bot.db.execute(
         "INSERT INTO play_events(emby_user_id,seconds,started_at,ended_at) VALUES(?,?,?,?)",
         ("u1", 80, now - 100, now),
     )
     bot._stats.bind_live_watch(list)
-    assert bot._stats.watch_summary("u1")["recorded_seconds"] == 380
+    assert bot._stats.watch_summary('u1')['recorded_seconds'] == 0
 
 
 def test_revoked_reviewer_during_presence_check_cannot_approve(bot):  # noqa: F811 - pytest fixture injection

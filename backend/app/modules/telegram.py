@@ -1777,11 +1777,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             s = self._stats.watch_summary(str(member['emby_user_id']))
         except Exception:  # noqa: BLE001 - preserve failure diagnostics without breaking caller
             return "观看统计：暂不可用"
-        start = time.strftime('%Y-%m-%d', time.localtime(s['first_at'])) if s.get('first_at') else '尚无记录'
+        start = time.strftime('%Y-%m-%d %H:%M', time.localtime(s.get('verification_since') or s.get('first_at'))) if (s.get('verification_since') or s.get('first_at')) else '尚无记录'
         return (f"近24小时观看：{duration(s['seconds_24h'])}\n"
                 f"近30天观看：{duration(s['seconds_30d'])}\n"
-                f"累计已记录：{duration(s['recorded_seconds'])}\n"
-                f"统计起点：{start}")
+                f"累计核验观看：{duration(s['recorded_seconds'])}\n"
+                f"历史未核验参考：{duration(s.get('historical_unverified_seconds', 0))}（不计榜单）\n"
+                f"核验起点：{start}\n"
+                "仅计进度正常前进的播放；暂停、卡住、跳转和缺失证据不计。"
+                + ("\n当前客户端缺少有效进度或心跳，暂不计时。" if s.get('unverified_playback_now') else ''))
 
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member, public=_GROUP.get()),
