@@ -281,8 +281,11 @@ def test_personal_and_admin_watch_totals_survive_prune(bot):
     bot._stats.prune(400)
     assert bot._stats.watch_summary('u1')['historical_unverified_seconds'] == 600
     assert "近30天：<b>0秒</b>" in bot._user_card(bot.members.get("u1"))
-    assert "历史未核验参考：10分" in bot._admin_details(bot.members.get("u1"))
-    assert "近30天观看" in bot._usage_text(bot.members.get("u1"))
+    detail = bot._admin_details(bot.members.get("u1"))
+    assert '累计观看：0秒' in detail
+    assert '历史未核验' not in detail
+    assert bot._stats.watch_summary('u1')['historical_unverified_seconds'] == 600
+    assert "近30天：0秒" in bot._usage_text(bot.members.get("u1"))
     bot._stats.bind_live_watch(lambda: [{"user_id": "u1", "seconds": 70, "started_at": now - 100}])
     assert bot._stats.watch_summary('u1')['recorded_seconds'] == 0  # unsupported live seconds never enter verified ledger
     bot.db._migrate()

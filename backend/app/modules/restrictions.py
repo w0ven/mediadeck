@@ -363,8 +363,7 @@ class RestrictionService:
                 self.db.execute("UPDATE restriction_notices SET state='sending',attempts=attempts+1 WHERE id=?", (row["id"],))
                 row["attempts"] += 1
                 text = (f"<b>账号限制处理 #{row['event_id']}</b>\n"
-                        f"用户：{html.escape(row['username'])}\n"
-                        f"原因：{EVENT_RULES.get(row['rule'], row['rule'])}\n"
+                        f"{html.escape(row['username'])} · {html.escape(EVENT_RULES.get(row['rule'], row['rule']))}\n"
                         f"{'操作' if row['rule'] == 'manual' else '处罚'}：{ACTIONS.get(row['action'], row['action'])}\n"
                         f"结果：{html.escape(row['result'])}")
                 marker = CALL_DELIVERY.set(None)

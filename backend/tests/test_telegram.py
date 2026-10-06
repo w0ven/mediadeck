@@ -311,7 +311,7 @@ def test_internal_registration_executor_shows_generated_password_once() -> None:
     issued = emby.passwords[0][1]
     assert len(issued) >= 12
     assert any(issued in msg for msg in bot.sent)  # type: ignore[attr-defined]
-    assert any("不会再发第二次" in msg for msg in bot.sent)  # type: ignore[attr-defined]
+    assert any("请保存密码，勿转发" in msg for msg in bot.sent)  # type: ignore[attr-defined]
 
 
 def test_bad_usernames_are_refused_before_touching_emby() -> None:
@@ -1174,7 +1174,7 @@ def test_buying_asks_before_it_spends(transactional_bot) -> None:
     bot._points.add('u1', 500, 'admin.adjust')
     item = bot._shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 100, 'amount': 50})
     asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
-    assert '确定用' in bot.edits[0] and '100' in bot.edits[0]
+    assert '确认兑换' in bot.edits[0] and '100' in bot.edits[0]
     assert bot._shop.orders('u1') == [] and bot._points.balance('u1') == 500
     member = bot._members.get('u1')
     asyncio.run(bot._shop_redeem(1, 2, member, str(item['id'])))
@@ -1342,7 +1342,7 @@ def test_pasting_a_code_is_enough_without_tapping_register() -> None:
 def test_an_ordinary_hello_still_opens_the_guest_home() -> None:
     bot = _bot()
     asyncio.run(bot._handle_message(_tg_message("你好")))
-    assert any("账号服务" in m for m in bot.sent)  # type: ignore[attr-defined]
+    assert any("MediaDeck" in m for m in bot.sent)  # type: ignore[attr-defined]
     assert "1" not in bot._pending
 
 
@@ -1385,7 +1385,7 @@ def test_member_home_does_not_put_the_server_on_the_front() -> None:
     body, keys = bot._home("999", "Friend")
     assert "https://emby.example" not in body
     assert "标准" in body
-    assert "请选择功能" in body
+    assert "请选择功能" not in body
     assert "me_nodes" in {b.get("callback_data") for row in keys for b in row}
 
 
@@ -1488,10 +1488,10 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     text = bot._usage_text(member)
     assert "本月流量（估算）" in text
     assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
-    assert "⚡ <b>带宽</b>" in text and "上限：<b>20 Mbps</b>" in text
+    assert "带宽：<b>20.0 Mbps</b>" in text
     assert "同时播放：2" in text
-    assert "已登记设备标识：1" in text
-    assert "已登记设备标识：1 /" not in text
+    assert "已登记设备：1" in text
+    assert "已登记设备：1 /" not in text
 
 
 def test_device_rows_show_client_version_and_safe_distinguishing_marker() -> None:
@@ -1569,7 +1569,7 @@ def test_watch_rank_pages_cover_everybody_and_link_telegram() -> None:
     assert "@alice" in pages[0] and "tg://user?id=1001" in pages[0]
     assert "alice" not in pages[0].replace("@alice", "")
     assert "@user15" in pages[1]
-    assert "第1名" in pages[0] and "第11名" in pages[1]
+    assert "1. " in pages[0] and "11. " in pages[1]
     keys = bot._watch_rank_keyboard(1, 2, 1)
     labels = [b["text"] for row in keys for b in row]
     actions = {b["callback_data"] for row in keys for b in row}

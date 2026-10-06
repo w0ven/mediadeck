@@ -132,6 +132,23 @@ def test_bot_group_confirm_can_cancel_then_applies_once(bot):  # noqa: F811 - py
     assert bot.members.get("u1")["updated_at"] == stamp
 
 
+@pytest.mark.parametrize('group_id', ['standard', WHITELIST_GROUP_ID])
+def test_bot_group_apply_buttons_explicitly_confirm_execution(bot, group_id):  # noqa: F811
+    asyncio.run(bot._handle_message(msg('/kk 901', user='900')))
+    mid = bot._panel['900']
+    before = bot.members.get('u1')
+    asyncio.run(bot._handle_callback(cb('admin_group_pick:' + group_id, user='900', mid=mid)))
+    card = next(payload for method, payload in reversed(bot.calls)
+                if method == 'editMessageText' and payload.get('message_id') == mid)
+    apply_buttons = [button for row in card['reply_markup']['inline_keyboard'] for button in row
+                     if button.get('callback_data', '').startswith('admin_group_apply:')]
+    policies = {button['callback_data'].split(':')[1] for button in apply_buttons}
+    expected = {'keep', 'apply_group'} if bot.groups.get(group_id)['billing_mode'] in ('time', 'both') else {'keep'}
+    assert policies == expected
+    assert all(button['text'].startswith('确认 · ') for button in apply_buttons)
+    assert bot.members.get('u1') == before  # choosing a plan card does not apply it
+
+
 def test_bot_changed_group_definition_invalidates_confirmation(bot):  # noqa: F811 - pytest fixture injection
     run = asyncio.run
     # /prouser grants directly; obtain a real preview from the group menu.

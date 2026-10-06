@@ -2,6 +2,28 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-07 — concise Bot replies and temporary group-message cleanup
+
+- Reproduced the missing `/usage` trigger deletion before the fix. Successful
+  temporary group queries now delete their command and expire their reply after
+  60 seconds. Refresh renews that message's timer; topic/actor/message isolation
+  and generation checks prevent stale timers from deleting newer cards.
+- Preserve private-chat behavior, failed-send commands, administrator target and
+  confirmation cards, scheduled broadcasts and sanction notices. Cleanup failures
+  remain quiet and cannot overwrite business delivery/error state. No history sweep.
+- Simplify account, usage, help, onboarding, password, rebinding, points, request,
+  notification and ranking templates. Use short mobile-friendly sections; remove
+  historical-verification and implementation explanations while retaining real
+  uncertainty, actionable errors and explicit destructive confirmations.
+- Format bandwidth and whole-hour durations for readability without changing
+  measurements. Missing values remain unavailable, not zero or unlimited. Correct
+  rules to describe simultaneous-play limits rather than a device-count cap.
+- Validation: final full backend suite 2478 passed, 56 environment-dependent skips,
+  2 subtests passed; Ruff and diff checks passed. Synthetic source-rendered reply
+  fixtures cover HTML escaping, message length, narrow lines and key confirmations.
+  Tests did not send or delete real Telegram messages. No Web, metering, enforcement,
+  ingress or gateway behavior changed; rollout only updates the panel/Bot service.
+
 ## 2026-10-06 — today's verified rankings and separate Bot commands
 
 - Add `/today` for user viewing time and `/today 影片` for independent movie/series

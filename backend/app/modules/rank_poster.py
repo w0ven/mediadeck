@@ -327,8 +327,8 @@ def render_rank_poster(movies: list[dict[str, Any]], shows: list[dict[str, Any]]
         if len(rows) < 10:
             y = 1040 if len(rows) == 1 else 1040 + (len(rows) - 1) * 116
             poster.text(x + 300, y, f'本期共 {len(rows)} 部 · 展示全部', 24, MUTED, 'mt')
-    poster.footer('今日截至查看时；按最近有效采样；暂停不计；不比较全天涨跌' if today else
-                  '累计观看时长排名；人数去重；升降比较上一等长周期')
+    poster.footer('今日截至查看时' if today else
+                  '观影时长榜')
     return poster.jpeg()
 
 
@@ -368,8 +368,8 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
             poster.rule(48, y + 107, 1152, 60)
     else:
         poster.text(600, 986, '本期暂无观影时长记录', 38, MUTED, 'mt')
-    poster.footer('今日截至查看时；按最近有效采样；暂停不计' if today else
-                  '使用 Telegram 昵称展示；记录不完整时标明已知时长')
+    poster.footer('今日截至查看时' if today else
+                  '观影达人榜')
     return poster.jpeg()
 
 

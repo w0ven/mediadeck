@@ -412,7 +412,7 @@ class GroupMembership:
             return escape(text[:limit] + ('…' if len(text) > limit else ''))
 
         extra = f'\n当前：{safe(current, 120)}' if current else ''
-        text = (f'⚑ <b>关联群组/频道成员检测</b>\n{safe(stage, 120)}{extra}\n'
+        text = (f'⚑ <b>群组核查</b>\n{safe(stage, 120)}{extra}\n'
                 f'已核 {processed}/{total} · 删除 {counts["deleted"]} · '
                 f'保留 {counts["kept"]} · 取消 {counts["cancelled"]} · '
                 f'失败保留 {counts["failed_retained"]}\n'
@@ -445,7 +445,7 @@ class GroupMembership:
             text += f'\n\n另有 {len(detailed) - shown} 条处理明细，群消息未展开。'
         if not latest.get('running') and not counts['deleted']:
             text += '\n本次未删除账号。'
-        return text + '\n\n完整逐人结果：面板 → 群组核查（可筛选已删除/失败/取消）'
+        return text + '\n\n完整结果：面板 → 群组核查'
 
     async def _announce(self) -> None:
         post = getattr(self.bot, 'post_job_progress', None)
@@ -565,7 +565,7 @@ class GroupMembership:
             return True
         self.bot._pending.pop(self.bot._pkey(chat_id), None)
         title = '⏳ 暂时无法核实成员状态' if result['state'] == 'unknown' else '🔒 请先加入群组并关注频道'
-        lines = [f'<b>{title}</b>', '所有启用的关联项都需满足。']
+        lines = [f'<b>{title}</b>']
         labels = {'present': '已完成', 'absent': '未加入 / 未关注', 'unknown': '暂无法验证'}
         buttons = []
         for target in result['targets']:
@@ -574,9 +574,9 @@ class GroupMembership:
             if target['join_url']:
                 buttons.append([{'text': ('关注频道' if target.get('type') == 'channel' else '加入群组') + ' · ' + str(target.get('title') or target['chat_id']),
                                  'url': target['join_url']}])
-        buttons.append([{'text': '✓ 我已完成，重新核实', 'callback_data': 'membership_recheck'}])
+        buttons.append([{'text': '重新检查', 'callback_data': 'membership_recheck'}])
         if result['state'] == 'unknown':
-            lines.append('查询失败不会被当作退群，请稍后重试或联系管理员。')
+            lines.append('请稍后重试或联系管理员。')
         await self.bot._show(chat_id, '\n'.join(lines), buttons)
         return False
 

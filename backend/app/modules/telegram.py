@@ -48,6 +48,7 @@ from app.modules.bot_views import (
     member_mention,
     poetry_line,
     quota_lines,
+    short_label,
     watch_rank_mention,
 )
 from app.modules.gift_receipts import GiftReceipts
@@ -78,7 +79,7 @@ USERNAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{2,19}$")
 CREDENTIAL_LENGTHS = {8, 12}
 
 BACK_HOME: list[list[dict[str, str]]] = [
-    [{"text": "◀ 返回主菜单 / 取消", "callback_data": "home"}],
+    [{"text": "◀ 首页 / 取消", "callback_data": "home"}],
 ]
 
 
@@ -127,8 +128,7 @@ SELF_ANSWERING_CALLBACKS = (
 RANK_HELP = ('<b>榜单口令</b>\n'
              '<code>/rank</code> 昨日观影榜；<code>/today</code> 今日观影榜\n'
              '<code>/rank 影片</code> 昨日电影/剧集榜；<code>/today 影片</code> 今日电影/剧集榜\n'
-             '今日从北京时间00:00统计至查看时，按最近有效采样，暂停不计。\n'
-             '旧 <code>/rank 7</code> 周榜继续可用（前7个完整自然日）。')
+             '<code>/rank 7</code> 周榜')
 
 ADMIN_HELP = """🛠 <b>管理员命令</b>
 
@@ -185,6 +185,12 @@ def _fmt_expiry(expires_at: int | None) -> str:
     return f"{max(1, left // 3600)} 小时内到期"
 
 
+def _member_expiry_label(member: dict[str, Any]) -> str:
+    if 'expires_at_effective' not in member and 'expires_at' not in member:
+        return '暂不可用'
+    return _fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))
+
+
 def _as_request_id(data: str) -> int:
     """Trailing id of a ``req_*:<id>`` callback. 0 when malformed."""
     _, _, tail = str(data or "").partition(":")
@@ -214,7 +220,7 @@ RULES_TEXT = """📜 <b>行为准则</b>
 · 账号仅供本人使用，禁止分享、转卖或公开线路
 · 禁止用下载工具、多开设备把带宽打满
 · 求片请给准确的 TMDB 链接，不要重复提交
-· 流量或设备超出套餐后会被限速或暂停播放
+· 遵守套餐的流量、带宽、同时播放限制
 · 遵守当地法律法规，片源仅限个人观影
 
 发送 /start 回到菜单。"""
@@ -229,6 +235,10 @@ ADMIN_TARGET_COMMANDS = {
 }
 PRIVATE_ONLY_COMMANDS = {"register", "claim", "rebind", "resetpw"}
 GROUP_BRIEF_TTL = 60.0
+GROUP_TEMP_COMMANDS = {
+    '/usage', '/me', '/myinfo', '/help', '/rules', '/start',
+    '/register', '/claim', '/rebind', '/resetpw', '/requests', '/request', '/req', '/uploader', '/manage',
+}
 
 _SESSION: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "tg_session", default=None)
@@ -287,6 +297,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # chat id -> the one panel message this conversation is editing.
         # A request that keeps adding replies is what made 求片 feel messy.
         self._panel: dict[str, int] = {}
+        # Physical message + generation: refreshing one actor's card cannot
+        # let an older timer expire a new card (or a different topic/actor).
+        self._brief_cleanups: dict[tuple[str, int], tuple[object, asyncio.Task]] = {}
         self._photo_panels: set[tuple[str, int]] = set()
         # Today's pager reuses the exact snapshot already drawn on its poster.
         self._today_rank_boards: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
@@ -399,19 +412,22 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if not _QUIET_CALL.get():
             self._last_error = error
 
-    async def _delete_trigger_command(self, chat_id: Any, message_id: Any) -> None:
+    async def _delete_trigger_command(self, chat_id: Any, message_id: Any) -> bool:
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
-            return
+            return False
         # Best-effort housekeeping must neither publish noise nor overwrite
         # another task's operational error (even when Telegram denies deletion).
         token = _QUIET_CALL.set(True)
         error_token = _CALL_ERROR.set(None)
+        delivery_token = CALL_DELIVERY.set(None)
         try:
             with contextlib.suppress(Exception):
-                await self._call('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, timeout=10)
+                return await self._call('deleteMessage', {'chat_id': chat_id, 'message_id': message_id}, timeout=10) is True
         finally:
+            CALL_DELIVERY.reset(delivery_token)
             _CALL_ERROR.reset(error_token)
             _QUIET_CALL.reset(token)
+        return False
 
     async def _call(self, method: str, payload: dict[str, Any] | None = None,
                     timeout: float = 20) -> Any:
@@ -823,6 +839,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                                  (self._menu_key(chat_id), str(message_id)))
 
     async def _retire_menu(self, chat_id: Any, message_id: int) -> None:
+        self._cancel_brief_cleanup(chat_id, message_id)
         self._photo_panels.discard((str(chat_id), int(message_id)))
         if await self._call("deleteMessage", {
                 "chat_id": chat_id, "message_id": message_id}) is not True:
@@ -851,7 +868,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             else:
                 self._remember_menu(chat_id, result["message_id"], keyboard)
             return True
-        return result is not None
+        return False if _GROUP.get() and self._in_bound_chat(chat_id) else result is not None
 
     async def _answer_callback(self, callback_id: str, text: str = "") -> None:
         # Telegram shows a spinner until this lands. Keep it short so a hung
@@ -907,6 +924,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if not self._in_bound_chat(chat_id):
             return False  # do not turn an outbound notice into a new personal menu
         old_key = (str(chat_id), int(message_id))
+        temporary = old_key in self._brief_cleanups
         panel = self._admin_panels.get(old_key)
         new = await self.send_message(chat_id, text, keyboard)
         if not new:
@@ -923,6 +941,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             self._admin_panels.pop(old_key, None)
         self._retired_panels[old_key] = time.time() + PENDING_TTL
         await self._retire_menu(chat_id, message_id)
+        if temporary:
+            self._schedule_brief_cleanup(chat_id)
         return True
 
     async def _edit(self, chat_id: str | int, message_id: int, text: str,
@@ -942,9 +962,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # callback acknowledgement must not turn this error into success.
         error = _CALL_ERROR.get()
         error = (self._last_error if error is None else error).lower()
-        if result is not None or 'not modified' in error:
+        if (result is not None and result is not False) or 'not modified' in error:
             self._touch_panel(chat_id, message_id)
             self._remember_menu(chat_id, message_id, keyboard)
+            if (str(chat_id), int(message_id)) in self._brief_cleanups:
+                self._schedule_brief_cleanup(chat_id)
             return True
         if any(reason in error for reason in (
                 'message to edit not found', "message can't be edited",
@@ -1028,10 +1050,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if self._registration_open():
             rows.append([{"text": "🆕 注册账号", "callback_data": "register"}])
         rows.append([
-            {"text": "🔗 TG 换绑申请", "callback_data": "rebind"},
+            {"text": "TG 换绑", "callback_data": "rebind"},
             {"text": "📜 准则", "callback_data": "rules"},
         ])
-        rows.append([{"text": "❓ 使用说明", "callback_data": "help"}])
+        rows.append([{"text": "帮助", "callback_data": "help"}])
         join = self._group_join_button()
         if join:
             rows.append([join])
@@ -1055,20 +1077,20 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         """A stable two-column home; optional point actions belong in the bag."""
         return [
             [{"text": "👤 我的账号", "callback_data": "me"},
-             {"text": "📊 用量与观看", "callback_data": "usage"}],
+             {"text": "📊 用量", "callback_data": "usage"}],
             [{"text": "🌐 播放线路", "callback_data": "me_nodes"},
              {"text": "🎬 求片中心", "callback_data": "request_center"}],
             [{"text": "🎒 积分背包", "callback_data": "bag"},
              {"text": "🏆 排行榜", "callback_data": "rank"}],
             [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
              {"text": "📜 使用准则", "callback_data": "rules"}],
-            [{"text": "❓ 使用帮助", "callback_data": "help"}],
+            [{"text": "帮助", "callback_data": "help"}],
         ]
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
         if self._rq_staff(member):
-            rows.append([{"text": "📥 上片员工作台", "callback_data": "request_uploader"}])
+            rows.append([{"text": "上片工作台", "callback_data": "request_uploader"}])
         if self.is_admin(member):
             rows.append([{"text": "🛠 管理", "callback_data": "admin"}])
         return rows
@@ -1084,7 +1106,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             [{"text": "📋 我的求片", "callback_data": "my_requests"},
              {"text": "🔑 重置密码", "callback_data": "resetpw"}],
             [{"text": "🔗 TG 换绑", "callback_data": "rebind"}],
-            [{'text': '🔄 刷新我的账号', 'callback_data': 'me'},
+            [{'text': '刷新', 'callback_data': 'me'},
              {'text': '◀ 功能首页', 'callback_data': 'home'}],
         ]
 
@@ -1142,13 +1164,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return (
                 "❓ <b>使用说明</b>\n\n"
                 "· <b>我的账号</b>：状态、用量、设备、密码\n"
-                "· <b>TG 换绑</b>：更换 TG、原号失效或无法发言时使用，账号权益保留\n"
-                "· <b>线路</b>：服务器地址和当前节点水位\n"
+                "· <b>TG 换绑</b>：更换 TG，保留权益\n"
+                "· <b>线路</b>：播放地址、节点状态\n"
                 "· <b>背包</b>：邀请码、积分兑换\n"
-                "· <b>求片</b>：发送 TMDB 链接即可提交\n"
+                "· <b>求片</b>：选片后确认提交\n"
                 "· <b>准则</b>：账号使用约定\n"
-                "· 发送 /start 随时回到菜单\n\n"
-                + RANK_HELP + "\n\n遇到问题请联系管理员。"
+                "· /start 返回菜单\n\n"
+                + RANK_HELP + "\n\n问题请联系管理员。"
             )
         cfg = self._cfg()
         channels = []
@@ -1159,10 +1181,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         how = "或".join(channels) if channels else "管理员授权"
         return (
             "❓ <b>使用说明</b>\n\n"
-            f"· <b>注册账号</b>：发送{how}，再选一个用户名，密码由系统生成\n"
+            f"· <b>注册账号</b>：发送{how}，再设置用户名和密码\n"
             "· 也可以直接发送邀请码，或打开朋友给的注册链接\n"
             "· <b>TG 换绑</b>：原 TG 更换或遗失时，验证 Emby 密码后申请管理员审核\n"
-            "· 已绑定的用户直接使用，无需认领\n\n"
+            ""
             "遇到问题请联系管理员。"
         )
 
@@ -1184,7 +1206,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         group = str(member.get("group_name") or "").strip()
         if group:
             bits.append(self._group_label(member))
-        bits.append(_fmt_expiry(member.get("expires_at_effective", member.get("expires_at"))))
+        bits.append(_member_expiry_label(member))
         lines = [
             self._whitelist_decoration(member) + "<b>MediaDeck · 我的影库</b>\n",
             f"{escape(str(member.get('username') or '成员'))}，欢迎回来",
@@ -1194,8 +1216,6 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         balance = self._balance(user_id)
         if balance or self._plugin_on("checkin") or self._plugin_on("points_transfer"):
             lines.append(f"积分 <b>{balance}</b>")
-        lines.append("")
-        lines.append("请选择功能")
         return "\n".join(lines), self._with_admin_row(self.member_menu(), member)
 
     def _guest_home(self, tg_name: str) -> str:
@@ -1208,15 +1228,15 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             channels.append("卡密")
         lines = [f"👋 你好，{escape(str(tg_name))}\n"]
         if open_:
-            lines.append("这里是影视库账号服务，<b>开放注册中</b>。\n")
+            lines.append("<b>MediaDeck · 开放注册</b>\n")
             if channels:
                 how = "或".join(channels)
                 lines.append(f"没有账号：用{how}即可开通")
             else:
                 lines.append("管理员已授权的用户可以直接注册。")
-            lines.append("已有绑定：请使用原 Telegram；换了 TG 可申请「TG 换绑」。")
+            lines.append("已有账号请使用原 TG；更换 TG 可申请换绑。")
         else:
-            lines.append("这里是影视库账号服务，<b>当前暂停注册</b>。\n")
+            lines.append("<b>MediaDeck · 暂停注册</b>\n")
             lines.append("已有用户请使用已绑定的 Telegram；更换 TG 可申请换绑。")
         rules = self.membership.rules() if self.membership else {}
         if rules.get("gate_enabled") and any(
@@ -1301,10 +1321,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         return ""
 
     _USERNAME_PROMPT = (
-        "🆕 <b>注册账号</b>\n\n请直接发送你想要的用户名：\n\n"
-        "· 3–20 个字符，字母开头\n"
-        "· 只能用字母、数字和下划线\n\n"
-        "<i>下一步可选择随机生成或自定义密码，最后确认后才创建账号。10 分钟内有效。</i>")
+        "🆕 <b>注册账号</b>\n请发送用户名：\n"
+        "3–20 位，字母开头，仅限字母、数字、下划线。\n"
+        "下一步设置密码并确认；10 分钟内有效。")
 
     def _credential_prompt(self) -> str:
         cfg = self._cfg()
@@ -1315,7 +1334,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             kinds.append("卡密（12 位，管理员发放）")
         detail = "\n".join(f"· {item}" for item in kinds) or "· 请发送管理员给你的凭证"
         return (
-            "🎟 <b>注册账号</b>\n\n请发送你的凭证：\n\n"
+            "🎟 <b>注册账号</b>\n请发送凭证：\n"
             f"{detail}\n\n"
             "<i>大小写不敏感，10 分钟内有效。发送 /start 可取消。</i>"
         )
@@ -1542,7 +1561,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if server:
             lines.append('服务器：' + escape(server))
         lines.append('有效期：' + _fmt_expiry(expires))
-        lines.append('\n<i>请立刻保存密码，这条消息不会再发第二次。</i>')
+        lines.append('\n<i>请保存密码，勿转发。</i>')
         await self._show(chat_id, '\n'.join(lines), self.member_menu())
         if receipt_id:
             try:
@@ -1577,13 +1596,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             except Exception as exc:  # noqa: BLE001 - shown to a member
                 notice = f"❌ {_public_error(exc)}\n\n"
 
-        quota = 0
-        codes: list[dict[str, Any]] = []
+        quota = None
+        codes: list[dict[str, Any]] | None = None
         with contextlib.suppress(Exception):
             quota = self._registration.invite_quota(user_id)
             codes = self._registration.list_invites(user_id, limit=10)
 
-        lines = [f"{notice}🎫 <b>我的邀请码</b>\n", f"剩余名额：<b>{quota}</b>"]
+        lines = [f"{notice}🎫 <b>我的邀请码</b>\n", f"剩余名额：<b>{quota if quota is not None else '暂不可用'}</b>"]
         if codes:
             lines.append("")
             for row in codes:
@@ -1599,14 +1618,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 if link and left > 0 and not row.get("revoked"):
                     lines.append(f"    {link}")
         else:
-            lines.append("\n你还没有生成过邀请码。")
+            lines.append("\n邀请码暂不可用。" if codes is None else "\n暂无邀请码。")
         if self._bot_username:
             lines.append("\n<i>把链接发给朋友，点开即可注册。</i>")
         else:
             lines.append("\n<i>把邀请码发给朋友，他们注册时填写即可。</i>")
 
         keyboard: list[list[dict[str, str]]] = []
-        if quota > 0:
+        if quota is not None and quota > 0:
             keyboard.append(
                 [{"text": f"➕ 生成新码（剩 {quota}）",
                   "callback_data": "invite_new"}])
@@ -1622,12 +1641,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return self._plugins.get(plugin_id)
         return None
 
-    def _balance(self, user_id: str) -> int:
-        if self._points is None:
-            return 0
-        with contextlib.suppress(Exception):
-            return int(self._points.balance(user_id))
-        return 0
+    def _balance(self, user_id: str) -> int | str:
+        # This helper is display-only; unavailable points are never a zero balance.
+        if self._points is not None:
+            with contextlib.suppress(Exception):
+                return int(self._points.balance(user_id))
+        return '暂不可用'
 
     def _points_text(self, member: dict[str, Any]) -> str:
         """Balance plus the last few rows that produced it.
@@ -1637,7 +1656,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         """
         user_id = str(member.get("emby_user_id") or "")
         lines = [f"💰 <b>我的积分</b>\n\n当前余额：<b>{self._balance(user_id)}</b>"]
-        rows: list[dict[str, Any]] = []
+        rows: list[dict[str, Any]] | None = None
         if self._points is not None:
             with contextlib.suppress(Exception):
                 rows = self._points.ledger(user_id, limit=5)
@@ -1652,7 +1671,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                     f"{when} · {escape(str(row.get('reason_label') or row.get('reason')))} "
                     f"· <b>{sign}{delta}</b>")
         else:
-            lines.append("\n还没有积分记录。")
+            lines.append("\n流水暂不可用。" if rows is None else "\n暂无积分记录。")
         return "\n".join(lines)
 
     async def _checkin(self, chat_id: Any, message_id: int,
@@ -1729,6 +1748,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 mark = "⛔ 维护中"
             elif not node.get("ok", True):
                 mark = "⚠️ 不可用"
+            elif node.get('ok') is None or node.get('utilisation') is None:
+                mark = '状态未知'
             elif percent >= 90:
                 mark = f"🔴 {percent}%"
             elif percent >= 60:
@@ -1739,7 +1760,6 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             if node.get("active_streams") is not None:
                 line += f" · {max(0, int(node['active_streams']))} 个连接"
             rows.append(line)
-        rows.append("\n<i>节点连接数不等于 Emby 播放会话数；水位越低越空闲，系统会自动为你选择线路。</i>")
         return rows
 
     async def _nodes_text(self) -> str:
@@ -1773,9 +1793,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             parts.append("")
         online = await self._online_plays()
         if online is not None:
-            parts.append(f"当前在线：<b>{online}</b> 路播放（Emby 会话）")
+            parts.append(f"当前在线：<b>{online}</b> 路播放")
         else:
-            parts.append("当前在线：暂不可用（Emby 播放会话查询失败）")
+            parts.append("当前在线：暂不可用，请稍后刷新。")
         parts.append("")
         if show_load:
             if custom or str(cfg.get("emby_public_url") or "").strip() or online is not None:
@@ -1791,23 +1811,22 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             s = self._stats.watch_summary(str(member['emby_user_id']))
         except Exception:  # noqa: BLE001 - preserve failure diagnostics without breaking caller
             return "观看统计：暂不可用"
-        start = time.strftime('%Y-%m-%d %H:%M', time.localtime(s.get('verification_since') or s.get('first_at'))) if (s.get('verification_since') or s.get('first_at')) else '尚无记录'
-        return (f"近24小时观看：{duration(s['seconds_24h'])}\n"
-                f"近30天观看：{duration(s['seconds_30d'])}\n"
-                f"累计核验观看：{duration(s['recorded_seconds'])}\n"
-                f"历史未核验参考：{duration(s.get('historical_unverified_seconds', 0))}（不计榜单）\n"
-                f"核验起点：{start}\n"
-                "仅计进度正常前进的播放；暂停、卡住、跳转和缺失证据不计。"
-                + ("\n当前客户端缺少有效进度或心跳，暂不计时。" if s.get('unverified_playback_now') else ''))
+        return ("<b>观看记录</b>\n"
+                f"近24小时：{duration(s.get('seconds_24h'))}\n"
+                f"近30天：{duration(s.get('seconds_30d'))}\n"
+                f"累计观看：{duration(s.get('recorded_seconds'))}"
+                + ("\n当前观看计时暂不可用。" if s.get('unverified_playback_now') else ''))
 
     def _usage_text(self, member: dict[str, Any]) -> str:
-        lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>\n", *quota_lines(member, public=_GROUP.get()),
-                 '', *bandwidth_lines(member), '']
+        lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>", '',
+                 *quota_lines(member, public=_GROUP.get()), *bandwidth_lines(member)]
         streams = member.get('max_streams')
-        if streams not in (None, ''):
-            lines.append(f"同时播放：{streams} 路" if int(streams or 0) else "同时播放：不限")
-        lines.append(f"已登记设备标识：{member.get('device_count', 0)}")
-        lines.extend([f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}", "", self._watch_text(member)])
+        stream_text = ('暂不可用' if streams in (None, '') else
+                       f'{int(streams)} 路' if int(streams) else '不限')
+        devices = member.get('device_count')
+        lines.extend([f"同时播放：{stream_text}",
+                      f"已登记设备：{devices if devices is not None else '暂不可用'}"])
+        lines.extend([f"有效期：{_member_expiry_label(member)}", "", self._watch_text(member)])
         return '\n'.join(lines)
 
     # -- shop -----------------------------------------------------------------
@@ -1855,7 +1874,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             {'item': item, 'user_id': (member or {}).get('emby_user_id'), 'message_id': message_id})
         await self._edit(
             chat_id, message_id,
-            f"确定用 <b>{item['cost']}</b> 积分兑换 <b>{escape(str(item['name']))}</b>？\n\n"
+            f"🎁 <b>确认兑换</b>\n用 <b>{item['cost']}</b> 积分兑换 <b>{escape(str(item['name']))}</b>？\n"
             f"内容：{item['amount']}{escape(str(item.get('unit') or ''))} · "
             f"{escape(str(item.get('kind_label') or ''))}",
             [[{"text": "✅ 确认兑换", "callback_data": f"buyok:{item['id']}"},
@@ -1890,8 +1909,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             chat_id, message_id,
             f"✅ <b>兑换成功</b>\n\n商品：{escape(str(item.get('name')))}\n"
             f"发放：{escape(str(result.get('granted')))}\n"
-            f"消耗：{result.get('cost')} 分\n"
-            f"余额：<b>{result.get('balance')}</b>{notice}",
+            f"消耗：{result.get('cost')} 分 · 余额：<b>{result.get('balance')}</b>{notice}",
             self.bag_menu())
 
     async def _orders_view(self, chat_id: Any, message_id: int,
@@ -1980,7 +1998,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         fee_line = f"\n手续费：{fee}（对方到账 {amount - fee}）" if fee else ""
         await self._show(
             chat_id,
-            f"请确认转账：\n\n收款人：<b>{extra.get('to_name')}</b>\n"
+            f"💸 <b>确认转账</b>\n收款人：<b>{escape(str(extra.get('to_name') or '—'))}</b>\n"
             f"数量：<b>{amount}</b>{fee_line}",
             [[{"text": "✅ 确认转账", "callback_data": "transfer_ok"},
               {"text": "取消", "callback_data": "home"}]])
@@ -2006,7 +2024,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         await self._edit(
             chat_id, message_id,
-            f"✅ <b>转账成功</b>\n\n收款人：{extra.get('to_name')}\n"
+            f"✅ <b>转账成功</b>\n收款人：{escape(str(extra.get('to_name') or '—'))}\n"
             f"转出：<b>{result.get('amount')}</b>"
             + (f"（手续费 {result.get('fee')}）" if result.get("fee") else "")
             + f"\n对方到账：<b>{result.get('received')}</b>\n"
@@ -2121,7 +2139,6 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             if board.get('unavailable'):
                 return '\n'.join([*lines, '排行统计暂时不可用。'])
             movies, shows = board['movies'], board['shows']
-            lines.append('按最近有效采样，暂停不计；今日不比较昨日全天涨跌。\n')
         elif self._stats is not None:
             try:
                 movies, shows = self._stats.top_titles_split(
@@ -2129,23 +2146,19 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             except Exception:  # noqa: BLE001 - unavailable is not an empty chart
                 lines.append("排行统计暂时不可用。")
                 return "\n".join(lines)
-        if movies or shows:
-            lines.append('按累计观看时长排序；播放次数仅作参考。\n')
         if movies:
             lines.append("<b>▎电影</b>")
             for i, row in enumerate(movies, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                    f"观看时长: {self._title_watch_time(row)}  "
-                    f"播放次数: {int(row.get('plays') or 0)}")
+                    f"{i}. {escape(short_label(row.get('title')))} · "
+                    f"{self._title_watch_time(row)} · {int(row.get('plays') or 0)} 次")
             lines.append("")
         if shows:
             lines.append("<b>▎电视剧</b>")
             for i, row in enumerate(shows, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))}\n"
-                    f"观看时长: {self._title_watch_time(row)}  "
-                    f"播放次数: {int(row.get('plays') or 0)}")
+                    f"{i}. {escape(short_label(row.get('title')))} · "
+                    f"{self._title_watch_time(row)} · {int(row.get('plays') or 0)} 次")
             lines.append("")
         while lines and not lines[-1]:
             lines.pop()
@@ -2159,7 +2172,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         days = max(1, int(days or 1))
         board = (board or self._today_board()) if today else None
         stamp = board['stamp'] if today else ranking_stamp(days)
-        heading = '▎🏆 <b>今日观影榜</b>\n按最近有效采样，暂停不计。' if today else f"▎🏆 <b>{days} 天观影榜</b>"
+        heading = '🏆 <b>今日观影榜</b>' if today else f"🏆 <b>{days} 天观影榜</b>"
         rows: list[dict[str, Any]] = []
         if today:
             if board.get('unavailable'):
@@ -2197,13 +2210,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                          or ('Telegram用户' if row.get('tg_user_id') else '未绑定'))
                 visible = dict(row)
                 if len(label.encode('utf-16-le')) // 2 > 40:
-                    visible['tg_display_name'] = label.encode('utf-16-le')[:76].decode('utf-16-le', errors='ignore') + '…'
+                    visible['tg_display_name'] = short_label(label, 40)
                 name = watch_rank_mention(visible)
                 if str(row.get("group_id") or "") == WHITELIST_GROUP_ID:
                     name += " · 💠白名单"
                 lines.append(
-                    f"{medal}<b>第{rank}名</b> | {name}\n"
-                    f"  观影时长 | {duration(int(row.get('seconds') or (row.get('hours') or 0) * 3600))}")
+                    f"{medal} {rank}. {name} · {duration(int(row.get('seconds') or (row.get('hours') or 0) * 3600))}")
             lines.append("")
             lines.append(f"#UPlaysRank  {stamp}")
             pages.append("\n".join(lines))
@@ -2252,8 +2264,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 parts.append(rest)
                 break
             cut = rest.rfind("\n", 0, limit)
-            if cut < limit // 2:
-                cut = limit
+            if cut <= 0:
+                # Source templates bound individual labels. Never cut a long
+                # HTML line through an entity/tag even if a caller exceeds it.
+                cut = rest.find('\n')
+                if cut <= 0:
+                    cut = len(rest)
             parts.append(rest[:cut].rstrip())
             rest = rest[cut:].lstrip("\n")
         return parts or [""]
@@ -2348,7 +2364,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             [{'text': '🗑 删除账号', 'callback_data': 'admin_rm'},
              {'text': '🔄 刷新目标账号', 'callback_data': 'admin_card'}],
             [{'text': '◀ 管理入口', 'callback_data': 'admin_root'},
-             {'text': '关闭卡片', 'callback_data': 'panel_close'}],
+             {'text': '关闭', 'callback_data': 'panel_close'}],
         ]
         rows.insert(0, [{'text': '⛔ 禁用账号', 'callback_data': 'admin_disable'},
                         {'text': '🔓 解除禁用', 'callback_data': 'admin_enable'}])
@@ -2364,8 +2380,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         local = '已封禁' if access.get('status') == 'suspended' else '未封禁'
         remote = ('未知，请刷新核实' if access.get('emby_disabled') is None else
                   '已禁用' if access['emby_disabled'] else '未禁用')
-        limits = '、'.join(access.get('remaining_restrictions') or []) or '无额外到期/额度/待开通限制'
-        return f"\n本地封禁：{local} · Emby：{remote}\n剩余权益限制：{escape(limits)}\n"
+        limits = '、'.join(access.get('remaining_restrictions') or []) or '无'
+        return f"\n本地封禁：{local} · Emby：{remote}\n其他限制：{escape(limits)}\n"
 
     def _user_card(self, target: dict[str, Any]) -> str:
         return self._account_card(target, public=_GROUP.get(), managing=True) + target.get('_access_text', '')
@@ -2385,13 +2401,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         return (
             self._whitelist_decoration(target)
             + f"🛠 <b>管理目标 · {escape(str(target.get('username') or '-'))}</b>\n\n"
-            f"状态：{self._status_label(target)}\n"
-            f"用户组：{self._group_label(target)}\n"
-            f"有效期：{_fmt_expiry(target.get('expires_at_effective', target.get('expires_at')))}\n"
+            f"状态：{self._status_label(target)} · 用户组：{self._group_label(target)}\n"
+            f"有效期：{_member_expiry_label(target)}\n"
             f"积分：{self._balance(user_id)}\n"
             f"注册渠道：{escape(str(target.get('register_via') or 'legacy'))}\n"
-            f"邀请人：{escape(str(inviter.get('username') or '—'))}\n"
-            f"下级：{invitee_count} 人\n"
+            f"邀请人：{escape(str(inviter.get('username') or '—'))} · 下级：{invitee_count} 人\n"
             f"Telegram：{escape(str(target.get('tg_user_id') or '未关联'))}\n"
             f"设备标识：{devices}\n"
             f"最近活跃："
@@ -2417,8 +2431,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         self._pending.pop(self._pkey(chat_id), None)
         await self._edit(
             chat_id, message_id,
-            "🛠 <b>管理</b>\n\n"
-            "查找用户后，续期、换组、加减积分和删除都在该目标的卡片里完成。",
+            "🛠 <b>管理</b>\n请先查找用户。",
             self.admin_menu() + (self._target_back() if self._admin_panel(chat_id, message_id) else []))
 
     async def _admin_prompt_find(self, chat_id: Any, message_id: int,
@@ -2553,15 +2566,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 '点击下方领取，前往机器人完成注册。',
                 [[{'text': '领取并注册', 'url': link}]])
             return
-        buttons = [[{"text": "🎁 点击领取（仅指定用户）", "url": link}]] if link else []
+        buttons = [[{"text": "领取（本人）", "url": link}]] if link else []
         buttons.append([{"text": "◀ 返回管理", "callback_data": "admin"}])
         await self._edit(
             chat_id, message_id,
             f"✅ <b>赠送资格已准备好</b>\n\n接收人：<code>{target}</code>\n"
             f"用户组：{group_name} · {duration}\n\n"
             + (f"{escape(link)}\n\n" if link else f"领取码：<code>{code}</code>\n\n")
-            + "请将链接或领取码交给对方，别人无法代领。\n"
-            "<i>Bot 没有主动私信对方。返回前请先复制链接。</i>", buttons)
+            + "请复制后转发给本人；未主动私信对方。", buttons)
 
     async def _admin_show_user(self, chat_id: Any, target: dict[str, Any],
                                actor: str, notice: str = '') -> bool:
@@ -2831,11 +2843,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         await self._show_home(chat_id, tg_user_id, tg_name)
 
-    async def _group_start(self, chat_id: Any, payload: str = "") -> None:
+    async def _group_start(self, chat_id: Any, payload: str = "") -> bool:
         supported = payload in ('account', 'manage') or bool(re.fullmatch(r'(manage_[A-Za-z0-9_-]+|person_[0-9]+)', payload))
         link = self._private_link(payload if looks_like_credential(payload) or supported else "")
         keyboard = [[{"text": "打开私聊", "url": link}]] if link else None
-        await self._show(
+        return await self._show(
             chat_id,
             "请私聊我打开菜单。" + (f"\n{escape(link)}" if link else ""),
             keyboard)
@@ -2864,11 +2876,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         badge = self._whitelist_decoration(member) or '👤 '
         heading = f'🛠 <b>管理目标 · {name}</b>' if managing else badge + f'<b>{name}</b>'
         expiry = member.get('expires_at_effective', member.get('expires_at'))
-        term = time.strftime('%Y-%m-%d 到期', time.localtime(expiry)) if expiry else '♾ 永久'
+        term = (time.strftime('%Y-%m-%d 到期', time.localtime(expiry)) if expiry else
+                '♾ 永久' if 'expires_at_effective' in member or 'expires_at' in member else '暂不可用')
         lines = [heading,
-                 self._group_label(member) + ' · ' + self._status_label(member) + ' · ' + term, '',
-                 *quota_lines(member, public=public), '', *bandwidth_lines(member), '',
-                 '🎬 <b>观看记录</b>']
+                 self._group_label(member) + ' · ' + self._status_label(member),
+                 '有效期：' + term, '',
+                 *quota_lines(member, public=public), *bandwidth_lines(member)]
         balance = None
         if self._points is not None:
             with contextlib.suppress(Exception):
@@ -2877,35 +2890,71 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if self._stats is not None and hasattr(self._stats, 'watch_summary'):
             with contextlib.suppress(Exception):
                 summary = self._stats.watch_summary(str(member['emby_user_id']))
-        for key, label in (('seconds_24h', '近24小时'), ('seconds_30d', '近30天')):
-            lines.append(label + '：<b>' + duration((summary or {}).get(key)) + '</b>')
-        lines += ['', '💰 <b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
+        lines.extend(['', '<b>观看记录</b>',
+                      '近24小时：<b>' + duration((summary or {}).get('seconds_24h')) + '</b>',
+                      '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>'])
+        lines += ['', '<b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         return '\n'.join(lines)
 
     def _brief_card(self, member: dict[str, Any]) -> str:
         return self._account_card(member, public=True)
 
     def _group_account_menu(self) -> list[list[dict[str, str]]]:
-        return [[{'text': '🔄 刷新我的账号', 'callback_data': 'me'},
-                 {'text': '关闭卡片', 'callback_data': 'panel_close'}],
-                *self._private_button('account', '完整账号 · 私聊')]
+        return [[{'text': '刷新', 'callback_data': 'me'},
+                 {'text': '关闭', 'callback_data': 'panel_close'}],
+                *self._private_button('account', '私聊账号')]
 
     def _usage_brief(self, member: dict[str, Any]) -> str:
-        return '\n'.join([*quota_lines(member), '', *bandwidth_lines(member)])
+        return '\n'.join([*quota_lines(member), *bandwidth_lines(member)])
+
+    def _cancel_brief_cleanup(self, chat_id: Any, message_id: int) -> None:
+        entry = self._brief_cleanups.pop((str(chat_id), int(message_id)), None)
+        if entry:
+            entry[1].cancel()
 
     async def _expire_own_card(self, chat_id: Any, message_id: int,
-                               delay: float = GROUP_BRIEF_TTL) -> None:
+                               delay: float = GROUP_BRIEF_TTL, *,
+                               generation: object | None = None,
+                               session: str | None = None) -> None:
+        key = (str(chat_id), int(message_id))
         await asyncio.sleep(delay)
-        await self._call("deleteMessage", {
-            "chat_id": chat_id, "message_id": message_id})
+        async with self._lock_for(str(chat_id)):
+            if generation is not None:
+                entry = self._brief_cleanups.get(key)
+                if not entry or entry[0] is not generation:
+                    return
+            deleted = await self._delete_trigger_command(chat_id, message_id)
+            if generation is not None:
+                entry = self._brief_cleanups.get(key)
+                if not entry or entry[0] is not generation:
+                    return
+                self._brief_cleanups.pop(key, None)
+            if not deleted:
+                return  # permission/transport refusal is not successful retirement
+            self._retired_panels[key] = time.time() + PENDING_TTL
+            self._card_actor.pop(f'{chat_id}:{message_id}', None)
+            for panels in (self._panel, self._menu_panel):
+                if session and panels.get(session) == message_id:
+                    panels.pop(session, None)
 
     def _schedule_brief_cleanup(self, chat_id: Any) -> None:
-        mid = self._panel.get(self._pkey(chat_id))
-        if not mid:
+        session = self._pkey(chat_id)
+        mid = self._panel.get(session)
+        if not mid or not _GROUP.get() or self._admin_panel(chat_id, mid):
             return
-        task = asyncio.create_task(self._expire_own_card(chat_id, mid))
+        self._cancel_brief_cleanup(chat_id, mid)
+        generation = object()
+        task = asyncio.create_task(self._expire_own_card(
+            chat_id, mid, generation=generation, session=session))
+        self._brief_cleanups[(str(chat_id), int(mid))] = (generation, task)
         self._in_flight.add(task)
         task.add_done_callback(self._in_flight.discard)
+        def finished(done: asyncio.Task) -> None:
+            key = (str(chat_id), int(mid))
+            entry = self._brief_cleanups.get(key)
+            if entry and entry[0] is generation:
+                self._brief_cleanups.pop(key, None)
+        task.add_done_callback(finished)
 
     @staticmethod
     def _rank_hours(hours: int) -> int:
@@ -2936,14 +2985,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             if str(row.get("group_id") or "") == WHITELIST_GROUP_ID:
                 name += " · 💠白名单"
             lines.append(
-                f"{medal}<b>第{i}名</b> | {name}\n"
-                f"  观影时长 | {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}")
+                f"{medal} {i}. {name} · {duration(row.get('seconds', int((row.get('hours') or 0)*3600)))}")
         return "\n".join(lines)
 
     def _heat_rankings_text(self, days: int = 1) -> str:
         days = 7 if int(days) >= 3 else 1
         window = "今日" if days <= 1 else "本周"
-        lines = [f"🎞 <b>{window}热度排行</b>\n", '按累计观看时长排序；播放次数仅作参考。\n']
+        lines = [f"🎞 <b>{window}热度排行</b>\n"]
         movies: list[dict[str, Any]] = []
         shows: list[dict[str, Any]] = []
         if self._stats is not None:
@@ -2956,14 +3004,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             lines.append("<b>▎电影</b>")
             for i, row in enumerate(movies, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))} · {self._title_watch_time(row)} · "
+                    f"{i}. {escape(short_label(row.get('title')))} · {self._title_watch_time(row)} · "
                     f"{int(row.get('plays') or 0)} 次")
             lines.append("")
         if shows:
             lines.append("<b>▎电视剧</b>")
             for i, row in enumerate(shows, 1):
                 lines.append(
-                    f"{i}. {escape(str(row.get('title') or '—'))} · {self._title_watch_time(row)} · "
+                    f"{i}. {escape(short_label(row.get('title')))} · {self._title_watch_time(row)} · "
                     f"{int(row.get('plays') or 0)} 次")
         while lines and not lines[-1]:
             lines.pop()
@@ -3046,8 +3094,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             payload = args[0] if command == 'start' else command
             if in_group:
                 link = self._private_link('requests')
-                await self._show(chat_id, '求片请在私聊完成。', [[{'text':'打开求片中心', 'url':link}]] if link else None)
-                return
+                return await self._show(chat_id, '求片请在私聊完成。', [[{'text':'求片私聊', 'url':link}]] if link else None)
             if not member or not self._requests_ready():
                 await self._show(chat_id, '当前 Telegram 未绑定账号或求片未开启。', BACK_HOME)
                 return
@@ -3066,6 +3113,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if command == "start":
             payload = args[0] if args else ""
+            if in_group:
+                return await self._group_start(chat_id, payload)
             if not in_group and payload == 'account':
                 await self._show(chat_id, self._account_card(member) if member else self._guest_home(display),
                                  self.info_menu() if member else self.guest_menu())
@@ -3096,8 +3145,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if command in PRIVATE_ONLY_COMMANDS and in_group:
             link = self._private_link()
             keyboard = [[{"text": "打开私聊", "url": link}]] if link else None
-            await self._show(chat_id, "请私聊我完成这项操作。", keyboard)
-            return
+            return await self._show(chat_id, "请私聊我完成这项操作。", keyboard)
         if command == "claim":
             await self._show(chat_id, "认领功能已停用，现有绑定用户直接使用即可。", self.guest_menu())
             return
@@ -3123,8 +3171,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return await self._present_watch_rank(chat_id, 168 if days == 7 else 24)
         if command == "manage" and self.is_admin(member):
             if in_group:
-                await self._show(chat_id, "请私聊打开管理菜单，或直接使用 /kk /renew 等命令。")
-                return
+                return await self._show(chat_id, "请私聊打开管理菜单，或使用 /kk /renew。")
             await self._show(chat_id, "🛠 <b>用户管理</b>\n\n请选择操作。", self.admin_menu())
             return
         if command == "help" and self.is_admin(member) and not in_group:
@@ -3133,8 +3180,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if command in ("help", "rules"):
             if in_group:
                 body = RULES_TEXT if command == "rules" else self._group_help_text(member)
-                await self._show(chat_id, body)
-                return
+                return await self._show(chat_id, body)
             body = RULES_TEXT if command == "rules" else self._help_text(member)
             keyboard = (self._with_admin_row(self.member_menu(), member)
                         if member else self.guest_menu())
@@ -3142,7 +3188,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if command == "usage":
             if member:
-                await self._show(chat_id, self._usage_text(member), BACK_HOME if not in_group else None)
+                return await self._show(chat_id, self._usage_text(member), BACK_HOME if not in_group else None)
             elif not in_group:
                 await self._show(chat_id, "当前 Telegram 没有绑定账号。", self.guest_menu())
             return
@@ -3157,10 +3203,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                                  self.guest_menu())
                 return
             if in_group:
-                shown = await self._show(chat_id, self._brief_card(member), self._group_account_menu())
-                if shown:
-                    self._schedule_brief_cleanup(chat_id)
-                return shown
+                return await self._show(chat_id, self._brief_card(member), self._group_account_menu())
             return await self._show(chat_id, self._account_card(member), self.info_menu())
         if not self.is_admin(member):
             if in_group:
@@ -3241,9 +3284,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                  f"按组重算：{_fmt_expiry(preview['policies']['apply_group']['expires_at'])}",
                  *[escape(w) for w in preview['warnings']],
                  "历史用量、积分及其他个人权限保留。"]
-        buttons = [{'text':'✅ 确认（保留期限/按组取消计时）','callback_data':f'admin_group_apply:keep:{nonce}'}]
+        buttons = [{'text':'确认 · 保留期限/取消计时','callback_data':f'admin_group_apply:keep:{nonce}'}]
         if group['billing_mode'] in ('time','both'):
-            buttons.append({'text':'按新组重算期限','callback_data':f'admin_group_apply:apply_group:{nonce}'})
+            buttons.append({'text':'确认 · 按组重算期限','callback_data':f'admin_group_apply:apply_group:{nonce}'})
         await self._show(chat_id, '\n'.join(lines), [[b] for b in buttons]+[[{'text':'取消','callback_data':'admin_card'}]])
         self._hold_admin_user(chat_id, target, actor)
         self._pending[self._pkey(chat_id)][2]['group_confirm'] = {
@@ -4012,7 +4055,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             shown = await self._handle_command(
                 chat_id, tg_user_id, tg_username, text, display_name=tg_name)
             command = text.split()[0].lower().split('@', 1)[0]
-            if shown and command in ('/kk', '/me', '/rank', '/today', '/renew', '/score'):
+            if shown and in_group and command in GROUP_TEMP_COMMANDS:
+                self._schedule_brief_cleanup(chat_id)
+            if shown and (command in ('/kk', '/me', '/rank', '/today', '/renew', '/score')
+                          or in_group and command in GROUP_TEMP_COMMANDS):
                 await self._delete_trigger_command(chat_id, message.get('message_id'))
             return
 
@@ -4433,7 +4479,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 + f"📋 <b>{escape(str(member.get('username') or '-'))}</b>\n\n"
                 f"状态：{self._status_label(member)}\n"
                 f"用户组：{self._group_label(member)}\n"
-                f"有效期：{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}\n"
+                f"有效期：{_member_expiry_label(member)}\n"
                 f"备注：{escape(str(member.get('note') or '—'))}",
                 self.info_menu())
             return
@@ -4708,7 +4754,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 member,
                 "⏳ <b>有效期提醒</b>\n\n"
                 f"账号 <b>{escape(str(member.get('username') or '-'))}</b> "
-                f"{_fmt_expiry(member.get('expires_at_effective', member.get('expires_at')))}。\n"
+                f"{_member_expiry_label(member)}。\n"
                 "需要续期请联系管理员。")
             sent += 1 if ok else 0
         return sent
