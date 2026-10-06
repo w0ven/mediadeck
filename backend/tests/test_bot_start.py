@@ -71,7 +71,7 @@ def test_unlinked_visitor_gets_the_guest_screen():
     bot = _bot()
     text = _start(bot)
     assert "无权限" not in text
-    assert "账号服务" in text
+    assert "MediaDeck" in text and "开放注册" in text
 
 
 def test_admin_start_is_not_answered_as_an_unknown_command():

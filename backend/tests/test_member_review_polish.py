@@ -160,7 +160,7 @@ def test_rank_command_shares_scheduled_poster_pager_and_page_profile_fetch(env, 
         page = next(p for m, p in env.tg.calls if m == method)
         assert page['message_id'] == mid
         text = page.get('caption') or page['text']
-        assert text.count('tg://user?id=') == 10 and '第11名' in text
+        assert text.count('tg://user?id=') == 10 and '11. ' in text
         await click(env, 'urank:2_7', mid, thread=31)
         assert len(profile_calls) == 20
         await click(env, 'urank:3_7', mid, thread=31)

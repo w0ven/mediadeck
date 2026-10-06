@@ -243,7 +243,7 @@ class GroupAuditPlugin(Plugin):
     def _notice_text(grace_days: int) -> str:
         tail = ("请尽快回到群组，否则账号可能被暂停。" if grace_days <= 0
                 else f"请在 {grace_days} 天内回到群组，否则账号可能被暂停。")
-        return "⚑ <b>群组核查</b>\n\n检测到你已不在要求的 Telegram 群组中。\n" + tail
+        return "⚑ <b>群组核查</b>\n\n你已离开要求加入的 TG 群组。\n" + tail
 
 
 # ---------------------------------------------------------------------------
@@ -487,8 +487,7 @@ class ViewingReportPlugin(Plugin):
     def _text(label: str, days: int, hours: float, plays: int,
               total_bytes: int | None, detail: dict[str, Any]) -> str:
         lines = [f"📊 <b>你的{label}</b>（近 {days} 天）\n",
-                 f"观看时长：{hours} 小时",
-                 f"播放次数：{plays} 次",
+                 f"观看：{hours:.1f} 小时 · 播放：{plays} 次",
                  f"消耗流量：{_fmt_bytes(total_bytes)}"]
         titles = _top_titles(detail)
         if titles:
@@ -496,7 +495,7 @@ class ViewingReportPlugin(Plugin):
             lines.extend(f"{i}. {html.escape(str(item['title']))} · {item['plays']} 次"
                          for i, item in enumerate(titles, 1))
         else:
-            lines.append("\n这段时间还没有观看记录。")
+            lines.append("\n暂无影片明细。" if plays or hours else "\n这段时间还没有观看记录。")
         return "\n".join(lines)
 
     async def _poster(self, member: dict[str, Any], label: str, days: int,
@@ -802,11 +801,10 @@ class RequestDigestPlugin(Plugin):
                     "已通知": 0, "结果": "无待处理，未推送"}
 
         body = (
-            "🎬 <b>求片摘要</b>\n\n"
-            f"待处理：<b>{pending}</b> 条\n"
-            f"已接受：<b>{working}</b> 条\n"
+            "🎬 <b>求片摘要</b>\n"
+            f"待处理：<b>{pending}</b> · 已接受：<b>{working}</b>\n"
             f"本月累计：{int(stats.get('month_total') or 0)} 条\n\n"
-            "发送 /uploader 查看工作台。接受即终结，之后手动安排下载。")
+            "/uploader 打开工作台。")
 
         sent = errors = 0
         delivery = _delivery_state(self, config)

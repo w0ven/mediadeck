@@ -44,7 +44,7 @@ def test_probe_zero_does_not_hide_playback_sessions_or_count_unique_users(bot):
     text = run(bot._nodes_text())
     assert '当前在线：<b>13</b> 路播放' in text
     assert '0 个连接' in text
-    assert '节点连接数不等于 Emby 播放会话数' in text
+    assert '节点连接数不等于 Emby 播放会话数' not in text
     assert bot._emby.calls == 1
 
 

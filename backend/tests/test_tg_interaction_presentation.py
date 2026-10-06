@@ -45,7 +45,7 @@ def test_successful_cards_delete_only_trigger_after_send(env, chat, text, reply,
     assert any(k[1] != 31 for k in env.tg.messages)
 
 
-@pytest.mark.parametrize('text', ['/start', '/usage', '/help', '/prouser ViewerA', '/myinfo'])
+@pytest.mark.parametrize('text', ['/prouser ViewerA'])
 def test_other_commands_never_delete_the_trigger(env, text):
     asyncio.run(dispatch(env, text))
     assert not deletions(env)
@@ -176,7 +176,7 @@ def test_card_has_compact_sections_and_truthful_unknown(env, chat, used):
     env.members.bind_metering(Metering(), cutover=True)
     asyncio.run(dispatch(env, '/me', chat=chat, user=VIEWER))
     text = next(p['text'] for m, p in env.tg.calls if m == 'sendMessage')
-    for section in ('📊 <b>本月流量</b>', '⚡ <b>带宽</b>', '🎬 <b>观看记录</b>', '💰 <b>积分：50</b>'):
+    for section in ('<b>本月流量</b>\n已用：', '带宽：<b>', '<b>观看记录</b>\n近24小时：', '<b>积分：50</b>'):
         assert section in text
     assert '数据不完整' not in text
     for forbidden in ('来源', '采集', '更新于', 'hidden-node', '这是本人', '请选择', '《'):

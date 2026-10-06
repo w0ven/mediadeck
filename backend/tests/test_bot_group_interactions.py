@@ -188,7 +188,8 @@ def test_group_rank_matches_scheduled_calendar_board(bot):
     run(bot._handle_message(_msg("/rank", user=ALICE, username="alice_tg")))
     body = last_text(bot)
     assert "1 天观影榜" in body
-    assert 'tg://user?id=901' in body and 'T' in body and "2小时0分" in body
+    assert 'tg://user?id=901' in body and 'T' in body and "2小时" in body
+    assert "2小时0分" not in body
     assert 'tg://user?id=900' not in body
     assert bot._watch_rank_poster.await_args.args == (1,)
     run(bot._handle_message(_msg('/rank 7', user=ALICE, username='alice_tg')))
@@ -417,6 +418,7 @@ def test_brief_card_cleanup_deletes_bot_message_only(bot, monkeypatch):
         sleeps.append(_delay)
 
     monkeypatch.setattr("app.modules.telegram.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(bot, '_schedule_brief_cleanup', lambda chat: None)
     run(bot._handle_message(_msg("/me", user=ALICE, username="alice_tg")))
     mid = bot._panel[f"g:{GROUP}:0:{ALICE}"]
     pending = list(bot._in_flight)

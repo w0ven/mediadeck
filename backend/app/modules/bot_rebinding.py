@@ -10,14 +10,14 @@ from typing import Any
 
 class RebindBotMixin:
     async def _start_rebind(self, chat_id: Any, tg_id: str) -> None:
-        back = [[{"text": "取消并返回", "callback_data": "home"}]]
+        back = [[{"text": "取消", "callback_data": "home"}]]
         if not self._rebinding or self._emby is None:
             await self._show(chat_id, "换绑服务暂不可用，请联系管理员。", back)
             return
         if self._member_for_chat(tg_id):
             self._pending[self._pkey(chat_id)] = ('rebind_target', time.time() + 300, {})
             await self._show(chat_id,
-                '🔗 <b>更换 Telegram</b>\n\n请输入新 Telegram 的数字 ID，生成仅供该账号使用的确认链接。\n新 TG 打开链接并验证 Emby 密码后，交绑定群管理员审核；审核前不改变当前绑定。\n\n<i>原 TG 已失效或不能发言？直接用新 TG 打开机器人选择「TG 换绑」，无需旧号确认。</i>', back)
+                '🔗 <b>更换 TG</b>\n请输入新 TG 数字 ID。\n新 TG 验证 Emby 密码后等待群管理员审核；审核前绑定不变。\n\n旧 TG 无法使用？用新 TG 打开「TG 换绑」。', back)
             return
         pending = self._db.one("SELECT * FROM tg_requests WHERE kind='rebind' AND status='pending' AND tg_user_id=? AND expires_at>?", (tg_id, int(time.time())))
         if pending:
@@ -29,7 +29,7 @@ class RebindBotMixin:
         self._pending[self._pkey(chat_id)] = ("rebind_verify", time.time() + 300, {})
         await self._show(
             chat_id,
-            "🔗 <b>申请 TG 换绑</b>\n\n仅用于将现存账号从原 Telegram 换到当前 Telegram。\n\n请在私聊发送：<code>Emby用户名 密码</code>\n验证后提交绑定群管理员审核，24 小时有效。\n\n<i>密码不会回显或保存，输入消息会及时删除；请勿在群里发送。发送 /cancel 取消。</i>",
+            "🔗 <b>申请 TG 换绑</b>\n请私聊发送：<code>Emby用户名 密码</code>\n验证后等待群管理员审核，24 小时有效；审核前绑定不变。\n\n请勿在群里发送密码。/cancel 取消。",
             back,
         )
 
@@ -42,7 +42,7 @@ class RebindBotMixin:
                 await self._call(
                     "deleteMessage", {"chat_id": chat_id, "message_id": message["message_id"]}
                 )
-        back = [[{"text": "取消并返回", "callback_data": "home"}]]
+        back = [[{"text": "取消", "callback_data": "home"}]]
         if self._member_for_chat(tg_id) or not self._rebinding or self._emby is None:
             self._pending.pop(self._pkey(chat_id), None)
             await self._show(chat_id, "当前绑定状态已变化，无法申请换绑。", back)
@@ -97,7 +97,7 @@ class RebindBotMixin:
                 [{'text': '返回首页', 'callback_data': 'home'}]]
 
     async def _pick_rebind_target(self, chat_id: Any, tg_id: str, text: str) -> None:
-        back = [[{'text': '取消并返回', 'callback_data': 'home'}]]
+        back = [[{'text': '取消', 'callback_data': 'home'}]]
         try:
             if not self._private_link():
                 raise ValueError('Bot 地址暂不可用，请稍后重试。')
@@ -109,7 +109,7 @@ class RebindBotMixin:
             return
         self._pending.pop(self._pkey(chat_id), None)
         link = self._private_link('rebind_' + token)
-        await self._show(chat_id, '🔗 <b>新 Telegram 确认</b>\n\n请将下方链接交给目标新 TG，30 分钟内打开并验证 Emby 密码。之后在群中审核；此时原绑定尚未变化。\n\n' + escape(link),
+        await self._show(chat_id, '🔗 <b>新 Telegram 确认</b>\n\n将链接交给新 TG，30 分钟内验证 Emby 密码。群管理员审核前绑定不变。\n\n' + escape(link),
                          [[{'text': '新 TG 打开确认', 'url': link}], *back])
 
     async def _open_rebind_handoff(self, chat_id: Any, tg_id: str, token: str) -> None:
@@ -155,7 +155,7 @@ class RebindBotMixin:
             f"Emby账号：{escape(str(row['wanted_username']))}\n"
             f"原绑定：<code>{escape(str(row['old_tg_user_id']))}</code>\n"
             f'申请人：<a href="tg://user?id={int(row["tg_user_id"])}">新 Telegram</a>\n'
-            f"验证：已通过 Emby 账号验证\n状态：{escape(status)}"
+            f"已验证 · 状态：{escape(status)}"
         )
 
     async def _publish_rebind(self, row: dict) -> int:
@@ -180,11 +180,11 @@ class RebindBotMixin:
                     "inline_keyboard": [
                         [
                             {
-                                "text": "✅ 通过换绑",
+                                "text": "✅ 通过",
                                 "callback_data": f"tg_rebind_review:{row['id']}:yes",
                             },
                             {
-                                "text": "❌ 拒绝申请",
+                                "text": "拒绝",
                                 "callback_data": f"tg_rebind_review:{row['id']}:no",
                             },
                         ]

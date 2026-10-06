@@ -68,7 +68,7 @@ class PasswordBotMixin:
         p.pop("password", None)
         p.pop("password_mode", None)
         title = "注册账号" if p["purpose"] == "register" else "重置本人密码"
-        actions = [[("🎲 随机生成", "random"), ("✏️ 自定义密码", "custom")]]
+        actions = [[("🎲 随机生成", "random"), ("✏️ 自定义", "custom")]]
         if p["purpose"] == "register":
             actions.append([("返回修改用户名", "username"), ("取消注册", "cancel")])
         else:
@@ -79,7 +79,7 @@ class PasswordBotMixin:
             p,
             "choice",
             f"🔐 <b>{title}</b>\n用户名：<code>{escape(p['username'])}</code>\n\n"
-            "请选择密码方式。选择前不会生成密码，也不会创建账号或修改旧密码。",
+            "请选择密码方式，下一步确认。",
             actions,
         )
 
@@ -156,7 +156,7 @@ class PasswordBotMixin:
         mode = "随机生成" if p["password_mode"] == "random" else "自定义"
         body = (
             f"🔐 <b>{title}</b>\n用户名：<code>{escape(p['username'])}</code>\n"
-            f"密码方式：{mode}\n新密码（原样）：<pre>{escape(p['password'])}</pre>\n"
+            f"密码方式：{mode}\n新密码：<pre>{escape(p['password'])}</pre>\n"
         )
         if p["purpose"] == "register":
             admission = p.get("admission")
@@ -166,10 +166,10 @@ class PasswordBotMixin:
             group = self._groups.get(group_id) if self._groups and group_id else None
             days = int(getattr(admission, "days", self._cfg().get("register_days") or 0))
             body += "用户组：" + escape(str((group or {}).get("name") or group_id or "默认"))
-            body += f"\n有效期：{str(days) + ' 天' if days > 0 else '永久'}\n确认后才会创建账号、使用注册资格。"
+            body += f"\n有效期：{str(days) + ' 天' if days > 0 else '永久'}\n确认后创建账号并使用注册资格。"
         else:
-            body += "确认后旧密码立即失效，需在客户端更新密码；账号权益不变。"
-        body += "\n\n仅限本人私聊，请确认资料并妥善保存，不要转发。"
+            body += "确认后旧密码立即失效，需在客户端更新密码。"
+        body += "\n\n请保存密码，勿转发。"
         await self._pw_render(
             chat,
             mid,
@@ -178,7 +178,7 @@ class PasswordBotMixin:
             body,
             [
                 [("确认注册" if p["purpose"] == "register" else "确认重置", "confirm")],
-                [("返回选择密码", "choose"), ("取消", "cancel")],
+                [("重选密码", "choose"), ("取消", "cancel")],
             ],
         )
 
@@ -229,8 +229,8 @@ class PasswordBotMixin:
                 mid,
                 p,
                 "custom",
-                "✏️ <b>自定义密码</b>\n\n请在此私聊发送新密码，至少 6 位。\n会原样使用，包括首尾空格；发送后还需确认，不会立即改密或创建账号。\n发送 /cancel 或 /start 可取消。",
-                [[("返回密码方式", "choose"), ("取消", "cancel")]],
+                "✏️ <b>自定义密码</b>\n请私聊发送新密码，至少 6 位，保留首尾空格。\n下一步确认；/cancel 或 /start 取消。",
+                [[("返回", "choose"), ("取消", "cancel")]],
             )
         if action == "random":
             from app.modules.telegram import generate_password
@@ -268,7 +268,7 @@ class PasswordBotMixin:
                 "请回复当前自定义密码卡；本条未保存，也未修改密码。",
                 [
                     [
-                        {"text": "返回密码方式", "callback_data": f"pw:{p['nonce']}:choose"},
+                        {"text": "返回", "callback_data": f"pw:{p['nonce']}:choose"},
                         {"text": "取消", "callback_data": f"pw:{p['nonce']}:cancel"},
                     ]
                 ],
@@ -284,7 +284,7 @@ class PasswordBotMixin:
                 p,
                 "custom",
                 "❌ " + escape(str(exc)) + "\n请重新输入，或返回取消。",
-                [[("返回密码方式", "choose"), ("取消", "cancel")]],
+                [[("返回", "choose"), ("取消", "cancel")]],
             )
             return
         await self._pw_confirm_card(chat, mid, dict(p, password=raw, password_mode="custom"))
@@ -303,7 +303,7 @@ class PasswordBotMixin:
             try:
                 self._on_password_changed()
             except Exception:  # noqa: BLE001 - never pretend a remote password change rolled back
-                cache_notice = "\n⚠ 密码已更改，面板会话缓存失效未确认，请联系管理员。"
+                cache_notice = "\n⚠ 密码已更改，旧面板登录失效尚未确认，请联系管理员。"
         if hasattr(self._members, "audit"):
             self._members.audit(
                 f"tg:{chat}",
@@ -326,7 +326,7 @@ class PasswordBotMixin:
             mid,
             (
                 f"🔑 <b>密码已重置</b>\n用户名：<code>{escape(str(current.get('username') or ''))}</code>\n"
-                f"新密码：<pre>{escape(password)}</pre>\n<i>请先保存。返回菜单后不会再次显示。</i>"
+                f"新密码：<pre>{escape(password)}</pre>\n<i>请保存密码，勿转发。</i>"
                 + cache_notice
             )
             if ok

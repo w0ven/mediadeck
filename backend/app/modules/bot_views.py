@@ -40,6 +40,15 @@ def member_mention(member: dict[str, Any]) -> str:
     return name
 
 
+def short_label(value: Any, units: int = 80) -> str:
+    """Bound one display label before HTML escaping, in Telegram UTF-16 units."""
+    text = str(value or '—')
+    encoded = text.encode('utf-16-le')
+    if len(encoded) <= units * 2:
+        return text
+    return encoded[:(units - 1) * 2].decode('utf-16-le', errors='ignore') + '…'
+
+
 def watch_rank_label(row: dict[str, Any]) -> str:
     """Nickname first, then @username. Never the Emby account name."""
     nick = str(row.get("tg_display_name") or "").strip()
@@ -69,7 +78,9 @@ def duration(seconds: int | None) -> str:
     if seconds < 60:
         return f"{seconds}秒"
     hours, minutes = divmod(seconds // 60, 60)
-    return f"{hours}小时{minutes}分" if hours else f"{minutes}分"
+    if hours:
+        return f"{hours}小时" + (f"{minutes}分" if minutes else "")
+    return f"{minutes}分"
 
 
 def bytes_label(value: int | None) -> str:
@@ -87,19 +98,23 @@ def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
     measured = member.get("quota_source") == "measured"
     sample = member.get("metering") or {}
     used = member.get("measured_used_bytes") if measured else member.get("traffic_used_bytes")
-    quota = int(member.get("traffic_quota_bytes") or 0)
+    raw_quota = member.get("traffic_quota_bytes")
+    quota = int(raw_quota) if raw_quota is not None else None
     label = '本月流量' + ('' if measured else '（估算）')
     no_records = (measured and used is None and sample.get('measurement_status') == 'no_usage_records'
                   and (sample.get('coverage') or {}).get('degraded') is False)
     used_text = (bytes_label(int(used)) if used is not None else
                  '本周期暂无播放记录' if no_records else '计量暂不可用')
-    remaining = ('不限' if not quota else bytes_label(quota) if no_records else
+    remaining = ('暂无法确认' if quota is None else '不限' if not quota else
+                 bytes_label(quota) if no_records else
                  bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
-    lines = [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
+    lines = [f'<b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
     return lines
 
 
 def bandwidth_lines(member: dict[str, Any]) -> list[str]:
-    bw = int(member.get('bandwidth_limit_kbps') or 0)
-    cap = f'{bw / 1000:g} Mbps' if bw >= 1000 else (f'{bw} kbps' if bw else '不限')
-    return ['⚡ <b>带宽</b>', f'上限：<b>{cap}</b>']
+    raw = member.get('bandwidth_limit_kbps')
+    bw = int(raw) if raw is not None else None
+    cap = ('暂不可用' if bw is None else
+           f'{bw / 1000:.1f} Mbps' if bw >= 1000 else f'{bw} kbps' if bw else '不限')
+    return [f'带宽：<b>{cap}</b>']

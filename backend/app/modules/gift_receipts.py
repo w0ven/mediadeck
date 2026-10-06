@@ -67,7 +67,7 @@ class GiftReceipts:
             (tg_id, self.bot_id()))
         if not row or not row.get('id'):
             return []
-        return [[{'text': '📨 注册群回执 / 重试', 'callback_data': f'gift_receipt_retry:{row["id"]}'}]]
+        return [[{'text': '重试群回执', 'callback_data': f'gift_receipt_retry:{row["id"]}'}]]
 
     async def _allowed_origin(self, chat_id: str) -> bool:
         allowed = self.bot._group_allowlist()

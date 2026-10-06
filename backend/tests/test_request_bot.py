@@ -9,9 +9,10 @@ import time
 import pytest
 
 from app.core.db import Database
+from app.modules.bot_requests import ACCEPT_NOTICE
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
-from app.modules.requests import ACCEPT_NOTICE, RequestService
+from app.modules.requests import RequestService
 from app.modules.telegram import TelegramBot
 
 
@@ -324,7 +325,7 @@ def test_existing_season_request_can_follow_and_accepted_history_stays_visible(b
     assert bot.service.list(user_id='u2',followed=True)[0]['id']==row['id']
     bot.service.finish(row['id'],'up1','accepted')
     message(bot,'/requests','901');tap(bot,'new','901');message(bot,'https://www.themoviedb.org/tv/1396','901')
-    assert '已有接受历史' in body(bot,'901') and '等待下载完成并入库' in body(bot,'901')
+    assert '已接受工单' in body(bot,'901') and '等待下载入库' in body(bot,'901')
     tap(bot,'selectseasons','901');message(bot,'1,3,5-7','901')
     assert '已接受' in body(bot,'901')
     assert 'submit' not in json.loads(cards(bot,'901')[0]['actions'])
@@ -345,7 +346,7 @@ def test_historical_requirements_survive_details_and_old_edit_buttons(bot):
     run(bot._rq_render('900',mid,member,'旧编辑器',[[('确认修改','save')]],p,rid=row['id'],revision=1))
     bot=bot.reboot();tap(bot,'save')
     assert bot.service.get(row['id'])==before
-    assert '原工单要求未更改' in body(bot) and '旧备注不能丢' in body(bot)
+    assert '原要求未更改' in body(bot) and '旧备注不能丢' in body(bot)
     assert 'modify' not in json.loads(cards(bot)[0]['actions'])
     assert 'save' not in json.loads(cards(bot)[0]['actions'])
 
@@ -365,7 +366,7 @@ def test_old_unsubmitted_draft_requires_new_confirmation_not_silent_submit(bot):
 
 def test_rejection_input_retains_role_revision_and_single_execution_guards(bot):
     submit(bot);tap(bot,'reject','801');tap(bot,'reason:custom','801')
-    assert '发送后立即拒绝' in body(bot,'801')
+    assert '发送即拒绝' in body(bot,'801')
     old=cards(bot,'801')[0]
     bot.members.set_roles('up1',[],actor='test');message(bot,'不应拒绝','801')
     assert bot.service.get(1)['status']=='open'

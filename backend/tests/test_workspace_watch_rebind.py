@@ -61,7 +61,9 @@ def test_crossing_old_session_is_reference_only(rb):
     assert summary['historical_unverified_seconds'] == 1200
     text = rb._watch_text(rb.members.get('u1'))
     assert '跨界' not in text
-    assert '历史未核验参考：20分' in text
+    assert '历史未核验参考' not in text
+    assert '累计观看：0秒' in text
+    assert rb._stats.watch_summary('u1', now)['historical_unverified_seconds'] == 1200
 
 
 def test_sample_crossing_24h_is_clipped_exactly(sampled):

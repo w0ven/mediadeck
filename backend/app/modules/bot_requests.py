@@ -8,7 +8,6 @@ import time
 from html import escape
 
 from app.modules.requests import (
-    ACCEPT_NOTICE,
     STATUS_LABELS,
     RequestError,
     display_title,
@@ -17,6 +16,8 @@ from app.modules.requests import (
     numbers,
 )
 from app.modules.tmdb import parse_link, poster_url
+
+ACCEPT_NOTICE = "已接受，等待下载并入库。"
 
 
 def button(label, action):
@@ -251,7 +252,7 @@ class RequestBotMixin:
             chat,
             mid,
             member,
-            f"🎬 <b>求片中心</b>\n\n本月剩余：{'不限' if left is None else str(left) + ' 次'}\n确认建单扣一次；关注不扣次。\n提交后待处理；接受即终结，由上片员手动安排下载。",
+            f"🎬 <b>求片中心</b>\n本月剩余：{'不限' if left is None else str(left) + ' 次'}\n提交扣 1 次 · 关注免费",
             rows,
         )
 
@@ -262,7 +263,7 @@ class RequestBotMixin:
             chat_id,
             message_id,
             member,
-            "🔎 <b>查找想求的片子</b>\n\n发送中英文片名、TMDB 链接或编号。\n纯编号下一步必须选择电影/剧集。\n例如 Fight Club / 流浪地球 / https://www.themoviedb.org/movie/550\n\n搜索不扣次；额度用完仍可关注原单。",
+            "🔎 <b>查找影片</b>\n发送片名、TMDB 链接或编号；编号需选择电影 / 剧集。\n搜索与关注免费。",
             [[button("◀ 求片中心", "home")]],
             {"draft": True},
             input_kind="search",
@@ -413,8 +414,8 @@ class RequestBotMixin:
         if not hint.get("available"):
             return "⚠ 媒体库查询失败/未配置，未知是否已有；仍可提交。", []
         if not hint.get("items"):
-            return "媒体库暂未查到匹配内容（仅本次辅助查询）。", []
-        lines, links = ["📚 媒体库已有匹配内容，可先打开详情查看："], []
+            return "媒体库未找到匹配内容。", []
+        lines, links = ["媒体库已有："], []
         for item in hint["items"][:3]:
             label = str(item.get("name") or item.get("id"))
             eps = item.get("episodes") or []
@@ -425,7 +426,7 @@ class RequestBotMixin:
                 suffix += " …（详见媒体库）"
             lines.append(escape(label + suffix))
             if str(item.get("url", "")).startswith(("https://", "http://")):
-                links.append([{"text": "打开媒体库详情 · " + label[:30], "url": item["url"]}])
+                links.append([{"text": "媒体库 · " + label[:30], "url": item["url"]}])
         return "\n".join(lines), links
 
     async def _rq_legacy_draft(self, chat, mid, member, p):
@@ -437,7 +438,7 @@ class RequestBotMixin:
                 member,
                 int(p["editing"]),
                 full=True,
-                prefix="要求编辑已简化，原工单要求未更改；可通过补充 / 回复说明。",
+                prefix="原要求未更改；请用「补充 / 回复」更新。",
             )
         p.update(simple=True, demand=normalize_demand(p["media_type"], {}), note="")
         return await self._rq_preview(
@@ -461,16 +462,16 @@ class RequestBotMixin:
             body += "\n季范围：" + self._rq_season_label(p["demand"])
         if p.get("history"):
             body += (
-                "\n\n已有接受历史（"
+                "\n\n已接受工单（"
                 + ",".join("#" + str(r["id"]) for r in p["history"])
-                + "），请耐心等待下载完成并入库。"
+                + "），等待下载入库。"
             )
         hint, links = self._rq_library(p.get("library") or {})
         body += "\n\n" + hint
         keys = []
         if entering_seasons:
             body += (
-                "\n\n请发送季号，例如 1,3,5-7（第 0 季为特别篇）。收到后会更新本卡，直接确认提交。"
+                "\n\n请发送季号，例如 1,3,5-7（0 为特别篇），下一步确认。"
             )
         else:
             same = self._requests.same_demand(p["media_type"], p["tmdb_id"], p["demand"])
@@ -478,17 +479,17 @@ class RequestBotMixin:
                 p["same"] = same["id"]
                 if same["emby_user_id"] == member["emby_user_id"]:
                     keys.append(
-                        [button(f"查看我的原单 #{same['id']}（不扣次）", f"view:{same['id']}")]
+                        [button(f"我的原单 #{same['id']}", f"view:{same['id']}")]
                     )
                 else:
-                    keys.append([button(f"关注原单 #{same['id']}（不扣次）", "follow")])
+                    keys.append([button(f"免费关注 #{same['id']}", "follow")])
                 body += f"\n\n已有相同求片 #{same['id']}，不重复创建、不扣次数。"
             elif same:
                 body += f"\n\n相同求片 #{same['id']} 已接受，请耐心等待下载完成并入库。"
             else:
                 left = self._requests.remaining(member["emby_user_id"])
                 body += f"\n\n确认求片扣 1 次；本月剩余 {'不限' if left is None else left}。提交后为待处理。"
-                keys.append([button("确认求片（扣 1 次）", "submit")])
+                keys.append([button("确认（扣 1 次）", "submit")])
         if p["media_type"] == "tv":
             checked = "☑ " if p["demand"]["scope"] == "series" else "☐ "
             keys.append(
@@ -589,7 +590,7 @@ class RequestBotMixin:
                 body += "\n拒绝理由：" + escape(row["result_note"])
             if prefix:
                 body += "\n\n" + escape(prefix)
-            keys.append([button("沟通 / 操作记录", "thread:0")])
+            keys.append([button("沟通记录", "thread:0")])
             if row["status"] == "open":
                 if staff:
                     keys = [
@@ -835,7 +836,7 @@ class RequestBotMixin:
             self._requests.retry_notifications(rid)
             await self.flush_request_notifications()
             return await self._rq_detail(
-                chat, mid, member, rid, prefix="已尝试重发未送达通知，未重复处理/扣次。", view=view
+                chat, mid, member, rid, prefix="已尝试重发通知。", view=view
             )
         if row["revision"] != card["revision"]:
             raise RequestError("工单已被修改，请重新打开详情")
@@ -877,9 +878,9 @@ class RequestBotMixin:
                 chat,
                 mid,
                 member,
-                f"拒绝工单 #{rid}\n理由完全选填。不填就不向用户显示理由。普通拒绝不自动退回额度。",
+                f"拒绝工单 #{rid}\n理由选填；拒绝不退额度。",
                 [
-                    [button("直接拒绝（无理由）", "rejectok"), button("填写理由", "reason:custom")],
+                    [button("无理由拒绝", "rejectok"), button("填写理由", "reason:custom")],
                     [button("返回详情", f"view:{rid}")],
                 ],
                 p,
@@ -896,9 +897,9 @@ class RequestBotMixin:
                 member,
                 p,
                 "reason",
-                f"工单 #{rid}：请发送拒绝理由（1–500 字）。发送后立即拒绝，无需再次确认。",
+                f"工单 #{rid}：请发送拒绝理由（1–500 字）。发送即拒绝。",
                 keys=[
-                    [button("直接拒绝（无理由）", "rejectok"), button("返回详情", f"view:{rid}")]
+                    [button("无理由拒绝", "rejectok"), button("返回详情", f"view:{rid}")]
                 ],
                 rid=rid,
                 revision=row["revision"],
@@ -930,7 +931,7 @@ class RequestBotMixin:
                 member,
                 rid,
                 full=True,
-                prefix="要求编辑已简化，原要求未更改；可通过补充 / 回复说明。",
+                prefix="原要求未更改；请用「补充 / 回复」更新。",
             )
         if cmd == "cancel":
             return await self._rq_render(
@@ -1201,7 +1202,7 @@ class RequestBotMixin:
                                     continue
                                 body += (
                                     (
-                                        "上片员询问（请求仍待处理）："
+                                        "上片员询问（待处理）："
                                         if payload["staff"]
                                         else "用户补充 / 回复："
                                     )
@@ -1210,9 +1211,9 @@ class RequestBotMixin:
                                 )
                             elif job["kind"] == "library":
                                 body += (
-                                    "你求的片子已有部分内容入库，可以先看。"
+                                    "部分内容已入库，可先观看。"
                                     if payload.get("stage") == "partial"
-                                    else "你求的片子已入库，可以开始观看。"
+                                    else "已入库，可开始观看。"
                                 )
                             else:
                                 if payload.get("correction"):

@@ -363,9 +363,10 @@ def test_bot_title_text_and_poster_share_real_watch_time_order(chart, request, m
     heat = env.bot._heat_rankings_text(days)
     for value in (text, heat):
         assert value.index('Long') < value.index('Many starts')
-        assert '按累计观看时长排序' in value and '播放次数仅作参考' in value
+        assert '1小时5分' in value and '20 次' in value
+        assert '按累计观看时长排序' not in value and '播放次数仅作参考' not in value
         assert '1小时5分' in value
-    assert '观看时长: 1小时5分  播放次数: 1' in text
+    assert 'Long · 1小时5分 · 1 次' in text
     photo = asyncio.run(env.bot._rankings_poster(days))
     decoded(photo, (1200, 2400))
     assert drawn.index('Long') < drawn.index('Many starts')
