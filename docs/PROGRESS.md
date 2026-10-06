@@ -2,6 +2,31 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-07 — complete Bot interaction simplification and visible request outcomes
+
+- Deliver all six interaction changes: minimal request cards with linked titles,
+  select/confirm/result flows, collapsed list/search filters, six-entry home with
+  merged account/usage, primary/more administrator actions, and compact navigation.
+  Retire Bot conversation and low-frequency correction/refund/retry capabilities;
+  keep Web tools, stored history and audit records unchanged.
+- Put pending/processed status above the title, include authoritative processor
+  and time, and remove terminal action buttons. Refresh other staff cards and
+  open workbenches; edit legacy shared messages only when their IDs are persisted.
+  No new claiming/downloading workflow, group broadcast or historical message scan.
+- Make asynchronous result receipts equally visible while preserving each event's
+  state/reason snapshot. Link existing outbox payloads to their existing event IDs;
+  do not infer missing actors or change delivery deduplication/ledger semantics.
+- Preserve explicit release for local-only or remote-only account disabling,
+  unknown-state safety, remaining entitlement restrictions, actor/target/message/
+  topic/nonce checks, destructive confirmations and existing group-query cleanup.
+- Validation: final full backend 2540 passed, 56 environment-dependent skips,
+  2 subtests passed; full Ruff and diff checks passed. Source-rendered fixtures
+  cover 39 views, and real handler/SQLite tests cover staff visibility, stale cards,
+  independent-connection races, retired inputs, formatting and account capability
+  preservation. No live requests, messages or account actions used for testing.
+- Panel/Bot-only rollout; no Web, ingress, gateway, download, measurement, billing
+  or sanction policy changes. Unrecorded old Telegram messages cannot be repainted.
+
 ## 2026-10-07 — concise Bot replies and temporary group-message cleanup
 
 - Reproduced the missing `/usage` trigger deletion before the fix. Successful

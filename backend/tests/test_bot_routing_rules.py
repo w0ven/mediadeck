@@ -46,7 +46,7 @@ def test_lines_rules_and_back_edit_one_card_without_expanding_the_line_page(bot)
     assert actions(lines) == {"me_nodes", "me_routing", "home"}
     assert "国内盘资源请直连" in lines["text"] and "rules:" not in lines["text"]
     rules = tap(bot, "me_routing")
-    assert actions(rules) == {"me_nodes", "home"}
+    assert actions(rules) == {"me_nodes"}
     assert f'<pre><code class="language-yaml">{escape(RULES)}</code></pre>' in rules["text"]
     assert "自己的代理软件、内核及策略组名称调整配置" in rules["text"]
     assert "勿直接覆盖原配置" in rules["text"]
@@ -62,7 +62,7 @@ def test_empty_rules_hide_button_and_stale_button_has_a_way_back(bot):
     assert "me_routing" not in actions(tap(bot, "me_nodes"))
     stale = tap(bot, "me_routing")
     assert "暂未配置" in stale["text"] and "<pre>" not in stale["text"]
-    assert actions(stale) == {"me_nodes", "home"}
+    assert actions(stale) == {"me_nodes"}
 
 
 def test_rule_content_is_escaped_not_executable_telegram_html(bot):

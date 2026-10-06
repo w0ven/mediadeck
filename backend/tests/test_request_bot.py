@@ -117,13 +117,13 @@ def test_movie_search_select_confirm_has_no_requirements_step(bot):
     assert any(m=='editMessageMedia' and p['media']['media'].endswith('/poster.jpg') for m,p in bot.transport.calls)
     original=cards(bot)[0]['message_id']
     tap(bot,'candidate:1');assert cards(bot)[0]['message_id']==original
-    tap(bot,'searchtype:movie');tap(bot,'year');message(bot,'1999');tap(bot,'pick')
+    tap(bot,'searchfilters');tap(bot,'searchtype:movie');tap(bot,'searchfilters');tap(bot,'year');message(bot,'1999');tap(bot,'pick')
     assert cards(bot)[0]['message_id']==original
     assert bot.service.used('u1')==0
     text=body(bot)
     for expected in ('搏击俱乐部','1999','电影','扣 1 次','媒体库已有'): assert expected in text
     for removed in ('可选要求','清晰度','字幕','配音','备注','重选需求'): assert removed not in text
-    assert set(json.loads(cards(bot)[0]['actions']))=={'submit','new','home'}
+    assert set(json.loads(cards(bot)[0]['actions']))=={'submit','new'}
     old=tap(bot,'submit');tap(bot,'submit',card=old)
     row=bot.service.list()[0]
     assert row['status']=='open' and bot.service.used('u1')==1
@@ -193,7 +193,7 @@ def test_uploader_is_independent_accept_final_all_cards_retired_followers_once(b
 @pytest.mark.parametrize('reason',['','暂无片源'])
 def test_rejection_reason_optional_no_fabricated_reason(bot,reason):
     row=submit(bot);tap(bot,'reject','801')
-    assert set(json.loads(cards(bot,'801')[0]['actions']))=={'rejectok','reason:custom','view:1'}
+    assert set(json.loads(cards(bot,'801')[0]['actions']))=={'rejectok','reason:custom','view:1','rejectreason:source','rejectreason:library'}
     if reason:
         tap(bot,'reason:custom','801');message(bot,reason,'801')
     else:
@@ -201,35 +201,29 @@ def test_rejection_reason_optional_no_fabricated_reason(bot,reason):
     assert bot.service.get(row['id'])['status']=='rejected'
     assert bot.service.get(row['id'])['result_note']==reason
     notice=[p['text'] for m,p in bot.transport.calls if m=='sendMessage' and str(p['chat_id'])=='900' and '已拒绝' in p.get('text','')][-1]
-    assert ('理由：' in notice)==bool(reason)
+    assert ('原因：' in notice)==bool(reason)
     assert bot.service.used('u1')==1
 
 
-def test_question_reply_internal_edit_cancel_and_message_ownership(bot):
-    row=submit(bot);tap(bot,'ask','801');message(bot,'请说明版本','801')
-    assert bot.service.get(row['id'])['status']=='open'
-    assert any('请说明版本' in p.get('text','') and str(p.get('chat_id'))=='900' for m,p in bot.transport.calls if m=='sendMessage')
-    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'reply')
-    message(bot,'跨卡消息不该转达',reply=999999)
-    assert not any(e['body']=='跨卡消息不该转达' for e in bot.service.events(1))
-    waiting=bot.db.one("SELECT * FROM request_inputs WHERE chat_id='900'")
-    assert waiting
-    message(bot,'原版即可')
-    assert any(e['body']=='原版即可' for e in bot.service.events(1))
-    message(bot,'/uploader','801');tap(bot,'view:1','801');tap(bot,'internal','801');message(bot,'内部片源位置','801')
-    assert '内部片源位置' not in json.dumps(bot.service.events(1),ensure_ascii=False)
-    assert not any('内部片源位置' in p.get('text','') and str(p.get('chat_id'))=='900' for m,p in bot.transport.calls)
-    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'reply');message(bot,'补充备注')
-    assert any(e['body']=='补充备注' for e in bot.service.events(1))
-    tap(bot,'cancel');tap(bot,'cancelok');assert bot.service.get(1)['status']=='cancelled'
+def test_communication_removed_history_preserved_and_cancel_still_confirmed(bot):
+    row=submit(bot)
+    bot.service.message(row['id'], 'up1', '历史询问', staff=True)
+    bot.service.message(row['id'], 'u1', '历史回复')
+    assert not {'ask','reply','internal','thread:0'} & set(json.loads(cards(bot)[0]['actions']))
+    tap(bot,'cancel')
+    assert bot.service.get(1)['status']=='open'
+    tap(bot,'cancelok')
+    assert bot.service.get(1)['status']=='cancelled'
+    assert {'历史询问','历史回复'} <= {e['body'] for e in bot.service.events(1)}
 
 
 def test_restart_recovers_lists_bound_input_and_draft_without_recharging(bot):
     row=submit(bot)
-    bot=bot.reboot();message(bot,'/uploader','801');tap(bot,'view:1','801');tap(bot,'ask','801')
-    bot=bot.reboot();message(bot,'重启后继续询问','801')
-    assert bot.service.get(row['id'])['status']=='open'
-    assert any(e['body']=='重启后继续询问' for e in bot.service.events(1))
+    bot=bot.reboot();message(bot,'/uploader','801');tap(bot,'view:1','801')
+    tap(bot,'reject','801');tap(bot,'reason:custom','801')
+    bot=bot.reboot();message(bot,'重启后拒绝理由','801')
+    assert bot.service.get(row['id'])['status']=='rejected'
+    assert bot.service.get(row['id'])['result_note']=='重启后拒绝理由'
     message(bot,'/requests');tap(bot,'new');message(bot,'552');tap(bot,'type:movie')
     bot=bot.reboot();tap(bot,'submit')
     assert bot.service.used('u1')==2 and len(bot.service.list())==2
@@ -286,12 +280,15 @@ def test_uploader_notifications_are_recognizable_poster_cards_and_fallback(bot):
     photos=[p for method,p in bot.transport.calls if method=='sendPhoto' and str(p['chat_id'])=='801']
     assert len(photos)==1
     assert photos[0]['photo'].endswith('/poster.jpg')
-    for text in ('测试剧集','1999','剧集','Fight Club','全部季','本地模拟简介'):
+    for text in ('测试剧集','1999','剧集','全部季','待处理'):
         assert text in photos[0]['caption']
     assert 'https://image.tmdb.org' not in photos[0]['caption']
     actions={b.get('callback_data','').rsplit(':',1)[-1] for r in photos[0]['reply_markup']['inline_keyboard'] for b in r}
-    assert {'accept','reject','ask','full'} <= actions
-    assert any(b.get('url','').startswith('https://www.themoviedb.org/tv/') for r in photos[0]['reply_markup']['inline_keyboard'] for b in r)
+    assert {'accept','reject'} <= actions
+    assert not {'ask','full','internal','thread'} & actions
+    assert 'href="https://www.themoviedb.org/tv/550"' in photos[0]['caption']
+    assert not any('url' in b for r in photos[0]['reply_markup']['inline_keyboard'] for b in r)
+    assert 'Fight Club' not in photos[0]['caption'] and '本地模拟简介' not in photos[0]['caption']
     message(bot,'/uploader','801')
     assert all(text in body(bot,'801') for text in ('测试剧集','1999','剧集','全部季'))
     # Media failure falls back to a usable text card, with all business actions.
@@ -336,7 +333,7 @@ def test_historical_requirements_survive_details_and_old_edit_buttons(bot):
             'quality':'4K','subtitle':'简中','audio':'国语'}
     row=run(bot.service.create('u1','tv',1396,note='旧备注不能丢',demand=demand))
     before=bot.service.get(row['id'])
-    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1');tap(bot,'full')
+    message(bot,'/requests');tap(bot,'list:mine');tap(bot,'view:1')
     for value in ('季：2','集：1,3','旧版本说明','4K','简中','国语','旧备注不能丢'):
         assert value in body(bot)
     member=bot.members.get('u1');mid=cards(bot)[0]['message_id']

@@ -134,7 +134,7 @@ def test_checked_in_previews_are_rendered_by_current_templates():
     for name in ('用量卡', '账号卡', '用量暂不可用'):
         rows = plain(cards[name]).splitlines()
         # Budget 16 CJK cells in a narrow bubble; each value has its own row.
-        assert len(rows) <= 16
+        assert len(rows) <= (18 if name == '账号卡' else 16)
         assert all(sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
                        for c in row) <= 32 for row in rows)
         for label in ('已用：', '剩余：', '近24小时：', '近30天：'):
@@ -167,7 +167,10 @@ def test_unknown_values_never_become_zero_or_unlimited():
     assert '设备：暂不可用' in body and '同时播放：暂不可用' in body
     assert '近24小时：暂不可用' in body and '累计观看：暂不可用' in body
     assert '有效期：暂不可用' in body
-    assert '有效期：暂不可用' in bot._account_card({'emby_user_id': 'demo'})
+    account = bot._account_card({'emby_user_id': 'demo'})
+    assert '有效期：暂不可用' in account
+    assert '同时播放：暂不可用' in account and '已登记设备：暂不可用' in account
+    assert '累计观看：<b>暂不可用</b>' in account
     bot._points = SimpleNamespace(balance=lambda uid: (_ for _ in ()).throw(OSError()))
     assert '余额：<b>暂不可用</b>' in bot._points_text({'emby_user_id': 'demo'})
     assert '流水暂不可用' in bot._points_text({'emby_user_id': 'demo'})

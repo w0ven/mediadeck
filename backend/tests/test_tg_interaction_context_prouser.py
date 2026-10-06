@@ -93,7 +93,10 @@ def test_prouser_button_keeps_target_and_escapes_names(env):
     env.members.upsert('admin', '<i>Operator</i>', {})
     async def run():
         mid = await command(env, '/kk ' + str(VIEWER))
-        assert any(b.get('callback_data') == 'admin_prouser' for b in env.tg.actions(GROUP, mid))
+        assert not any(b.get('callback_data') == 'admin_prouser' for b in env.tg.actions(GROUP, mid))
+        await click(env, 'admin_more', mid)
+        assert any(b.get('callback_data') == 'admin_groups' for b in env.tg.actions(GROUP, mid))
+        # Effective old command/callback retains scoped target semantics.
         await click(env, 'admin_prouser', mid)
         text = env.tg.text(GROUP, mid)
         assert '&lt;b&gt;Viewer&lt;/b&gt;' in text

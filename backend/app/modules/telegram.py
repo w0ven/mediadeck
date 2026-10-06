@@ -1074,41 +1074,35 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return False
 
     def member_menu(self) -> list[list[dict[str, str]]]:
-        """A stable two-column home; optional point actions belong in the bag."""
         return [
             [{"text": "👤 我的账号", "callback_data": "me"},
-             {"text": "📊 用量", "callback_data": "usage"}],
-            [{"text": "🌐 播放线路", "callback_data": "me_nodes"},
-             {"text": "🎬 求片中心", "callback_data": "request_center"}],
-            [{"text": "🎒 积分背包", "callback_data": "bag"},
-             {"text": "🏆 排行榜", "callback_data": "rank"}],
-            [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
-             {"text": "📜 使用准则", "callback_data": "rules"}],
-            [{"text": "帮助", "callback_data": "help"}],
+             {"text": "🌐 播放线路", "callback_data": "me_nodes"}],
+            [{"text": "🎬 求片中心", "callback_data": "request_center"},
+             {"text": "🎒 积分背包", "callback_data": "bag"}],
+            [{"text": "🏆 排行榜", "callback_data": "rank"},
+             {"text": "帮助", "callback_data": "help"}],
         ]
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
-        if self._rq_staff(member):
-            rows.append([{"text": "上片工作台", "callback_data": "request_uploader"}])
         if self.is_admin(member):
             rows.append([{"text": "🛠 管理", "callback_data": "admin"}])
         return rows
 
     @staticmethod
     def info_menu() -> list[list[dict[str, str]]]:
-        """Account details. Line/server lives on the home row, not here."""
         return [
-            [{"text": "📋 账号状态", "callback_data": "me_status"},
-             {"text": "📊 用量", "callback_data": "usage"}],
             [{"text": "📺 设备", "callback_data": "devices"},
-             {"text": "💰 积分", "callback_data": "me_points"}],
-            [{"text": "📋 我的求片", "callback_data": "my_requests"},
              {"text": "🔑 重置密码", "callback_data": "resetpw"}],
-            [{"text": "🔗 TG 换绑", "callback_data": "rebind"}],
-            [{'text': '刷新', 'callback_data': 'me'},
-             {'text': '◀ 功能首页', 'callback_data': 'home'}],
+            [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
+             {"text": "刷新", "callback_data": "me"}],
+            [{"text": "◀ 功能首页", "callback_data": "home"}],
         ]
+
+    @staticmethod
+    def help_menu() -> list[list[dict[str, str]]]:
+        return [[{"text": "📜 使用准则", "callback_data": "rules"}],
+                [{"text": "◀ 功能首页", "callback_data": "home"}]]
 
     def nodes_menu(self) -> list[list[dict[str, str]]]:
         """Keep the line page compact; configured rules have their own view."""
@@ -1119,8 +1113,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
 
     @staticmethod
     def routing_menu() -> list[list[dict[str, str]]]:
-        return [[{"text": "◀ 播放线路", "callback_data": "me_nodes"},
-                 {"text": "🏠 功能首页", "callback_data": "home"}]]
+        return [[{"text": "◀ 播放线路", "callback_data": "me_nodes"}]]
 
     def _routing_text(self) -> str:
         rules = str(self._cfg().get("playback_routing_rules") or "").strip()
@@ -1142,9 +1135,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if self._plugin_on("points_transfer"):
             extra.append({"text": "💸 积分转账", "callback_data": "transfer"})
         return ([extra] if extra else []) + [
-            [{"text": "🎫 我的邀请码", "callback_data": "invites"},
-             {"text": "🎁 兑换商城", "callback_data": "shop"}],
-            [{"text": "📜 兑换记录", "callback_data": "orders"}],
+            [{"text": "🎫 邀请码", "callback_data": "invites"},
+             {"text": "🎁 商城", "callback_data": "shop"},
+             {"text": "📜 流水", "callback_data": "bag_records"}],
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
@@ -2348,32 +2341,59 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                      {'text': '关闭', 'callback_data': 'panel_close'}],
                     *self._private_button('manage', '完整管理 · 私聊')]
         return [
-            [{"text": "🔍 查找 / 赠送开号", "callback_data": "admin_find"}],
-            [{"text": "📋 求片队列", "callback_data": "admin_reqs"},
-             {"text": "🎟 生成卡密", "callback_data": "admin_code"}],
-            [{"text": "✅ 预授权注册", "callback_data": "admin_auth"}],
+            [{"text": "🔍 查找 / 赠送开号", "callback_data": "admin_find"},
+             {"text": "📋 求片队列", "callback_data": "admin_reqs"}],
+            [{"text": "🎟 生成卡密", "callback_data": "admin_code"},
+             {"text": "✅ 预授权注册", "callback_data": "admin_auth"}],
             [{"text": "◀ 我的首页", "callback_data": "personal_home"}],
         ]
 
-    def _user_admin_keyboard(self, user_id: str) -> list[list[dict[str, str]]]:
-        rows = [
-            [{'text': '⏳ 续期', 'callback_data': 'admin_renew'},
-             {'text': '👥 用户组', 'callback_data': 'admin_groups'}],
-            [{'text': '💰 调整积分', 'callback_data': 'admin_score'},
-             {'text': '📊 使用详情', 'callback_data': 'admin_usage'}],
-            [{'text': '🗑 删除账号', 'callback_data': 'admin_rm'},
-             {'text': '🔄 刷新目标账号', 'callback_data': 'admin_card'}],
-            [{'text': '◀ 管理入口', 'callback_data': 'admin_root'},
-             {'text': '关闭', 'callback_data': 'panel_close'}],
-        ]
-        rows.insert(0, [{'text': '⛔ 禁用账号', 'callback_data': 'admin_disable'},
-                        {'text': '🔓 解除禁用', 'callback_data': 'admin_enable'}])
-        rows.insert(1, [{'text': '💠 直接授予白名单', 'callback_data': 'admin_prouser'}])
+    @staticmethod
+    def _admin_access_action(access: dict[str, Any] | None) -> str:
+        access = access or {}
+        status, remote = access.get("status"), access.get("emby_disabled")
+        if remote is not True and remote is not False:
+            return ""  # An unknown remote observation never chooses an action.
+        if remote is True or status == 'suspended':
+            return "admin_enable"  # Explicitly release either actual disable source.
+        return "admin_disable" if status in ('active', 'pending') else ''
+
+    def _user_admin_keyboard(self, user_id: str, access=None) -> list[list[dict[str, str]]]:
+        action = self._admin_access_action(access)
+        first = [{"text": "⏳ 续期", "callback_data": "admin_renew"}]
+        if action:
+            first.append({"text": "⛔ 禁用账号" if action == "admin_disable" else "🔓 解除禁用",
+                          "callback_data": action})
+        return [first,
+                [{"text": "更多管理", "callback_data": "admin_more"},
+                 {"text": "刷新状态", "callback_data": "admin_card"}],
+                [{"text": "◀ 管理入口", "callback_data": "admin_root"},
+                 {"text": "关闭", "callback_data": "panel_close"}]]
+
+    def _user_admin_more(self, user_id: str) -> list[list[dict[str, str]]]:
+        rows = [[{"text": "👥 用户组 / 白名单", "callback_data": "admin_groups"},
+                 {"text": "💰 调整积分", "callback_data": "admin_score"}],
+                [{"text": "📊 使用详情", "callback_data": "admin_usage"},
+                 {"text": "🗑 删除账号", "callback_data": "admin_rm"}]]
         if _GROUP.get():
-            rows += self._private_button('manage_' + user_id, '完整管理 · 私聊')
+            links = self._private_button('manage_' + user_id, '资料 / 绑定 · 私聊')
+            if links:
+                rows[0].append(rows[1][0])
+                rows[1] = [links[0][0], rows[1][1]]
         else:
-            rows.insert(2, [{'text': '📋 详细资料 / 绑定', 'callback_data': 'admin_binding'}])
+            rows[1].insert(0, {"text": "📋 资料 / 绑定", "callback_data": "admin_binding"})
+        rows.append([{"text": "◀ 目标账号", "callback_data": "admin_card"}])
         return rows
+
+    async def _admin_read_access(self, target):
+        if self._restrictions is None:
+            return {'status': target.get('status'), 'emby_disabled': None}
+        uid = str(target.get('emby_user_id') or '')
+        try:
+            remote = await self._restrictions.user(uid)
+        except Exception:  # noqa: BLE001 - observational read cannot imply enabled
+            remote = None
+        return self._restrictions.access_state(uid, remote, available=remote is not None)
 
     @staticmethod
     def _admin_access_text(access: dict[str, Any]) -> str:
@@ -2577,14 +2597,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
 
     async def _admin_show_user(self, chat_id: Any, target: dict[str, Any],
                                actor: str, notice: str = '') -> bool:
-        if self._restrictions is not None:
-            uid = str(target.get('emby_user_id') or '')
-            try:
-                remote = await self._restrictions.user(uid)
-                access = self._restrictions.access_state(uid, remote, available=remote is not None)
-            except Exception:  # noqa: BLE001 - never imply enabled on read failure
-                access = self._restrictions.access_state(uid, None, available=False)
+        access = await self._admin_read_access(target)
+        if access:
             target = {**target, '_access_text': self._admin_access_text(access)}
+            if not self._admin_access_action(access):
+                target['_access_text'] += '禁用状态暂不可用；请刷新核实。\n'
         previous = self._admin_panel(chat_id)
         if previous and previous['user_id'] != str(target.get('emby_user_id') or ''):
             # A card is never silently retargeted; late buttons still name the
@@ -2592,7 +2609,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             self._panel.pop(self._pkey(chat_id), None)
         self._hold_admin_user(chat_id, target, actor)
         shown = await self._show(chat_id, self._user_card(target) + notice,
-                                 self._user_admin_keyboard(str(target.get("emby_user_id"))))
+                                 self._user_admin_keyboard(str(target.get("emby_user_id")), access))
         waiting = self._pending.get(self._pkey(chat_id))
         if waiting and waiting[0] == "admin_user":
             waiting[2]["message_id"] = self._panel.get(self._pkey(chat_id))
@@ -2682,6 +2699,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if data in ('admin_disable', 'admin_enable') or data.startswith('admin_access_ok:'):
             await self._admin_manual_access(chat_id, message_id, member, target, actor, data)
             return
+        if data == "admin_more":
+            self._pending.pop(self._pkey(chat_id), None)
+            self._save_admin_pending(chat_id)
+            await self._edit(chat_id, message_id, "🛠 <b>更多管理</b>\n目标："
+                             + escape(str(target.get("username") or user_id)),
+                             self._user_admin_more(user_id))
+            return
         if data == "admin_prouser":
             await self._grant_whitelist(chat_id, actor, target)
             return
@@ -2694,7 +2718,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             await self._edit(chat_id, message_id,
                 self._admin_details(target) + '\n\n'
                 + "更换 TG 由新 Telegram 私聊验证 Emby 密码后提交申请，管理员在绑定群审核。",
-                self._user_admin_keyboard(user_id))
+                self._user_admin_more(user_id))
             return
         if data == "admin_groups":
             choices = [{'text': str(g['name']), 'callback_data': 'admin_group_pick:'+g['id']}
@@ -2758,6 +2782,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if (not panel or panel['user_id'] != uid or not self._admin_panel_authorized(panel, tg_id)
                 or self._restrictions is None):
             await self._edit(chat_id, message_id, '管理卡或权限已失效，请重新 /kk 查询。')
+            return
+        current_access = await self._admin_read_access(target)
+        intended = (data if data in ('admin_disable', 'admin_enable') else
+                    'admin_' + (self._pending.get(self._pkey(chat_id), ('', 0, {}))[2].get('action', '')))
+        if self._admin_access_action(current_access) != intended:
+            self._pending.pop(self._pkey(chat_id), None)
+            panel['pending'] = None
+            await self._admin_show_user(chat_id, target, actor, '\n状态已变化或未知；未执行，请核实。')
             return
         if data in ('admin_disable', 'admin_enable'):
             action = 'disable' if data == 'admin_disable' else 'enable'
@@ -2882,6 +2914,18 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                  self._group_label(member) + ' · ' + self._status_label(member),
                  '有效期：' + term, '',
                  *quota_lines(member, public=public), *bandwidth_lines(member)]
+        streams = member.get('max_streams')
+        stream_text = ('暂不可用' if streams in (None, '') else
+                       f'{int(streams)} 路' if int(streams) else '不限')
+        devices = member.get('device_count')
+        lines.extend(['同时播放：' + stream_text,
+                      '已登记设备：' + (str(devices) if devices is not None else '暂不可用')])
+        for field, label in (('allow_download', '下载权限'), ('allow_transcode', '转码权限')):
+            if field in member:
+                value = member[field]
+                lines.append(label + '：' + ('暂不可用' if value is None else '允许' if value else '不允许'))
+        if not public and member.get('note'):
+            lines.append('备注：' + escape(str(member['note'])))
         balance = None
         if self._points is not None:
             with contextlib.suppress(Exception):
@@ -2892,7 +2936,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 summary = self._stats.watch_summary(str(member['emby_user_id']))
         lines.extend(['', '<b>观看记录</b>',
                       '近24小时：<b>' + duration((summary or {}).get('seconds_24h')) + '</b>',
-                      '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>'])
+                      '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>',
+                      '累计观看：<b>' + duration((summary or {}).get('recorded_seconds')) + '</b>'])
+        if (summary or {}).get('unverified_playback_now'):
+            lines.append('当前观看计时暂不可用。')
         lines += ['', '<b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         return '\n'.join(lines)
 
@@ -3182,8 +3229,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 body = RULES_TEXT if command == "rules" else self._group_help_text(member)
                 return await self._show(chat_id, body)
             body = RULES_TEXT if command == "rules" else self._help_text(member)
-            keyboard = (self._with_admin_row(self.member_menu(), member)
-                        if member else self.guest_menu())
+            keyboard = (self.help_menu() if command == "help" else
+                        [[{"text": "◀ 帮助", "callback_data": "help"}]])
             await self._show(chat_id, body, keyboard)
             return
         if command == "usage":
@@ -4189,7 +4236,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         panel = self._admin_panel(chat_id, message_id)
         targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
-            'admin_card', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
+            'admin_card', 'admin_more', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
             'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_disable', 'admin_enable')
         if panel:
             if not self._admin_panel_authorized(panel, tg_user_id):
@@ -4214,7 +4261,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if in_group:
             public = data in ('membership_recheck', 'me', 'me_status', 'usage', 'home', 'help', 'rules', 'rank', 'top',
                               'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
-                              'admin_groups', 'admin_renew', 'admin_score', 'admin_usage',
+                              'admin_groups', 'admin_more', 'admin_renew', 'admin_score', 'admin_usage',
                               'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift', 'admin_disable', 'admin_enable')
             public = public or data.startswith(('admin_access_ok:', 'admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
@@ -4306,7 +4353,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         # Leaving an input/confirmation screen also abandons its hidden draft.
         # Otherwise the next ordinary message can still transfer points or
         # submit a request after the member has returned to the parent menu.
-        if data in ('home', 'me', 'bag', 'request_center', 'admin', 'help', 'rules',
+        if data in ('home', 'me', 'bag', 'bag_records', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
                     'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry'):
             self._pending.pop(self._pkey(chat_id), None)
@@ -4336,12 +4383,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if data == "help":
             await self._edit(
                 chat_id, message_id, self._help_text(member),
-                self._with_admin_row(self.member_menu(), member) if member else self.guest_menu())
+                self.help_menu())
             return
         if data == "rules":
             await self._edit(
                 chat_id, message_id, RULES_TEXT,
-                self._with_admin_row(self.member_menu(), member) if member else self.guest_menu())
+                [[{"text": "◀ 帮助", "callback_data": "help"}]])
             return
         if data == "home":
             self._pending.pop(self._pkey(chat_id), None)
@@ -4423,7 +4470,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if data.startswith(("admin_access_ok:", "admin_renew", "admin_group_pick:", "admin_group_apply:")) or data in (
                 "admin_pro", "admin_rev", "admin_prouser", "admin_score", "admin_rm",
-                "admin_usage", "admin_binding", "admin_groups", "admin_card", "admin_disable", "admin_enable"):
+                "admin_usage", "admin_binding", "admin_groups", "admin_card", "admin_more", "admin_disable", "admin_enable"):
             await self._admin_user_action(chat_id, message_id, member, data)
             return
         if data == "top" or data.startswith("top:"):
@@ -4485,7 +4532,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if data == "me_points":
             await self._edit(chat_id, message_id, self._points_text(member),
-                             self.info_menu())
+                             [[{"text": "◀ 背包流水", "callback_data": "bag_records"}]])
             return
         if data == "me_nodes":
             await self._edit(chat_id, message_id, await self._nodes_text(),
@@ -4493,6 +4540,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         if data == "me_routing":
             await self._edit(chat_id, message_id, self._routing_text(), self.routing_menu())
+            return
+        if data == "bag_records":
+            await self._edit(chat_id, message_id, "📜 <b>背包流水</b>",
+                             [[{"text": "积分流水", "callback_data": "me_points"},
+                               {"text": "兑换记录", "callback_data": "orders"}],
+                              [{"text": "◀ 背包", "callback_data": "bag"}]])
             return
         if data == "bag":
             await self._edit(

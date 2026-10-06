@@ -270,11 +270,11 @@ def test_guest_and_member_see_different_menus() -> None:
     assert "register" not in member_actions
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
-    assert {"me", "bag", "rank", "usage", "me_nodes", "rules"} <= member_actions
+    assert {"me", "bag", "rank", "request_center", "me_nodes", "help"} == member_actions
     assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
-    assert {"devices", "usage", "me_points", "resetpw"} <= info_actions
+    assert {"devices", "rebind", "resetpw", "me", "home"} == info_actions
     assert "me_nodes" not in info_actions
 
     assert "没有账号" in guest_body
@@ -969,21 +969,20 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
-                              "rules", "usage", "help", "rebind"}
+                              "help"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
-        "me_status", "me_points", "devices", "usage", "resetpw",
-        "my_requests", "home", "rebind", "me"}
-    assert _actions(bot.bag_menu()) == {"invites", "shop", "orders", "home", "checkin", "transfer"}
+        "devices", "resetpw", "home", "rebind", "me"}
+    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "checkin", "transfer"}
 
 
 def test_the_backpack_holds_invites_shop_and_history() -> None:
     bot = _points_bot()
     labels = [b["text"] for row in bot.bag_menu() for b in row]
     assert any("邀请码" in t for t in labels)
-    assert any("兑换商城" in t for t in labels)
-    assert any("兑换记录" in t for t in labels)
+    assert any("商城" in t for t in labels)
+    assert any("流水" in t for t in labels)
 
 
 def test_checking_in_from_the_bot_reports_points_and_streak() -> None:
