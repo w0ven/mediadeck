@@ -308,7 +308,7 @@ class RequestService:
     def _refresh(self, conn, rid, revision):
         self._queue(conn, rid, "", "refresh", {}, f"refresh:{rid}:{revision}")
 
-    def _results(self, conn, row, *, correction=False):
+    def _results(self, conn, row, *, event_id, correction=False):
         uids = {row["emby_user_id"]} | {
             r[0]
             for r in conn.execute(
@@ -321,7 +321,8 @@ class RequestService:
                 row["id"],
                 uid,
                 "result",
-                {"status": row["status"], "note": row["result_note"], "correction": correction},
+                {"status": row["status"], "note": row["result_note"], "correction": correction,
+                 "event_id": event_id},
                 f"result:{row['id']}:{row['revision']}:{uid}",
             )
         self._refresh(conn, row["id"], row["revision"])
@@ -481,9 +482,9 @@ class RequestService:
             ).rowcount
             if not changed:
                 raise RequestError("工单已被其他人终结")
-            self._event(c, rid, actor, status, str(note).strip() if status == "rejected" else "")
+            event_id = self._event(c, rid, actor, status, str(note).strip() if status == "rejected" else "")
             row = self.get(rid)
-            self._results(c, row)
+            self._results(c, row, event_id=event_id)
             if status == "accepted":
                 self._start_watch(c, rid)
         return {"ok": True, "request": row}
@@ -616,7 +617,7 @@ class RequestService:
                 )
             except sqlite3.IntegrityError:
                 raise RequestError("同需求已有待处理工单，不能重开") from None
-            self._event(
+            event_id = self._event(
                 c,
                 rid,
                 actor,
@@ -624,7 +625,7 @@ class RequestService:
                 f"{row['status']} -> {status}: {str(reason)[:500]}",
                 True,
             )
-            self._results(c, self.get(rid), correction=True)
+            self._results(c, self.get(rid), event_id=event_id, correction=True)
             if status == "accepted":
                 self._start_watch(c, rid)
             else:

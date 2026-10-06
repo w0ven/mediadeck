@@ -138,6 +138,7 @@ def test_group_sensitive_callbacks_are_private_only_and_do_not_write(env, action
 def test_private_link_keeps_target_and_requires_current_admin(env):
     async def run():
         mid = await command(env, '/kk ViewerA')
+        await click(env, 'admin_more', mid)
         link = next(b['url'] for b in env.tg.actions(GROUP, mid) if 'url' in b)
         private = await command(env, '/start ' + link.split('start=')[1], chat=ADMIN)
         assert 'ViewerA' in env.tg.text(ADMIN, private)

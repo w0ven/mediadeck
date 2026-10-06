@@ -166,7 +166,7 @@ def test_measured_month_ignores_estimates_and_applies_credit_once(rb):
 
 def test_member_entry_handoff_password_then_group_approval(rb):
     rb._bot_username = 'example_bot'
-    assert 'rebind' in str(rb.member_menu()) and 'rebind' in str(rb.info_menu())
+    assert 'rebind' not in str(rb.member_menu()) and 'rebind' in str(rb.info_menu())
     asyncio.run(rb._handle_callback(cb('rebind', user='901')))
     assert rb._pending['901'][0] == 'rebind_target'
     asyncio.run(rb._handle_message(msg('903', user='901')))

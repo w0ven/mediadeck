@@ -64,7 +64,7 @@ def test_kk_visible_explicit_buttons_confirmation_and_roundtrip(bot, group):
     async def run():
         await bot._handle_message(message(group))
         first = bot.mid
-        assert "禁用账号" in str(bot.calls) and "解除禁用" in str(bot.calls)
+        assert "禁用账号" in str(bot.calls) and "解除禁用" not in str(bot.calls)
         assert "本地封禁：未封禁" in str(bot.calls) and "Emby：未禁用" in str(bot.calls)
         await bot._handle_callback(callback("admin_disable", group, mid=first))
         assert bot._members.get("u1")["status"] == "active"  # preview only
@@ -194,11 +194,94 @@ def test_remote_only_disable_visible_release_and_failure_truthful(bot):
         await bot._handle_message(message())
         first = bot.mid
         assert "本地封禁：未封禁 · Emby：已禁用" in str(bot.calls)
+        buttons = next(p['reply_markup']['inline_keyboard'] for m,p in reversed(bot.calls)
+                       if m in ('sendMessage','editMessageText'))
+        assert any(b.get('callback_data') == 'admin_enable' for row in buttons for b in row)
+        assert not any(b.get('callback_data') == 'admin_disable' for row in buttons for b in row)
         await bot._handle_callback(callback("admin_enable", mid=first))
+        assert bot._restrictions.events() == []  # still a confirmation, no mutation
         key = nonce(bot, mid=first)
         bot._emby.apply_member_policy = AsyncMock(return_value={"status": "failed"})
         await bot._handle_callback(callback("admin_access_ok:" + key, mid=first))
         assert "可重试" in str(bot.calls)
         assert "账号已可用" not in str(bot.calls)
         assert "Emby：已禁用" in str(bot.calls)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('state', ['unknown', 'conflict'])
+def test_held_disable_confirmation_rechecks_remote_state_and_refuses_changed_action_or_unknown(bot, state):
+    async def run():
+        await bot._handle_message(message())
+        first = bot.mid
+        await bot._handle_callback(callback('admin_disable', mid=first))
+        key = nonce(bot, mid=first)
+        if state == 'unknown':
+            bot._emby._users['u1']['Policy'].pop('IsDisabled')
+        else:
+            bot._emby._users['u1']['Policy']['IsDisabled'] = True
+        bot._emby.apply_member_policy = AsyncMock()
+        await bot._handle_callback(callback('admin_access_ok:' + key, mid=first))
+        assert bot._restrictions.events() == []
+        bot._emby.apply_member_policy.assert_not_awaited()
+        assert bot._members.get('u1')['status'] == 'active'
+        assert '未执行，请核实' in str(bot.calls)
+    asyncio.run(run())
+
+
+def test_more_management_cancels_hidden_confirmation_and_keeps_bound_target(bot):
+    async def run():
+        await bot._handle_message(message())
+        first = bot.mid
+        await bot._handle_callback(callback('admin_disable', mid=first))
+        key = nonce(bot, mid=first)
+        await bot._handle_callback(callback('admin_more', mid=first))
+        panel = bot._admin_panels[('12', first)]
+        assert panel['user_id'] == 'u1' and panel['pending'] is None
+        await bot._handle_callback(callback('admin_access_ok:' + key, mid=first))
+        assert bot._restrictions.events() == []
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('group', [False, True])
+@pytest.mark.parametrize('source,limit', [
+    ('remote_only', None), ('local_only', None),
+    ('remote_only', 'expired'), ('local_only', 'expired'),
+    ('remote_only', 'exhausted'), ('local_only', 'exhausted'), ('remote_only', 'pending'),
+])
+def test_known_independent_disable_sources_have_enable_button_and_confirmed_execution(bot, group, source, limit):
+    async def run():
+        local = 'suspended' if source == 'local_only' else 'pending' if limit == 'pending' else 'active'
+        bot._members.set_status('u1', local)
+        if limit == 'expired':
+            bot._members.upsert('u1', 'alice', {'expires_at': int(time.time()) - 10})
+        elif limit == 'exhausted':
+            bot._restrictions.db.execute("UPDATE members SET traffic_used_bytes=9999999999999 WHERE emby_user_id='u1'")
+        bot._emby._users['u1']['Policy']['IsDisabled'] = source == 'remote_only'
+        before = bot._members.get('u1')
+        await bot._handle_message(message(group))
+        first = bot.mid
+        rows = next(p['reply_markup']['inline_keyboard'] for m,p in reversed(bot.calls)
+                    if m in ('sendMessage','editMessageText'))
+        actions = {b.get('callback_data') for row in rows for b in row}
+        assert 'admin_enable' in actions and 'admin_disable' not in actions
+        assert '一致前不可操作' not in str(bot.calls) and '未知或不一致' not in str(bot.calls)
+        await bot._handle_callback(callback('admin_enable', group, mid=first))
+        assert not bot._restrictions.events()  # necessary confirmation is retained
+        assert '到期、耗尽、待开通限制仍适用' in str(bot.calls)
+        key = nonce(bot, group, first)
+        await bot._handle_callback(callback('admin_access_ok:' + key, group, mid=first))
+        after = bot._members.get('u1')
+        assert after['status'] == ('pending' if limit == 'pending' else 'active')
+        for field in ('expires_at', 'traffic_used_bytes', 'group_id', 'roles', 'overrides'):
+            assert after[field] == before[field]
+        assert len(bot._restrictions.events()) == 1
+        if limit:
+            assert bot._emby._users['u1']['Policy']['IsDisabled'] is True
+            assert '仍不可用' in str(bot.calls) and '账号已可用' not in str(bot.calls)
+        else:
+            assert bot._emby._users['u1']['Policy']['IsDisabled'] is False
+            assert '账号已可用' in str(bot.calls)
+        await bot._handle_callback(callback('admin_access_ok:' + key, group, mid=first))
+        assert len(bot._restrictions.events()) == 1
     asyncio.run(run())

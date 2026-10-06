@@ -29,7 +29,7 @@ def open_original(bot):
     return original["message_id"]
 
 
-USER_ACTIONS = {"full", "thread:0", "reply", "cancel", "list:mine"}
+USER_ACTIONS = {"cancel", "list:mine"}
 
 
 @pytest.mark.parametrize("roles", [[], ["uploader"], ["admin"], ["admin", "uploader"]])
@@ -41,7 +41,7 @@ def test_own_card_stays_user_independent_notice_and_workbench_stay_staff(bot, ro
     if roles:
         staff = [c for c in cards(bot) if json.loads(c["payload"]).get("view") == "staff"]
         assert len(staff) == 1 and staff[0]["message_id"] != mid
-        assert {"accept", "reject", "ask", "internal"} <= actions(bot, staff[0]["message_id"])
+        assert {"accept", "reject"} <= actions(bot, staff[0]["message_id"])
         assert not {"reply", "cancel"} & actions(bot, staff[0]["message_id"])
         bot.service.message(1, "up1", "内部备注仅管理可见", internal=True)
     bot = bot.reboot()
@@ -49,13 +49,9 @@ def test_own_card_stays_user_independent_notice_and_workbench_stay_staff(bot, ro
     run(bot._rq_refresh(1))
     assert bot._panel["900"] == mid
     assert actions(bot, mid) == USER_ACTIONS
-    tap(bot, "full", card=card_at(bot, mid))
-    assert "correct" not in actions(bot, mid)
-    tap(bot, "thread:0", card=card_at(bot, mid))
     visible = bot.transport.messages[("900", mid)]
     assert "内部备注仅管理可见" not in (visible.get("text") or visible.get("caption", ""))
-    tap(bot, "view:1", card=card_at(bot, mid))
-    assert actions(bot, mid) == USER_ACTIONS
+    assert not {"correct", "refund", "retry", "ask", "reply", "internal", "thread:0", "full"} & actions(bot, mid)
     if roles:
         message(bot, "/uploader")
         tap(bot, "view:1")

@@ -7,6 +7,7 @@ import secrets
 import time
 from html import escape
 
+from app.modules.bot_views import short_label
 from app.modules.requests import (
     STATUS_LABELS,
     RequestError,
@@ -89,6 +90,7 @@ class RequestBotMixin:
         revision=None,
         photo="",
         input_kind=None,
+        refresh_only=False,
     ):
         """Rotate capabilities only after successful edit. An old token cannot act on a new card."""
         payload = dict(payload or {})
@@ -116,7 +118,7 @@ class RequestBotMixin:
         is_photo = bool(photo) or old_photo
         # Telegram captions have a hard 1024-character ceiling. Full requirements
         # are never truncated; a long detail transitions to a text panel once.
-        if len(body) > 1000:
+        if len(body.encode('utf-16-le')) // 2 > 1000:
             photo, is_photo = "", False
         markup = {"inline_keyboard": keyboard}
         result = None
@@ -139,34 +141,44 @@ class RequestBotMixin:
                     is_photo = False
                     result = await self._edit(chat, mid, body + "\n（海报暂不可用）", keyboard)
                 else:
-                    replacement = await self._rq_render(
-                        chat,
-                        None,
-                        member,
-                        body + "\n（海报暂不可用）",
-                        rows,
-                        payload,
-                        rid=rid,
-                        revision=revision,
-                        input_kind=input_kind,
-                    )
-                    if replacement:
-                        await self._call(
-                            "editMessageReplyMarkup",
-                            {
-                                "chat_id": chat,
-                                "message_id": mid,
-                                "reply_markup": {"inline_keyboard": []},
-                            },
+                    # A stale poster URL is irrelevant to a status-only refresh.
+                    result = await self._call('editMessageCaption', {
+                        'chat_id': chat, 'message_id': mid, 'caption': body,
+                        'parse_mode': 'HTML', 'reply_markup': markup,
+                    })
+                    if not result and 'not modified' not in str(self._last_error).lower():
+                        if refresh_only:
+                            return None
+                        replacement = await self._rq_render(
+                            chat,
+                            None,
+                            member,
+                            body + "\n（海报暂不可用）",
+                            rows,
+                            payload,
+                            rid=rid,
+                            revision=revision,
+                            input_kind=input_kind,
                         )
-                        self._rq_db.execute(
-                            "DELETE FROM request_cards WHERE chat_id=? AND message_id=?",
-                            (str(chat), int(mid)),
-                        )
-                    return replacement
+                        if replacement:
+                            await self._call(
+                                "editMessageReplyMarkup",
+                                {
+                                    "chat_id": chat,
+                                    "message_id": mid,
+                                    "reply_markup": {"inline_keyboard": []},
+                                },
+                            )
+                            self._rq_db.execute(
+                                "DELETE FROM request_cards WHERE chat_id=? AND message_id=?",
+                                (str(chat), int(mid)),
+                            )
+                        return replacement
         elif mid and not old_photo:
             result = await self._edit(chat, mid, body, keyboard)
         else:
+            if refresh_only:
+                return None  # keep the original locator and retryable refresh receipt
             if photo and is_photo:
                 result = await self._call(
                     "sendPhoto",
@@ -246,7 +258,7 @@ class RequestBotMixin:
             [button("我的求片", "list:mine"), button("我的关注", "list:follow")],
         ]
         if self._rq_staff(member):
-            rows.append([button("📥 上片员工作台", "list:staff")])
+            rows[0].append(button("📥 上片员工作台", "list:staff"))
         rows.append([{"text": "◀ 主菜单", "callback_data": "home"}])
         await self._rq_render(
             chat,
@@ -263,7 +275,7 @@ class RequestBotMixin:
             chat_id,
             message_id,
             member,
-            "🔎 <b>查找影片</b>\n发送片名、TMDB 链接或编号；编号需选择电影 / 剧集。\n搜索与关注免费。",
+            "🔎 <b>查找影片</b>\n发送片名、TMDB 链接或编号。\n编号需选择电影 / 剧集。\n搜索与关注免费。",
             [[button("◀ 求片中心", "home")]],
             {"draft": True},
             input_kind="search",
@@ -280,55 +292,30 @@ class RequestBotMixin:
         page = max(0, int(p.get("page", 0)))
         status = p.get("status", "open" if mode == "staff" else "")
         rows = self._requests.list(
-            status=status,
-            limit=6,
-            offset=page * 5,
+            status=status, limit=6, offset=page * 5,
             user_id=None if mode == "staff" else member["emby_user_id"],
-            followed=mode == "follow",
-            media_type=p.get("type", ""),
-            search=p.get("search", ""),
+            followed=mode == "follow", media_type=p.get("type", ""), search=p.get("search", ""),
         )
-        text = [
-            f"📋 <b>{ {'mine': '我的求片', 'follow': '我的关注', 'staff': '上片员工作台'}[mode] }</b> · 第 {page + 1} 页",
-            f"状态：{STATUS_LABELS.get(status, '全部')} · 类型：{ {'movie': '电影', 'tv': '剧集'}.get(p.get('type'), '全部') }"
-            + (f" · 搜索：{escape(p['search'])}" if p.get("search") else ""),
-        ]
+        title = {"mine": "我的求片", "follow": "我的关注", "staff": "上片员工作台"}[mode]
+        group = "待处理" if status == "open" else "已处理" if status else "全部工单"
+        text = [f"📋 <b>{title} · {group}</b>\n第 {page + 1} 页",
+                f"状态：{STATUS_LABELS.get(status, '全部')} · 类型："
+                + {"movie": "电影", "tv": "剧集"}.get(p.get("type"), "全部")]
+        if p.get("search"):
+            text.append("搜索：" + escape(p["search"]))
         keys = []
         for row in rows[:5]:
-            lines = [
-                line for line in row["demand_text"].splitlines() if not line.endswith("：无要求")
-            ]
-            summary = " · ".join(lines[:3])[:100]
-            if row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):
-                summary = self._rq_season_label(row["demand"])
-            text.append(
-                f"#{row['id']} {escape(row['display_title'])} · {row['media_label']} · {row['status_label']}\n{escape(summary)}"
-                + (f" · {escape(row['username'])}" if mode == "staff" else "")
-            )
-            label = (
-                f"#{row['id']} {row['display_title']}" if mode == "staff" else f"#{row['id']} 详情"
-            )
-            if len(label) > 55:
-                label = label[:54] + "…"
-            keys.append([button(label, f"view:{row['id']}")])
+            state = '待处理' if row['status'] == 'open' else '已处理 · ' + row['status_label']
+            text.append(f"<b>{state}</b> · #{row['id']}\n"
+                        + escape(short_label(row['display_title'], 48))
+                        + '\n' + row['media_label']
+                        + (' · ' + self._rq_season_label(row['demand'])
+                           if row['media_type'] == 'tv' and row['demand']['scope'] in ('series', 'season') else '')
+                        + ('\n求片人：' + escape(row['username']) if mode == 'staff' else ''))
+            label = f"#{row['id']} {row['display_title']} · {row['status_label']}"
+            keys.append([button(short_label(label, 55), f"view:{row['id']}")])
         if not rows:
             text.append("暂无符合条件的工单。")
-        keys.append(
-            [
-                button("待处理", "status:open"),
-                button("已接受", "status:accepted"),
-                button("已拒绝", "status:rejected"),
-            ]
-        )
-        keys.append([button("已取消", "status:cancelled"), button("全部", "status:")])
-        keys.append(
-            [
-                button("电影", "filter:movie"),
-                button("剧集", "filter:tv"),
-                button("全部类型", "filter:"),
-            ]
-        )
-        keys.append([button("🔎 搜索工单", "find")])
         nav = []
         if page:
             nav.append(button("上一页", "page:-1"))
@@ -336,9 +323,28 @@ class RequestBotMixin:
             nav.append(button("下一页", "page:1"))
         if nav:
             keys.append(nav)
+        keys.append([button("筛选 / 搜索", "filters")])
         keys.append([button("◀ 求片中心", "home")])
         p.update(mode=mode, status=status, page=page, view="staff" if mode == "staff" else "user")
         return await self._rq_render(chat, mid, member, "\n\n".join(text), keys, p)
+
+    async def _rq_filters(self, chat, mid, member, p, *, candidates=False):
+        if candidates:
+            rows = [[button("电影", "searchtype:movie"), button("剧集", "searchtype:tv"),
+                     button("全部类型", "searchtype:")], [button("按年份筛选", "year")]]
+            if p.get("year") or p.get("type"):
+                rows[1].append(button("清除筛选", "searchclear"))
+            rows.append([button("◀ 候选影片", "candidates")])
+        else:
+            rows = [[button("待处理", "status:open"), button("已接受", "status:accepted"),
+                     button("已拒绝", "status:rejected")],
+                    [button("已撤回", "status:cancelled"), button("全部状态", "status:"),
+                     button("类型", "filtertypes")], [button("搜索工单", "find")]]
+            default = "open" if p.get("mode") == "staff" else ""
+            if p.get("status", default) != default or p.get("type") or p.get("search"):
+                rows[-1].append(button("清除筛选", "listclear"))
+            rows[-1].append(button("◀ 工单列表", "listback"))
+        return await self._rq_render(chat, mid, member, "🔎 <b>筛选与搜索</b>", rows, p)
 
     async def _rq_candidates(self, chat, mid, member, p, *, fetch=False):
         if fetch:
@@ -362,23 +368,17 @@ class RequestBotMixin:
         results = p.get("results", [])
         index = max(0, min(int(p.get("index", 0)), len(results) - 1))
         p["index"] = index
-        rows = [
-            [
-                button("电影", "searchtype:movie"),
-                button("剧集", "searchtype:tv"),
-                button("全部", "searchtype:"),
-            ],
-            [button("按年份筛选", "year"), button("清除年份", "clearyear")],
-        ]
+        rows = []
         photo = ""
         if results:
             item = results[index]
             photo = poster_url(item.get("poster_path", ""))
             body = (
-                f"🎞 <b>{escape(display_title(item))}</b>\n"
+                f"🎞 {self._rq_title(item)}\n"
                 f"{'电影' if item['media_type'] == 'movie' else '剧集'} · TMDB {item['tmdb_id']}\n"
-                f"搜索：{escape(p['query'])} · 第 {p.get('page', 1)}/{p.get('total_pages', 1)} 页 · 候选 {index + 1}/{len(results)}\n"
-                + escape(str(item.get("overview") or "")[:250])
+                f"搜索：{escape(p['query'])}\n"
+                f"第 {p.get('page', 1)}/{p.get('total_pages', 1)} 页 · 候选 {index + 1}/{len(results)}\n"
+                + escape(str(item.get("overview") or "")[:120])
             )
             rows.insert(0, [button("选择这部", "pick")])
         else:
@@ -390,7 +390,7 @@ class RequestBotMixin:
             nav.append(button("下一候选 ▶", "candidate:1"))
         if nav:
             rows.append(nav)
-        rows.append([button("重新搜索", "new"), button("求片中心", "home")])
+        rows.append([button("筛选", "searchfilters"), button("◀ 重新搜索", "new")])
         await self._rq_render(chat, mid, member, body, rows, p, photo=photo)
 
     async def _rq_selected(self, chat, mid, member, p):
@@ -412,7 +412,7 @@ class RequestBotMixin:
 
     def _rq_library(self, hint):
         if not hint.get("available"):
-            return "⚠ 媒体库查询失败/未配置，未知是否已有；仍可提交。", []
+            return "⚠ 媒体库暂不可用，未知是否已有。\n仍可确认提交。", []
         if not hint.get("items"):
             return "媒体库未找到匹配内容。", []
         lines, links = ["媒体库已有："], []
@@ -426,7 +426,7 @@ class RequestBotMixin:
                 suffix += " …（详见媒体库）"
             lines.append(escape(label + suffix))
             if str(item.get("url", "")).startswith(("https://", "http://")):
-                links.append([{"text": "媒体库 · " + label[:30], "url": item["url"]}])
+                lines.append(f'<a href="{escape(item["url"], quote=True)}">打开媒体库</a>')
         return "\n".join(lines), links
 
     async def _rq_legacy_draft(self, chat, mid, member, p):
@@ -438,7 +438,7 @@ class RequestBotMixin:
                 member,
                 int(p["editing"]),
                 full=True,
-                prefix="原要求未更改；请用「补充 / 回复」更新。",
+                prefix="原要求未更改；Bot 沟通已停用。",
             )
         p.update(simple=True, demand=normalize_demand(p["media_type"], {}), note="")
         return await self._rq_preview(
@@ -455,7 +455,7 @@ class RequestBotMixin:
         p["demand"] = normalize_demand(p["media_type"], p["demand"])
         meta = dict(p.get("meta") or {}, tmdb_id=p["tmdb_id"], media_type=p["media_type"])
         body = (
-            f"🎬 <b>确认求片</b>\n{escape(display_title(meta))}\n"
+            f"🎬 <b>确认求片</b>\n{self._rq_title(meta)}\n"
             f"{'电影' if p['media_type'] == 'movie' else '剧集'}"
         )
         if p["media_type"] == "tv":
@@ -466,7 +466,7 @@ class RequestBotMixin:
                 + ",".join("#" + str(r["id"]) for r in p["history"])
                 + "），等待下载入库。"
             )
-        hint, links = self._rq_library(p.get("library") or {})
+        hint, _links = self._rq_library(p.get("library") or {})
         body += "\n\n" + hint
         keys = []
         if entering_seasons:
@@ -475,20 +475,11 @@ class RequestBotMixin:
             )
         else:
             same = self._requests.same_demand(p["media_type"], p["tmdb_id"], p["demand"])
-            if same and same["status"] == "open":
-                p["same"] = same["id"]
-                if same["emby_user_id"] == member["emby_user_id"]:
-                    keys.append(
-                        [button(f"我的原单 #{same['id']}", f"view:{same['id']}")]
-                    )
-                else:
-                    keys.append([button(f"免费关注 #{same['id']}", "follow")])
-                body += f"\n\n已有相同求片 #{same['id']}，不重复创建、不扣次数。"
-            elif same:
-                body += f"\n\n相同求片 #{same['id']} 已接受，请耐心等待下载完成并入库。"
+            if same:
+                return await self._rq_detail(chat, mid, member, same["id"], discovery=True)
             else:
                 left = self._requests.remaining(member["emby_user_id"])
-                body += f"\n\n确认求片扣 1 次；本月剩余 {'不限' if left is None else left}。提交后为待处理。"
+                body += f"\n\n确认求片扣 1 次\n本月剩余：{'不限' if left is None else str(left) + ' 次'}\n提交后为待处理。"
                 keys.append([button("确认（扣 1 次）", "submit")])
         if p["media_type"] == "tv":
             checked = "☑ " if p["demand"]["scope"] == "series" else "☐ "
@@ -505,7 +496,7 @@ class RequestBotMixin:
             keys.append([button("返回确认卡", "preview")])
         if notice:
             body += "\n\n" + escape(notice)
-        keys += links + [[button("重新选片", "new"), button("求片中心", "home")]]
+        keys += [[button("◀ 重新选片", "new")]]
         return await self._rq_render(
             chat,
             mid,
@@ -517,127 +508,118 @@ class RequestBotMixin:
             input_kind="simple_seasons" if entering_seasons else None,
         )
 
+    @staticmethod
+    def _rq_title(row):
+        title = escape(display_title(row))
+        ident = str(row.get("tmdb_id") or "")
+        kind = row.get("media_type")
+        if kind in ("movie", "tv") and ident.isascii() and ident.isdigit() and int(ident) > 0:
+            return f'<a href="https://www.themoviedb.org/{kind}/{ident}">{title}</a>'
+        return title
+
+    def _rq_result_text(self, row, *, event_id=None, snapshot=False):
+        # Corrections may leave claimed_by pointing to an earlier processor.
+        # Read the latest authoritative status event, never infer a new actor.
+        if snapshot:
+            # The outbox identifies the exact committed event. Never borrow a
+            # later processor/time for an older status-only legacy payload.
+            event = self._rq_db.one(
+                'SELECT * FROM request_events WHERE id=? AND request_id=?',
+                (event_id, row['id']),
+            ) if event_id is not None else None
+        else:
+            event = self._rq_db.one(
+                "SELECT * FROM request_events WHERE request_id=? "
+                "AND kind IN ('accepted','rejected','cancelled','correction') ORDER BY id DESC LIMIT 1",
+                (row["id"],),
+            )
+        if not event or not (event["kind"] == row["status"] or
+                             (event["kind"] == "correction" and
+                              f" -> {row['status']}:" in event["body"])):
+            return "处理人 / 时间：暂不可用"
+        actor = self._members.get(event["actor"]) or {}
+        name = actor.get("username") or event["actor"] or "未知"
+        stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(event['created_at']))
+        return f"处理人：{escape(name)}\n处理时间：{stamp}"
+
+    def _rq_body(self, row, *, compact=False, requirements=True, event_id=None, snapshot=False):
+        if compact:
+            row = dict(row, title=short_label(row['title'], 40) if row['title'] else '',
+                       username=short_label(row['username'], 30),
+                       result_note=short_label(row['result_note'], 80) if row['result_note'] else '',
+                       note='', demand_text='')
+        status = {"open": "🟠 待处理", "accepted": "✅ 已处理 · 已接受",
+                  "rejected": "⛔ 已处理 · 已拒绝", "cancelled": "↩ 已处理 · 已撤回"}[row["status"]]
+        body = f"<b>{status}</b>\n{self._rq_title(row)}\n{row['media_label']} · #{row['id']}\n"
+        body += "求片人：" + escape(row["username"])
+        demand = "\n".join(line for line in row["demand_text"].splitlines()
+                           if not line.endswith("：无要求"))
+        if requirements and not compact and row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):
+            demand = "季范围：" + self._rq_season_label(row["demand"])
+        if requirements and demand:
+            body += "\n" + escape(demand)
+        if requirements and row["note"]:
+            body += "\n备注：" + escape(row["note"])
+        if row["status"] != "open" or snapshot:
+            body += "\n\n" + self._rq_result_text(row, event_id=event_id, snapshot=snapshot)
+        if row["status"] == "accepted":
+            body += "\n" + ACCEPT_NOTICE
+        if row["status"] == "rejected" and row["result_note"]:
+            body += "\n原因：" + escape(row["result_note"])
+        if compact:
+            body += '\n完整信息请从工单列表重新打开。'
+        return body
+
+    def _rq_result_notice(self, row, payload):
+        # State and rejection reason belong to this queued event, not the
+        # request's mutable current state. Creation/quota/outbox keys stay intact.
+        snapshot = dict(row, status=payload['status'], result_note=payload.get('note') or '')
+        body = self._rq_body(snapshot, requirements=False,
+                             event_id=payload.get('event_id'), snapshot=True)
+        if payload.get('correction'):
+            if snapshot['status'] == 'open':
+                body = body.replace('<b>🟠 待处理</b>', '<b>🟠 状态已纠正 · 待处理</b>', 1)
+            body += '\n管理员已纠正工单状态。'
+        if row['status'] != snapshot['status']:
+            body += '\n状态已有更新，请查看工单。'
+        return body
+
     async def _rq_detail(
-        self, chat, mid, member, rid, *, prefix="", thread=None, full=False, view="user"
+        self, chat, mid, member, rid, *, prefix="", thread=None, full=False, view="user",
+        discovery=False, refresh_only=False,
     ):
         staff = view == "staff"
-        row = self._requests.authorize(rid, member["emby_user_id"], staff=staff)
+        row = (self._requests.get(rid) if discovery and not staff else
+               self._requests.authorize(rid, member["emby_user_id"], staff=staff))
+        if not row:
+            raise RequestError("求片记录不存在")
         own = row["emby_user_id"] == member["emby_user_id"]
-        p = {"rid": rid, "view": view}
+        p = {"rid": rid, "view": view, "discovery": discovery}
         keys = []
-        body = f"🎬 <b>{escape(row['display_title'])}</b>\n{row['media_label']} · 工单 #{rid} · {row['status_label']}\n"
-        if row.get("original_title") and row["original_title"] != row["title"]:
-            body += escape(row["original_title"][:100]) + "\n"
-        body += "\n"
-        if thread is not None:
-            page = max(0, int(thread))
-            events = self._requests.events(rid, internal=staff, limit=2, offset=page)
-            if events:
-                e = events[0]
-                label = {
-                    "created": "提交",
-                    "accepted": "已接受",
-                    "rejected": "已拒绝",
-                    "cancelled": "已取消",
-                    "question": "上片员询问",
-                    "reply": "用户回复",
-                    "modified": "修改需求",
-                    "internal": "🔒 内部备注",
-                    "refund": "🔒 额度退回",
-                    "correction": "🔒 管理员纠错",
-                }.get(e["kind"], e["kind"])
-                body += f"{label} · {time.strftime('%Y-%m-%d %H:%M', time.localtime(e['created_at']))}\n{escape(e['body']) or '（无附言）'}"
-            else:
-                body += "暂无记录"
-            p["thread"] = page
-            nav = []
-            if page:
-                nav.append(button("较新记录", "thread:-1"))
-            if len(events) > 1:
-                nav.append(button("较早记录", "thread:1"))
-            if nav:
-                keys.append(nav)
-            keys.append([button("返回详情", f"view:{rid}")])
-        else:
-            demand = (
-                row["demand_text"]
-                if full
-                else "\n".join(
-                    line if len(line) <= 70 else line[:67] + "…"
-                    for line in row["demand_text"].splitlines()
-                    if not line.endswith("：无要求")
-                )
-            )
-            if row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):
-                demand = "季范围：" + self._rq_season_label(row["demand"]) + "\n" + demand
-            note = row["note"]
-            if not full and len(note) > 150:
-                note = note[:147] + "…（完整需求见详情）"
-            body += escape(demand)
-            if note:
-                body += "\n备注：" + escape(note)
-            if row.get("overview") and not full:
-                body += "\n\n" + escape(row["overview"][:120])
-            if not full:
-                keys.append([button("详情", "full")])
-            else:
-                keys.append([button("返回工单", f"view:{rid}")])
+        body = self._rq_body(row)
+        if mid and row['status'] != 'open':
+            refresh_only = True
+            old = self._rq_db.one('SELECT photo FROM request_cards WHERE chat_id=? AND message_id=?',
+                                  (str(chat), int(mid)))
+            if old and old['photo'] and len(body.encode('utf-16-le')) // 2 > 900:
+                body = self._rq_body(row, compact=True)
+        if prefix:
+            body += "\n\n" + escape(prefix)
+        if row["status"] == "open":
             if staff:
-                body += "\n求片人：" + escape(row["username"])
-            if row["status"] == "accepted":
-                body += "\n\n" + ACCEPT_NOTICE
-            if row["status"] == "rejected" and row["result_note"]:
-                body += "\n拒绝理由：" + escape(row["result_note"])
-            if prefix:
-                body += "\n\n" + escape(prefix)
-            keys.append([button("沟通记录", "thread:0")])
-            if row["status"] == "open":
-                if staff:
-                    keys = [
-                        [
-                            button("✅ 接受请求", "accept"),
-                            button("拒绝请求", "reject"),
-                            button("询问用户", "ask"),
-                        ]
-                    ] + keys
-                    keys.append([button("🔒 内部备注", "internal")])
-                if own and not staff:
-                    keys += [
-                        [button("补充 / 回复", "reply"), button("撤回求片", "cancel")],
-                    ]
-            if staff and "admin" in (member.get("roles") or []):
-                keys.append(
-                    [button("🔒 管理员纠错", "correct"), button("🔒 人工退回额度", "refund")]
-                )
-            if staff:
-                keys.append([button("重试失败通知", "retry")])
-            keys.append(
-                [
-                    button(
-                        "◀ 工作台" if staff else "◀ 我的求片",
-                        "list:staff" if staff else "list:mine",
-                    ),
-                ]
-            )
-        keys.append(
-            [
-                {
-                    "text": "TMDB 详情 ↗",
-                    "url": f"https://www.themoviedb.org/{row['media_type']}/{row['tmdb_id']}",
-                }
-            ]
-        )
-        return await self._rq_render(
-            chat,
-            mid,
-            member,
-            body,
-            keys,
-            p,
-            rid=rid,
-            revision=row["revision"],
-            photo=poster_url(row["poster_path"]) if thread is None and not full else "",
-        )
+                keys.append([button("✅ 接受请求", "accept"), button("拒绝请求", "reject")])
+            elif own:
+                keys.append([button("撤回求片", "cancel")])
+            elif discovery:
+                p["same"] = rid
+                keys.append([button("免费关注", "follow")])
+        keys.append([button("◀ 返回工作台" if staff else "◀ 返回求片中心" if discovery
+                            else "◀ 我的求片" if own else "◀ 我的关注",
+                            "list:staff" if staff else "home" if discovery else
+                            "list:mine" if own else "list:follow")])
+        return await self._rq_render(chat, mid, member, body, keys, p, rid=rid,
+                                     revision=row["revision"], photo=poster_url(row["poster_path"]),
+                                     refresh_only=refresh_only)
 
     async def _rq_prompt(
         self, chat, mid, member, p, kind, body, keys=None, *, rid=None, revision=None
@@ -651,11 +633,7 @@ class RequestBotMixin:
             or (
                 [
                     [
-                        button("返回详情", f"view:{rid}"),
-                        button(
-                            "工作台" if p.get("view") == "staff" else "我的求片",
-                            "list:staff" if p.get("view") == "staff" else "list:mine",
-                        ),
+                        button("◀ 返回工单", f"view:{rid}"),
                     ]
                 ]
                 if rid
@@ -674,6 +652,18 @@ class RequestBotMixin:
                 raise RequestError("当前账号未绑定或求片未开启")
             _, token, action = data.split(":", 2)
             card = self._rq_db.one("SELECT * FROM request_cards WHERE token=?", (token,))
+            if not card:
+                current = self._rq_db.one(
+                    'SELECT * FROM request_cards WHERE chat_id=? AND message_id=? AND user_id=?',
+                    (str(chat), int(mid), member['emby_user_id']),
+                )
+                row = self._requests.get(current['request_id']) if current and current['request_id'] else None
+                if row and row['status'] != 'open':
+                    self._requests.authorize(row['id'], member['emby_user_id'],
+                                             staff=self._rq_card_view(current) == 'staff')
+                    await self._answer_callback(callback_id, short_label(row['status_label'] + '；未重复执行。'
+                                                + self._rq_result_text(row).replace('\n', ' · '), 180))
+                    return
             if (
                 not card
                 or card["chat_id"] != str(chat)
@@ -712,13 +702,32 @@ class RequestBotMixin:
     async def _rq_action(self, action, chat, mid, member, p, card):
         uid = member["emby_user_id"]
         cmd, _, arg = action.partition(":")
+        if cmd in ("ask", "reply", "internal", "thread", "correct", "refund", "retry", "modify"):
+            raise RequestError("此 Bot 操作已停用，请重新打开工单；管理低频操作请使用 Web 后台")
+        if cmd == "searchfilters":
+            return await self._rq_filters(chat, mid, member, p, candidates=True)
+        if cmd == "filters":
+            return await self._rq_filters(chat, mid, member, p)
+        if cmd == "filtertypes":
+            return await self._rq_render(chat, mid, member, "影片类型", [
+                [button("电影", "filter:movie"), button("剧集", "filter:tv"),
+                 button("全部类型", "filter:")], [button("◀ 筛选", "filters")]], p)
+        if cmd == "candidates":
+            return await self._rq_candidates(chat, mid, member, p)
+        if cmd == "searchclear":
+            p.update(type="", year=None, page=1)
+            return await self._rq_candidates(chat, mid, member, p, fetch=True)
         if cmd == "home":
             return await self._rq_home(chat, mid, member)
         if cmd == "new":
             return await self._request_start(chat, mid, member)
-        if cmd in ("list", "status", "page", "filter", "find"):
+        if cmd in ("list", "status", "page", "filter", "find", "listback", "listclear"):
             if cmd == "list":
                 p = {"mode": arg, "status": "open" if arg == "staff" else "", "page": 0}
+            elif cmd == "listclear":
+                p.update(status="open" if p.get("mode") == "staff" else "", type="", search="", page=0)
+            elif cmd == "listback":
+                pass
             elif cmd == "status":
                 p.update(status=arg, page=0)
             elif cmd == "page":
@@ -815,6 +824,7 @@ class RequestBotMixin:
                 "reject",
                 "rejectok",
                 "reason",
+                "rejectreason",
                 "ask",
                 "internal",
                 "correct",
@@ -827,40 +837,17 @@ class RequestBotMixin:
         row = self._requests.authorize(rid, uid, staff=staff)
         if cmd == "full":
             return await self._rq_detail(chat, mid, member, rid, full=True, view=view)
-        if cmd == "thread":
-            page = int(p.get("thread", 0)) + int(arg) if arg else 0
-            return await self._rq_detail(chat, mid, member, rid, thread=page, view=view)
-        if cmd == "retry":
-            if not staff:
-                raise RequestError("你不是上片员")
-            self._requests.retry_notifications(rid)
-            await self.flush_request_notifications()
-            return await self._rq_detail(
-                chat, mid, member, rid, prefix="已尝试重发通知。", view=view
-            )
-        if row["revision"] != card["revision"]:
-            raise RequestError("工单已被修改，请重新打开详情")
-        if cmd in ("correct", "refund"):
-            self._requests.authorize(rid, uid, admin=True)
-            body = (
-                "输入目标状态和纠错原因：open / accepted / rejected / cancelled 后接空格和原因。纠错不自动退额度。"
-                if cmd == "correct"
-                else "发送人工退回额度原因。每工单仅可退一次，只退原扣次月份；普通拒绝不退款。"
-            )
-            return await self._rq_prompt(
-                chat,
-                mid,
-                member,
-                p,
-                cmd,
-                f"🔒 工单 #{rid}\n{body}",
-                rid=rid,
-                revision=row["revision"],
-            )
-        if row["status"] != "open":
-            raise RequestError("此工单已终结，旧按钮不可再次执行")
-        if cmd in ("accept", "reject", "rejectok", "reason", "ask", "internal") and not staff:
+        if row["revision"] != card["revision"] or row["status"] != "open":
+            return await self._rq_detail(chat, mid, member, rid, view=view,
+                                         prefix="工单已变化；未重复执行。")
+        if cmd in ("accept", "reject", "rejectok", "reason", "rejectreason") and not staff:
             raise RequestError("你不是上片员")
+        if cmd == "rejectreason":
+            reasons = {"source": "暂无片源", "library": "已有资源"}
+            if arg not in reasons:
+                raise RequestError("拒绝理由无效")
+            p["reason"] = reasons[arg]
+            cmd = "rejectok"
         if cmd in ("accept", "rejectok", "cancelok"):
             status = {"accept": "accepted", "rejectok": "rejected", "cancelok": "cancelled"}[cmd]
             self._requests.finish(
@@ -878,10 +865,12 @@ class RequestBotMixin:
                 chat,
                 mid,
                 member,
-                f"拒绝工单 #{rid}\n理由选填；拒绝不退额度。",
+                f"拒绝工单 #{rid}\n选择下列明确拒绝动作即完成；拒绝不退额度。",
                 [
-                    [button("无理由拒绝", "rejectok"), button("填写理由", "reason:custom")],
-                    [button("返回详情", f"view:{rid}")],
+                    [button("拒绝 · 暂无片源", "rejectreason:source"),
+                     button("拒绝 · 已有资源", "rejectreason:library")],
+                    [button("确认拒绝 · 无理由", "rejectok"), button("其他原因拒绝", "reason:custom")],
+                    [button("◀ 返回工单", f"view:{rid}")],
                 ],
                 p,
                 rid=rid,
@@ -904,35 +893,8 @@ class RequestBotMixin:
                 rid=rid,
                 revision=row["revision"],
             )
-        if cmd in ("ask", "internal", "reply"):
-            if cmd == "reply" and row["emby_user_id"] != uid:
-                raise RequestError("关注者不能补充他人的工单")
-            text = {
-                "ask": "询问求片人（仍待处理）",
-                "internal": "内部备注（仅上片员/管理员可见）",
-                "reply": "发送补充/回复给上片员",
-            }[cmd]
-            return await self._rq_prompt(
-                chat,
-                mid,
-                member,
-                p,
-                cmd,
-                f"工单 #{rid} · {text}\n请输入消息（最多 500 字）。",
-                rid=rid,
-                revision=row["revision"],
-            )
-        if cmd in ("modify", "cancel") and row["emby_user_id"] != uid:
-            raise RequestError("只能修改/撤回自己的工单")
-        if cmd == "modify":
-            return await self._rq_detail(
-                chat,
-                mid,
-                member,
-                rid,
-                full=True,
-                prefix="原要求未更改；请用「补充 / 回复」更新。",
-            )
+        if cmd == "cancel" and row["emby_user_id"] != uid:
+            raise RequestError("只能撤回自己的工单")
         if cmd == "cancel":
             return await self._rq_render(
                 chat,
@@ -955,6 +917,10 @@ class RequestBotMixin:
         )
         if not waiting:
             return False
+        if waiting["kind"] in ("ask", "reply", "internal", "correct", "refund"):
+            self._rq_clear_input(chat)
+            await self._show(chat, "原 Bot 输入已停用，请重新打开工单。历史记录保留。")
+            return True
         if text.startswith("/"):
             self._rq_clear_input(chat)
             return False
@@ -1026,17 +992,13 @@ class RequestBotMixin:
                 await self._rq_legacy_draft(chat, mid, member, p)
             else:
                 rid = card["request_id"]
-                if kind in ("ask", "reply", "internal"):
-                    self._requests.message(
-                        rid,
-                        member["emby_user_id"],
-                        text,
-                        staff=kind == "ask",
-                        internal=kind == "internal",
-                        revision=card["revision"],
-                        key="input:" + card["token"],
-                    )
-                elif kind == "reason":
+                if kind == "reason":
+                    row = self._requests.authorize(rid, member['emby_user_id'], staff=True)
+                    if row['status'] != 'open' or row['revision'] != card['revision']:
+                        self._rq_clear_input(chat)
+                        await self._rq_detail(chat, mid, member, rid, view='staff',
+                                              prefix='工单已变化；未重复执行。')
+                        return True
                     if not text.strip() or len(text) > 500:
                         raise RequestError("理由须为 1–500 字")
                     if not p.get("reject_on_text"):
@@ -1070,27 +1032,8 @@ class RequestBotMixin:
                     await self._rq_detail(chat, mid, member, rid, view=p.get("view", "user"))
                     await self.flush_request_notifications()
                     return True
-                elif kind == "correct":
-                    status, _, reason = text.partition(" ")
-                    self._requests.correct(
-                        rid, member["emby_user_id"], status, reason, card["revision"]
-                    )
-                elif kind == "refund":
-                    self._requests.refund(rid, member["emby_user_id"], text)
                 else:
-                    raise RequestError("输入已过期")
-                self._rq_clear_input(chat)
-                await self._rq_detail(
-                    chat,
-                    mid,
-                    member,
-                    rid,
-                    prefix="已记录。"
-                    if kind in ("internal", "refund", "correct")
-                    else "消息已保存并将通知对方。",
-                    view=p.get("view", "user"),
-                )
-                await self.flush_request_notifications()
+                    raise RequestError("输入已过期，请重新打开工单")
         except RequestError as exc:
             # Keep the exact bound input to let the sender correct a typo.
             await self.send(chat, "⚠ " + escape(str(exc)))
@@ -1101,7 +1044,10 @@ class RequestBotMixin:
         if not row:
             return True
         ok = True
-        for card in self._rq_db.query("SELECT * FROM request_cards WHERE request_id=?", (rid,)):
+        for card in self._rq_db.query("SELECT * FROM request_cards"):
+            payload = json.loads(card["payload"])
+            if card["request_id"] != rid and payload.get("mode") != "staff":
+                continue
             # Immutable communication/result receipts have only a read-only view
             # button. Do not erase the question as soon as its refresh runs.
             if json.loads(card["payload"]).get("notice"):
@@ -1126,9 +1072,19 @@ class RequestBotMixin:
                 continue
             try:
                 with self._bind_session("", ""):
-                    mid = await self._rq_detail(
-                        card["chat_id"], card["message_id"], member, rid, view=self._rq_card_view(card)
-                    )
+                    if payload.get("mode") == "staff":
+                        mid = await self._rq_list(card["chat_id"], card["message_id"], member, payload)
+                    else:
+                        mid = await self._rq_detail(
+                            card["chat_id"], card["message_id"], member, rid,
+                            view=self._rq_card_view(card), discovery=payload.get("discovery", False),
+                            refresh_only=True,
+                        )
+                if not mid:
+                    await self._call("editMessageReplyMarkup", {
+                        "chat_id": card["chat_id"], "message_id": card["message_id"],
+                        "reply_markup": {"inline_keyboard": []},
+                    })
                 ok = bool(mid) and ok
             except RequestError:
                 self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
@@ -1152,8 +1108,24 @@ class RequestBotMixin:
                 result = await self._edit(
                     notice["tg_user_id"],
                     notice["message_id"],
-                    f"工单 #{rid} · {row['status_label']}\n旧卡已停用，请用 /uploader 打开工作台。",
+                    self._rq_body(row) + "\n\n旧卡已停用。\n用 /uploader 打开工作台。",
+                    [],
                 )
+            if not result:
+                # Some old group receipts are photo messages. Caption editing
+                # is safe on the exact persisted ID; no history scan or send.
+                result = await self._call("editMessageCaption", {
+                    "chat_id": notice["tg_user_id"], "message_id": notice["message_id"],
+                    "caption": self._rq_body(row, compact=True), "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": []},
+                })
+                if not result and 'not modified' in str(self._last_error).lower():
+                    result = True
+                if not result:
+                    await self._call("editMessageReplyMarkup", {
+                        "chat_id": notice["tg_user_id"], "message_id": notice["message_id"],
+                        "reply_markup": {"inline_keyboard": []},
+                    })
             ok = bool(result) and ok
         return ok
 
@@ -1191,7 +1163,8 @@ class RequestBotMixin:
                         if job["kind"] == "new":
                             # A queued new notice may have become terminal before delivery.
                             mid = await self._rq_detail(
-                                chat, None, member, row["id"], prefix="新求片", view="staff"
+                                chat, None, member, row["id"],
+                                prefix="新求片" if row['status'] == 'open' else '', view="staff"
                             )
                         else:
                             body = f"工单 #{row['id']} · {escape(row['display_title'])}\n\n"
@@ -1216,14 +1189,7 @@ class RequestBotMixin:
                                     else "已入库，可开始观看。"
                                 )
                             else:
-                                if payload.get("correction"):
-                                    body += "管理员已纠正工单状态：\n"
-                                status = payload["status"]
-                                body += (
-                                    ACCEPT_NOTICE if status == "accepted" else STATUS_LABELS[status]
-                                )
-                                if status == "rejected" and payload.get("note"):
-                                    body += "\n理由：" + escape(payload["note"])
+                                body = self._rq_result_notice(row, payload)
                             mid = await self._rq_render(
                                 chat,
                                 None,
