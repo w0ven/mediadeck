@@ -2439,3 +2439,11 @@ three only appear at production scale or during a routine operation.
 **Open questions**
 - Panel domain: undecided (owner: "whatever for now").
 - Frontend stack decision deferred until Phase 4 UI pass.
+
+---
+
+## 2026-10-08 — Focused check-in interaction correction
+- Add strict whole-message check-in commands in private and allowlisted group chats, using the existing verified-watch and daily-idempotent business service.
+- Send independent check-in receipts instead of editing menus; keep callback acknowledgements, group actor/reply/topic isolation, and membership gates. Other menu rendering is unchanged.
+- Exercise actual update dispatch for Chinese reply transfers without command entities and with Bot suffixes; preserve confirmation, admin mint, ordinary and private-transfer semantics.
+- Preserve live catalogue/configuration and all prior main changes; ship through the standard PR/CI/tag workflow. Live-user Telegram messages and financial actions are not test probes.

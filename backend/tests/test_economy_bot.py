@@ -110,7 +110,9 @@ def test_bot_checkin_shows_progress_and_negative_delta_without_plus_minus(env, m
     async def run():
         mid = await command(env, "/start", chat=VIEWER, user=VIEWER)
         await click(env, "checkin", mid, chat=VIEWER, user=VIEWER)
-        assert "/600" in env.tg.text(VIEWER, mid)
+        feedback = [p for method, p in env.tg.calls if method == "sendMessage"][-1]
+        assert "/600" in feedback["text"]
+        assert "欢迎" in env.tg.text(VIEWER, mid)
         import time
 
         proof(env.db, "u1", now=time.time())
@@ -124,7 +126,7 @@ def test_bot_checkin_shows_progress_and_negative_delta_without_plus_minus(env, m
             ),
         )
         await click(env, "checkin", mid, chat=VIEWER, user=VIEWER)
-        text = env.tg.text(VIEWER, mid)
+        text = [p for method, p in env.tg.calls if method == "sendMessage"][-1]["text"]
         assert "-10" in text and "+-10" not in text and "签到成功" in text
 
     asyncio.run(run())
