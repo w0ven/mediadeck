@@ -93,6 +93,8 @@ class Settings(BaseSettings):
     mediadeck_admin_user: str = "admin"
     mediadeck_admin_password: str = "change-me"
     mediadeck_data_dir: str = "data"
+    # Persistent credential, never returned by runtime UI or generated implicitly.
+    mediadeck_checkin_secret: str = ""
 
     # Bootstrap-only: seeds the settings store on first run.
     emby_url: str = "http://127.0.0.1:8096"

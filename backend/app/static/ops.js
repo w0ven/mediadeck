@@ -1247,7 +1247,7 @@ PAGES.automation = async (context = pageContext('automation')) => {
   $('#view').innerHTML = `
     <div class="help">${{
     points: `积分功能和定时任务共用同一套开关与配置。<b>签到和转账由成员在机器人里触发</b>，
-       这里的「立即运行」只统计不发放；<b>关掉开关，机器人里对应的按钮就会消失</b>。`,
+       这里的「立即运行」只统计不发放；<b>关掉签到/转账开关，机器人里对应的按钮就会消失；背包配置不改变商品上下架或已有权益</b>。`,
     request: `求片相关的定时任务。<b>每条求片在提交时就会推给上片员</b>，
        这里的摘要只是每天提醒一次还有多少没人接，避免没人接的求片一直没动静。`,
   }[automation.category]
@@ -1790,7 +1790,11 @@ const SHOP_KINDS = [
   { id: 'traffic', label: '流量包', unit: 'GB' },
   { id: 'days', label: '会员天数', unit: '天' },
   { id: 'bandwidth', label: '带宽提速', unit: 'Mbps' },
-  { id: 'invite', label: '邀请名额', unit: '个' },
+  { id: 'invite', label: '邀请名额（旧版即时）', unit: '个' },
+  { id: 'invite_card', label: '邀请码卡（入包）', unit: '张' },
+  { id: 'bandwidth_card', label: '带宽卡（入包）', unit: 'Mbps' },
+  { id: 'streams_card', label: '同播卡（入包）', unit: '路' },
+  { id: 'title_card', label: '称号卡（入包）', unit: '张' },
 ];
 function shopUnit(kind) {
   const found = SHOP_KINDS.find((k) => k.id === kind);
@@ -1820,6 +1824,9 @@ PAGES.shop = async (context = pageContext('shop')) => {
       ${stat('📜', orders.length, '兑换记录', '最近 50 条')}
       ${stat('💰', spent, '消耗积分', '这些记录合计')}
     </div>
+    ${card('成员背包 / 称号管理', '签到活动与叠加上限在插件页配置；称号为普通成员标签',
+      `<div class="card-body"><input id="ec-user" aria-label="Emby用户ID" placeholder="Emby用户ID"><button class="btn" id="ec-load">查询</button>
+       <div id="ec-member"></div></div>`)}
     ${card('新增商品', '数量的单位随类型变化：流量按 GB，天数按天，提速按 Mbps，名额按个',
     `<div class="card-body">
         <div class="form-row"><label for="sh-kind">类型</label>
@@ -1834,6 +1841,9 @@ PAGES.shop = async (context = pageContext('shop')) => {
           <input id="sh-cost" type="number" min="1" value="100" style="width:110px"></div>
         <div class="form-row"><label for="sh-amount">数量</label>
           <input id="sh-amount" type="number" min="1" value="50" style="width:110px"></div>
+        <div class="form-row"><label for="sh-duration">道具使用期限（天）</label>
+          <input id="sh-duration" type="number" min="0" value="30">
+          <span class="muted">从使用/创建开始；0仅用于永久称号/邀请码卡；旧版即时商品不受此字段影响</span></div>
         <div class="form-row"><label for="sh-limit">每人限兑</label>
           <input id="sh-limit" type="number" min="0" value="0" style="width:110px">
           <span class="muted">0 = 不限</span></div>
@@ -1878,6 +1888,7 @@ PAGES.shop = async (context = pageContext('shop')) => {
     };
   }
   if ($('#sh-add')) bindAsyncButton('sh-add', addShopItem);
+  if ($('#ec-load')) bindAsyncButton('ec-load', loadEconomyMember);
 };
 function shopFormPayload() {
   return {
@@ -1886,6 +1897,7 @@ function shopFormPayload() {
     description: (($('#sh-desc') || {}).value || '').trim(),
     cost: Number(($('#sh-cost') || {}).value || 0),
     amount: Number(($('#sh-amount') || {}).value || 0),
+    duration_days: Number(($('#sh-duration') || {}).value || 0),
     per_user_limit: Number(($('#sh-limit') || {}).value || 0),
     sort: Number(($('#sh-sort') || {}).value || 0),
     enabled: !!(($('#sh-enabled') || {}).checked),
@@ -1918,6 +1930,8 @@ function editShopItem(id) {
       <input id="se-cost" type="number" min="1" value="${esc(row.cost || 1)}" style="width:110px"></div>
     <div class="form-row"><label for="se-amount">数量</label>
       <input id="se-amount" type="number" min="1" value="${esc(row.amount || 1)}" style="width:110px"></div>
+    <div class="form-row"><label for="se-duration">道具使用期限（天）</label>
+      <input id="se-duration" type="number" min="0" value="${esc(row.duration_days ?? 30)}"></div>
     <div class="form-row"><label for="se-limit">每人限兑</label>
       <input id="se-limit" type="number" min="0" value="${esc(row.per_user_limit || 0)}" style="width:110px">
       <span class="muted">0 = 不限</span></div>
@@ -1935,6 +1949,7 @@ function editShopItem(id) {
             description: ($('#se-desc') || {}).value,
             cost: Number(($('#se-cost') || {}).value || 0),
             amount: Number(($('#se-amount') || {}).value || 0),
+            duration_days: Number(($('#se-duration') || {}).value || 0),
             per_user_limit: Number(($('#se-limit') || {}).value || 0),
             sort: Number(($('#se-sort') || {}).value || 0),
           }),
@@ -2050,4 +2065,39 @@ async function requestAction(id, action) {
     renderPage('requests',false,false,ctx);
   } catch(e) {toast('未执行或未确认：'+e.message,1); renderPage('requests',false,false,ctx);}
   finally {requestBusy.delete(id);}
+}
+
+async function loadEconomyMember() {
+  const user = ($('#ec-user')?.value || '').trim();
+  if (!user) { toast('请输入Emby用户ID', 1); return; }
+  const base = '/api/economy/members/' + encodeURIComponent(user);
+  try {
+    const result = await api(base);
+    $('#ec-member').innerHTML = `<p>道具 ${result.inventory.length} 件（不可赠送）</p>
+      ${result.inventory.map(r => `<div>#${esc(r.id)} ${esc(r.spec.name)} · ${r.used_at === null ? '未使用' : r.active ? '生效中' : '已使用/到期'} ${esc(r.expiry_error || '')}</div>`).join('')}
+      <p>群标签同步状态</p>${result.tags.map(r => `<div>${esc(r.status)} ${esc(r.error)}</div>`).join('')}
+      <button class="btn" id="ec-retry">重试标签同步</button><p>拥有的称号</p>
+      ${result.titles.map(r => `<div>#${esc(r.id)} ${esc(r.tag)} · ${r.revoked_at ? '已撤销' : r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : '永久'}
+        <button class="btn" data-title-revoke="${esc(r.id)}">撤销</button></div>`).join('')}
+      <input id="ec-tag" aria-label="授予称号" placeholder="称号（1..16字，无emoji/链接/冒充）">
+      <input id="ec-days" type="number" min="0" value="0" aria-label="称号期限天数">天（0永久）
+      <button class="btn" id="ec-grant">授予称号</button>`;
+    $('#ec-grant').onclick = async () => {
+      try {
+        await api(base+'/titles', {method:'POST',body:JSON.stringify({tag:$('#ec-tag').value,days:Number($('#ec-days').value)})});
+        await loadEconomyMember(); toast('已授予（用户自行佩戴）');
+      } catch(e) {toast(e.message,1);}
+    };
+    $('#ec-retry').onclick = async () => {
+      try {await api(base+'/titles/retry',{method:'POST'}); await loadEconomyMember();}
+      catch(e) {toast(e.message,1);}
+    };
+    document.querySelectorAll('[data-title-revoke]').forEach(button => {
+      button.onclick = async () => {
+        if (!(await deckConfirm('撤销此称号？系统会核对后清除对应标签，手改标签保留。'))) return;
+        try {await api(base+'/titles/'+button.dataset.titleRevoke,{method:'DELETE'});await loadEconomyMember();}
+        catch(e) {toast(e.message,1);}
+      };
+    });
+  } catch(e) {toast(e.message,1);}
 }

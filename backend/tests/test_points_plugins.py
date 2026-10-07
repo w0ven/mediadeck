@@ -14,6 +14,8 @@ and ``run()`` only reports. That shifts what is worth testing.
 from __future__ import annotations
 
 import time
+import json
+from app.modules.economy_rules import day_bounds, draw, encode
 from typing import Any
 
 import pytest
@@ -44,7 +46,8 @@ class FakeStore:
 
 
 @pytest.fixture()
-def stack(tmp_path):
+def stack(tmp_path, monkeypatch):
+    monkeypatch.setenv("MEDIADECK_CHECKIN_SECRET", "local-test-only-secret-material-32bytes")
     db = Database(tmp_path / "plugins.db")
     groups = GroupService(db)
     groups.seed_defaults()
@@ -55,6 +58,14 @@ def stack(tmp_path):
     registry = register_builtin(PluginRegistry(store, db), ctx)
     members.upsert("u1", "alice", {"group_id": "standard"}, actor="test")
     members.upsert("u2", "bob", {"group_id": "standard"}, actor="test")
+    registry.save('checkin',config=dict(weekends=False,holidays='[]'))
+    # Settlement fixtures: actual progress admission is tested with the sampler
+    # in test_economy.py, rather than mocking the eligibility function.
+    for ago in range(11):
+        day,start,_ = day_bounds(time.time()-ago*DAY)
+        for user in ('u1','u2'):
+            db.execute('INSERT INTO watch_verified_samples VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                       (user+day,user,'film','Film','Movie','','Test','',start,start+600,600,0,600,1))
     return registry, points, members, db
 
 
@@ -76,117 +87,88 @@ def _configure(registry: PluginRegistry, plugin_id: str, **config) -> None:
 
 def test_a_first_checkin_pays_the_base_rate(stack, checkin) -> None:
     registry, points, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=5,
-               max_streak_bonus=50)
-
-    result = checkin.checkin("u1")
-    assert result["ok"] is True
-    # Day one is not "coming back", so it earns no streak bonus.
-    assert result["points"] == 10 and result["bonus"] == 0
-    assert result["streak"] == 1
-    assert result["balance"] == 10
-    assert points.balance("u1") == 10
+    _configure(registry,'checkin')
+    result = checkin.checkin('u1')
+    assert result['ok'] is True
+    assert -10 <= result['base'] <= 30
+    assert result['points'] == result['base'] and result['bonus'] == 0
+    assert result['streak'] == 1
+    assert result['balance'] == points.balance('u1') == result['points']
 
 
-def test_checking_in_twice_on_one_day_is_refused_without_paying(
-        stack, checkin) -> None:
-    registry, points, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10)
-
-    assert checkin.checkin("u1")["ok"] is True
-    second = checkin.checkin("u1")
-    assert second["ok"] is False
-    assert second["reason"] == "今天已签到"
-    assert second["balance"] == 10
-    assert points.balance("u1") == 10
-    assert len(points.ledger("u1")) == 1
+def test_checking_in_twice_on_one_day_is_refused_without_paying(stack,checkin):
+    _configure(stack[0],'checkin')
+    first = checkin.checkin('u1')
+    second = checkin.checkin('u1')
+    assert second['ok'] is False and second['reason']=='今天已签到'
+    assert second['saved_result'] == first
+    assert second['balance']==first['balance']
+    assert len(stack[1].ledger('u1'))==1
 
 
-def test_a_streak_accumulates_across_consecutive_days(stack, checkin) -> None:
-    registry, points, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=5,
-               max_streak_bonus=100)
-    now = time.time()
-
-    day1 = checkin.checkin("u1", now=now - 2 * DAY)
-    day2 = checkin.checkin("u1", now=now - DAY)
-    day3 = checkin.checkin("u1", now=now)
-
-    assert [d["streak"] for d in (day1, day2, day3)] == [1, 2, 3]
-    assert [d["points"] for d in (day1, day2, day3)] == [10, 15, 20]
-    assert points.balance("u1") == 45
+def test_a_streak_accumulates_across_consecutive_days(stack,checkin):
+    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0),dict(days=3,bonus=20)]))
+    now=time.time()
+    results=[checkin.checkin('u1',now=now-ago*DAY) for ago in (2,1,0)]
+    assert [r['streak'] for r in results]==[1,2,3]
+    assert [r['bonus'] for r in results]==[0,0,20]
+    assert all(r['points']==r['base']+r['bonus'] for r in results)
+    assert stack[1].balance('u1')==sum(r['points'] for r in results)
 
 
-def test_missing_a_day_restarts_the_streak(stack, checkin) -> None:
-    registry, _, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=5,
-               max_streak_bonus=100)
-    now = time.time()
-
-    checkin.checkin("u1", now=now - 3 * DAY)
-    checkin.checkin("u1", now=now - 2 * DAY)  # streak 2
-    # nothing on day -1: the chain is broken
-    after_gap = checkin.checkin("u1", now=now)
-
-    assert after_gap["streak"] == 1
-    # Back to base pay -- but they did check in, so it is 1 rather than 0.
-    assert after_gap["points"] == 10
+def test_missing_a_day_restarts_the_streak(stack,checkin):
+    _configure(stack[0],'checkin')
+    now=time.time()
+    checkin.checkin('u1',now=now-3*DAY)
+    checkin.checkin('u1',now=now-2*DAY)
+    result=checkin.checkin('u1',now=now)
+    assert result['streak']==1 and result['bonus']==0
 
 
-def test_the_streak_bonus_stops_at_its_cap(stack, checkin) -> None:
-    registry, _, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=5,
-               max_streak_bonus=20)
-    now = time.time()
-
-    awards = [checkin.checkin("u1", now=now - (9 - i) * DAY)["points"]
-              for i in range(10)]
-    # 10, 15, 20, 25, then capped at 10+20 forever.
-    assert awards[:4] == [10, 15, 20, 25]
-    assert set(awards[4:]) == {30}
+def test_the_streak_bonus_stops_at_its_cap(stack,checkin):
+    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0),dict(days=5,bonus=20)]))
+    now=time.time()
+    results=[checkin.checkin('u1',now=now-(9-i)*DAY) for i in range(10)]
+    assert [r['bonus'] for r in results[:4]]==[0]*4
+    assert [r['bonus'] for r in results[4:]]==[20]*6
 
 
-def test_a_zero_bonus_turns_the_streak_reward_off(stack, checkin) -> None:
-    registry, _, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=0,
-               max_streak_bonus=50)
-    now = time.time()
-
-    first = checkin.checkin("u1", now=now - DAY)
-    second = checkin.checkin("u1", now=now)
-    assert second["streak"] == 2
-    assert first["points"] == second["points"] == 10
+def test_a_zero_bonus_turns_the_streak_reward_off(stack,checkin):
+    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0)]))
+    now=time.time()
+    first=checkin.checkin('u1',now=now-DAY)
+    second=checkin.checkin('u1',now=now)
+    assert second['streak']==2
+    assert first['bonus']==second['bonus']==0
+    assert first['points']==first['base'] and second['points']==second['base']
 
 
-def test_checkins_are_per_member(stack, checkin) -> None:
-    registry, points, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10)
-    checkin.checkin("u1")
-    assert checkin.checkin("u2")["ok"] is True
-    assert points.balance("u1") == points.balance("u2") == 10
+def test_checkins_are_per_member(stack,checkin):
+    _configure(stack[0],'checkin')
+    for user in ('u1','u2'):
+        result=checkin.checkin(user)
+        assert result['ok'] and stack[1].balance(user)==result['points']
 
 
-def test_a_checkin_without_a_member_id_is_refused(stack, checkin) -> None:
-    _configure(stack[0], "checkin", points_per_day=10)
-    assert checkin.checkin("")["ok"] is False
+def test_a_checkin_without_a_member_id_is_refused(stack,checkin):
+    _configure(stack[0],'checkin')
+    assert checkin.checkin('')['ok'] is False
 
 
-def test_the_checkin_card_reports_todays_totals(stack, checkin) -> None:
+def test_the_checkin_card_reports_todays_totals(stack,checkin):
     import asyncio
-    registry, _, _, _ = stack
-    _configure(registry, "checkin", points_per_day=10, streak_bonus=5,
-               max_streak_bonus=50)
-    now = time.time()
-    checkin.checkin("u1", now=now - DAY)
-    checkin.checkin("u1", now=now)
-    checkin.checkin("u2", now=now)
-
-    summary = asyncio.run(registry.run_now("checkin"))
-    assert summary["ok"] is True
-    assert summary["今日签到人数"] == 2
-    assert summary["今日发出积分"] == 25  # 15 (streak 2) + 10
-    assert summary["今日最长连签"] == 2
-    assert summary["累计签到次数"] == 3
+    registry,_,_,db=stack
+    _configure(registry,'checkin')
+    now=time.time()
+    checkin.checkin('u1',now=now-DAY)
+    one=checkin.checkin('u1',now=now)
+    two=checkin.checkin('u2',now=now)
+    summary=asyncio.run(registry.run_now('checkin'))
+    assert summary['ok'] is True
+    assert summary['今日签到人数']==2
+    assert summary['今日发出积分']==one['points']+two['points']
+    assert summary['今日最长连签']==2
+    assert summary['累计签到次数']==3
 
 
 # -- transfer ----------------------------------------------------------------

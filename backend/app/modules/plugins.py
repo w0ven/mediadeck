@@ -228,6 +228,9 @@ class PluginRegistry:
                     continue  # unknown keys are dropped, never stored
                 cleaned[key] = by_key[key].coerce(raw)
             current.update(cleaned)
+            validator = getattr(plugin, "validate_config", None)
+            if validator:
+                validator(current)
             entry["config"] = current
 
         section[plugin_id] = entry

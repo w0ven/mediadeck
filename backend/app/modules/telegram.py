@@ -274,6 +274,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         self._registration = registration
         self._points = points
         self._shop = shop
+        self._inventory = None
+        self._titles = None
         # The registry, not the plugins themselves: whether a feature is on is
         # an operator decision that can change between two taps of the same
         # keyboard, so it is read at render time rather than captured here.
@@ -1138,6 +1140,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             [{"text": "🎫 邀请码", "callback_data": "invites"},
              {"text": "🎁 商城", "callback_data": "shop"},
              {"text": "📜 流水", "callback_data": "bag_records"}],
+            [{"text": "🎒 我的道具", "callback_data": "inventory"},
+             {"text": "称号", "callback_data": "titles"}],
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 
@@ -1692,8 +1696,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         extra = f"（含连签奖励 +{bonus}）" if bonus else ""
         await self._edit(
             chat_id, message_id,
-            f"✅ <b>签到成功</b>\n\n获得积分：<b>+{result.get('points')}</b>{extra}\n"
-            f"连续签到：<b>{result.get('streak')}</b> 天\n"
+            f"✅ <b>签到成功</b>\n\n积分变动：<b>{int(result.get('points') or 0):+d}</b>{extra}\n"
+            f"基础：{result.get('base')} × {result.get('multiplier',1)} · 连签：+{bonus}\n"
+            + (f"掉落：{escape(str((result.get('drop_spec') or {}).get('name')))}（已入包）\n" if result.get('drop_spec') else "")
+            + f"连续签到：<b>{result.get('streak')}</b> 天\n"
             f"当前余额：<b>{result.get('balance')}</b>",
             self.member_menu())
 
@@ -1867,12 +1873,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             return
         member = self._member_for_chat(_ACTOR.get() or str(chat_id))
         self._pending[self._pkey(chat_id)] = ('shop_confirm', time.time() + 120,
-            {'item': item, 'user_id': (member or {}).get('emby_user_id'), 'message_id': message_id})
+            {'request_id': secrets.token_hex(16), 'item': item, 'user_id': (member or {}).get('emby_user_id'), 'message_id': message_id})
         await self._edit(
             chat_id, message_id,
             f"🎁 <b>确认兑换</b>\n用 <b>{item['cost']}</b> 积分兑换 <b>{escape(str(item['name']))}</b>？\n"
             f"内容：{item['amount']}{escape(str(item.get('unit') or ''))} · "
-            f"{escape(str(item.get('kind_label') or ''))}",
+            f"{escape(str(item.get('kind_label') or ''))}\n"
+            + (f"购买后入包，使用/创建起计时：{item['duration_days']}天（0为永久/邀请名额）" if item['kind'].endswith('_card') else "购买后立即生效"),
             [[{"text": "✅ 确认兑换", "callback_data": f"buyok:{item['id']}"},
               {"text": "取消", "callback_data": "shop"}]])
 
@@ -1894,7 +1901,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         try:
             result = self._shop.redeem(
                 str(member.get("emby_user_id") or ""), int(item_id),
-                actor="telegram")
+                actor="telegram", request_id=extra["request_id"], expected_spec=extra['item'])
         except Exception as exc:  # noqa: BLE001 - the reason is for the member
             await self._edit(chat_id, message_id, f"❌ 兑换失败：{_public_error(exc)}",
                              self.bag_menu())
@@ -1927,6 +1934,82 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             lines.append(
                 f"{when} · {escape(str(row.get('item_name') or '-'))} · -{row.get('cost')} 分")
         await self._edit(chat_id, message_id, "\n".join(lines), self.bag_menu())
+
+    async def _inventory_view(self, chat_id, message_id, member, page=0):
+        if not self._inventory:
+            await self._edit(chat_id, message_id, '背包服务不可用', self.bag_menu())
+            return
+        rows = sorted(self._inventory.items(member['emby_user_id']),
+                      key=lambda r: (r['used_at'] is not None, -r['id']))
+        pages = max(1, (len(rows) + 9) // 10)
+        page = max(0, min(int(page), pages - 1))
+        lines = [f'🎒 <b>我的道具</b>（不可赠送） · {page+1}/{pages}页']
+        keyboard = []
+        for row in rows[page*10:(page+1)*10]:
+            spec = row['spec']
+            lines.append(f"#{row['id']} {escape(spec['name'])} · 期限 {spec['duration_days']} 天（0为永久）")
+            if row['used_at'] is None:
+                keyboard.append([dict(text='使用 '+spec['name'], callback_data=f"card:{row['id']}")])
+            else:
+                lines.append('已使用' + (' · 到期 '+time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600))+'（北京）' if row['expires_at'] else ''))
+            if row['expiry_error']:
+                lines.append('⚠ '+escape(row['expiry_error']))
+        if not rows:
+            lines.append('暂无道具，购买新商品入包后使用。')
+        pager = []
+        if page > 0:
+            pager.append(dict(text='上一页', callback_data=f'invpage:{page-1}'))
+        if page+1 < pages:
+            pager.append(dict(text='下一页', callback_data=f'invpage:{page+1}'))
+        if pager:
+            keyboard.append(pager)
+        keyboard.append([dict(text='◀ 背包', callback_data='bag')])
+        await self._edit(chat_id, message_id, '\n'.join(lines), keyboard)
+
+    async def _card_use(self,chat_id,message_id,member,card_id):
+        try:
+            row = next((r for r in self._inventory.items(member['emby_user_id']) if r['id']==int(card_id)),None)
+            if not row: raise ValueError('道具不存在')
+            if row['used_at'] is not None:
+                await self._edit(chat_id,message_id,'此卡已使用，未再次消耗或发放。请在道具/称号页查看状态。',self.bag_menu())
+                return
+            if row['spec']['kind']=='title_card':
+                self._pending[self._pkey(chat_id)] = ('title_create',time.time()+PENDING_TTL,
+                    dict(user_id=member['emby_user_id'],card_id=int(card_id)))
+                await self._edit(chat_id,message_id,'发送称号文字（1..16字符，无emoji/链接/冒充管理）。创建即消耗卡、开始计时；佩戴和切换免费。',self.bag_menu())
+                return
+            result = self._inventory.use(member['emby_user_id'],int(card_id))
+            notice = await self._after_member_change(member)
+            await self._edit(chat_id,message_id,escape(result['granted'])+notice,self.bag_menu())
+        except Exception as exc:
+            await self._edit(chat_id,message_id,'使用失败：'+_public_error(exc),self.bag_menu())
+
+    async def _titles_view(self, chat_id, message_id, member, page=0):
+        if not self._titles:
+            await self._edit(chat_id, message_id, '称号服务不可用', self.bag_menu())
+            return
+        rows = [r for r in self._titles.titles(member['emby_user_id'])
+                if r['revoked_at'] is None and (r['expires_at'] is None or r['expires_at'] > time.time())]
+        pages = max(1, (len(rows)+19)//20)
+        page = max(0, min(int(page), pages-1))
+        lines = [f'<b>我的称号</b> · 免费切换/取消 · {page+1}/{pages}页']
+        keyboard = []
+        for row in rows[page*20:(page+1)*20]:
+            lines.append(escape(row['tag']) + (' · 已选择' if row['worn'] else '') +
+                         (' · 永久' if not row['expires_at'] else ' · 到期 '+time.strftime('%Y-%m-%d %H:%M',time.gmtime(row['expires_at']+8*3600))+'（北京）'))
+            keyboard.append([dict(text='佩戴 '+row['tag'], callback_data=f"wear:{row['id']}")])
+        for row in self._titles.states(member['emby_user_id']):
+            lines.append('TG同步：'+escape(row['status'])+' '+escape(row['error']))
+        pager = []
+        if page > 0:
+            pager.append(dict(text='上一页', callback_data=f'titlespage:{page-1}'))
+        if page+1 < pages:
+            pager.append(dict(text='下一页', callback_data=f'titlespage:{page+1}'))
+        if pager:
+            keyboard.append(pager)
+        keyboard += [[dict(text='取消佩戴', callback_data='wear:none'), dict(text='重试同步', callback_data='title_retry')],
+                     [dict(text='◀ 背包', callback_data='bag')]]
+        await self._edit(chat_id, message_id, '\n'.join(lines), keyboard)
 
     # -- transfer -------------------------------------------------------------
 
@@ -1990,8 +2073,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         fee = plugin.fee_for(amount)
         self._pending[self._pkey(chat_id)] = (
             "transfer_confirm", time.time() + PENDING_TTL,
-            {**extra, "amount": amount})
-        fee_line = f"\n手续费：{fee}（对方到账 {amount - fee}）" if fee else ""
+            {**extra, "amount": amount, "fee": fee, "request_id": secrets.token_hex(16)})
+        fee_line = f"\n手续费：{fee}（对方到账 {amount - fee}）"
         await self._show(
             chat_id,
             f"💸 <b>确认转账</b>\n收款人：<b>{escape(str(extra.get('to_name') or '—'))}</b>\n"
@@ -2013,7 +2096,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         try:
             result = plugin.transfer(
                 str(member.get("emby_user_id") or ""), to_id,
-                int(extra.get("amount") or 0))
+                int(extra.get("amount") or 0), request_id=extra["request_id"], expected_fee=extra["fee"])
         except Exception as exc:  # noqa: BLE001 - the reason is for the member
             await self._edit(chat_id, message_id, f"❌ 转账失败：{_public_error(exc)}",
                              self.member_menu())
@@ -4069,6 +4152,19 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                     chat_id, tg_user_id, tg_username, text,
                     admission=extra.get("admission"))
                 return
+            if kind == "title_create":
+                member = self._member_for_chat(tg_user_id)
+                if not member or member['emby_user_id'] != extra['user_id']:
+                    self._pending.pop(self._pkey(chat_id),None)
+                    return
+                try:
+                    result = self._inventory.use(member['emby_user_id'],extra['card_id'],title=text)
+                except ValueError as exc:
+                    await self._show(chat_id,escape(str(exc)),self.bag_menu())
+                    return
+                self._pending.pop(self._pkey(chat_id),None)
+                await self._show(chat_id,'称号已创建，可免费佩戴。',[[{'text':'选择称号','callback_data':'titles'}]])
+                return
             if kind in ("transfer_to", "transfer_amount"):
                 member = self._member_for_chat(tg_user_id)
                 if not member:
@@ -4557,6 +4653,22 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 f"当前积分：<b>{self._balance(str(member.get('emby_user_id')))}</b>\n\n"
                 "这里是你的邀请码、可兑换的商品和兑换记录。",
                 self.bag_menu())
+            return
+        if data == 'inventory' or data.startswith('invpage:'):
+            await self._inventory_view(chat_id,message_id,member,0 if data=='inventory' else data.split(':')[1]); return
+        if data.startswith('card:'):
+            await self._card_use(chat_id,message_id,member,data.split(':')[1]); return
+        if data == 'titles' or data.startswith('titlespage:'):
+            await self._titles_view(chat_id,message_id,member,0 if data=='titles' else data.split(':')[1]); return
+        if data.startswith('wear:') or data == 'title_retry':
+            try:
+                if data == 'title_retry': await self._titles.sync(member['emby_user_id'])
+                else:
+                    tid=data.split(':')[1]
+                    await self._titles.wear(member['emby_user_id'],None if tid=='none' else int(tid))
+                await self._titles_view(chat_id,message_id,member)
+            except Exception as exc:
+                await self._edit(chat_id,message_id,'称号操作失败：'+_public_error(exc),self.bag_menu())
             return
         if data == "checkin":
             await self._checkin(chat_id, message_id, member)
