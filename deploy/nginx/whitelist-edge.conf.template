@@ -56,6 +56,8 @@ server {
     proxy_send_timeout 3600s;
     proxy_ssl_server_name on;
     proxy_ssl_verify on;
+    # Allow the verified public CA intermediate chain; never disable verification.
+    proxy_ssl_verify_depth 3;
     proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
     proxy_set_header X-Real-IP $remote_addr;
     proxy_set_header X-Forwarded-For $remote_addr;
