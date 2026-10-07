@@ -370,9 +370,11 @@ class LiveEmby:
             sessions = reply.json()
         if not isinstance(sessions, list):
             raise TypeError("credential identity unavailable")
-        if any(not isinstance(s, dict) or not s.get("UserId") for s in sessions):
+        if any(not isinstance(s, dict) for s in sessions):
             return None
-        owners = {str(s["UserId"]) for s in sessions}
+        # Emby includes unauthenticated discovery sessions without UserId.
+        # They identify nobody; never use their DeviceId to choose an owner.
+        owners = {str(s["UserId"]) for s in sessions if s.get("UserId")}
         return owners.pop() if len(owners) == 1 else None
 
     async def item_media_paths(self, item_id: str) -> dict[str, str]:
