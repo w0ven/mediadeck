@@ -37,18 +37,25 @@ jobs:
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/mediadeck-browsers" >> "$GITHUB_ENV"
       - name: Install isolated browser test runtime
         run: python -m playwright install --with-deps chromium
-      - name: Select real Chromium instead of the runner snap launcher
+      - name: Select actual headless shell for offline CLI browser tests
         run: |
           python - <<'PY'
           import os
+          import subprocess
           from pathlib import Path
-          from playwright.sync_api import sync_playwright
 
           directory = Path(os.environ["RUNNER_TEMP"]) / "mediadeck-test-bin"
           directory.mkdir()
-          with sync_playwright() as driver:
-              executable = driver.chromium.executable_path
-          assert Path(executable).is_file()
+          cache = Path(os.environ["PLAYWRIGHT_BROWSERS_PATH"])
+          shells = list(cache.glob("chromium_headless_shell-*/*/headless_shell"))
+          shells += list(cache.glob("chromium_headless_shell-*/*/chrome-headless-shell"))
+          assert len(shells) == 1, "Expected the Playwright-installed headless shell"
+          executable = str(shells[0])
+          probe = subprocess.run([
+              executable, "--no-sandbox", "--disable-gpu", "--dump-dom",
+              "--virtual-time-budget=1000", "data:text/html,<body>offline-browser-ok</body>",
+          ], capture_output=True, text=True, timeout=15, check=True)
+          assert "offline-browser-ok" in probe.stdout
           (directory / "chromium").symlink_to(executable)
           with open(os.environ["GITHUB_PATH"], "a") as path:
               path.write(str(directory) + "\n")
