@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 from app.modules.economy_rules import economy_write, validate_card
 import json
+import contextlib
 import uuid
 
 from app.core.config import settings
@@ -376,7 +377,10 @@ class PointsTransferPlugin(Plugin):
         *,
         request_id: str | None = None,
         expected_fee: int | None = None,
+        conn: Any = None,
+        actor: str = "member",
     ) -> dict[str, Any]:
+        """Regular debit transfer; supplied conn joins the group confirmation transaction."""
         points = getattr(self.ctx, "points", None)
         if points is None:
             raise ValueError("积分服务不可用")
@@ -385,7 +389,7 @@ class PointsTransferPlugin(Plugin):
             raise ValueError("转账数量必须是正整数")
         request_id = request_id or uuid.uuid4().hex
         request = dict(to_id=to_id, amount=int(amount), expected_fee=expected_fee)
-        with economy_write(points._db) as conn:
+        with (economy_write(points._db) if conn is None else contextlib.nullcontext(conn)) as conn:
             prior = receipt(conn, "transfer", request_id, from_id, request)
             if prior is not None:
                 return prior
@@ -409,7 +413,7 @@ class PointsTransferPlugin(Plugin):
             if expected_fee is not None and fee != expected_fee:
                 raise ValueError("手续费已变化，请重新确认")
             result = points.transfer(
-                from_id, to_id, int(amount), actor="member", fee=fee, conn=conn, now=int(now)
+                from_id, to_id, int(amount), actor=actor, fee=fee, conn=conn, now=int(now)
             )
             save_receipt(conn, "transfer", request_id, from_id, request, result)
             return result

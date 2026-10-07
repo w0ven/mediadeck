@@ -37,6 +37,7 @@ REASON_LABELS = {
     "shop.redeem": "商城兑换",
     "shop.refund": "兑换回滚",
     "admin.adjust": "管理员调整",
+    "admin.mint": "系统管理员发放",
 }
 
 

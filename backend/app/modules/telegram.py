@@ -52,6 +52,7 @@ from app.modules.bot_views import (
     watch_rank_mention,
 )
 from app.modules.gift_receipts import GiftReceipts
+from app.modules.group_points import GroupPointsBotMixin, CALLBACKS as GROUP_POINTS_CALLBACKS
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
@@ -146,6 +147,8 @@ ADMIN_HELP = """🛠 <b>管理员命令</b>
 <code>/renewall 天数</code> 全员续期（需确认）
 
 <b>积分与发放</b>
+群内回复收款人本人消息：<code>/transfer 100</code> 或 <code>/转账 100</code>
+系统管理员走「管理员发放」，不扣本人余额；仅TG群管理身份无发放权限。
 <code>/score 用户 ±数量</code> 调整积分
 <code>/scoreall 数量</code> 全员加分（需确认）
 <code>/gift 用户 traffic|days|bandwidth|invite 数量</code> 直接发放
@@ -252,7 +255,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
+class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -517,6 +520,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 {"command": "usage", "description": "用量与观看"},
                 {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
                 {"command": "today", "description": "今日榜 · 截至查看时"},
+                {"command": "transfer", "description": "回复消息系统发放积分" if admin else "回复消息转账（扣本人余额）"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
             ]
@@ -1166,6 +1170,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 "· <b>背包</b>：邀请码、积分兑换\n"
                 "· <b>求片</b>：选片后确认提交\n"
                 "· <b>准则</b>：账号使用约定\n"
+                "· 群内回复收款人本人消息：/transfer 100 或 /转账 100；普通成员扣余额，系统管理员直接发放，须本人确认。\n"
+                "· 无响应请用 /transfer@" + (self._bot_username or "机器人用户名") + " 100；隐私模式可能不投递回复他人的裸命令/中文命令。\n"
+                "· 私聊转账始终扣本人余额，群聊不公开成员余额。\n"
                 "· /start 返回菜单\n\n"
                 + RANK_HELP + "\n\n问题请联系管理员。"
             )
@@ -3223,6 +3230,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         command = command.split("@", 1)[0]
         args = parts[1:]
         display = (display_name or tg_username or "朋友").strip() or "朋友"
+        if command in ('transfer', '转账') and not _GROUP.get():
+            if not self._plugin_on('points_transfer'):
+                return await self._show(chat_id, '普通积分转账未开启。')
+            return await self._show(chat_id,
+                '私聊仍为扣本人余额的普通转账（管理员也不例外）。请选择下方入口；群内回复收款人消息用 /transfer 100。',
+                [[{'text': '💸 普通积分转账', 'callback_data': 'transfer'}]])
         if command == "myinfo":
             command = "me"
         if command == "rmemby":
@@ -4038,10 +4051,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         if not chat_id or not tg_user_id:
             return
         if self._anonymous_sender(message):
-            if (text and text.split()[0].lower().split('@', 1)[0] == '/kk'
+            if (text and text.split()[0].lower().split('@', 1)[0] in ('/kk', '/transfer', '/转账')
                     and not self._addressed_to_other_bot(text)
                     and self._group_chat_allowed(message.get('chat') or {})):
-                await self.send(chat_id, '⛔ 无法核实匿名管理身份，请使用本人账号发送 /kk。')
+                await self.send(chat_id, '⛔ 无法核实匿名管理身份，请使用本人账号发送 /kk。'
+                                if text.split()[0].lower().split('@', 1)[0] == '/kk'
+                                else '⛔ 无法核实匿名管理身份，请使用本人账号发送 /transfer。')
             return
         custom_password = (self._private_chat(message) and self._password_custom_waiting(chat_id)
                            and not self._password_navigation(str(message.get("text") or "")))
@@ -4147,6 +4162,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 await self._show(chat_id, "这条转发隐藏了发送者身份，请发送对方的 Telegram 数字 ID。",
                                  [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
                 return
+        if in_group and await self._group_points_command(message):
+            return
         text = self._with_reply_target(text, message)
         if waiting and text and not text.startswith("/"):
             if in_group:
@@ -4239,6 +4256,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         tg_user_id = str(from_user.get("id") or "")
         tg_name = from_user.get("first_name") or "朋友"
         callback_id = str(callback.get("id") or "")
+        if data.startswith(GROUP_POINTS_CALLBACKS) and from_user.get('is_bot') is not False:
+            await self._answer_callback(callback_id, '无法核实真实操作者身份。')
+            return
         self._remember_tg_user(from_user)
         tg_name = self._tg_profiles.get(tg_user_id, {}).get('display_name') or tg_name
         await self._run_callback(data, chat_id, message_id, callback_id,
@@ -4252,6 +4272,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 await self._answer_callback(callback_id)
             return
         in_group = not self._private_chat(message)
+        if data.startswith(GROUP_POINTS_CALLBACKS) and (not in_group or not self._group_chat_allowed(message.get('chat') or {}) or self._anonymous_sender(message)):
+            await self._answer_callback(callback_id, '仅限原授权群的确认卡操作。')
+            return
         if in_group:
             if self._anonymous_sender(message) or not tg_user_id:
                 if callback_id:
@@ -4270,6 +4293,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
     async def _run_bound_callback(self, data: str, chat_id: Any, message_id: Any,
                                    callback_id: str, tg_user_id: str, tg_name: str,
                                    message: dict[str, Any], in_group: bool) -> None:
+        if data.startswith(GROUP_POINTS_CALLBACKS):
+            await self._group_points_callback(data, message, tg_user_id, callback_id)
+            return
         # Committed receipt retries are recipient-only transport work, never
         # a replay of registration or an administrative operation.
         if data == 'urank_close' or data.startswith('urank:'):

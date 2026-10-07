@@ -14,6 +14,17 @@ def migrate(db):
         request_json TEXT NOT NULL, result_json TEXT NOT NULL,
         PRIMARY KEY(scope,request_id,user_id)
     );
+    CREATE TABLE IF NOT EXISTS group_points_intents (
+        nonce TEXT PRIMARY KEY, chat_id TEXT NOT NULL,
+        command_message_id INTEGER NOT NULL, reply_message_id INTEGER NOT NULL,
+        actor_tg_id TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+        to_tg_id TEXT NOT NULL, to_user_id TEXT NOT NULL, to_name TEXT NOT NULL,
+        amount INTEGER NOT NULL CHECK(amount>0), fee INTEGER NOT NULL,
+        mode TEXT NOT NULL CHECK(mode IN ('transfer','mint')), thread_id INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL,
+        confirmation_message_id INTEGER, status TEXT NOT NULL DEFAULT 'pending',
+        result_json TEXT NOT NULL DEFAULT '{}', UNIQUE(chat_id,command_message_id)
+    );
     CREATE TABLE IF NOT EXISTS inventory (
         id INTEGER PRIMARY KEY AUTOINCREMENT, emby_user_id TEXT NOT NULL,
         spec_json TEXT NOT NULL, source TEXT NOT NULL, created_at INTEGER NOT NULL,
