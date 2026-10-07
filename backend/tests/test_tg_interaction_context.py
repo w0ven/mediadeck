@@ -95,7 +95,7 @@ def env(tmp_path):
 
 async def command(env, text, chat=GROUP, user=ADMIN, reply=None, thread=None):
     message = {'chat': {'id': chat, 'type': 'supergroup' if chat < 0 else 'private'},
-               'from': {'id': user, 'username': 'local_user'}, 'message_id': 20, 'text': text}
+               'from': {'id': user, 'username': 'local_user', 'is_bot': False}, 'message_id': 20, 'text': text}
     if reply:
         message['reply_to_message'] = {'message_id': reply, 'from': {'is_bot': True, 'id': 123}}
     if thread:
@@ -112,7 +112,7 @@ async def click(env, action, mid, chat=GROUP, user=ADMIN, thread=None):
         message['message_thread_id'] = thread
         message['is_topic_message'] = True
     await env.bot._dispatch_update({'callback_query': {'id': 'callback', 'data': action,
-                    'from': {'id': user}, 'message': message}})
+                    'from': {'id': user, 'is_bot': False}, 'message': message}})
     key = env.bot._session_key(chat, user, group=chat < 0, thread_id=thread)
     return env.bot._panel.get(key)
 

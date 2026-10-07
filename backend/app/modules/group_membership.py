@@ -550,7 +550,8 @@ class GroupMembership:
             await self._persist(key, marker, key=state_key)
             return True
 
-    async def gate(self, chat_id: Any, tg_id: str) -> bool:
+    async def gate(self, chat_id: Any, tg_id: str, *, fresh_message: bool = False,
+                   reply_to_message_id: int | None = None) -> bool:
         if not self.rules()['gate_enabled']:
             return True
         member = await self._io(self.bot._member_for_chat, tg_id)
@@ -577,7 +578,12 @@ class GroupMembership:
         buttons.append([{'text': '重新检查', 'callback_data': 'membership_recheck'}])
         if result['state'] == 'unknown':
             lines.append('请稍后重试或联系管理员。')
-        await self.bot._show(chat_id, '\n'.join(lines), buttons)
+        if fresh_message:
+            lines.insert(0, f'<a href="tg://user?id={int(tg_id)}">发起人</a> 的签到验证')
+            await self.bot.send_message(chat_id, '\n'.join(lines), buttons,
+                                        reply_to_message_id=reply_to_message_id)
+        else:
+            await self.bot._show(chat_id, '\n'.join(lines), buttons)
         return False
 
 

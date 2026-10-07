@@ -54,7 +54,7 @@ from app.modules.bot_views import (
 from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
-from app.modules.group_points import GroupPointsBotMixin
+from app.modules.group_points import GroupPointsBotMixin, GroupPointsError, reliable_user
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
 from app.modules.report_delivery import CALL_DELIVERY
@@ -886,7 +886,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
 
     async def send_message(self, chat_id: str | int, text: str,
                            keyboard: list[list[dict[str, str]]] | None = None, *,
-                           thread_id: int | None = None) -> int | None:
+                           thread_id: int | None = None,
+                           reply_to_message_id: int | None = None) -> int | None:
         """Like send(), but returns the message id.
 
         The request fan-out needs it: when one uploader claims, every other
@@ -904,6 +905,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             payload["reply_markup"] = {"inline_keyboard": keyboard}
         if thread_id is not None:
             payload['message_thread_id'] = thread_id
+        if reply_to_message_id is not None:
+            payload['reply_parameters'] = {'message_id': reply_to_message_id}
         result = await self._call("sendMessage", payload)
         if isinstance(result, dict) and result.get("message_id"):
             self._remember_menu(chat_id, result["message_id"], keyboard)
@@ -1679,37 +1682,57 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             lines.append("\n流水暂不可用。" if rows is None else "\n暂无积分记录。")
         return "\n".join(lines)
 
+    @staticmethod
+    def _checkin_command(text: str):
+        return re.fullmatch(r"(?:签到|/(?:签到|checkin)(?:@([A-Za-z0-9_]+))?)", text, re.IGNORECASE)
+
+    async def _checkin_feedback(self, chat_id: Any, message_id: int,
+                                text: str, name: str = "") -> None:
+        actor = _ACTOR.get()
+        if _GROUP.get() and actor:
+            text = f'<a href="tg://user?id={actor}">{escape(name or "发起人")}</a> 的签到\n\n' + text
+        payload = {"chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                   "disable_web_page_preview": True,
+                   "reply_parameters": {"message_id": message_id}}
+        if _THREAD.get():
+            payload["message_thread_id"] = _THREAD.get()
+        # A receipt is not a menu: do not edit or replace the user's old panel.
+        await self._call("sendMessage", payload)
+
     async def _checkin(self, chat_id: Any, message_id: int,
-                       member: dict[str, Any]) -> None:
+                       member: dict[str, Any] | None, name: str = "") -> None:
+        async def feedback(text):
+            await self._checkin_feedback(chat_id, message_id, text, name)
+
+        if not member:
+            await feedback("🔗 请先私聊Bot绑定系统账号，再来签到。")
+            return
         plugin = self._plugin("checkin")
-        if plugin is None or not self._plugin_on("checkin"):
-            await self._edit(chat_id, message_id, "签到功能未开启。",
-                             self.member_menu())
+        if plugin is None:
+            await feedback("⏳ 签到服务暂不可用，请稍后重试或联系管理员。")
+            return
+        if not self._plugin_on("checkin"):
+            await feedback("签到功能未开启，请联系管理员。")
             return
         user_id = str(member.get("emby_user_id") or "")
         try:
             result = plugin.checkin(user_id)
         except Exception as exc:  # noqa: BLE001 - shown to a member
-            await self._edit(chat_id, message_id, f"❌ 签到失败：{_public_error(exc)}",
-                             self.member_menu())
+            await feedback(f"❌ 签到失败，请稍后重试：{_public_error(exc)}")
             return
         if not result.get("ok"):
-            await self._edit(
-                chat_id, message_id,
+            await feedback(
                 f"📅 {escape(str(result.get('reason') or '今天已签到'))}\n\n"
-                f"当前余额：<b>{result.get('balance', self._balance(user_id))}</b>",
-                self.member_menu())
+                f"当前余额：<b>{result.get('balance', self._balance(user_id))}</b>")
             return
         bonus = int(result.get("bonus") or 0)
         extra = f"（含连签奖励 +{bonus}）" if bonus else ""
-        await self._edit(
-            chat_id, message_id,
+        await feedback(
             f"✅ <b>签到成功</b>\n\n积分变动：<b>{int(result.get('points') or 0):+d}</b>{extra}\n"
             f"基础：{result.get('base')} × {result.get('multiplier',1)} · 连签：+{bonus}\n"
             + (f"掉落：{escape(str((result.get('drop_spec') or {}).get('name')))}（已入包）\n" if result.get('drop_spec') else "")
             + f"连续签到：<b>{result.get('streak')}</b> 天\n"
-            f"当前余额：<b>{result.get('balance')}</b>",
-            self.member_menu())
+            f"当前余额：<b>{result.get('balance')}</b>")
 
     def _node_snapshot(self) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
@@ -4051,6 +4074,22 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         text = str(message.get("text") or "").strip()
         if not chat_id or not tg_user_id:
             return
+        checkin = self._checkin_command(text)
+        if checkin:
+            try:
+                reliable_user(message)
+            except GroupPointsError:
+                return
+            if (message.get('chat') or {}).get('type') not in ('private', 'group', 'supergroup'):
+                return
+            if type(message.get('message_id')) is not int or message['message_id'] <= 0:
+                return
+            if self._private_chat(message) and chat_id != from_user['id']:
+                return
+            self._check_bot_identity()
+            suffix = checkin.group(1)
+            if suffix and (not self._bot_username or suffix.lower() != self._bot_username.lower()):
+                return
         if self._anonymous_sender(message):
             if (text and text.split()[0].lower().split('@', 1)[0] in ('/kk', '/transfer', '/转账')
                     and not self._addressed_to_other_bot(text)
@@ -4079,6 +4118,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
     async def _handle_bound_message(self, message: dict[str, Any], chat_id: Any,
                                     tg_user_id: str, tg_username: str, tg_name: str,
                                     text: str, in_group: bool) -> None:
+        if self._checkin_command(text):
+            member = self._member_for_chat(tg_user_id)
+            if not member or await self.membership.gate(
+                    chat_id, tg_user_id, fresh_message=True,
+                    reply_to_message_id=message['message_id']):
+                await self._checkin(chat_id, message['message_id'], member, tg_name)
+            return
         command = text.split()[0].lower().split('@', 1)[0] if text else ''
         reply = (message.get('reply_to_message') or {}).get('message_id')
         waiting = self._pending.get(self._pkey(chat_id))
@@ -4257,6 +4303,18 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         tg_user_id = str(from_user.get("id") or "")
         tg_name = from_user.get("first_name") or "朋友"
         callback_id = str(callback.get("id") or "")
+        if data == 'checkin':
+            try:
+                reliable_user({'from': from_user})
+            except GroupPointsError:
+                await self._answer_callback(callback_id, '无法核实真实操作者身份。')
+                return
+            if ((message.get('chat') or {}).get('type') not in ('private', 'group', 'supergroup')
+                    or type(message_id) is not int or message_id <= 0
+                    or (self._private_chat(message) and chat_id != from_user['id'])
+                    or message.get('sender_chat') or message.get('is_automatic_forward')):
+                await self._answer_callback(callback_id)
+                return
         if data.startswith(GROUP_POINTS_CALLBACKS) and from_user.get('is_bot') is not False:
             await self._answer_callback(callback_id, '无法核实真实操作者身份。')
             return
@@ -4372,6 +4430,14 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         owner = self._card_owner(chat_id, message_id)
         if in_group and owner != str(tg_user_id):
             await self._answer_callback(callback_id, '这不是你的操作卡片，请发送自己的命令。')
+            return
+        if data == 'checkin':
+            await self._answer_callback(callback_id)
+            member = self._member_for_chat(tg_user_id)
+            if not member or await self.membership.gate(
+                    chat_id, tg_user_id, fresh_message=True,
+                    reply_to_message_id=int(message_id)):
+                await self._checkin(chat_id, int(message_id), member, tg_name)
             return
         panel = self._admin_panel(chat_id, message_id)
         targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
@@ -4711,7 +4777,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 await self._edit(chat_id,message_id,'称号操作失败：'+_public_error(exc),self.bag_menu())
             return
         if data == "checkin":
-            await self._checkin(chat_id, message_id, member)
+            await self._checkin(chat_id, message_id, member, tg_name)
             return
         if data == "transfer":
             await self._transfer_start(chat_id, message_id)

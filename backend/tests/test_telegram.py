@@ -956,6 +956,15 @@ def _points_bot(members=None, *, enabled=None, plugins=None, points=None,
         return True
 
     bot._edit = fake_edit  # type: ignore[assignment]
+    bot.posts = []  # type: ignore[attr-defined]
+
+    async def fake_call(method, payload=None, **kwargs):
+        if method == "sendMessage":
+            bot.posts.append(payload)  # type: ignore[attr-defined]
+            return {"message_id": 3, "chat": {"id": payload["chat_id"]}}
+        return True
+
+    bot._call = fake_call  # isolated transport for new check-in receipts
     return bot
 
 
@@ -993,7 +1002,9 @@ def test_checking_in_from_the_bot_reports_points_and_streak() -> None:
     asyncio.run(bot._checkin(1, 2, member))
 
     assert plugin.calls == ["u1"]
-    text = bot.edits[0]  # type: ignore[attr-defined]
+    assert bot.edits == []  # type: ignore[attr-defined]
+    text = bot.posts[0]["text"]  # type: ignore[attr-defined]
+    assert bot.posts[0]["reply_parameters"] == {"message_id": 2}  # type: ignore[attr-defined]
     assert "签到成功" in text and "+15" in text
     assert "2" in text and "115" in text
 
@@ -1004,7 +1015,8 @@ def test_a_second_checkin_says_so_instead_of_paying_again() -> None:
     bot = _points_bot(enabled={"checkin"}, plugins={"checkin": plugin})
 
     asyncio.run(bot._checkin(1, 2, {"emby_user_id": "u1"}))
-    assert "今天已签到" in bot.edits[0]  # type: ignore[attr-defined]
+    assert bot.edits == []  # type: ignore[attr-defined]
+    assert "今天已签到" in bot.posts[0]["text"]  # type: ignore[attr-defined]
 
 
 def test_checkin_is_refused_when_the_plugin_is_off() -> None:
@@ -1012,7 +1024,8 @@ def test_checkin_is_refused_when_the_plugin_is_off() -> None:
     bot = _points_bot(plugins={"checkin": plugin})  # registered but disabled
     asyncio.run(bot._checkin(1, 2, {"emby_user_id": "u1"}))
     assert plugin.calls == []
-    assert "未开启" in bot.edits[0]  # type: ignore[attr-defined]
+    assert bot.edits == []  # type: ignore[attr-defined]
+    assert "未开启" in bot.posts[0]["text"]  # type: ignore[attr-defined]
 
 
 def test_transfer_asks_for_a_name_then_an_amount_then_confirmation() -> None:
