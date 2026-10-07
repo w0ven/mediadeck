@@ -1755,7 +1755,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
             rows.append(line)
         return rows
 
-    async def _nodes_text(self) -> str:
+    async def _nodes_text(self, member: dict[str, Any] | None = None) -> str:
         """Member-facing playback addresses, then optional node load.
 
         Custom lines are operator copy: labels and URLs are escaped, never
@@ -1763,7 +1763,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
         (public Emby URL plus load) so existing deployments do not go blank.
         """
         cfg = self._cfg()
-        custom = list(cfg.get("playback_lines") or [])
+        eligible = bool(member and member.get("group_id") == WHITELIST_GROUP_ID
+                        and member.get("state", member.get("status")) == "active")
+        custom = [line for line in (cfg.get("playback_lines") or [])
+                  if not line.get("whitelist_only") or eligible]
         note = str(cfg.get("playback_lines_note") or "").strip()
         show_load = bool(cfg.get("playback_lines_show_load", True))
         parts = ["🌐 <b>播放线路</b>\n"]
@@ -4535,7 +4538,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                              [[{"text": "◀ 背包流水", "callback_data": "bag_records"}]])
             return
         if data == "me_nodes":
-            await self._edit(chat_id, message_id, await self._nodes_text(),
+            await self._edit(chat_id, message_id, await self._nodes_text(member),
                              self.nodes_menu())
             return
         if data == "me_routing":

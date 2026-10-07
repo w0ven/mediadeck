@@ -73,8 +73,13 @@ def normalize_playback_lines(raw: Any) -> list[dict[str, str]]:
         hint = str(item.get("hint") or "").strip()
         if len(hint) > PLAYBACK_LINE_HINT_MAX or any(ord(c) < 32 for c in hint):
             raise ConfigError(f"线路说明最长 {PLAYBACK_LINE_HINT_MAX} 字")
+        restricted = item.get("whitelist_only", False)
+        if not isinstance(restricted, bool):
+            raise ConfigError("线路 whitelist_only 必须是布尔值")
         seen.add(origin)
         row = {"label": label, "url": origin}
+        if restricted:
+            row["whitelist_only"] = True
         if hint:
             row["hint"] = hint
         out.append(row)
@@ -482,7 +487,8 @@ class SettingsService:
                 {"id": e["id"], "origin": e["origin"],
                  "stream_origin": e.get("stream_origin") or "",
                  "node": e.get("node") or "",
-                 "proxy_key_set": bool(e.get("proxy_key"))}
+                 "proxy_key_set": bool(e.get("proxy_key")),
+                 **({"whitelist_only": True} if e.get("whitelist_only") else {})}
                 for e in cfg["external_entries"]
             ],
         }

@@ -47,7 +47,7 @@ def https_origin(value: Any) -> str:
 
 def validate_entries(raw: Any, current: list[dict[str, Any]],
                      official_url: str = "",
-                     node_names: set[str] | None = None) -> list[dict[str, str]]:
+                     node_names: set[str] | None = None) -> list[dict[str, Any]]:
     if not isinstance(raw, list) or len(raw) > MAX_ENTRIES:
         raise ConfigError(f"外部入口必须是列表，最多 {MAX_ENTRIES} 个")
     previous = {entry["id"]: entry for entry in current}
@@ -86,11 +86,16 @@ def validate_entries(raw: Any, current: list[dict[str, Any]],
                 raise ConfigError(f"固定节点 {pinned_node} 不在节点池中")
             if stream_origin in origins or stream_origin == origin or stream_origin == official:
                 raise ConfigError("推流域名不能与入口域名、官方 Emby 入口或其他入口重复")
+        restricted = entry.get("whitelist_only", previous.get(entry_id, {}).get("whitelist_only", False))
+        if not isinstance(restricted, bool):
+            raise ConfigError("whitelist_only 必须是布尔值")
         # Keys are minted by the panel, never accepted from a submitted form.
         # A partial edit or a GET -> PUT round trip keeps the existing key.
         old_key = previous.get(entry_id, {}).get("proxy_key", "")
         row = {"id": entry_id, "origin": origin,
                "proxy_key": secrets.token_urlsafe(32) if rotate or not old_key else old_key}
+        if restricted:
+            row["whitelist_only"] = True
         if stream_origin:
             row["stream_origin"] = stream_origin
             row["node"] = pinned_node
@@ -108,6 +113,7 @@ class PlaybackEntry:
     # Pinned mode (CDN without path routing): one stream domain -> one node.
     stream_origin: str = ""
     node: str = ""
+    whitelist_only: bool = False
 
     @property
     def cache_scope(self) -> str:
@@ -137,7 +143,8 @@ def identify_entry(headers: Any, entries: list[dict[str, Any]]) -> PlaybackEntry
                 and secrets.compare_digest(keys[0].encode(), entry["proxy_key"].encode())):
             return PlaybackEntry(id=entry["id"], origin=entry["origin"],
                                  stream_origin=entry.get("stream_origin") or "",
-                                 node=entry.get("node") or "")
+                                 node=entry.get("node") or "",
+                                 whitelist_only=bool(entry.get("whitelist_only", False)))
     return None
 
 
