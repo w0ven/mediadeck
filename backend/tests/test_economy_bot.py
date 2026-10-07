@@ -155,3 +155,25 @@ def test_owned_card_and_title_pagers_keep_old_items_reachable_and_messages_bound
         assert env.tags.tag == "称号0"
 
     asyncio.run(run())
+
+
+def test_bot_empty_state_and_failure_never_fake_success(env):
+    async def run():
+        mid = await command(env, "/start", chat=VIEWER, user=VIEWER)
+        # Empty inventory
+        await click(env, "inventory", mid, chat=VIEWER, user=VIEWER)
+        text = env.tg.text(VIEWER, mid)
+        assert "暂无道具" in text and "已使用" not in text
+
+        # Empty titles
+        await click(env, "titles", mid, chat=VIEWER, user=VIEWER)
+        text = env.tg.text(VIEWER, mid)
+        assert "暂无可用称号" in text
+
+        # Transfer confirmation failure with timeout / cancelled state
+        await click(env, "transfer", mid, chat=VIEWER, user=VIEWER)
+        await click(env, "transfer_ok", mid, chat=VIEWER, user=VIEWER)
+        text = env.tg.text(VIEWER, mid)
+        assert "转账已取消或超时" in text and "转账成功" not in text
+
+    asyncio.run(run())

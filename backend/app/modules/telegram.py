@@ -1943,28 +1943,33 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                       key=lambda r: (r['used_at'] is not None, -r['id']))
         pages = max(1, (len(rows) + 9) // 10)
         page = max(0, min(int(page), pages - 1))
-        lines = [f'🎒 <b>我的道具</b>（不可赠送） · {page+1}/{pages}页']
+        lines = [f'🎒 <b>我的道具</b>（不可赠送） · {page+1}/{pages}页', '<i>道具绑定本人账号，不可赠送</i>\n']
         keyboard = []
         for row in rows[page*10:(page+1)*10]:
             spec = row['spec']
-            lines.append(f"#{row['id']} {escape(spec['name'])} · 期限 {spec['duration_days']} 天（0为永久）")
+            dur_label = '永久' if not spec['duration_days'] else f"{spec['duration_days']} 天"
+            lines.append(f"📦 <b>{escape(spec['name'])}</b> <code>#{row['id']}</code>")
+            lines.append(f"   · 规格期限：{dur_label}")
             if row['used_at'] is None:
-                keyboard.append([dict(text='使用 '+spec['name'], callback_data=f"card:{row['id']}")])
+                lines.append("   · 状态：<b>未使用</b>")
+                keyboard.append([dict(text='⚡ 使用 '+spec['name'], callback_data=f"card:{row['id']}")])
             else:
-                lines.append('已使用' + (' · 到期 '+time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600))+'（北京）' if row['expires_at'] else ''))
+                expiry_str = (' · ' + time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600)) + ' 到期' if row['expires_at'] else ' · 永久')
+                lines.append(f"   · 状态：已使用{expiry_str}")
             if row['expiry_error']:
-                lines.append('⚠ '+escape(row['expiry_error']))
+                lines.append(f"   · ⚠️ 异常：{escape(row['expiry_error'])}")
+            lines.append("")
         if not rows:
-            lines.append('暂无道具，购买新商品入包后使用。')
+            lines.append('暂无道具。前往商城兑换新道具卡，购买后存入背包。')
         pager = []
         if page > 0:
-            pager.append(dict(text='上一页', callback_data=f'invpage:{page-1}'))
+            pager.append(dict(text='◀ 上一页', callback_data=f'invpage:{page-1}'))
         if page+1 < pages:
-            pager.append(dict(text='下一页', callback_data=f'invpage:{page+1}'))
+            pager.append(dict(text='下一页 ▶', callback_data=f'invpage:{page+1}'))
         if pager:
             keyboard.append(pager)
-        keyboard.append([dict(text='◀ 背包', callback_data='bag')])
-        await self._edit(chat_id, message_id, '\n'.join(lines), keyboard)
+        keyboard.append([dict(text='◀ 返回背包', callback_data='bag')])
+        await self._edit(chat_id, message_id, '\n'.join(lines).strip(), keyboard)
 
     async def _card_use(self,chat_id,message_id,member,card_id):
         try:
@@ -1992,23 +1997,31 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
                 if r['revoked_at'] is None and (r['expires_at'] is None or r['expires_at'] > time.time())]
         pages = max(1, (len(rows)+19)//20)
         page = max(0, min(int(page), pages-1))
-        lines = [f'<b>我的称号</b> · 免费切换/取消 · {page+1}/{pages}页']
+        lines = [f'🏷️ <b>我的称号</b> · 免费切换/取消 · {page+1}/{pages}页', '<i>支持普通成员自定义头衔，佩戴与切换免费</i>\n']
         keyboard = []
         for row in rows[page*20:(page+1)*20]:
-            lines.append(escape(row['tag']) + (' · 已选择' if row['worn'] else '') +
-                         (' · 永久' if not row['expires_at'] else ' · 到期 '+time.strftime('%Y-%m-%d %H:%M',time.gmtime(row['expires_at']+8*3600))+'（北京）'))
-            keyboard.append([dict(text='佩戴 '+row['tag'], callback_data=f"wear:{row['id']}")])
-        for row in self._titles.states(member['emby_user_id']):
-            lines.append('TG同步：'+escape(row['status'])+' '+escape(row['error']))
+            exp_text = '永久有效' if not row['expires_at'] else time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600)) + ' 到期'
+            status_text = ' [当前佩戴]' if row['worn'] else ''
+            lines.append(f"· <b>{escape(row['tag'])}</b>{status_text} · {exp_text}")
+            keyboard.append([dict(text=('✓ 已佩戴 ' if row['worn'] else '🏷️ 佩戴 ') + row['tag'], callback_data=f"wear:{row['id']}")])
+        tag_states = self._titles.states(member['emby_user_id'])
+        if tag_states:
+            lines.append("\n<b>群标签同步状态</b>：")
+            for row in tag_states:
+                status_desc = {'synced': '已同步至群组 (synced)', 'pending': '等待后台同步 (pending)', 'retry': '网络波动重试中 (retry)', 'protected': '管理员手改保护中 (protected)', 'failed': '同步失败 (failed)'}.get(row['status'], row['status'])
+                err_desc = f" ({escape(row['error'])})" if row['error'] else ""
+                lines.append(f"· 状态：{status_desc}{err_desc}")
+        if not rows:
+            lines.append('\n暂无可用称号。使用背包中的称号卡可创建个性化称号。')
         pager = []
         if page > 0:
-            pager.append(dict(text='上一页', callback_data=f'titlespage:{page-1}'))
+            pager.append(dict(text='◀ 上一页', callback_data=f'titlespage:{page-1}'))
         if page+1 < pages:
-            pager.append(dict(text='下一页', callback_data=f'titlespage:{page+1}'))
+            pager.append(dict(text='下一页 ▶', callback_data=f'titlespage:{page+1}'))
         if pager:
             keyboard.append(pager)
-        keyboard += [[dict(text='取消佩戴', callback_data='wear:none'), dict(text='重试同步', callback_data='title_retry')],
-                     [dict(text='◀ 背包', callback_data='bag')]]
+        keyboard += [[dict(text='✕ 取消佩戴', callback_data='wear:none'), dict(text='🔄 重试同步', callback_data='title_retry')],
+                     [dict(text='◀ 返回背包', callback_data='bag')]]
         await self._edit(chat_id, message_id, '\n'.join(lines), keyboard)
 
     # -- transfer -------------------------------------------------------------

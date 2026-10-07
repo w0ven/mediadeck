@@ -103,5 +103,25 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
                 "document.querySelector('[data-plugin=checkin]').textContent.includes('已保存')"
             )
             assert app.state.plugins.config("checkin")["double_ppm"] == 123456
+
+            # Verify itemized editor and mobile viewport behavior
+            page.locator("[data-add-tier='checkin']").click()
+            new_row_input = page.locator("[data-tier-rows='checkin'] tr:last-child [data-tier-days]")
+            new_row_input.fill("45")
+            new_bonus_input = page.locator("[data-tier-rows='checkin'] tr:last-child [data-tier-bonus]")
+            new_bonus_input.fill("88")
+            # Close advanced details to ensure itemized editor takes precedence
+            page.evaluate("document.querySelector('#details-pl-checkin-streak_tiers').removeAttribute('open')")
+            page.locator('[data-plugin="checkin"] [data-act="save"]').click()
+            page.wait_for_function("document.querySelector('[data-plugin=checkin]').textContent.includes('已保存')")
+            saved_tiers = app.state.plugins.config("checkin")["streak_tiers"]
+            assert '"days":45' in saved_tiers or '"days": 45' in saved_tiers
+
+            # Check mobile responsive width doesn't cause body horizontal overflow
+            page.set_viewport_size(dict(width=390, height=844))
+            scroll_width = page.evaluate("document.body.scrollWidth")
+            inner_width = page.evaluate("window.innerWidth")
+            assert scroll_width <= inner_width + 1
+
             assert not errors
             browser.close()

@@ -287,3 +287,48 @@ body.member-drawer-open{overflow:hidden}#member-detail:not(.hidden){position:fix
   font-size: 11px;
   line-height: 1.5;
 }
+
+/* Itemized Editor Styles (Hard Glass) */
+.item-editor-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+.item-editor-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.item-editor-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0 6px;
+}
+.item-editor-table tr {
+  background: rgba(13, 19, 33, 0.55);
+  border: 1px solid rgba(168, 182, 221, 0.12);
+}
+.item-editor-table td {
+  padding: 6px 8px;
+  border: none;
+  vertical-align: middle;
+}
+.item-editor-table input, .item-editor-table select {
+  font-size: 11px;
+  min-height: 28px;
+  padding: 3px 6px;
+  width: 100%;
+  max-width: 100%;
+}
+.item-editor-table .btn {
+  min-height: 28px;
+  padding: 3px 8px;
+}
+.item-editor-empty {
+  font-size: 11px;
+  color: #8795ad;
+  padding: 10px 0;
+  text-align: center;
+}

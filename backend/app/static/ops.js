@@ -1274,6 +1274,114 @@ function pluginScheduleText(c) {
   return '仅手动';
 }
 
+function renderItemizedEditor(pid, key, rawJson) {
+  let items = [];
+  try { items = JSON.parse(rawJson); } catch (e) { items = null; }
+  if (!Array.isArray(items)) return '';
+
+  if (key === 'streak_tiers') {
+    return `
+      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
+        <div class="item-editor-header">
+          <span style="font-weight:600;font-size:12px">连签阶梯设置</span>
+          <button type="button" class="btn sm" data-add-tier="${esc(pid)}">+ 添加阶梯</button>
+        </div>
+        <table class="item-editor-table">
+          <thead>
+            <tr>
+              <th style="width:45%">连签达标天数</th>
+              <th style="width:45%">额外奖励积分</th>
+              <th style="width:10%"></th>
+            </tr>
+          </thead>
+          <tbody data-tier-rows="${esc(pid)}">
+            ${items.map((t, idx) => `
+              <tr data-tier-idx="${idx}">
+                <td><input type="number" min="1" value="${esc(t.days ?? '')}" data-tier-days></td>
+                <td><input type="number" min="0" value="${esc(t.bonus ?? '')}" data-tier-bonus></td>
+                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  if (key === 'drops') {
+    return `
+      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
+        <div class="item-editor-header">
+          <span style="font-weight:600;font-size:12px">活动掉落设置</span>
+          <button type="button" class="btn sm" data-add-drop="${esc(pid)}">+ 添加掉落</button>
+        </div>
+        <table class="item-editor-table">
+          <thead>
+            <tr>
+              <th style="width:30%">概率(ppm/百万分比)</th>
+              <th style="width:60%">掉落类型 / 商品</th>
+              <th style="width:10%"></th>
+            </tr>
+          </thead>
+          <tbody data-drop-rows="${esc(pid)}">
+            ${items.map((d, idx) => {
+              const ppm = d.ppm ?? 0;
+              const hasItem = d.item_id !== undefined;
+              const kind = hasItem ? 'item_id' : (d.spec?.kind || 'invite_card');
+              const specName = d.spec?.name || '';
+              return `
+              <tr data-drop-idx="${idx}">
+                <td><input type="number" min="1" max="1000000" value="${esc(ppm)}" data-drop-ppm></td>
+                <td>
+                  <div style="display:flex;gap:6px;align-items:center">
+                    <select data-drop-kind style="width:130px">
+                      <option value="invite_card" ${kind==='invite_card'?'selected':''}>邀请码卡</option>
+                      <option value="bandwidth_card" ${kind==='bandwidth_card'?'selected':''}>带宽卡</option>
+                      <option value="streams_card" ${kind==='streams_card'?'selected':''}>同播卡</option>
+                      <option value="title_card" ${kind==='title_card'?'selected':''}>称号卡</option>
+                      <option value="item_id" ${hasItem?'selected':''}>商品ID</option>
+                    </select>
+                    <input type="text" placeholder="${hasItem?'数字商品ID':'道具自定义名称'}" value="${esc(hasItem ? d.item_id : specName)}" data-drop-val style="flex:1">
+                  </div>
+                </td>
+                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  if (key === 'holidays') {
+    return `
+      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
+        <div class="item-editor-header">
+          <span style="font-weight:600;font-size:12px">节日特惠设置</span>
+          <button type="button" class="btn sm" data-add-holiday="${esc(pid)}">+ 添加节日</button>
+        </div>
+        <table class="item-editor-table">
+          <thead>
+            <tr>
+              <th style="width:40%">日期(YYYY-MM-DD)</th>
+              <th style="width:50%">节日名称</th>
+              <th style="width:10%"></th>
+            </tr>
+          </thead>
+          <tbody data-holiday-rows="${esc(pid)}">
+            ${items.map((h, idx) => `
+              <tr data-holiday-idx="${idx}">
+                <td><input type="date" value="${esc(h.date || '')}" data-holiday-date></td>
+                <td><input type="text" value="${esc(h.name || '')}" placeholder="节日名称" data-holiday-name></td>
+                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
+              </tr>
+            `).join('')}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
+  return '';
+}
+
 function pluginField(pid, f, value) {
   const id = `pl-${pid}-${f.key}`;
   const v = value === undefined ? f.default : value;
@@ -1289,18 +1397,27 @@ function pluginField(pid, f, value) {
       `<option value="${esc(o.value)}" ${o.value === v ? 'selected' : ''}>${esc(o.label)}</option>`
     ).join('')}</select>`;
   } else if (f.kind === 'text') {
-    let smartHelper = '';
-    if (f.key === 'streak_tiers') {
-      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 示例：<code>[{"days":1,"bonus":0},{"days":3,"bonus":5},{"days":7,"bonus":15},{"days":30,"bonus":50}]</code></div>`;
-    } else if (f.key === 'drops') {
-      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 掉落规格示例：<code>[{"ppm":5000,"spec":{"name":"邀请码卡","kind":"invite_card","amount":1,"duration_days":0}}]</code> 或使用 <code>item_id</code></div>`;
-    } else if (f.key === 'holidays') {
-      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 预置 2026/2027 节日，可对单日覆盖 <code>double_ppm</code>、<code>multiplier</code> 或 <code>drops</code></div>`;
+    const isSpecialJson = ['streak_tiers', 'drops', 'holidays'].includes(f.key);
+    if (isSpecialJson) {
+      const itemizedHtml = renderItemizedEditor(pid, f.key, v);
+      input = `
+        <div class="plugin-json-smart" data-field-wrap="${esc(pid)}-${esc(f.key)}">
+          <div class="item-editor-container" id="wrap-items-${esc(id)}">
+            ${itemizedHtml}
+          </div>
+          <div style="margin-top:6px">
+            <details class="advanced-config" id="details-${esc(id)}" open>
+              <summary style="font-size:11px;color:#8795ad;cursor:pointer">⚙️ 高级模式：编辑原始 JSON 文本</summary>
+              <div style="margin-top:8px">
+                <textarea id="${id}" rows="3" spellcheck="false" style="width:100%;min-width:240px;box-sizing:border-box">${esc(v)}</textarea>
+                <div class="muted" style="font-size:10px;margin-top:4px">保存时若处于高级展开状态将直接以文本框内容为准，否则优先同步条目编辑器的修改。</div>
+              </div>
+            </details>
+          </div>
+        </div>`;
+    } else {
+      input = `<textarea id="${id}" rows="3" style="flex:1;min-width:240px">${esc(v)}</textarea>`;
     }
-    input = `<div class="plugin-json-smart">
-      <textarea id="${id}" rows="3" spellcheck="false" style="flex:1;min-width:240px">${esc(v)}</textarea>
-      ${smartHelper}
-    </div>`;
   } else {
     input = `<input id="${id}" value="${esc(v)}" style="flex:1;min-width:200px">`;
   }
@@ -1386,9 +1503,159 @@ function pluginCardEl(pid) {
   return document.querySelector(`.plugin-card[data-plugin="${pid}"]`);
 }
 
+function bindItemizedEditor(el, pid) {
+  // Bind Add Buttons
+  const addTier = el.querySelector(`[data-add-tier="${pid}"]`);
+  if (addTier) {
+    addTier.onclick = () => {
+      const tbody = el.querySelector(`[data-tier-rows="${pid}"]`);
+      if (!tbody) return;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="number" min="1" value="1" data-tier-days></td>
+        <td><input type="number" min="0" value="0" data-tier-bonus></td>
+        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
+      tbody.appendChild(tr);
+      syncItemizedToTextarea(el, pid, 'streak_tiers');
+    };
+  }
+
+  const addDrop = el.querySelector(`[data-add-drop="${pid}"]`);
+  if (addDrop) {
+    addDrop.onclick = () => {
+      const tbody = el.querySelector(`[data-drop-rows="${pid}"]`);
+      if (!tbody) return;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td><input type="number" min="1" max="1000000" value="1000" data-drop-ppm></td>
+        <td>
+          <div style="display:flex;gap:6px;align-items:center">
+            <select data-drop-kind style="width:130px">
+              <option value="invite_card" selected>邀请码卡</option>
+              <option value="bandwidth_card">带宽卡</option>
+              <option value="streams_card">同播卡</option>
+              <option value="title_card">称号卡</option>
+              <option value="item_id">商品ID</option>
+            </select>
+            <input type="text" placeholder="道具自定义名称" value="自定义道具卡" data-drop-val style="flex:1">
+          </div>
+        </td>
+        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
+      tbody.appendChild(tr);
+      syncItemizedToTextarea(el, pid, 'drops');
+    };
+  }
+
+  const addHoliday = el.querySelector(`[data-add-holiday="${pid}"]`);
+  if (addHoliday) {
+    addHoliday.onclick = () => {
+      const tbody = el.querySelector(`[data-holiday-rows="${pid}"]`);
+      if (!tbody) return;
+      const tr = document.createElement('tr');
+      const today = new Date().toISOString().slice(0, 10);
+      tr.innerHTML = `
+        <td><input type="date" value="${today}" data-holiday-date></td>
+        <td><input type="text" value="新节日活动" placeholder="节日名称" data-holiday-name></td>
+        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
+      tbody.appendChild(tr);
+      syncItemizedToTextarea(el, pid, 'holidays');
+    };
+  }
+
+  // Bind change/input & delete delegation
+  el.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-del-row]');
+    if (!btn) return;
+    const tr = btn.closest('tr');
+    const table = btn.closest('table');
+    if (tr && table) {
+      tr.remove();
+      if (table.querySelector('[data-tier-days]')) syncItemizedToTextarea(el, pid, 'streak_tiers');
+      else if (table.querySelector('[data-drop-ppm]')) syncItemizedToTextarea(el, pid, 'drops');
+      else if (table.querySelector('[data-holiday-date]')) syncItemizedToTextarea(el, pid, 'holidays');
+    }
+  });
+
+  el.addEventListener('input', (ev) => {
+    if (ev.target.matches('[data-tier-days],[data-tier-bonus]')) {
+      syncItemizedToTextarea(el, pid, 'streak_tiers');
+    } else if (ev.target.matches('[data-drop-ppm],[data-drop-val]')) {
+      syncItemizedToTextarea(el, pid, 'drops');
+    } else if (ev.target.matches('[data-holiday-date],[data-holiday-name]')) {
+      syncItemizedToTextarea(el, pid, 'holidays');
+    }
+  });
+
+  el.addEventListener('change', (ev) => {
+    if (ev.target.matches('[data-drop-kind]')) {
+      const kind = ev.target.value;
+      const input = ev.target.closest('tr')?.querySelector('[data-drop-val]');
+      if (input) input.placeholder = kind === 'item_id' ? '数字商品ID' : '道具自定义名称';
+      syncItemizedToTextarea(el, pid, 'drops');
+    }
+  });
+}
+
+function syncItemizedToTextarea(el, pid, key) {
+  const textarea = el.querySelector(`#pl-${pid}-${key}`);
+  if (!textarea) return;
+  // If user has the advanced details open, don't overwrite user's raw edits
+  const details = el.querySelector(`#details-pl-${pid}-${key}`);
+  if (details && details.open) return;
+
+  if (key === 'streak_tiers') {
+    const rows = [...el.querySelectorAll(`[data-tier-rows="${pid}"] tr`)];
+    const tiers = rows.map(r => ({
+      days: parseInt(r.querySelector('[data-tier-days]')?.value || '1', 10),
+      bonus: parseInt(r.querySelector('[data-tier-bonus]')?.value || '0', 10),
+    })).filter(t => !isNaN(t.days) && !isNaN(t.bonus));
+    textarea.value = JSON.stringify(tiers);
+  } else if (key === 'drops') {
+    let originalDrops = [];
+    try { originalDrops = JSON.parse(textarea.value); } catch(e){}
+    const rows = [...el.querySelectorAll(`[data-drop-rows="${pid}"] tr`)];
+    const drops = rows.map((r, idx) => {
+      const ppm = parseInt(r.querySelector('[data-drop-ppm]')?.value || '0', 10);
+      const kind = r.querySelector('[data-drop-kind]')?.value || 'invite_card';
+      const val = (r.querySelector('[data-drop-val]')?.value || '').trim();
+      const orig = (Array.isArray(originalDrops) && originalDrops[idx]) ? originalDrops[idx] : {};
+      const res = Object.assign({}, orig, { ppm });
+      if (kind === 'item_id') {
+        delete res.spec;
+        res.item_id = parseInt(val, 10) || 0;
+      } else {
+        delete res.item_id;
+        const defaultAmounts = { invite_card: 1, bandwidth_card: 10, streams_card: 1, title_card: 1 };
+        const defaultDurations = { invite_card: 0, bandwidth_card: 30, streams_card: 30, title_card: 30 };
+        const origSpec = orig.spec || {};
+        res.spec = Object.assign({}, origSpec, {
+          kind,
+          name: val || origSpec.name || '道具卡',
+          amount: origSpec.amount ?? defaultAmounts[kind] ?? 1,
+          duration_days: origSpec.duration_days ?? defaultDurations[kind] ?? 0,
+        });
+      }
+      return res;
+    });
+    textarea.value = JSON.stringify(drops);
+  } else if (key === 'holidays') {
+    let originalHolidays = [];
+    try { originalHolidays = JSON.parse(textarea.value); } catch(e){}
+    const rows = [...el.querySelectorAll(`[data-holiday-rows="${pid}"] tr`)];
+    const holidays = rows.map((r, idx) => {
+      const date = r.querySelector('[data-holiday-date]')?.value || '';
+      const name = (r.querySelector('[data-holiday-name]')?.value || '').trim();
+      const orig = (Array.isArray(originalHolidays) && originalHolidays[idx]) ? originalHolidays[idx] : {};
+      return Object.assign({}, orig, { date, name });
+    }).filter(h => h.date);
+    textarea.value = JSON.stringify(holidays);
+  }
+}
+
 function bindPluginCard(c) {
   const el = pluginCardEl(c.id);
   if (!el) return;
+  bindItemizedEditor(el, c.id);
   el.querySelector('[data-act="save"]').onclick = () => savePlugin(c);
   el.querySelector('[data-act="run"]').onclick = () => runPlugin(c);
   el.querySelector('[data-act="history"]').onclick = () => togglePluginHistory(c);
@@ -1401,11 +1668,17 @@ function bindPluginCard(c) {
 }
 
 function pluginPayload(c) {
+  const el = pluginCardEl(c.id);
+  if (el) {
+    ['streak_tiers', 'drops', 'holidays'].forEach(key => {
+      syncItemizedToTextarea(el, c.id, key);
+    });
+  }
   const config = {};
   (c.fields || []).forEach((f) => {
-    const el = $(`#pl-${c.id}-${f.key}`);
-    if (!el) return;
-    config[f.key] = f.kind === 'bool' ? el.checked : el.value;
+    const fieldEl = $(`#pl-${c.id}-${f.key}`);
+    if (!fieldEl) return;
+    config[f.key] = f.kind === 'bool' ? fieldEl.checked : fieldEl.value;
   });
   const sw = $(`#pl-${c.id}-enabled`);
   return { enabled: sw ? sw.checked : c.enabled, config };
