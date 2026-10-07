@@ -311,11 +311,8 @@ class GroupPointsBotMixin:
                 raise GroupPointsError("此请求已结束，请重新发起。")
             mint = row["mode"] == "mint"
             body = "🛠 <b>管理员发放</b>" if mint else "💸 <b>普通积分转账</b>"
-            body += (
-                "\n系统直接发放，不扣管理员余额。"
-                if mint
-                else "\n扣发起人余额，按原手续费和日限额规则。"
-            )
+            if not mint:
+                body += "\n确认后从本人积分扣除数量，手续费包含在该数量内。"
             body += (
                 f"\n收款账号：<b>{escape(row['to_name'])}</b>\n收款人TG ID：<code>{row['to_tg_id']}</code>"
                 f"\n数量：<b>{row['amount']}</b> · 手续费：{row['fee']} · 到账：<b>{row['amount'] - row['fee']}</b>"
@@ -408,12 +405,15 @@ class GroupPointsBotMixin:
             "已取消，未执行。"
             if result.get("cancelled")
             else (
-                "✅ 管理员发放成功（系统发放，不扣管理员余额）"
+                "✅ 积分奖励发放成功"
                 if result["mode"] == "mint"
-                else "✅ 普通转账成功（扣发起人余额）"
+                else "✅ 积分转账成功"
             )
         )
         if not result.get("cancelled"):
+            row = self._db.one('SELECT to_name,to_tg_id FROM group_points_intents WHERE nonce=?', (data.split(':', 1)[1],))
+            if row:
+                text += f"\n收款人：{row['to_name']} · TG ID：{row['to_tg_id']}"
             text += f"\n数量：{result['amount']} · 手续费：{result['fee']} · 对方到账：{result['received']}"
         await self._call(
             "editMessageText",

@@ -17,6 +17,14 @@ from app.modules.enforcement import EnforcementService
 ADMIN = ('admin', 'change-me')
 
 
+async def buy_and_use(bot, item):
+    await bot._handle_callback(callback('buy:' + str(item['id'])))
+    await bot._handle_callback(callback('buyok:' + str(item['id'])))
+    card = bot._inventory.items('u1')[0]
+    assert card['used_at'] is None  # purchase alone never grants the entitlement
+    await bot._handle_callback(callback('card:' + str(card['id'])))
+
+
 @pytest.fixture
 def stack(request):
     return request.getfixturevalue('account_stack')
@@ -171,9 +179,8 @@ def test_all_bot_entitlement_paths_use_injected_callback(integrated, monkeypatch
             await bot._handle_command(12, '12', 'operator', '/gift demo-user-1 days 7')
         elif path == 'shop':
             bot._points.add('u1', 100, 'admin.adjust')
-            item = bot._shop.create({'kind': 'days', 'name': 'Term', 'cost': 10, 'amount': 7})
-            await bot._handle_callback(callback('buy:' + str(item['id'])))
-            await bot._handle_callback(callback('buyok:' + str(item['id'])))
+            item = bot._shop.create({'kind': 'streams_card', 'name': 'Extra stream', 'cost': 10, 'amount': 1, 'duration_days': 7})
+            await buy_and_use(bot, item)
         else:
             await bot._preview_group_change(12, member, 'operator', 'vip')
             nonce = bot._pending['12'][2]['group_confirm']['nonce']
@@ -182,7 +189,10 @@ def test_all_bot_entitlement_paths_use_injected_callback(integrated, monkeypatch
     assert enforce.await_count == int(enabled)
     terminate.assert_not_awaited()
     assert app.state.cache.get('rate:u1') == 'keep-unless-rate-changed'
-    if path != 'group':
+    if path == 'shop':
+        assert bot._members.get('u1')['max_streams'] == member['max_streams'] + 1
+        assert bot._members.get('u1')['expires_at_effective'] == member['expires_at_effective']
+    elif path != 'group':
         assert bot._members.get('u1')['expires_at_effective'] == member['expires_at_effective'] + 7 * 86400
 
 
@@ -192,15 +202,14 @@ def test_bandwidth_purchase_reissues_and_kicks_only_for_changed_rate(integrated,
     monkeypatch.setattr(app.state.settings_service, 'membership_config', lambda: {'enforcement_enabled': enabled})
     bot._members.set_overrides('u1', {'bandwidth_limit_kbps': 1000})
     bot._points.add('u1', 100, 'admin.adjust')
-    item = bot._shop.create({'kind': 'bandwidth', 'name': 'Speed', 'cost': 10, 'amount': 1})
+    item = bot._shop.create({'kind': 'bandwidth_card', 'name': 'Speed', 'cost': 10, 'amount': 1, 'duration_days': 30})
     enforce = AsyncMock(return_value={'ok': True, 'remote_ok': True})
     terminate = AsyncMock(return_value=0)
     monkeypatch.setattr(app.state.enforcement, 'enforce_now', enforce)
     monkeypatch.setattr(app.state.enforcement, 'terminate_users', terminate)
     app.state.cache.set('rate:u1', 'old-signature')
     async def run():
-        await bot._handle_callback(callback('buy:' + str(item['id'])))
-        await bot._handle_callback(callback('buyok:' + str(item['id'])))
+        await buy_and_use(bot, item)
         await bot._handle_callback(callback('buyok:' + str(item['id'])))
     asyncio.run(run())
     assert app.state.cache.get('rate:u1') is None
@@ -217,14 +226,14 @@ def test_remote_failure_keeps_successful_order_and_reports_partial(integrated, m
     enforce = AsyncMock(side_effect=RuntimeError('private-example-value')) if exception else AsyncMock(return_value={'ok': False, 'remote_ok': False})
     monkeypatch.setattr(app.state.enforcement, 'enforce_now', enforce)
     bot._points.add('u1', 100, 'admin.adjust')
-    item = bot._shop.create({'kind': 'days', 'name': 'Term', 'cost': 10, 'amount': 7})
-    before = bot._members.get('u1')['expires_at_effective']
+    item = bot._shop.create({'kind': 'streams_card', 'name': 'Extra stream', 'cost': 10, 'amount': 1, 'duration_days': 7})
+    before = bot._members.get('u1')
     async def run():
-        await bot._handle_callback(callback('buy:' + str(item['id'])))
-        await bot._handle_callback(callback('buyok:' + str(item['id'])))
+        await buy_and_use(bot, item)
     asyncio.run(run())
     assert bot._points.balance('u1') == 90 and len(bot._shop.orders('u1')) == 1
-    assert bot._members.get('u1')['expires_at_effective'] == before + 7 * 86400
+    assert bot._members.get('u1')['max_streams'] == before['max_streams'] + 1
+    assert bot._members.get('u1')['expires_at_effective'] == before['expires_at_effective']
     assert '远端未确认' in str(bot.calls)
     assert 'private-example-value' not in str(bot.calls)
 
@@ -243,12 +252,11 @@ def test_rate_kick_failure_is_reported_without_refunding_order(integrated, monke
     monkeypatch.setattr(app.state.settings_service, 'membership_config', lambda: {'enforcement_enabled': False})
     bot._members.set_overrides('u1', {'bandwidth_limit_kbps': 1000})
     bot._points.add('u1', 100, 'admin.adjust')
-    item = bot._shop.create({'kind': 'bandwidth', 'name': 'Speed', 'cost': 10, 'amount': 1})
+    item = bot._shop.create({'kind': 'bandwidth_card', 'name': 'Speed', 'cost': 10, 'amount': 1, 'duration_days': 30})
     bot._emby.active_sessions_raw = AsyncMock(return_value=[{'Id': 'session', 'UserId': 'u1'}])
     bot._emby.stop_session = AsyncMock(return_value=False) if mode == 'false' else AsyncMock(side_effect=RuntimeError('private-example-value'))
     async def run():
-        await bot._handle_callback(callback('buy:' + str(item['id'])))
-        await bot._handle_callback(callback('buyok:' + str(item['id'])))
+        await buy_and_use(bot, item)
     asyncio.run(run())
     assert bot._points.balance('u1') == 90 and len(bot._shop.orders('u1')) == 1
     assert '远端未确认' in str(bot.calls) and 'private-example-value' not in str(bot.calls)
@@ -293,7 +301,7 @@ def test_bulk_renew_stops_if_authority_changes_during_sync(integrated):
 def test_cancel_during_post_order_sync_never_rolls_back_or_duplicates(integrated):
     _client, bot = integrated
     bot._points.add('u1', 100, 'admin.adjust')
-    item = bot._shop.create({'kind': 'days', 'name': 'Term', 'cost': 10, 'amount': 7})
+    item = bot._shop.create({'kind': 'streams_card', 'name': 'Extra stream', 'cost': 10, 'amount': 1, 'duration_days': 7})
     async def run():
         started = asyncio.Event()
         async def changed(*args):
@@ -301,11 +309,16 @@ def test_cancel_during_post_order_sync_never_rolls_back_or_duplicates(integrated
             await asyncio.Event().wait()
         bot._on_member_changed = changed
         await bot._handle_callback(callback('buy:' + str(item['id'])))
-        task = asyncio.create_task(bot._handle_callback(callback('buyok:' + str(item['id']))))
+        await bot._handle_callback(callback('buyok:' + str(item['id'])))
+        card = bot._inventory.items('u1')[0]
+        task = asyncio.create_task(bot._handle_callback(callback('card:' + str(card['id']))))
         await started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
         await bot._handle_callback(callback('buyok:' + str(item['id'])))
+        await bot._handle_callback(callback('card:' + str(card['id'])))
+        assert bot._members.get('u1')['max_streams'] == 3
+        assert len(bot._db.query('SELECT * FROM inventory WHERE used_at IS NOT NULL')) == 1
     asyncio.run(run())
     assert bot._points.balance('u1') == 90 and len(bot._shop.orders('u1')) == 1

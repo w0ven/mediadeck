@@ -365,8 +365,9 @@ def flow_document(previews):
     return '\n'.join(lines)
 
 
-def test_real_template_synthetic_preview_html_lengths_mobile_lines_and_button_budget(bot, monkeypatch):
+def test_real_template_synthetic_preview_html_lengths_mobile_lines_and_button_budget(request, monkeypatch):
     monkeypatch.setattr(time, 'time', lambda: 1791309600)
+    bot = request.getfixturevalue('bot')  # freeze before accounts are created, not after
     previews = render_flow_previews(bot)
     for title, page in previews.items():
         text = plain(page['body'])

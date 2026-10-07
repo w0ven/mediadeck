@@ -22,9 +22,11 @@ from fastapi.testclient import TestClient
 from app.core.db import Database
 from app.main import app
 from app.modules.groups import GroupService
+from app.modules.inventory import InventoryService
+from app.modules.member_rewards import GB, KBPS_PER_MBPS, grant_reward
 from app.modules.members import MemberService
 from app.modules.points import PointsService
-from app.modules.shop import GB, KBPS_PER_MBPS, ShopError, ShopService
+from app.modules.shop import ShopError, ShopService
 
 ADMIN = ("admin", "change-me")
 
@@ -48,8 +50,8 @@ def member(stack) -> str:
 
 
 def _item(shop: ShopService, **kwargs) -> int:
-    payload = {"kind": "traffic", "name": "测试商品", "cost": 100,
-               "amount": 10, "enabled": True}
+    payload = {"kind": "bandwidth_card", "name": "测试商品", "cost": 100,
+               "amount": 10, "duration_days": 30, "enabled": True}
     payload.update(kwargs)
     return int(shop.create(payload)["id"])
 
@@ -59,75 +61,60 @@ def _item(shop: ShopService, **kwargs) -> int:
 def test_the_starter_catalogue_ships_disabled(stack) -> None:
     """A live default catalogue would sell at prices nobody chose."""
     _, _, _, shop = stack
-    assert shop.seed_defaults() == 4
+    shop.seed_cards()
     items = shop.items()
-    assert {i["kind"] for i in items} == {"traffic", "days", "bandwidth", "invite"}
-    assert all(i["enabled"] is False for i in items)
-    assert [i["cost"] for i in items] == [100, 200, 300, 500]
-    assert shop.items(enabled_only=True) == []
+    assert {i["kind"] for i in items} == {"invite_card", "bandwidth_card", "streams_card", "title_card", "whitelist_card"}
+    assert all(i["enabled"] is False for i in items if i['kind'] != 'whitelist_card')
+    assert [i["cost"] for i in items] == [500, 300, 600, 200, 5000]
+    assert [i['kind'] for i in shop.items(enabled_only=True)] == ['whitelist_card']
 
 
 def test_seeding_twice_does_not_duplicate_the_catalogue(stack) -> None:
     _, _, _, shop = stack
-    assert shop.seed_defaults() == 4
-    assert shop.seed_defaults() == 0
-    assert len(shop.items()) == 4
+    shop.seed_cards()
+    shop.seed_cards()
+    assert len(shop.items()) == 5
 
 
 def test_seeding_does_not_undo_a_deliberately_emptied_shop(stack) -> None:
     """An operator who deleted everything meant to have no catalogue."""
     _, _, _, shop = stack
-    shop.seed_defaults()
+    shop.seed_cards()
     for item in shop.items():
         shop.delete(item["id"])
     # The table is empty again, so re-seeding is allowed -- but a shop with a
     # single surviving item is one the operator has curated, and is left alone.
-    shop.create({"kind": "days", "name": "保留", "cost": 10, "amount": 1})
-    assert shop.seed_defaults() == 0
+    shop.create({"kind": "invite_card", "name": "保留", "cost": 10, "amount": 1})
+    shop.seed_cards()
     assert len(shop.items()) == 1
 
 
 # -- the four kinds, delivered -----------------------------------------------
 
-def test_traffic_redemption_adds_extra_bytes(stack, member) -> None:
-    _, members, points, shop = stack
-    points.add(member, 500, "checkin")
-    item_id = _item(shop, kind="traffic", amount=50, cost=100)
-
-    result = shop.redeem(member, item_id)
-    assert result["balance"] == 400
+def test_traffic_admin_reward_preserves_shared_capability(stack, member):
+    db, members, points, shop = stack
+    note = grant_reward(db, members, member, "traffic", 50)
     assert members.get(member)["overrides"]["extra_traffic_bytes"] == 50 * GB
-    assert "50GB" in result["granted"]
+    assert "50GB" in note and points.balance(member) == 0 and not shop.orders()
 
 
-def test_days_redemption_extends_the_term(stack, member) -> None:
-    _, members, points, shop = stack
-    points.add(member, 500, "checkin")
-    before = int(members.get(member).get("expires_at") or 0)
-    item_id = _item(shop, kind="days", amount=7, cost=200)
-
-    shop.redeem(member, item_id)
-    after = int(members.get(member)["expires_at"])
-    assert after >= max(before, int(time.time())) + 7 * 86400 - 5
+def test_days_admin_reward_extends_the_term(stack, member):
+    db, members, _, _ = stack
+    before = members.get(member)["expires_at_effective"]
+    grant_reward(db, members, member, "days", 7)
+    assert members.get(member)["expires_at_effective"] >= max(before, int(time.time())) + 7 * 86400 - 5
 
 
-def test_bandwidth_redemption_raises_an_existing_limit(stack, member) -> None:
-    _, members, points, shop = stack
+def test_bandwidth_admin_reward_preserves_existing_limit(stack, member):
+    db, members, _, _ = stack
     members.set_overrides(member, {"bandwidth_limit_kbps": 10_000})
-    points.add(member, 500, "checkin")
-    item_id = _item(shop, kind="bandwidth", amount=10, cost=300)
-
-    shop.redeem(member, item_id)
-    ov = members.get(member)["overrides"]
-    assert ov["bandwidth_limit_kbps"] == 10_000 + 10 * KBPS_PER_MBPS
+    grant_reward(db, members, member, "bandwidth", 10)
+    assert members.get(member)["overrides"]["bandwidth_limit_kbps"] == 10_000 + 10 * KBPS_PER_MBPS
 
 
-def test_invite_redemption_adds_quota(stack, member) -> None:
-    _, members, points, shop = stack
-    points.add(member, 999, "checkin")
-    item_id = _item(shop, kind="invite", amount=2, cost=500)
-
-    shop.redeem(member, item_id)
+def test_invite_admin_reward_preserves_quota(stack, member):
+    db, members, _, _ = stack
+    grant_reward(db, members, member, "invite", 2)
     assert members.get(member)["invite_quota"] == 2
 
 
@@ -153,7 +140,7 @@ def test_a_member_who_cannot_afford_it_is_not_charged_and_gets_nothing(
     """The rollback test: an insufficient balance must not deliver."""
     _, members, points, shop = stack
     points.add(member, 50, "checkin")
-    item_id = _item(shop, kind="traffic", amount=50, cost=100)
+    item_id = _item(shop, amount=50, cost=100)
 
     with pytest.raises(ValueError, match="积分不足"):
         shop.redeem(member, item_id)
@@ -168,12 +155,12 @@ def test_a_grant_that_fails_rolls_the_debit_back(stack, member,
     """Delivery failing after the charge is the one outcome to prevent."""
     _, members, points, shop = stack
     points.add(member, 500, "checkin")
-    item_id = _item(shop, kind="traffic", amount=50, cost=100)
+    item_id = _item(shop, amount=50, cost=100)
 
     def explode(*args, **kwargs):
         raise RuntimeError("storage went away")
 
-    monkeypatch.setattr(shop, "_grant", explode)
+    monkeypatch.setattr(InventoryService, "add", explode)
     with pytest.raises(RuntimeError):
         shop.redeem(member, item_id)
 
@@ -228,17 +215,17 @@ def test_one_members_limit_is_not_anothers(stack, member) -> None:
     assert len(shop.orders()) == 2
 
 
-def test_speed_boosts_are_refused_on_an_already_unlimited_account(
-        stack, member) -> None:
-    """Charging for a no-op is the failure the member would notice first."""
-    _, _, points, shop = stack
+def test_unlimited_account_cannot_consume_bandwidth_card(stack, member):
+    db, members, points, shop = stack
     points.add(member, 500, "checkin")
-    item_id = _item(shop, kind="bandwidth", amount=10, cost=300)
-
-    with pytest.raises(ShopError, match="不限速"):
-        shop.redeem(member, item_id)
-    assert points.balance(member) == 500
-    assert shop.orders(user_id=member) == []
+    item_id = _item(shop, amount=10, cost=300)
+    result = shop.redeem(member, item_id)
+    card = db.one("SELECT id,used_at FROM inventory WHERE emby_user_id=?", (member,))
+    bag = InventoryService(db, members, shop, lambda: {"bandwidth_cap_mbps": 100, "streams_cap": 10})
+    with pytest.raises(ValueError, match="不限速"):
+        bag.use(member, card["id"])
+    assert result["balance"] == 200 and points.balance(member) == 200
+    assert db.one("SELECT used_at FROM inventory WHERE id=?", (card["id"],))["used_at"] is None
 
 
 def test_buying_something_that_does_not_exist_is_refused(stack, member) -> None:
@@ -261,10 +248,10 @@ def test_a_member_who_is_not_enrolled_cannot_redeem(stack) -> None:
 def test_items_are_validated_on_the_way_in(stack) -> None:
     _, _, _, shop = stack
     for bad in ({"kind": "moonbeam", "name": "x", "cost": 1, "amount": 1},
-                {"kind": "days", "name": "", "cost": 1, "amount": 1},
-                {"kind": "days", "name": "x", "cost": 0, "amount": 1},
-                {"kind": "days", "name": "x", "cost": 1, "amount": 0},
-                {"kind": "days", "name": "x", "cost": "free", "amount": 1}):
+                {"kind": "bandwidth_card", "name": "", "cost": 1, "amount": 1},
+                {"kind": "bandwidth_card", "name": "x", "cost": 0, "amount": 1},
+                {"kind": "bandwidth_card", "name": "x", "cost": 1, "amount": 0},
+                {"kind": "bandwidth_card", "name": "x", "cost": "free", "amount": 1}):
         with pytest.raises(ShopError):
             shop.create(bad)
     assert shop.items() == []
@@ -313,10 +300,10 @@ def test_items_come_back_in_the_operators_order(stack) -> None:
 def test_the_shop_api_manages_the_catalogue() -> None:
     with TestClient(app) as client:
         created = client.post("/api/shop/items", auth=ADMIN, json={
-            "kind": "days", "name": "会员 30 天", "cost": 400, "amount": 30,
+            "kind": "bandwidth_card", "name": "带宽卡30", "cost": 400, "amount": 30,
             "enabled": True}).json()
         item_id = created["id"]
-        assert created["kind_label"] == "会员天数" and created["unit"] == "天"
+        assert created["kind_label"] == "带宽卡（入包）" and created["unit"] == "Mbps"
 
         updated = client.put(f"/api/shop/items/{item_id}", auth=ADMIN,
                              json={"cost": 350}).json()
@@ -346,10 +333,11 @@ def test_the_shop_api_refuses_bad_items_and_unknown_ids() -> None:
 def test_the_shop_ships_a_disabled_starter_catalogue_on_first_boot() -> None:
     with TestClient(app) as client:
         items = client.get("/api/shop/items", auth=ADMIN).json()
-        assert len(items) == 8
-        assert all(i["enabled"] is False for i in items)
-        assert client.get("/api/shop/items?enabled_only=true",
-                          auth=ADMIN).json() == []
+        assert len(items) == 5
+        assert all(i["enabled"] is False for i in items if i['kind'] != 'whitelist_card')
+        live = client.get("/api/shop/items?enabled_only=true", auth=ADMIN).json()
+        assert len(live) == 1 and live[0]['kind'] == 'whitelist_card'
+        assert live[0]['cost'] == 5000 and live[0]['duration_days'] == 0
 
 
 def test_the_shop_api_needs_authentication() -> None:
@@ -367,7 +355,7 @@ def test_orders_are_listed_newest_first_and_name_the_buyer() -> None:
                    json={"group_id": "standard", "username": "demo-user-1"})
         client.post("/api/points/u1/adjust", auth=ADMIN, json={"delta": 1000})
         item_id = client.post("/api/shop/items", auth=ADMIN, json={
-            "kind": "invite", "name": "邀请名额", "cost": 100, "amount": 1,
+            "kind": "invite_card", "name": "邀请码卡", "cost": 100, "amount": 1,
             "enabled": True}).json()["id"]
 
         app.state.shop.redeem("u1", item_id, actor="test")

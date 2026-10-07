@@ -29,6 +29,7 @@ from app.modules.economy_rules import (
 )
 from app.modules.groups import GroupService
 from app.modules.inventory import InventoryService, validate_title
+from app.modules.member_rewards import grant_reward
 from app.modules.members import MemberService
 from app.modules.plugins import PluginRegistry
 from app.modules.plugins_builtin import PluginContext, register_builtin
@@ -325,7 +326,8 @@ def test_positive_lucky_before_streak_and_one_drop(env):
         },
     )
     result = env.checkin.checkin(user)
-    assert result["points"] == result["base"] * 2 + 7 and result["multiplier"] == 2
+    assert result["points"] == result["base"] * 2 + result["base"] * 7 // 100 and result["multiplier"] == 2
+    assert result['streak_percent'] == 7
     assert len(env.bag.items(user)) == 1
     assert json.loads(env.db.one("SELECT result_json FROM checkins")["result_json"]) == result
 
@@ -380,18 +382,18 @@ def test_independent_expiration_keeps_base_and_later_admin_changes(env):
         env.shop.redeem("u", item["id"])
         card = env.bag.items("u")[0]
         assert env.members.get("u")["bandwidth_limit_kbps"] == 20 * 1024 + (
-            10 * 1024 if cards else 0
+            10 * 1000 if cards else 0
         )
         env.bag.use("u", card["id"])
         cards.append(card["id"])
-    assert env.members.get("u")["bandwidth_limit_kbps"] == 50 * 1024
+    assert env.members.get("u")["bandwidth_limit_kbps"] == 20 * 1024 + 30 * 1000
     # A legacy permanent boost while cards are active must not bake them in.
-    env.shop.grant("u", "bandwidth", 5)
+    grant_reward(env.db, env.members, "u", "bandwidth", 5)
     assert env.members.get("u")["overrides"]["bandwidth_limit_kbps"] == 25 * 1024
     env.clock[0] = NOW + 86400
-    assert env.members.get("u")["bandwidth_limit_kbps"] == 45 * 1024
+    assert env.members.get("u")["bandwidth_limit_kbps"] == 25 * 1024 + 20 * 1000
     env.members.set_overrides("u", {"bandwidth_limit_kbps": 40 * 1024})
-    assert env.members.get("u")["bandwidth_limit_kbps"] == 60 * 1024
+    assert env.members.get("u")["bandwidth_limit_kbps"] == 40 * 1024 + 20 * 1000
     env.clock[0] = NOW + 2 * 86400
     assert env.members.get("u")["bandwidth_limit_kbps"] == 40 * 1024
     assert env.members.get("u")["overrides"]["bandwidth_limit_kbps"] == 40 * 1024
@@ -621,7 +623,7 @@ def test_admin_backend_config_grant_revoke_and_authentication():
             client.get("/api/economy/members/u", auth=auth).json()["titles"][0]["revoked_at"]
             is not None
         )
-        assert len(client.get("/api/shop/items", auth=auth).json()) == 8
+        assert len(client.get("/api/shop/items", auth=auth).json()) == 5
         assert (
             client.post(
                 "/api/shop/items", auth=auth, json=dict(DEFAULT_CARDS[3], cost=199)

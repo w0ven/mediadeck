@@ -332,3 +332,37 @@ body.member-drawer-open{overflow:hidden}#member-detail:not(.hidden){position:fix
   padding: 10px 0;
   text-align: center;
 }
+
+/* Scoped points settings: original glass cards, compact editable summaries. */
+.plugin-settings-group { border-top:1px solid #a2b3df18; margin:10px 0; padding-top:4px; }
+.plugin-settings-group > summary { cursor:pointer; padding:10px 0; color:#c6d3ec; font-size:12px; }
+.plugin-settings-group > summary .muted { margin-left:8px; }
+.plugin-settings-group .form-row { flex-wrap:wrap; }
+.plugin-settings-group .plugin-json-smart { min-width:0; flex:1 1 260px; }
+.holiday-list > summary { cursor:pointer; padding:10px 0; color:#c6d3ec; }
+.holiday-list .item-list { margin-top:8px; }
+.item-entry { min-width:0; border:1px solid #a2b3df18; border-radius:8px; background:#0d13218c; margin:6px 0; }
+.item-entry > summary { display:flex; align-items:center; gap:8px; padding:10px; cursor:pointer; }
+.item-entry > summary::before { content:'▸'; color:#8c9cba; }
+.item-entry[open] > summary::before { content:'▾'; }
+.entry-summary { flex:1; min-width:0; overflow-wrap:anywhere; line-height:1.8; font-size:11px; }
+.entry-actions { display:inline-flex; flex-shrink:0; gap:3px; }
+.entry-actions .btn { padding:3px 6px; min-width:25px; }
+.entry-fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; padding:10px; }
+.entry-fields label { display:flex; flex-direction:column; gap:5px; min-width:0; font-size:11px; color:#95a5c2; }
+.entry-fields input, .entry-fields select { width:100%; min-width:0; box-sizing:border-box; }
+.drop-spec-fields { grid-column:1/-1; display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; border:0; margin:0; padding:0; }
+.holiday-drops { border:0; padding:10px; margin:0; min-width:0; }
+.drop-spec-fields[hidden], .holiday-drops[hidden] { display:none; }
+.holiday-override { display:block; padding:10px; font-size:11px; line-height:1.8; }
+.holiday-override input { width:auto; }
+.item-entry > .help { margin:0; padding:0 10px 10px; }
+.editor-error:not(:empty) { color:#daa1ae; }
+.item-editor-container[inert] { opacity:.5; }
+@media(max-width:600px) {
+  .entry-fields, .drop-spec-fields { grid-template-columns:minmax(0,1fr); }
+  .item-entry > summary { flex-wrap:wrap; }
+  .entry-actions { margin-left:auto; }
+  .item-editor-table td { padding:5px 3px; }
+  .plugin-json-smart textarea { min-width:0 !important; }
+}

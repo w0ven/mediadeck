@@ -11,7 +11,10 @@ from datetime import date, datetime, timedelta, timezone
 BEIJING = timezone(timedelta(hours=8))
 RULE_VERSION = "watch-checkin-v1"
 PPM = 1_000_000
-CARD_KINDS = ("invite_card", "bandwidth_card", "streams_card", "title_card")
+CARD_KINDS = ("invite_card", "bandwidth_card", "streams_card", "title_card", "whitelist_card")
+BAG_KINDS = CARD_KINDS + ("custom",)
+DEFAULT_WHITELIST_CARD = {"kind": "whitelist_card", "name": "白名单卡", "cost": 5000,
+                          "amount": 1, "duration_days": 0}
 DEFAULT_CARDS = [
     {"kind": "invite_card", "name": "邀请码卡", "cost": 500, "amount": 1, "duration_days": 0},
     {"kind": "bandwidth_card", "name": "带宽 +10Mbps 30天", "cost": 300, "amount": 10, "duration_days": 30},
@@ -100,24 +103,34 @@ def default_holidays():
     return sorted(rows, key=lambda r: r["date"])
 
 
+def percent_tiers(raw):
+    """Old fixed bonus numbers become percentages, never rewrite settled results."""
+    tiers = json.loads(raw)
+    if isinstance(tiers, list):
+        tiers = [{'days': t['days'], 'percent': t['bonus']}
+                 if isinstance(t, dict) and set(t) == {'days', 'bonus'} else t for t in tiers]
+    return tiers
+
+
 def validate_checkin(config):
-    tiers = json.loads(config["streak_tiers"])
+    tiers = percent_tiers(config["streak_tiers"])
     if not isinstance(tiers, list) or not tiers:
         raise ValueError("连签阶梯必须是非空JSON数组")
     last = 0
     for tier in tiers:
         if (
             not isinstance(tier, dict)
-            or set(tier) != {"days", "bonus"}
+            or set(tier) != {"days", "percent"}
             or type(tier["days"]) is not int
-            or type(tier["bonus"]) is not int
+            or type(tier["percent"]) is not int
         ):
-            raise ValueError('阶梯格式为 {"days":天数,"bonus":奖励}')
-        if not last < tier["days"] <= 100000 or not 0 <= tier["bonus"] <= 100000:
-            raise ValueError("连签天数须递增、奖励非负")
+            raise ValueError('阶梯格式为 {"days":天数,"percent":加成百分比}')
+        if not last < tier["days"] <= 100000 or not 0 <= tier["percent"] <= 100000:
+            raise ValueError("连签天数须递增、加成百分比为非负整数")
         last = tier["days"]
     if tiers[0]["days"] != 1:
         raise ValueError("连签阶梯必须从第1天开始")
+    config['streak_tiers'] = encode(tiers)
     holidays = json.loads(config["holidays"])
     if not isinstance(holidays, list):
         raise ValueError("节日必须是JSON数组")  # noqa: TRY004 - public validation contract
@@ -185,8 +198,20 @@ def validate_card(spec):
         raise ValueError("带宽/同播卡期限必须大于0")
     if spec["kind"] == "invite_card" and spec["duration_days"] != 0:
         raise ValueError("邀请码卡增加现有邀请名额，不设置到期（期限须为0）")
-    if spec["kind"] in ("title_card", "invite_card") and spec["amount"] != 1:
+    if spec["kind"] in ("title_card", "invite_card", "whitelist_card") and spec["amount"] != 1:
         raise ValueError("每张称号/邀请码卡数量必须为1")
+    return spec
+
+
+def validate_bag_spec(spec):
+    if not isinstance(spec, dict) or spec.get('kind') != 'custom':
+        return validate_card(spec)
+    if not str(spec.get('name') or '').strip() or spec.get('amount') != 1:
+        raise ValueError('自定义商品须有名称且数量为1')
+    if not isinstance(spec.get('purchase_notice'), str) or not 1 <= len(spec['purchase_notice'].strip()) <= 12000:
+        raise ValueError('购买后说明须为1..12000字符')
+    if type(spec.get('retention_days')) is not int or not 1 <= spec['retention_days'] <= 36500:
+        raise ValueError('背包保留天数须为1..36500整数')
     return spec
 
 

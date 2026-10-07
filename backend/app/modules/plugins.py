@@ -205,7 +205,8 @@ class PluginRegistry:
         stored = self._section().get(plugin_id) or {}
         merged = plugin.defaults()
         merged.update(stored.get("config") or {})
-        return merged
+        normalizer = getattr(plugin, "normalize_config", None)
+        return normalizer(merged) if normalizer else merged
 
     def enabled(self, plugin_id: str) -> bool:
         stored = self._section().get(plugin_id) or {}

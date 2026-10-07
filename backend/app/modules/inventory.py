@@ -8,7 +8,8 @@ import time
 import unicodedata
 from typing import Any
 
-from app.modules.economy_rules import economy_write, encode, validate_card
+from app.modules.economy_rules import economy_write, encode, validate_bag_spec
+from app.modules.whitelist_cards import activate, reconcile
 
 
 def validate_title(raw):
@@ -32,13 +33,16 @@ def contributions(db, user, now=None):
     now = int(time.time()) if now is None else now
     out = {"bandwidth_limit_kbps": 0, "max_streams": 0}
     for row in db.query(
-        "SELECT spec_json FROM inventory WHERE emby_user_id=? AND used_at IS NOT NULL "
+        "SELECT spec_json,result_json FROM inventory WHERE emby_user_id=? AND used_at IS NOT NULL "
         "AND expires_at>?",
         (str(user), now),
     ):
         spec = json.loads(row["spec_json"])
         if spec["kind"] == "bandwidth_card":
-            out["bandwidth_limit_kbps"] += spec["amount"] * 1024
+            # Old already-applied cards retain their historical contribution.
+            # New uses freeze exact decimal Mbps -> stored kbps in the result.
+            result = json.loads(row['result_json'])
+            out["bandwidth_limit_kbps"] += result.get('bandwidth_bonus_kbps', spec["amount"] * 1024)
         if spec["kind"] == "streams_card":
             out["max_streams"] += spec["amount"]
     return out
@@ -48,17 +52,27 @@ class InventoryService:
     def __init__(self, db, members, shop, config):
         self.db, self.members, self.shop, self.config = db, members, shop, config
 
-    def items(self, user):
+    def items(self, user, *, now=None):
+        now = time.time() if now is None else now
         rows = self.db.query(
             "SELECT * FROM inventory WHERE emby_user_id=? ORDER BY id DESC", (str(user),)
         )
+        visible = []
         for row in rows:
             row["spec"] = json.loads(row.pop("spec_json"))
+            if row['spec']['kind'] == 'custom' and row['expires_at'] <= now:
+                continue
+            visible.append(row)
             row["result"] = json.loads(row.pop("result_json"))
             row["active"] = bool(
-                row["used_at"] is not None and row["expires_at"] and row["expires_at"] > time.time()
+                (row["used_at"] is not None or row['spec']['kind'] == 'custom')
+                and (row["expires_at"] is None or row["expires_at"] > now)
             )
-        return rows
+            if row['spec']['kind'] == 'whitelist_card':
+                grant = self.db.one('SELECT error FROM whitelist_card_grants WHERE emby_user_id=?', (str(user),))
+                if grant and grant['error']:
+                    row['expiry_error'] = grant['error']
+        return visible
 
     async def reconcile_expired(self, sync_effects):
         """Reissue existing signed rate caps after expiry; durable retry on failure.
@@ -66,6 +80,7 @@ class InventoryService:
         The effective limits already exclude expired rows. Synchronizing only
         touches the existing enforcement/cache path, never the original rights.
         """
+        await reconcile(self.db, sync_effects)
         now = int(time.time())
         due = self.db.query(
             "SELECT * FROM inventory WHERE used_at IS NOT NULL AND expires_at<=? "
@@ -99,12 +114,28 @@ class InventoryService:
 
     @staticmethod
     def add(conn, user, spec, source, now):
-        validate_card(spec)
+        validate_bag_spec(spec)
+        expires = int(now) + spec['retention_days'] * 86400 if spec['kind'] == 'custom' else None
         cur = conn.execute(
-            "INSERT INTO inventory(emby_user_id,spec_json,source,created_at) VALUES(?,?,?,?)",
-            (str(user), encode(spec), source, int(now)),
+            "INSERT INTO inventory(emby_user_id,spec_json,source,created_at,expires_at) VALUES(?,?,?,?,?)",
+            (str(user), encode(spec), source, int(now), expires),
         )
         return int(cur.lastrowid)
+
+    def custom_notice(self, user, card_id, *, now=None):
+        now = time.time() if now is None else now
+        row = self.db.one('SELECT * FROM inventory WHERE emby_user_id=? AND id=?', (str(user), int(card_id)))
+        if not row:
+            raise ValueError('购买内容不存在或不属于你')
+        spec = json.loads(row['spec_json'])
+        if spec['kind'] != 'custom' or row['expires_at'] <= now:
+            raise ValueError('说明保留期已结束或不是自定义商品')
+        return {"card_id": row['id'], "name": spec['name'], "notice": spec['purchase_notice'],
+                "expires_at": row['expires_at'], "notice_state": row['notice_state']}
+
+    def mark_notice(self, user, card_id, sent):
+        self.db.execute('UPDATE inventory SET notice_state=? WHERE emby_user_id=? AND id=?',
+                        ('sent' if sent else 'failed', str(user), int(card_id)))
 
     def use(self, user, card_id, *, title="", now=None):
         now = int(time.time()) if now is None else int(now)
@@ -124,7 +155,9 @@ class InventoryService:
             if not member:
                 raise ValueError("账号不存在")
             spec = json.loads(row["spec_json"])
-            validate_card(spec)
+            validate_bag_spec(spec)
+            if spec['kind'] == 'custom':
+                raise ValueError('自定义商品请查看购买后说明，无需使用或确认完成')
             kind, amount = spec["kind"], spec["amount"]
             expires = now + spec["duration_days"] * 86400 if spec["duration_days"] else None
             result: dict[str, Any] = {
@@ -136,25 +169,28 @@ class InventoryService:
                 if current <= 0:
                     raise ValueError("原权益已不限速/不限同播，无需使用")
                 cfg = self.config()
-                cap = (
-                    cfg["bandwidth_cap_mbps"] * 1024
-                    if kind == "bandwidth_card"
-                    else cfg["streams_cap"]
-                )
-                added = amount * 1024 if kind == "bandwidth_card" else amount
-                if current + added > cap:
-                    limit = (
-                        f"{cfg['bandwidth_cap_mbps']}Mbps"
-                        if kind == "bandwidth_card"
-                        else f"{cap}路"
-                    )
-                    raise ValueError(f"超过可叠加上限，未消耗道具（上限{limit}）")
+                added = amount * 1000 if kind == "bandwidth_card" else amount
+                if kind == 'bandwidth_card':
+                    cap = cfg['bandwidth_cap_mbps'] * 1000
+                    bonus = member['card_contributions']['bandwidth_limit_kbps']
+                    if cap > 0 and bonus + added > cap:
+                        raise ValueError(f"超过额外道具带宽上限，未消耗道具（上限{cfg['bandwidth_cap_mbps']}Mbps，不含基础）")
+                    result['bandwidth_bonus_kbps'] = added
+                elif current + added > cfg['streams_cap']:
+                    raise ValueError(f"超过可叠加上限，未消耗道具（上限{cfg['streams_cap']}路）")
                 result.update(
                     granted=f"+{amount}{'Mbps' if kind == 'bandwidth_card' else '路'}",
                     effective=current + added,
                 )
             elif kind == "invite_card":
-                result["granted"] = self.shop._grant(conn, user, member, "invite", 1)
+                conn.execute(
+                    "UPDATE members SET invite_quota=COALESCE(invite_quota,0)+1,updated_at=? WHERE emby_user_id=?",
+                    (now, user),
+                )
+                result["granted"] = "+1 个邀请名额"
+            elif kind == 'whitelist_card':
+                expires = activate(conn, self.db, self.members, user, int(card_id), spec['duration_days'], now)
+                result.update(expires_at=expires, granted='白名单资格已生效' + ('（永久组资格，基础账号有效期不变）' if expires is None else '（到期恢复原组，基础有效期不变）'))
             elif kind == "title_card":
                 tag = validate_title(title)
                 cur = conn.execute(
@@ -170,7 +206,7 @@ class InventoryService:
                     now,
                     expires,
                     encode(result),
-                    now if kind not in ("bandwidth_card", "streams_card") else None,
+                    now if kind not in ("bandwidth_card", "streams_card", "whitelist_card") else None,
                     int(card_id),
                 ),
             )

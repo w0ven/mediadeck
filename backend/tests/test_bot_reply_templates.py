@@ -65,8 +65,8 @@ def demo_bot():
     bot = TelegramBot(lambda: cfg, members, points=points, stats=stats)
     bot._requests = SimpleNamespace(remaining=lambda uid: 3)
     bot._shop = SimpleNamespace(get=lambda iid: {
-        'id': 1, 'name': '10 GiB 流量', 'enabled': True, 'cost': 30,
-        'amount': 10, 'unit': ' GiB', 'kind_label': '流量', 'kind': 'traffic', 'duration_days': 30,
+        'id': 1, 'name': '带宽 +10Mbps 30天', 'enabled': True, 'cost': 30,
+        'amount': 10, 'unit': ' Mbps', 'kind_label': '带宽卡', 'kind': 'bandwidth_card', 'duration_days': 30,
     })
     bot._panel['1001'] = 11
     captured = []

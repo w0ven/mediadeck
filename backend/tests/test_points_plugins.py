@@ -110,7 +110,8 @@ def test_a_streak_accumulates_across_consecutive_days(stack,checkin):
     now=time.time()
     results=[checkin.checkin('u1',now=now-ago*DAY) for ago in (2,1,0)]
     assert [r['streak'] for r in results]==[1,2,3]
-    assert [r['bonus'] for r in results]==[0,0,20]
+    assert [r['streak_percent'] for r in results]==[0,0,20]
+    assert [r['bonus'] for r in results]==[0,0,max(results[2]['base'],0)*20//100]
     assert all(r['points']==r['base']+r['bonus'] for r in results)
     assert stack[1].balance('u1')==sum(r['points'] for r in results)
 
@@ -129,7 +130,8 @@ def test_the_streak_bonus_stops_at_its_cap(stack,checkin):
     now=time.time()
     results=[checkin.checkin('u1',now=now-(9-i)*DAY) for i in range(10)]
     assert [r['bonus'] for r in results[:4]]==[0]*4
-    assert [r['bonus'] for r in results[4:]]==[20]*6
+    assert [r['streak_percent'] for r in results[4:]]==[20]*6
+    assert all(r['bonus']==max(r['base'],0)*20//100 for r in results[4:])
 
 
 def test_a_zero_bonus_turns_the_streak_reward_off(stack,checkin):

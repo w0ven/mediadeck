@@ -1228,9 +1228,12 @@ const PLUGIN_CATEGORIES = [
 
 PAGES.automation = async (context = pageContext('automation')) => {
   $('#view').innerHTML = pageLoading();
-  const cards = await api(`/api/plugins?category=${encodeURIComponent(automation.category)}`)
-    .catch(() => null);
+  const [cards, items] = await Promise.all([
+    api(`/api/plugins?category=${encodeURIComponent(automation.category)}`).catch(() => null),
+    automation.category === 'points' ? api('/api/shop/items').catch(() => []) : Promise.resolve([]),
+  ]);
   if (!context.isCurrent()) return;
+  automation.itemSpecs = items || [];
   if (!cards) { $('#view').innerHTML = pageError('无法读取任务列表'); return; }
 
   const tabs = PLUGIN_CATEGORIES.map((c) =>
@@ -1274,112 +1277,113 @@ function pluginScheduleText(c) {
   return '仅手动';
 }
 
-function renderItemizedEditor(pid, key, rawJson) {
-  let items = [];
-  try { items = JSON.parse(rawJson); } catch (e) { items = null; }
-  if (!Array.isArray(items)) return '';
-
-  if (key === 'streak_tiers') {
-    return `
-      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
-        <div class="item-editor-header">
-          <span style="font-weight:600;font-size:12px">连签阶梯设置</span>
-          <button type="button" class="btn sm" data-add-tier="${esc(pid)}">+ 添加阶梯</button>
-        </div>
-        <table class="item-editor-table">
-          <thead>
-            <tr>
-              <th style="width:45%">连签达标天数</th>
-              <th style="width:45%">额外奖励积分</th>
-              <th style="width:10%"></th>
-            </tr>
-          </thead>
-          <tbody data-tier-rows="${esc(pid)}">
-            ${items.map((t, idx) => `
-              <tr data-tier-idx="${idx}">
-                <td><input type="number" min="1" value="${esc(t.days ?? '')}" data-tier-days></td>
-                <td><input type="number" min="0" value="${esc(t.bonus ?? '')}" data-tier-bonus></td>
-                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>`;
-  }
-
+// Each visual row owns its original object; position is never its identity.
+function entryOriginal(row) { return JSON.parse(decodeURIComponent(row.dataset.entryObject)); }
+function entryAttr(value) { return esc(encodeURIComponent(JSON.stringify(value))); }
+function dropSpecText(spec) {
+  if (!spec) return '规格暂不可读，请核对商品';
+  const units = {bandwidth_card:'Mbps',streams_card:'路',invite_card:'张',title_card:'张',whitelist_card:'张'};
+  return `${spec.name || '道具'} · ${spec.amount}${units[spec.kind] || ''} · ${Number(spec.duration_days) ? `使用起 ${spec.duration_days} 天` : '永久'}`;
+}
+function dropSummary(d) {
+  const spec = d.item_id !== undefined ? (automation.itemSpecs || []).find(x => x.id === d.item_id) : d.spec;
+  return `${Number(d.ppm) / 10000}% · ${d.item_id !== undefined ? `商品 #${d.item_id} · ` : ''}${dropSpecText(spec)}`;
+}
+function holidaySummary(h) {
+  return `${h.date || '未填日期'} · ${h.name || '未命名'} · ${h.double_ppm === undefined && h.multiplier === undefined && h.drops === undefined ? '继承默认活动' : `${h.double_ppm === undefined ? '概率继承' : Number(h.double_ppm)/10000+'%幸运'} / ${h.multiplier === undefined ? '倍率继承' : h.multiplier+'倍'} / ${h.drops === undefined ? '掉落继承' : h.drops.length ? h.drops.map(dropSummary).join('；') : '不掉落'}`}`;
+}
+function entryActions() {
+  return '<span class="entry-actions"><button type="button" class="btn sm" data-move-entry="-1" title="上移">↑</button><button type="button" class="btn sm" data-move-entry="1" title="下移">↓</button><button type="button" class="btn sm danger" data-del-entry title="删除">✕</button></span>';
+}
+function renderEntry(key, obj) {
+  const data = `class="item-entry" data-entry-object="${entryAttr(obj)}"`;
+  if (key === 'streak_tiers') return `<tr ${data}>
+    <td><input type="number" min="1" max="100000" required value="${esc(obj.days ?? '')}" data-tier-days></td>
+    <td><input type="number" min="0" max="100000" required value="${esc(obj.percent ?? obj.bonus ?? '')}" data-tier-percent></td>
+    <td>${entryActions()}</td></tr>`;
   if (key === 'drops') {
-    return `
-      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
-        <div class="item-editor-header">
-          <span style="font-weight:600;font-size:12px">活动掉落设置</span>
-          <button type="button" class="btn sm" data-add-drop="${esc(pid)}">+ 添加掉落</button>
-        </div>
-        <table class="item-editor-table">
-          <thead>
-            <tr>
-              <th style="width:30%">概率(ppm/百万分比)</th>
-              <th style="width:60%">掉落类型 / 商品</th>
-              <th style="width:10%"></th>
-            </tr>
-          </thead>
-          <tbody data-drop-rows="${esc(pid)}">
-            ${items.map((d, idx) => {
-              const ppm = d.ppm ?? 0;
-              const hasItem = d.item_id !== undefined;
-              const kind = hasItem ? 'item_id' : (d.spec?.kind || 'invite_card');
-              const specName = d.spec?.name || '';
-              return `
-              <tr data-drop-idx="${idx}">
-                <td><input type="number" min="1" max="1000000" value="${esc(ppm)}" data-drop-ppm></td>
-                <td>
-                  <div style="display:flex;gap:6px;align-items:center">
-                    <select data-drop-kind style="width:130px">
-                      <option value="invite_card" ${kind==='invite_card'?'selected':''}>邀请码卡</option>
-                      <option value="bandwidth_card" ${kind==='bandwidth_card'?'selected':''}>带宽卡</option>
-                      <option value="streams_card" ${kind==='streams_card'?'selected':''}>同播卡</option>
-                      <option value="title_card" ${kind==='title_card'?'selected':''}>称号卡</option>
-                      <option value="item_id" ${hasItem?'selected':''}>商品ID</option>
-                    </select>
-                    <input type="text" placeholder="${hasItem?'数字商品ID':'道具自定义名称'}" value="${esc(hasItem ? d.item_id : specName)}" data-drop-val style="flex:1">
-                  </div>
-                </td>
-                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
-              </tr>`;
-            }).join('')}
-          </tbody>
-        </table>
-      </div>`;
+    const kind = obj.item_id !== undefined ? 'item_id' : obj.spec?.kind || 'invite_card';
+    const spec = obj.spec || {};
+    return `<details ${data}><summary><span class="entry-summary">${esc(dropSummary(obj))}</span>${entryActions()}</summary>
+      <div class="entry-fields">
+        <label>概率（ppm）<input type="number" min="0" max="1000000" required value="${esc(obj.ppm ?? 0)}" data-drop-ppm></label>
+        <label>来源 / 类型<select data-drop-kind>${[['invite_card','邀请码卡'],['bandwidth_card','带宽卡'],['streams_card','同播卡'],['title_card','称号卡'],['whitelist_card','白名单卡'],['item_id','引用商品']].map(([v,l])=>`<option value="${v}" ${kind===v?'selected':''}>${l}</option>`).join('')}</select></label>
+        <label>${kind==='item_id'?'商品ID':'名称'}<input required value="${esc(obj.item_id ?? spec.name ?? '')}" data-drop-val></label>
+        <fieldset class="drop-spec-fields" ${kind==='item_id'?'hidden disabled':''}>
+          <label>额度（带宽为 Mbps / 同播为路 / 其余为张）<input type="number" min="1" max="1000000" required value="${esc(spec.amount ?? 1)}" data-drop-amount></label>
+          <label>使用后有效天数（0=永久）<input type="number" min="${['bandwidth_card','streams_card'].includes(kind)?1:0}" max="36500" required value="${esc(spec.duration_days ?? 0)}" data-drop-days></label>
+        </fieldset>
+      </div><p class="help">独立规格不会自动跟随商城；引用商品在掉落时读取当前规格，入包后冻结。概率总和不超过100%，每次最多1件。</p></details>`;
   }
-
-  if (key === 'holidays') {
-    return `
-      <div class="item-editor-wrap" data-editor-for="${esc(pid)}-${esc(key)}">
-        <div class="item-editor-header">
-          <span style="font-weight:600;font-size:12px">节日特惠设置</span>
-          <button type="button" class="btn sm" data-add-holiday="${esc(pid)}">+ 添加节日</button>
-        </div>
-        <table class="item-editor-table">
-          <thead>
-            <tr>
-              <th style="width:40%">日期(YYYY-MM-DD)</th>
-              <th style="width:50%">节日名称</th>
-              <th style="width:10%"></th>
-            </tr>
-          </thead>
-          <tbody data-holiday-rows="${esc(pid)}">
-            ${items.map((h, idx) => `
-              <tr data-holiday-idx="${idx}">
-                <td><input type="date" value="${esc(h.date || '')}" data-holiday-date></td>
-                <td><input type="text" value="${esc(h.name || '')}" placeholder="节日名称" data-holiday-name></td>
-                <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>`;
-  }
-
-  return '';
+  return `<details ${data}><summary><span class="entry-summary">${esc(holidaySummary(obj))}</span>${entryActions()}</summary>
+    <div class="entry-fields">
+      <label>日期<input type="date" required value="${esc(obj.date || '')}" data-holiday-date></label>
+      <label>节日名称<input required value="${esc(obj.name || '')}" data-holiday-name></label>
+      <label>幸运概率（ppm，留空继承）<input type="number" min="0" max="1000000" value="${esc(obj.double_ppm ?? '')}" data-holiday-double></label>
+      <label>幸运倍率（留空继承）<input type="number" min="1" max="100" value="${esc(obj.multiplier ?? '')}" data-holiday-multiplier></label>
+    </div>
+    <label class="holiday-override"><input type="checkbox" data-holiday-override-drops ${obj.drops!==undefined?'checked':''}> 独立配置本节日掉落（取消则继承默认，空列表表示不掉落）</label>
+    <fieldset class="holiday-drops" ${obj.drops===undefined?'hidden disabled':''}>${renderEntryList('', 'drops', obj.drops || [])}</fieldset></details>`;
+}
+// Nested lists do not use element IDs; their enclosing JSON field owns saving.
+function renderEntryList(pid, key, items) {
+  const labels = {streak_tiers:'连签阶梯',drops:'活动掉落',holidays:'节日活动'};
+  const entries = items.map(o=>renderEntry(key,o)).join('');
+  return `<div class="item-list item-editor-wrap" data-list-key="${key}"><div class="item-editor-header"><b>${labels[key]} · ${items.length} 项</b><button type="button" class="btn sm" data-add-entry="${key}" ${key==='streak_tiers'?`data-add-tier="${esc(pid)}"`:''}>＋ 添加</button></div>
+    ${key==='streak_tiers'?`<table class="item-editor-table"><thead><tr><th>达标天数</th><th>基础正分加成（%）</th><th>操作</th></tr></thead><tbody class="item-entries" data-tier-rows="${esc(pid)}">${entries}</tbody></table>`:`<div class="item-entries">${entries}</div>`}
+    ${key==='holidays'?'<p class="help">展开单项编辑独立额度、期限与幸运设置；仅界面收纳，节日仍优先于周末，不叠乘。</p>':''}</div>`;
+}
+function renderItemizedEditor(pid, key, rawJson) {
+  let items;
+  try { items = JSON.parse(rawJson); } catch(e) { return ''; }
+  if (!Array.isArray(items) || items.some(x=>!x || typeof x!=='object' || Array.isArray(x))) return '';
+  const list = renderEntryList(pid,key,items);
+  return key==='holidays'?`<details class="holiday-list"><summary>📅 节日列表 · ${items.length} 项 · 展开管理</summary>${list}</details>`:list;
+}
+function listData(list) {
+  const key = list.dataset.listKey;
+  const rows = list.querySelector(':scope > .item-entries') || list.querySelector(':scope > table > .item-entries');
+  const entries = [...rows.children];
+  const labels = {streak_tiers:'连签阶梯',drops:'活动掉落',holidays:'节日活动'};
+  list.querySelector(':scope > .item-editor-header b').textContent = `${labels[key]} · ${entries.length} 项`;
+  if (key === 'holidays') list.closest('.holiday-list').querySelector(':scope > summary').textContent = `📅 节日列表 · ${entries.length} 项 · 展开管理`;
+  return entries.map(row=> {
+    const obj = entryOriginal(row);
+    const value = selector=>row.querySelector(selector).value;
+    if (key==='streak_tiers') return {days:Number(value('[data-tier-days]')),percent:Number(value('[data-tier-percent]'))};
+    if (key==='drops') {
+      obj.ppm = Number(value('[data-drop-ppm]'));
+      const kind = value('[data-drop-kind]');
+      if (kind==='item_id') { delete obj.spec; obj.item_id=Number(value('[data-drop-val]')); }
+      else {
+        delete obj.item_id;
+        obj.spec = Object.assign({},obj.spec || {}, {kind,name:value('[data-drop-val]').trim(),amount:Number(value('[data-drop-amount]')),duration_days:Number(value('[data-drop-days]'))});
+      }
+    } else {
+      obj.date=value('[data-holiday-date]'); obj.name=value('[data-holiday-name]').trim();
+      for (const [field, selector] of [['double_ppm','[data-holiday-double]'],['multiplier','[data-holiday-multiplier]']]) {
+        if (value(selector)==='') delete obj[field]; else obj[field]=Number(value(selector));
+      }
+      if (row.querySelector('[data-holiday-override-drops]').checked) obj.drops=listData(row.querySelector('.holiday-drops > .item-list'));
+      else delete obj.drops;
+    }
+    const summary=row.querySelector(':scope > summary > .entry-summary');
+    if (summary) summary.textContent=key==='drops'?dropSummary(obj):holidaySummary(obj);
+    return obj;
+  });
+}
+function pluginFields(c) {
+  const groups = {
+    checkin:[['基础与连签',['streak_tiers'],true],['周末与默认活动',['weekends','double_ppm','multiplier','drops'],true],['节日管理',['holidays'],true]],
+    inventory:[['道具叠加限制',['bandwidth_cap_mbps','streams_cap'],true],['称号同步设置',['title_chat'],false]],
+    points_transfer:[['转账额度与手续费',['enabled_for_members','daily_limit','min_amount','fee_percent'],true],['收款安全设置',['restrict_receivers'],false]],
+    red_packets:[['红包额度与有效期',['enabled_for_members','max_total','max_parts','ttl_hours'],true]]
+  }[c.id];
+  if (!groups) return (c.fields||[]).map(f=>pluginField(c.id,f,c.config?.[f.key])).join('');
+  const used = new Set(groups.flatMap(g=>g[1]));
+  const rest = (c.fields||[]).filter(f=>!used.has(f.key)).map(f=>f.key);
+  if (rest.length) groups.push(['高级设置',rest,false]);
+  return groups.map(([label,keys,open])=>`<details class="plugin-settings-group" ${open?'open':''}><summary>${esc(label)} <span class="muted">${keys.length}项</span></summary>${keys.map(key=>{const f=(c.fields||[]).find(f=>f.key===key);return f?pluginField(c.id,f,c.config?.[key]):'';}).join('')}</details>`).join('');
 }
 
 function pluginField(pid, f, value) {
@@ -1401,19 +1405,20 @@ function pluginField(pid, f, value) {
     if (isSpecialJson) {
       const itemizedHtml = renderItemizedEditor(pid, f.key, v);
       input = `
-        <div class="plugin-json-smart" data-field-wrap="${esc(pid)}-${esc(f.key)}">
+        <div class="plugin-json-smart" data-field-wrap="${esc(pid)}-${esc(f.key)}" data-field-key="${esc(f.key)}">
           <div class="item-editor-container" id="wrap-items-${esc(id)}">
             ${itemizedHtml}
           </div>
           <div style="margin-top:6px">
-            <details class="advanced-config" id="details-${esc(id)}" open>
-              <summary style="font-size:11px;color:#8795ad;cursor:pointer">⚙️ 高级模式：编辑原始 JSON 文本</summary>
+            <details class="advanced-config" id="details-${esc(id)}">
+              <summary style="font-size:11px;color:#8795ad;cursor:pointer">⚙️ 切换到 JSON 编辑</summary>
               <div style="margin-top:8px">
                 <textarea id="${id}" rows="3" spellcheck="false" style="width:100%;min-width:240px;box-sizing:border-box">${esc(v)}</textarea>
-                <div class="muted" style="font-size:10px;margin-top:4px">保存时若处于高级展开状态将直接以文本框内容为准，否则优先同步条目编辑器的修改。</div>
+                <div class="muted" style="font-size:10px;margin-top:4px">展开后仅编辑 JSON；收起时校验并同步到可视条目。切换前保留当前修改，错误内容不会丢失。</div>
               </div>
             </details>
           </div>
+          <p class="help editor-error" data-editor-error role="status"></p>
         </div>`;
     } else {
       input = `<textarea id="${id}" rows="3" style="flex:1;min-width:240px">${esc(v)}</textarea>`;
@@ -1482,7 +1487,7 @@ function pluginCard(c) {
     </div>
     <div class="card-body">
       <div class="muted" style="line-height:1.6;margin-bottom:12px">${esc(c.description)}</div>
-      ${(c.fields || []).map((f) => pluginField(c.id, f, (c.config || {})[f.key])).join('')}
+      ${pluginFields(c)}
       <div class="toolbar" style="margin-top:12px">
         <button class="btn primary" data-act="save" ${busy ? 'disabled' : ''}>保存</button>
         <button class="btn" data-act="run" ${busy ? 'disabled' : ''}>
@@ -1503,153 +1508,92 @@ function pluginCardEl(pid) {
   return document.querySelector(`.plugin-card[data-plugin="${pid}"]`);
 }
 
-function bindItemizedEditor(el, pid) {
-  // Bind Add Buttons
-  const addTier = el.querySelector(`[data-add-tier="${pid}"]`);
-  if (addTier) {
-    addTier.onclick = () => {
-      const tbody = el.querySelector(`[data-tier-rows="${pid}"]`);
-      if (!tbody) return;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><input type="number" min="1" value="1" data-tier-days></td>
-        <td><input type="number" min="0" value="0" data-tier-bonus></td>
-        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
-      tbody.appendChild(tr);
-      syncItemizedToTextarea(el, pid, 'streak_tiers');
-    };
-  }
-
-  const addDrop = el.querySelector(`[data-add-drop="${pid}"]`);
-  if (addDrop) {
-    addDrop.onclick = () => {
-      const tbody = el.querySelector(`[data-drop-rows="${pid}"]`);
-      if (!tbody) return;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><input type="number" min="1" max="1000000" value="1000" data-drop-ppm></td>
-        <td>
-          <div style="display:flex;gap:6px;align-items:center">
-            <select data-drop-kind style="width:130px">
-              <option value="invite_card" selected>邀请码卡</option>
-              <option value="bandwidth_card">带宽卡</option>
-              <option value="streams_card">同播卡</option>
-              <option value="title_card">称号卡</option>
-              <option value="item_id">商品ID</option>
-            </select>
-            <input type="text" placeholder="道具自定义名称" value="自定义道具卡" data-drop-val style="flex:1">
-          </div>
-        </td>
-        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
-      tbody.appendChild(tr);
-      syncItemizedToTextarea(el, pid, 'drops');
-    };
-  }
-
-  const addHoliday = el.querySelector(`[data-add-holiday="${pid}"]`);
-  if (addHoliday) {
-    addHoliday.onclick = () => {
-      const tbody = el.querySelector(`[data-holiday-rows="${pid}"]`);
-      if (!tbody) return;
-      const tr = document.createElement('tr');
-      const today = new Date().toISOString().slice(0, 10);
-      tr.innerHTML = `
-        <td><input type="date" value="${today}" data-holiday-date></td>
-        <td><input type="text" value="新节日活动" placeholder="节日名称" data-holiday-name></td>
-        <td><button type="button" class="btn sm danger" data-del-row title="删除">✕</button></td>`;
-      tbody.appendChild(tr);
-      syncItemizedToTextarea(el, pid, 'holidays');
-    };
-  }
-
-  // Bind change/input & delete delegation
-  el.addEventListener('click', (ev) => {
-    const btn = ev.target.closest('[data-del-row]');
-    if (!btn) return;
-    const tr = btn.closest('tr');
-    const table = btn.closest('table');
-    if (tr && table) {
-      tr.remove();
-      if (table.querySelector('[data-tier-days]')) syncItemizedToTextarea(el, pid, 'streak_tiers');
-      else if (table.querySelector('[data-drop-ppm]')) syncItemizedToTextarea(el, pid, 'drops');
-      else if (table.querySelector('[data-holiday-date]')) syncItemizedToTextarea(el, pid, 'holidays');
-    }
-  });
-
-  el.addEventListener('input', (ev) => {
-    if (ev.target.matches('[data-tier-days],[data-tier-bonus]')) {
-      syncItemizedToTextarea(el, pid, 'streak_tiers');
-    } else if (ev.target.matches('[data-drop-ppm],[data-drop-val]')) {
-      syncItemizedToTextarea(el, pid, 'drops');
-    } else if (ev.target.matches('[data-holiday-date],[data-holiday-name]')) {
-      syncItemizedToTextarea(el, pid, 'holidays');
-    }
-  });
-
-  el.addEventListener('change', (ev) => {
-    if (ev.target.matches('[data-drop-kind]')) {
-      const kind = ev.target.value;
-      const input = ev.target.closest('tr')?.querySelector('[data-drop-val]');
-      if (input) input.placeholder = kind === 'item_id' ? '数字商品ID' : '道具自定义名称';
-      syncItemizedToTextarea(el, pid, 'drops');
-    }
-  });
-}
-
 function syncItemizedToTextarea(el, pid, key) {
-  const textarea = el.querySelector(`#pl-${pid}-${key}`);
-  if (!textarea) return;
-  // If user has the advanced details open, don't overwrite user's raw edits
-  const details = el.querySelector(`#details-pl-${pid}-${key}`);
-  if (details && details.open) return;
-
-  if (key === 'streak_tiers') {
-    const rows = [...el.querySelectorAll(`[data-tier-rows="${pid}"] tr`)];
-    const tiers = rows.map(r => ({
-      days: parseInt(r.querySelector('[data-tier-days]')?.value || '1', 10),
-      bonus: parseInt(r.querySelector('[data-tier-bonus]')?.value || '0', 10),
-    })).filter(t => !isNaN(t.days) && !isNaN(t.bonus));
-    textarea.value = JSON.stringify(tiers);
-  } else if (key === 'drops') {
-    let originalDrops = [];
-    try { originalDrops = JSON.parse(textarea.value); } catch(e){}
-    const rows = [...el.querySelectorAll(`[data-drop-rows="${pid}"] tr`)];
-    const drops = rows.map((r, idx) => {
-      const ppm = parseInt(r.querySelector('[data-drop-ppm]')?.value || '0', 10);
-      const kind = r.querySelector('[data-drop-kind]')?.value || 'invite_card';
-      const val = (r.querySelector('[data-drop-val]')?.value || '').trim();
-      const orig = (Array.isArray(originalDrops) && originalDrops[idx]) ? originalDrops[idx] : {};
-      const res = Object.assign({}, orig, { ppm });
-      if (kind === 'item_id') {
-        delete res.spec;
-        res.item_id = parseInt(val, 10) || 0;
-      } else {
-        delete res.item_id;
-        const defaultAmounts = { invite_card: 1, bandwidth_card: 10, streams_card: 1, title_card: 1 };
-        const defaultDurations = { invite_card: 0, bandwidth_card: 30, streams_card: 30, title_card: 30 };
-        const origSpec = orig.spec || {};
-        res.spec = Object.assign({}, origSpec, {
-          kind,
-          name: val || origSpec.name || '道具卡',
-          amount: origSpec.amount ?? defaultAmounts[kind] ?? 1,
-          duration_days: origSpec.duration_days ?? defaultDurations[kind] ?? 0,
-        });
+  const wrap=el.querySelector(`[data-field-wrap="${pid}-${key}"]`);
+  if (!wrap || wrap.dataset.editorSource==='json') return;
+  const list=wrap.querySelector('.item-editor-container .item-list');
+  if (list) wrap.querySelector('textarea').value=JSON.stringify(listData(list));
+}
+function bindItemizedEditor(el, pid) {
+  el.querySelectorAll('.plugin-json-smart').forEach(wrap=>{
+    const key=wrap.dataset.fieldKey;
+    wrap.dataset.editorSource=wrap.querySelector('.item-list')?'visual':'json';
+    const details=wrap.querySelector('.advanced-config');
+    if (wrap.dataset.editorSource==='json') details.open=true;
+    wrap.addEventListener('toggle', ev=>{
+      if (ev.target!==details) return;
+      const textarea=wrap.querySelector('textarea');
+      const error=wrap.querySelector('[data-editor-error]');
+      if (details.open) {
+        if (wrap.dataset.editorSource==='visual') syncItemizedToTextarea(el,pid,key);
+        wrap.dataset.editorSource='json';
+      } else if (wrap.dataset.editorSource==='json') {
+        try {
+          const rendered=renderItemizedEditor(pid,key,textarea.value);
+          if (!rendered) throw new Error('须为对象条目数组');
+          wrap.querySelector('.item-editor-container').innerHTML=rendered;
+          wrap.dataset.editorSource='visual';
+          error.textContent=''; textarea.setCustomValidity('');
+        } catch(e) {
+          error.textContent='JSON无效，内容已保留。请修正后再切回可视编辑。';
+          textarea.setCustomValidity('JSON须为对象条目数组');
+          details.open=true;
+        }
       }
-      return res;
-    });
-    textarea.value = JSON.stringify(drops);
-  } else if (key === 'holidays') {
-    let originalHolidays = [];
-    try { originalHolidays = JSON.parse(textarea.value); } catch(e){}
-    const rows = [...el.querySelectorAll(`[data-holiday-rows="${pid}"] tr`)];
-    const holidays = rows.map((r, idx) => {
-      const date = r.querySelector('[data-holiday-date]')?.value || '';
-      const name = (r.querySelector('[data-holiday-name]')?.value || '').trim();
-      const orig = (Array.isArray(originalHolidays) && originalHolidays[idx]) ? originalHolidays[idx] : {};
-      return Object.assign({}, orig, { date, name });
-    }).filter(h => h.date);
-    textarea.value = JSON.stringify(holidays);
+      wrap.querySelector('.item-editor-container').inert=wrap.dataset.editorSource==='json';
+    },true);
+  });
+  el.addEventListener('click', ev=>{
+    const add=ev.target.closest('[data-add-entry]');
+    const del=ev.target.closest('[data-del-entry]');
+    const move=ev.target.closest('[data-move-entry]');
+    if (!add && !del && !move) return;
+    ev.preventDefault(); ev.stopPropagation();
+    const wrap=ev.target.closest('.plugin-json-smart');
+    if (!wrap || wrap.dataset.editorSource==='json') return;
+    if (add) {
+      const list=add.closest('.item-list');
+      const key=list.dataset.listKey;
+      const rows=list.querySelector(':scope > .item-entries') || list.querySelector(':scope > table > .item-entries');
+      const defaultEntry=key==='streak_tiers'?{days:1,percent:0}:key==='drops'?{ppm:1000,spec:{kind:'invite_card',name:'新邀请码卡',amount:1,duration_days:0}}:{date:new Date().toLocaleDateString('sv-SE',{timeZone:'Asia/Shanghai'}),name:'新节日活动'};
+      rows.insertAdjacentHTML('beforeend',renderEntry(key,defaultEntry));
+      const entry=rows.lastElementChild;
+      if (entry.tagName==='DETAILS') entry.open=true;
+    } else {
+      const row=ev.target.closest('.item-entry');
+      if (del) row.remove();
+      else if (move.dataset.moveEntry==='-1' && row.previousElementSibling) row.parentElement.insertBefore(row,row.previousElementSibling);
+      else if (move.dataset.moveEntry==='1' && row.nextElementSibling) row.parentElement.insertBefore(row.nextElementSibling,row);
+    }
+    syncItemizedToTextarea(el,pid,wrap.dataset.fieldKey);
+  });
+  function changed(ev) {
+    const wrap=ev.target.closest('.plugin-json-smart');
+    if (!wrap) return;
+    if (ev.target.tagName==='TEXTAREA') {
+      wrap.dataset.editorSource='json';
+      wrap.querySelector('.item-editor-container').inert=true;
+      wrap.querySelector('[data-editor-error]').textContent='';
+      ev.target.setCustomValidity('');
+      return;
+    }
+    if (wrap.dataset.editorSource==='json') return;
+    if (ev.target.matches('[data-drop-kind]')) {
+      const row=ev.target.closest('.item-entry');
+      const fieldset=row.querySelector('.drop-spec-fields');
+      const reference=ev.target.value==='item_id';
+      fieldset.hidden=fieldset.disabled=reference;
+      row.querySelector('[data-drop-val]').parentElement.firstChild.textContent=reference?'商品ID':'名称';
+      row.querySelector('[data-drop-days]').min=['bandwidth_card','streams_card'].includes(ev.target.value)?'1':'0';
+    }
+    if (ev.target.matches('[data-holiday-override-drops]')) {
+      const fieldset=ev.target.closest('.item-entry').querySelector('.holiday-drops');
+      fieldset.hidden=fieldset.disabled=!ev.target.checked;
+    }
+    syncItemizedToTextarea(el,pid,wrap.dataset.fieldKey);
   }
+  el.addEventListener('input',changed);
+  el.addEventListener('change',changed);
 }
 
 function bindPluginCard(c) {
@@ -1687,7 +1631,7 @@ function pluginPayload(c) {
 async function savePlugin(c, run = false) {
   const el = pluginCardEl(c.id);
   if (!el || automation.busy[c.id]) return;
-  const invalid = [...el.querySelectorAll('input,select,textarea')].find(input => !input.checkValidity());
+  const invalid = [...el.querySelectorAll('input,select,textarea')].find(input => !input.closest('[inert]') && !input.checkValidity());
   if (invalid) { invalid.reportValidity(); return; }
   // Capture before any DOM update, and never reload unrelated plugin editors.
   const payload = pluginPayload(c);
@@ -2071,14 +2015,12 @@ PAGES.sharing = async (context = pageContext('sharing')) => {
    the other half -- a catalogue with no record of what it handed out cannot
    answer "why does this member have 500GB extra". */
 const SHOP_KINDS = [
-  { id: 'traffic', label: '流量包', unit: 'GB' },
-  { id: 'days', label: '会员天数', unit: '天' },
-  { id: 'bandwidth', label: '带宽提速', unit: 'Mbps' },
-  { id: 'invite', label: '邀请名额（旧版即时）', unit: '个' },
   { id: 'invite_card', label: '邀请码卡（入包）', unit: '张' },
   { id: 'bandwidth_card', label: '带宽卡（入包）', unit: 'Mbps' },
   { id: 'streams_card', label: '同播卡（入包）', unit: '路' },
   { id: 'title_card', label: '称号卡（入包）', unit: '张' },
+  { id: 'whitelist_card', label: '白名单卡（入包）', unit: '张' },
+  { id: 'custom', label: '自定义商品（购买后说明）', unit: '件' },
 ];
 function shopUnit(kind) {
   const found = SHOP_KINDS.find((k) => k.id === kind);
@@ -2116,23 +2058,28 @@ PAGES.shop = async (context = pageContext('shop')) => {
          </div>
          <div id="ec-member"></div>
        </div>`)}
-    ${card('新增商品', '数量的单位随类型变化：流量按 GB，天数按天，提速按 Mbps，名额按个',
+    ${card('新增商品', '卡片购买后入包，使用才生效；自定义说明仅购买者可见',
     `<div class="card-body">
         <div class="form-row"><label for="sh-kind">类型</label>
           <select id="sh-kind">${SHOP_KINDS.map((k) =>
     `<option value="${esc(k.id)}">${esc(k.label)}</option>`).join('')}</select>
-          <span class="muted" id="sh-unit">单位 GB</span></div>
+          <span class="muted" id="sh-unit">单位 张</span></div>
         <div class="form-row"><label for="sh-name">名称</label>
-          <input id="sh-name" placeholder="例如「流量包 50GB」"></div>
-        <div class="form-row"><label for="sh-desc">说明</label>
+          <input id="sh-name" placeholder="填写商品名称"></div>
+        <div class="form-row"><label for="sh-desc">公开描述</label>
           <input id="sh-desc" placeholder="成员在机器人里看到的一句话说明"></div>
         <div class="form-row"><label for="sh-cost">消耗积分</label>
           <input id="sh-cost" type="number" min="1" value="100" style="width:110px"></div>
         <div class="form-row"><label for="sh-amount">数量</label>
-          <input id="sh-amount" type="number" min="1" value="50" style="width:110px"></div>
-        <div class="form-row"><label for="sh-duration">道具使用期限（天）</label>
+          <input id="sh-amount" type="number" min="1" value="1" style="width:110px"></div>
+        <div class="form-row" id="sh-duration-row"><label for="sh-duration">使用后期限（天）</label>
           <input id="sh-duration" type="number" min="0" value="30">
-          <span class="muted">从使用/创建开始；0仅用于永久称号/邀请码卡；旧版即时商品不受此字段影响</span></div>
+          <span class="muted" id="sh-spec">从使用/创建起算；带宽/同播须大于0，称号/白名单0为永久，邀请码固定0；白名单不延长基础有效期。</span></div>
+        <div class="form-row" id="sh-notice-row" hidden><label for="sh-notice">购买后私密说明</label>
+          <textarea id="sh-notice" rows="5" maxlength="12000" placeholder="仅购买后私聊和本人背包展示，管理员填写实际内容"></textarea></div>
+        <div class="form-row" id="sh-retention-row" hidden><label for="sh-retention">背包保留（天）</label>
+          <input id="sh-retention" type="number" min="1" max="36500" value="7">
+          <span class="muted">从购买起算；到期隐藏背包说明，订单和流水保留，不撤回聊天消息、不自动退款。</span></div>
         <div class="form-row"><label for="sh-limit">每人限兑</label>
           <input id="sh-limit" type="number" min="0" value="0" style="width:110px">
           <span class="muted">0 = 不限</span></div>
@@ -2174,7 +2121,21 @@ PAGES.shop = async (context = pageContext('shop')) => {
     kindSel.onchange = () => {
       const unit = $('#sh-unit');
       if (unit) unit.textContent = '单位 ' + shopUnit(kindSel.value);
+      const kind = kindSel.value;
+      const custom = kind === 'custom';
+      const scalar = kind === 'bandwidth_card' || kind === 'streams_card';
+      $('#sh-notice-row').hidden = !custom;
+      $('#sh-retention-row').hidden = !custom;
+      $('#sh-duration-row').hidden = custom;
+      $('#sh-amount').disabled = !scalar;
+      $('#sh-amount').value = scalar ? (kind === 'bandwidth_card' ? 10 : 1) : 1;
+      $('#sh-duration').value = scalar ? 30 : 0;
+      $('#sh-duration').min = scalar ? 1 : 0;
+      $('#sh-duration').disabled = kind === 'invite_card';
+      if (kind === 'whitelist_card') $('#sh-cost').value = 5000;
+      else if (kind === 'title_card') $('#sh-cost').value = Math.max(200, Number($('#sh-cost').value || 0));
     };
+    kindSel.onchange();
   }
   if ($('#sh-add')) bindAsyncButton('sh-add', addShopItem);
   if ($('#ec-load')) bindAsyncButton('ec-load', loadEconomyMember);
@@ -2182,6 +2143,10 @@ PAGES.shop = async (context = pageContext('shop')) => {
 function shopFormPayload() {
   return {
     kind: ($('#sh-kind') || {}).value,
+    ...((($('#sh-kind') || {}).value === 'custom') ? {
+      purchase_notice: ($('#sh-notice') || {}).value || '',
+      retention_days: Number(($('#sh-retention') || {}).value || 0),
+    } : {}),
     name: (($('#sh-name') || {}).value || '').trim(),
     description: (($('#sh-desc') || {}).value || '').trim(),
     cost: Number(($('#sh-cost') || {}).value || 0),
@@ -2214,13 +2179,19 @@ function editShopItem(id) {
   const row = item || { id };
   openModal('编辑商品', `
     <div class="form-row"><label for="se-name">名称</label><input id="se-name" value="${esc(row.name || '')}"></div>
-    <div class="form-row"><label for="se-desc">说明</label><input id="se-desc" value="${esc(row.description || '')}"></div>
+    <div class="form-row"><label for="se-desc">公开描述</label><input id="se-desc" value="${esc(row.description || '')}"></div>
     <div class="form-row"><label for="se-cost">消耗积分</label>
       <input id="se-cost" type="number" min="1" value="${esc(row.cost || 1)}" style="width:110px"></div>
     <div class="form-row"><label for="se-amount">数量</label>
       <input id="se-amount" type="number" min="1" value="${esc(row.amount || 1)}" style="width:110px"></div>
-    <div class="form-row"><label for="se-duration">道具使用期限（天）</label>
-      <input id="se-duration" type="number" min="0" value="${esc(row.duration_days ?? 30)}"></div>
+    <div class="form-row" ${row.kind === 'custom' ? 'hidden' : ''}><label for="se-duration">使用后期限（天）</label>
+      <input id="se-duration" type="number" min="0" value="${esc(row.duration_days ?? 30)}">
+      <span class="muted">带宽/同播期限>0；称号/白名单0为永久；限时白名单续期，到期安全恢复原组，管理员接管不覆盖。</span></div>
+    ${row.kind === 'custom' ? `<div class="form-row"><label for="se-notice">购买后私密说明</label>
+      <textarea id="se-notice" rows="5" maxlength="12000">${esc(row.purchase_notice || '')}</textarea></div>
+      <div class="form-row"><label for="se-retention">背包保留（天）</label>
+        <input id="se-retention" type="number" min="1" max="36500" value="${esc(row.retention_days ?? 7)}">
+        <span class="muted">说明和期限在购买时冻结；修改不影响已购买内容。</span></div>` : ''}
     <div class="form-row"><label for="se-limit">每人限兑</label>
       <input id="se-limit" type="number" min="0" value="${esc(row.per_user_limit || 0)}" style="width:110px">
       <span class="muted">0 = 不限</span></div>
@@ -2234,6 +2205,8 @@ function editShopItem(id) {
         await api(`/api/shop/items/${Number(id)}`, {
           method: 'PUT',
           body: JSON.stringify({
+            ...(row.kind === 'custom' ? { purchase_notice: ($('#se-notice') || {}).value || '',
+              retention_days: Number(($('#se-retention') || {}).value || 0) } : {}),
             name: ($('#se-name') || {}).value,
             description: ($('#se-desc') || {}).value,
             cost: Number(($('#se-cost') || {}).value || 0),

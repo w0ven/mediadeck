@@ -377,7 +377,6 @@ async def _startup() -> None:
     app.state.points = PointsService(app.state.db)
     app.state.shop = ShopService(app.state.db, app.state.members,
                                  app.state.points)
-    app.state.shop.seed_defaults()
     app.state.shop.seed_cards()
     # Requests need a group to promote into (/prouser) and one to charge the
     # monthly allowance against, so they are built after groups and members.
@@ -2113,6 +2112,8 @@ async def _inventory_expired_effects(user_id: str, kinds: set[str]) -> dict[str,
     """Use the existing actual cap reissue path, including old signed URLs."""
     try:
         enabled = bool(app.state.settings_service.membership_config().get('enforcement_enabled'))
+        if 'whitelist_card' in kinds:
+            return await _telegram_member_changed(user_id, None)
         if 'bandwidth_card' in kinds:
             return await _reissue_rate_caps(user_id=user_id,reason='带宽道具已独立到期',
                                            enforce=enabled,kick=True,report_failures=True)
@@ -3397,7 +3398,7 @@ async def points_adjust(user_id: str, payload: dict[str, Any] = Body(...),  # no
 # ---- shop -------------------------------------------------------------------
 @app.get("/api/shop/items", dependencies=[Depends(_auth)])
 async def shop_items(enabled_only: bool = False) -> list[dict[str, Any]]:
-    return app.state.shop.items(enabled_only=enabled_only)
+    return app.state.shop.items(enabled_only=enabled_only, include_private=True)
 
 
 @app.post("/api/shop/items", dependencies=[Depends(_auth)])
