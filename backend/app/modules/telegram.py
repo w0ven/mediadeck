@@ -1141,7 +1141,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin):
              {"text": "🎁 商城", "callback_data": "shop"},
              {"text": "📜 流水", "callback_data": "bag_records"}],
             [{"text": "🎒 我的道具", "callback_data": "inventory"},
-             {"text": "称号", "callback_data": "titles"}],
+             {"text": "🏷️ 我的称号", "callback_data": "titles"}],
             [{"text": "◀ 返回", "callback_data": "home"}],
         ]
 

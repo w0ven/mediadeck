@@ -1289,7 +1289,18 @@ function pluginField(pid, f, value) {
       `<option value="${esc(o.value)}" ${o.value === v ? 'selected' : ''}>${esc(o.label)}</option>`
     ).join('')}</select>`;
   } else if (f.kind === 'text') {
-    input = `<textarea id="${id}" rows="3" style="flex:1;min-width:240px">${esc(v)}</textarea>`;
+    let smartHelper = '';
+    if (f.key === 'streak_tiers') {
+      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 示例：<code>[{"days":1,"bonus":0},{"days":3,"bonus":5},{"days":7,"bonus":15},{"days":30,"bonus":50}]</code></div>`;
+    } else if (f.key === 'drops') {
+      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 掉落规格示例：<code>[{"ppm":5000,"spec":{"name":"邀请码卡","kind":"invite_card","amount":1,"duration_days":0}}]</code> 或使用 <code>item_id</code></div>`;
+    } else if (f.key === 'holidays') {
+      smartHelper = `<div class="muted" style="font-size:11px;margin-top:4px">💡 预置 2026/2027 节日，可对单日覆盖 <code>double_ppm</code>、<code>multiplier</code> 或 <code>drops</code></div>`;
+    }
+    input = `<div class="plugin-json-smart">
+      <textarea id="${id}" rows="3" spellcheck="false" style="flex:1;min-width:240px">${esc(v)}</textarea>
+      ${smartHelper}
+    </div>`;
   } else {
     input = `<input id="${id}" value="${esc(v)}" style="flex:1;min-width:200px">`;
   }
@@ -1825,8 +1836,13 @@ PAGES.shop = async (context = pageContext('shop')) => {
       ${stat('💰', spent, '消耗积分', '这些记录合计')}
     </div>
     ${card('成员背包 / 称号管理', '签到活动与叠加上限在插件页配置；称号为普通成员标签',
-      `<div class="card-body"><input id="ec-user" aria-label="Emby用户ID" placeholder="Emby用户ID"><button class="btn" id="ec-load">查询</button>
-       <div id="ec-member"></div></div>`)}
+      `<div class="card-body">
+         <div class="toolbar" style="gap:10px;margin-bottom:12px">
+           <input id="ec-user" aria-label="Emby用户ID" placeholder="输入 Emby 用户 ID…" style="width:240px">
+           <button class="btn primary" id="ec-load">查询成员资产</button>
+         </div>
+         <div id="ec-member"></div>
+       </div>`)}
     ${card('新增商品', '数量的单位随类型变化：流量按 GB，天数按天，提速按 Mbps，名额按个',
     `<div class="card-body">
         <div class="form-row"><label for="sh-kind">类型</label>
@@ -2073,15 +2089,83 @@ async function loadEconomyMember() {
   const base = '/api/economy/members/' + encodeURIComponent(user);
   try {
     const result = await api(base);
-    $('#ec-member').innerHTML = `<p>道具 ${result.inventory.length} 件（不可赠送）</p>
-      ${result.inventory.map(r => `<div>#${esc(r.id)} ${esc(r.spec.name)} · ${r.used_at === null ? '未使用' : r.active ? '生效中' : '已使用/到期'} ${esc(r.expiry_error || '')}</div>`).join('')}
-      <p>群标签同步状态</p>${result.tags.map(r => `<div>${esc(r.status)} ${esc(r.error)}</div>`).join('')}
-      <button class="btn" id="ec-retry">重试标签同步</button><p>拥有的称号</p>
-      ${result.titles.map(r => `<div>#${esc(r.id)} ${esc(r.tag)} · ${r.revoked_at ? '已撤销' : r.expires_at ? new Date(r.expires_at*1000).toLocaleString() : '永久'}
-        <button class="btn" data-title-revoke="${esc(r.id)}">撤销</button></div>`).join('')}
-      <input id="ec-tag" aria-label="授予称号" placeholder="称号（1..16字，无emoji/链接/冒充）">
-      <input id="ec-days" type="number" min="0" value="0" aria-label="称号期限天数">天（0永久）
-      <button class="btn" id="ec-grant">授予称号</button>`;
+    const tagStatusMap = {
+      synced: { label: '已同步群', cls: 'synced' },
+      pending: { label: '待同步', cls: 'pending' },
+      retry: { label: '重试中', cls: 'retry' },
+      protected: { label: '手动修改保护', cls: 'protected' },
+      failed: { label: '同步失败', cls: 'failed' },
+    };
+    $('#ec-member').innerHTML = `
+      <div class="ec-member-panel">
+        <div class="ec-section">
+          <div class="ec-section-title">
+            <span>🎒 成员道具（${result.inventory.length} 件 · 不可赠送）</span>
+          </div>
+          <div class="ec-item-list">
+            ${result.inventory.length ? result.inventory.map(r => `
+              <div class="ec-item-row">
+                <div class="ec-item-meta">
+                  <span class="ec-item-id">#${esc(r.id)}</span>
+                  <span class="ec-item-name">${esc(r.spec.name)}</span>
+                  <span class="muted">· ${r.spec.duration_days ? r.spec.duration_days + ' 天' : '永久'}</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:8px">
+                  <span class="tag ${r.used_at === null ? 'ok' : r.active ? 'warn' : 'idle'}">
+                    ${r.used_at === null ? '未使用' : r.active ? '生效中' : '已使用/到期'}
+                  </span>
+                  ${r.expires_at ? `<span class="muted" style="font-size:11px">到期: ${new Date(r.expires_at * 1000).toLocaleDateString()}</span>` : ''}
+                  ${r.expiry_error ? `<span class="danger-text" style="font-size:11px">⚠ ${esc(r.expiry_error)}</span>` : ''}
+                </div>
+              </div>`).join('') : '<div class="muted" style="font-size:12px;padding:8px 0">暂无道具</div>'}
+          </div>
+        </div>
+
+        <div class="ec-section">
+          <div class="ec-section-title">
+            <span>🏷️ 群标签同步状态</span>
+            <button class="btn sm" id="ec-retry">重试标签同步</button>
+          </div>
+          <div class="ec-item-list">
+            ${result.tags.length ? result.tags.map(r => {
+              const info = tagStatusMap[r.status] || { label: r.status, cls: 'pending' };
+              return `
+              <div class="ec-item-row">
+                <div class="ec-item-meta">
+                  <span class="ec-tag-status ${info.cls}">${esc(info.label)}</span>
+                  ${r.error ? `<span class="danger-text" style="font-size:11px">${esc(r.error)}</span>` : '<span class="muted" style="font-size:11px">状态正常</span>'}
+                </div>
+                <span class="muted" style="font-size:11px">重试次数: ${Number(r.retry_count || 0)}</span>
+              </div>`;
+            }).join('') : '<div class="muted" style="font-size:12px;padding:8px 0">暂无群标签记录</div>'}
+          </div>
+        </div>
+
+        <div class="ec-section">
+          <div class="ec-section-title">
+            <span>👑 拥有的称号（${result.titles.length} 个）</span>
+          </div>
+          <div class="ec-item-list">
+            ${result.titles.length ? result.titles.map(r => `
+              <div class="ec-item-row">
+                <div class="ec-item-meta">
+                  <span class="ec-item-id">#${esc(r.id)}</span>
+                  <span class="ec-item-name">${esc(r.tag)}</span>
+                  <span class="muted">· ${r.revoked_at ? '已撤销' : r.expires_at ? new Date(r.expires_at * 1000).toLocaleString() + ' 到期' : '永久有效'}</span>
+                </div>
+                <div>
+                  ${r.revoked_at ? '<span class="tag idle">已撤销</span>' : `<button class="btn sm danger" data-title-revoke="${esc(r.id)}">撤销</button>`}
+                </div>
+              </div>`).join('') : '<div class="muted" style="font-size:12px;padding:8px 0">暂无称号</div>'}
+          </div>
+          <div class="ec-form-inline">
+            <input id="ec-tag" aria-label="授予称号" placeholder="新称号（1..16字，无emoji/链接/冒充）" style="width:260px">
+            <input id="ec-days" type="number" min="0" value="0" aria-label="称号期限天数" style="width:80px">
+            <span class="muted" style="font-size:11px">天（0为永久）</span>
+            <button class="btn primary" id="ec-grant">直接授予称号</button>
+          </div>
+        </div>
+      </div>`;
     $('#ec-grant').onclick = async () => {
       try {
         await api(base+'/titles', {method:'POST',body:JSON.stringify({tag:$('#ec-tag').value,days:Number($('#ec-days').value)})});
