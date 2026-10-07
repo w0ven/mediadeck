@@ -199,7 +199,9 @@ def test_finished_node_signature_is_rechecked_against_live_group(guard, uid):
     (403, {}, [{"UserId": "u-vip"}], "u-vip"),
     (200, {"Items": [{"AccessToken": "caller"}]}, [{"UserId": "u-vip"}], None),
     (200, {"Items": []}, [{"UserId": "u-vip"}, {"UserId": "u-normal"}], None),
-    (403, {}, [{"UserId": "u-vip"}, {}], None),
+    (403, {}, [{"UserId": "u-vip"}, {}, {}], "u-vip"),
+    (403, {}, [{}, {}], None),
+    (403, {}, [{"UserId": "u-vip"}, "malformed"], None),
     (403, {}, [], None)])
 def test_adapter_scoped_identity_rejects_shared_key_and_missing_owner(monkeypatch, keys_status, keys, sessions, expected):
     emby = LiveEmby(lambda: {"enabled": True, "url": "https://emby.example.com", "api_key": "configured-admin"})
