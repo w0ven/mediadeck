@@ -46,6 +46,7 @@ from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
 from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeStore
+from app.modules.inventory import InventoryService
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.metering import UNIT as METER_UNIT
 from app.modules.metering import MeasuredMeteringService
@@ -78,14 +79,13 @@ from app.modules.scheduler import PROBE_INTERVAL, Scheduler
 from app.modules.settings import SettingsService
 from app.modules.sharing import SharingDetector
 from app.modules.shop import ShopError, ShopService
-from app.modules.inventory import InventoryService
-from app.modules.titles import TitleService
 from app.modules.signing import user_tag
 from app.modules.stats import StatsService
 from app.modules.storage import MockStorage, StorageManager
 from app.modules.streams import StreamAdmission, matching_sessions
 from app.modules.tasks import MockTasks, TasksReader
 from app.modules.telegram import TelegramBot
+from app.modules.titles import TitleService
 from app.modules.tmdb import TmdbClient
 from app.modules.updater import MockUpdater, Updater
 from app.modules.usage import UsageSampler, run_usage_io
@@ -3437,12 +3437,12 @@ async def shop_orders(user_id: str | None = None,
 # Administrative UI only. Members use the bot and the same business services.
 @app.get('/api/economy/members/{user_id}', dependencies=[Depends(_auth)])
 async def economy_member(user_id: str):
-    return dict(inventory=app.state.inventory.items(user_id),titles=app.state.titles.titles(user_id),
-                tags=app.state.titles.states(user_id))
+    return {"inventory": app.state.inventory.items(user_id),"titles": app.state.titles.titles(user_id),
+                "tags": app.state.titles.states(user_id)}
 
 
 @app.post('/api/economy/members/{user_id}/titles', dependencies=[Depends(_auth)])
-async def economy_title_grant(user_id: str, payload: dict[str, Any] = Body(...), user: str = Depends(_auth)):
+async def economy_title_grant(user_id: str, payload: dict[str, Any] = Body(...), user: str = Depends(_auth)):  # noqa: B008
     try:
         return app.state.titles.grant(user_id,payload.get('tag'),payload.get('days',0),actor=user)
     except ValueError as exc:

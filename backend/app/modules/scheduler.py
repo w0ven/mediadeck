@@ -176,7 +176,10 @@ class Scheduler:
     async def wait_for_change(self, timeout: float) -> None:
         """Sleep until the node list changes, or the timeout elapses."""
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(self._wake.wait(), timeout=timeout)
+            # wait_for can swallow outer cancellation when the wake completes
+            # concurrently on Python 3.11.2, leaving shutdown stuck forever.
+            async with asyncio.timeout(timeout):
+                await self._wake.wait()
         self._wake.clear()
 
     def set_policy(self, policy: str, load_threshold: float | None = None) -> None:

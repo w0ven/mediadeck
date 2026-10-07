@@ -52,8 +52,9 @@ from app.modules.bot_views import (
     watch_rank_mention,
 )
 from app.modules.gift_receipts import GiftReceipts
-from app.modules.group_points import GroupPointsBotMixin, CALLBACKS as GROUP_POINTS_CALLBACKS
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
+from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
+from app.modules.group_points import GroupPointsBotMixin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.rebinding import RebindingService
 from app.modules.report_delivery import CALL_DELIVERY
@@ -1959,7 +1960,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             lines.append(f"   · 规格期限：{dur_label}")
             if row['used_at'] is None:
                 lines.append("   · 状态：<b>未使用</b>")
-                keyboard.append([dict(text='⚡ 使用 '+spec['name'], callback_data=f"card:{row['id']}")])
+                keyboard.append([{"text": '⚡ 使用 '+spec['name'], "callback_data": f"card:{row['id']}"}])
             else:
                 expiry_str = (' · ' + time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600)) + ' 到期' if row['expires_at'] else ' · 永久')
                 lines.append(f"   · 状态：已使用{expiry_str}")
@@ -1970,12 +1971,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             lines.append('暂无道具。前往商城兑换新道具卡，购买后存入背包。')
         pager = []
         if page > 0:
-            pager.append(dict(text='◀ 上一页', callback_data=f'invpage:{page-1}'))
+            pager.append({"text": '◀ 上一页', "callback_data": f'invpage:{page-1}'})
         if page+1 < pages:
-            pager.append(dict(text='下一页 ▶', callback_data=f'invpage:{page+1}'))
+            pager.append({"text": '下一页 ▶', "callback_data": f'invpage:{page+1}'})
         if pager:
             keyboard.append(pager)
-        keyboard.append([dict(text='◀ 返回背包', callback_data='bag')])
+        keyboard.append([{"text": '◀ 返回背包', "callback_data": 'bag'}])
         await self._edit(chat_id, message_id, '\n'.join(lines).strip(), keyboard)
 
     async def _card_use(self,chat_id,message_id,member,card_id):
@@ -1987,13 +1988,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 return
             if row['spec']['kind']=='title_card':
                 self._pending[self._pkey(chat_id)] = ('title_create',time.time()+PENDING_TTL,
-                    dict(user_id=member['emby_user_id'],card_id=int(card_id)))
+                    {"user_id": member['emby_user_id'],"card_id": int(card_id)})
                 await self._edit(chat_id,message_id,'发送称号文字（1..16字符，无emoji/链接/冒充管理）。创建即消耗卡、开始计时；佩戴和切换免费。',self.bag_menu())
                 return
             result = self._inventory.use(member['emby_user_id'],int(card_id))
             notice = await self._after_member_change(member)
             await self._edit(chat_id,message_id,escape(result['granted'])+notice,self.bag_menu())
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - safely render external fulfillment failures
             await self._edit(chat_id,message_id,'使用失败：'+_public_error(exc),self.bag_menu())
 
     async def _titles_view(self, chat_id, message_id, member, page=0):
@@ -2010,7 +2011,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             exp_text = '永久有效' if not row['expires_at'] else time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600)) + ' 到期'
             status_text = ' [当前佩戴]' if row['worn'] else ''
             lines.append(f"· <b>{escape(row['tag'])}</b>{status_text} · {exp_text}")
-            keyboard.append([dict(text=('✓ 已佩戴 ' if row['worn'] else '🏷️ 佩戴 ') + row['tag'], callback_data=f"wear:{row['id']}")])
+            keyboard.append([{"text": ('✓ 已佩戴 ' if row['worn'] else '🏷️ 佩戴 ') + row['tag'], "callback_data": f"wear:{row['id']}"}])
         tag_states = self._titles.states(member['emby_user_id'])
         if tag_states:
             lines.append("\n<b>群标签同步状态</b>：")
@@ -2022,13 +2023,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             lines.append('\n暂无可用称号。使用背包中的称号卡可创建个性化称号。')
         pager = []
         if page > 0:
-            pager.append(dict(text='◀ 上一页', callback_data=f'titlespage:{page-1}'))
+            pager.append({"text": '◀ 上一页', "callback_data": f'titlespage:{page-1}'})
         if page+1 < pages:
-            pager.append(dict(text='下一页 ▶', callback_data=f'titlespage:{page+1}'))
+            pager.append({"text": '下一页 ▶', "callback_data": f'titlespage:{page+1}'})
         if pager:
             keyboard.append(pager)
-        keyboard += [[dict(text='✕ 取消佩戴', callback_data='wear:none'), dict(text='🔄 重试同步', callback_data='title_retry')],
-                     [dict(text='◀ 返回背包', callback_data='bag')]]
+        keyboard += [[{"text": '✕ 取消佩戴', "callback_data": 'wear:none'}, {"text": '🔄 重试同步', "callback_data": 'title_retry'}],
+                     [{"text": '◀ 返回背包', "callback_data": 'bag'}]]
         await self._edit(chat_id, message_id, '\n'.join(lines), keyboard)
 
     # -- transfer -------------------------------------------------------------
@@ -4188,7 +4189,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                     self._pending.pop(self._pkey(chat_id),None)
                     return
                 try:
-                    result = self._inventory.use(member['emby_user_id'],extra['card_id'],title=text)
+                    self._inventory.use(member['emby_user_id'],extra['card_id'],title=text)
                 except ValueError as exc:
                     await self._show(chat_id,escape(str(exc)),self.bag_menu())
                     return
@@ -4706,7 +4707,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                     tid=data.split(':')[1]
                     await self._titles.wear(member['emby_user_id'],None if tid=='none' else int(tid))
                 await self._titles_view(chat_id,message_id,member)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - no raw external error or false success
                 await self._edit(chat_id,message_id,'称号操作失败：'+_public_error(exc),self.bag_menu())
             return
         if data == "checkin":

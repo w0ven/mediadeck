@@ -6,17 +6,17 @@ import hashlib
 import hmac
 import json
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone, date
+from datetime import date, datetime, timedelta, timezone
 
 BEIJING = timezone(timedelta(hours=8))
 RULE_VERSION = "watch-checkin-v1"
 PPM = 1_000_000
 CARD_KINDS = ("invite_card", "bandwidth_card", "streams_card", "title_card")
 DEFAULT_CARDS = [
-    dict(kind="invite_card", name="邀请码卡", cost=500, amount=1, duration_days=0),
-    dict(kind="bandwidth_card", name="带宽 +10Mbps 30天", cost=300, amount=10, duration_days=30),
-    dict(kind="streams_card", name="同播 +1 30天", cost=600, amount=1, duration_days=30),
-    dict(kind="title_card", name="自定义称号卡", cost=200, amount=1, duration_days=0),
+    {"kind": "invite_card", "name": "邀请码卡", "cost": 500, "amount": 1, "duration_days": 0},
+    {"kind": "bandwidth_card", "name": "带宽 +10Mbps 30天", "cost": 300, "amount": 10, "duration_days": 30},
+    {"kind": "streams_card", "name": "同播 +1 30天", "cost": 600, "amount": 1, "duration_days": 30},
+    {"kind": "title_card", "name": "自定义称号卡", "cost": 200, "amount": 1, "duration_days": 0},
 ]
 
 
@@ -96,7 +96,7 @@ def default_holidays():
         m = (a + 11 * h + 22 * l) // 451
         n = h + l - 7 * m + 114
         dates.append((f"{n // 31:02d}-{n % 31 + 1:02d}", "复活节"))
-        rows.extend(dict(date=f"{year}-{md}", name=name) for md, name in dates)
+        rows.extend({"date": f"{year}-{md}", "name": name} for md, name in dates)
     return sorted(rows, key=lambda r: r["date"])
 
 
@@ -120,7 +120,7 @@ def validate_checkin(config):
         raise ValueError("连签阶梯必须从第1天开始")
     holidays = json.loads(config["holidays"])
     if not isinstance(holidays, list):
-        raise ValueError("节日必须是JSON数组")
+        raise ValueError("节日必须是JSON数组")  # noqa: TRY004 - public validation contract
     seen = set()
     for holiday in holidays:
         if not isinstance(holiday, dict) or not str(holiday.get("name") or "").strip():
@@ -142,11 +142,11 @@ def validate_checkin(config):
 
 
 def activity_defaults(config):
-    return dict(
-        double_ppm=config["double_ppm"],
-        multiplier=config["multiplier"],
-        drops=json.loads(config["drops"]),
-    )
+    return {
+        "double_ppm": config["double_ppm"],
+        "multiplier": config["multiplier"],
+        "drops": json.loads(config["drops"]),
+    }
 
 
 def validate_activity(activity):
@@ -155,7 +155,7 @@ def validate_activity(activity):
             raise ValueError(f"{key}必须是{lo}..{hi}的整数")
     drops = activity.get("drops")
     if not isinstance(drops, list):
-        raise ValueError("drops必须是数组")
+        raise ValueError("drops必须是数组")  # noqa: TRY004 - public validation contract
     total = 0
     for drop in drops:
         if not isinstance(drop, dict) or set(drop) not in ({"ppm", "item_id"}, {"ppm", "spec"}):
@@ -202,7 +202,7 @@ def activity_for(config, now):
             )
     if config["weekends"] and today.weekday() >= 5:
         return dict(defaults, name="周末", event="weekend")
-    return dict(double_ppm=0, multiplier=1, drops=[], name="平日", event="normal")
+    return {"double_ppm": 0, "multiplier": 1, "drops": [], "name": "平日", "event": "normal"}
 
 
 @contextmanager

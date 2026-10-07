@@ -6,7 +6,7 @@ No production writes or live Telegram delivery are performed here.
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -33,7 +33,7 @@ from app.modules.members import MemberService
 from app.modules.plugins import PluginRegistry
 from app.modules.plugins_builtin import PluginContext, register_builtin
 from app.modules.points import PointsService
-from app.modules.shop import ShopService, ShopError
+from app.modules.shop import ShopError, ShopService
 from app.modules.titles import TitleService
 from app.modules.usage import UsageSampler
 
@@ -84,8 +84,8 @@ def env(tmp_path, monkeypatch):
     e = build(db)
     e.groups.seed_defaults()
     for uid in ("u", "v"):
-        e.members.upsert(uid, uid, dict(group_id="standard"))
-        e.members.set_overrides(uid, dict(bandwidth_limit_kbps=20 * 1024, max_streams=2))
+        e.members.upsert(uid, uid, {"group_id": "standard"})
+        e.members.set_overrides(uid, {"bandwidth_limit_kbps": 20 * 1024, "max_streams": 2})
     e.registry.save("checkin", enabled=True)
     e.registry.save("points_transfer", enabled=True)
     e.clock = clock
@@ -118,17 +118,17 @@ def proof(db, user, now=NOW, seconds=600, key=None):
 
 
 def play(at, pos, sid="s", device="d", play_id="p", paused=False, heartbeat=None):
-    return dict(
-        Id=sid,
-        UserId="u",
-        DeviceId=device,
-        PlaySessionId=play_id,
-        LastActivityDate=datetime.fromtimestamp(
+    return {
+        "Id": sid,
+        "UserId": "u",
+        "DeviceId": device,
+        "PlaySessionId": play_id,
+        "LastActivityDate": datetime.fromtimestamp(
             at if heartbeat is None else heartbeat, UTC
         ).isoformat(),
-        NowPlayingItem=dict(Id="film", Name="Demo", Type="Movie", RunTimeTicks=3600 * 10000000),
-        PlayState=dict(IsPaused=paused, PositionTicks=pos * 10000000, PlaybackRate=1),
-    )
+        "NowPlayingItem": {"Id": "film", "Name": "Demo", "Type": "Movie", "RunTimeTicks": 3600 * 10000000},
+        "PlayState": {"IsPaused": paused, "PositionTicks": pos * 10000000, "PlaybackRate": 1},
+    }
 
 
 def test_unbiased_rejection_boundaries_and_all_41_endpoints():
@@ -157,21 +157,21 @@ def test_hmac_determinism_domain_separation_and_range():
 @pytest.mark.parametrize(
     "changes",
     [
-        dict(double_ppm=-1),
-        dict(double_ppm=PPM + 1),
-        dict(double_ppm=0.5),
-        dict(multiplier=0),
-        dict(
-            drops=encode([dict(ppm=PPM, spec=DEFAULT_CARDS[0]), dict(ppm=1, spec=DEFAULT_CARDS[1])])
-        ),
-        dict(drops=encode([dict(ppm=0.5, spec=DEFAULT_CARDS[0])])),
-        dict(streak_tiers="[]"),
-        dict(streak_tiers=encode([dict(days=2, bonus=1)])),
-        dict(streak_tiers=encode([dict(days=1, bonus=0), dict(days=1, bonus=2)])),
-        dict(
-            holidays=encode([dict(date="2026-10-10", name="a"), dict(date="2026-10-10", name="b")])
-        ),
-        dict(holidays=encode([dict(date="2026-02-30", name="bad")])),
+        {"double_ppm": -1},
+        {"double_ppm": PPM + 1},
+        {"double_ppm": 0.5},
+        {"multiplier": 0},
+        {
+            "drops": encode([{"ppm": PPM, "spec": DEFAULT_CARDS[0]}, {"ppm": 1, "spec": DEFAULT_CARDS[1]}])
+        },
+        {"drops": encode([{"ppm": 0.5, "spec": DEFAULT_CARDS[0]}])},
+        {"streak_tiers": "[]"},
+        {"streak_tiers": encode([{"days": 2, "bonus": 1}])},
+        {"streak_tiers": encode([{"days": 1, "bonus": 0}, {"days": 1, "bonus": 2}])},
+        {
+            "holidays": encode([{"date": "2026-10-10", "name": "a"}, {"date": "2026-10-10", "name": "b"}])
+        },
+        {"holidays": encode([{"date": "2026-02-30", "name": "bad"}])},
     ],
 )
 def test_invalid_config_is_rejected_without_saving(env, changes):
@@ -187,9 +187,9 @@ def test_holiday_overrides_weekend_without_stacking_and_annual_lunar_dates(env):
     assert {"2026-02-17", "2027-02-06"} <= {r["date"] for r in holidays}
     env.registry.save(
         "checkin",
-        config=dict(
-            holidays=encode([dict(date="2026-10-10", name="特别节日", double_ppm=0, multiplier=3)])
-        ),
+        config={
+            "holidays": encode([{"date": "2026-10-10", "name": "特别节日", "double_ppm": 0, "multiplier": 3}])
+        },
     )
     activity = activity_for(env.registry.config("checkin"), NOW)
     assert (
@@ -254,7 +254,7 @@ def test_successful_stopped_is_immediate_even_with_later_cached_progress_and_res
     sampler = UsageSampler(env.db, env.members, MockEmby())
     sampler._sample([play(NOW, 0)], NOW, None)
     sampler._sample([play(NOW + 30, 30)], NOW + 30, None)
-    asyncio.run(sampler.playback_report("u", "d", dict(PlaySessionId="p"), stopped=True))
+    asyncio.run(sampler.playback_report("u", "d", {"PlaySessionId": "p"}, stopped=True))
     for offset in (60, 90, 120):
         sampler._sample([play(NOW + offset, offset)], NOW + offset, None)
     assert env.db.one("SELECT seconds FROM watch_verified_totals")["seconds"] == 30
@@ -262,11 +262,11 @@ def test_successful_stopped_is_immediate_even_with_later_cached_progress_and_res
     sampler._sample([play(NOW + 150, 150)], NOW + 150, None)
     sampler._sample([play(NOW + 180, 180)], NOW + 180, None)
     assert env.db.one("SELECT seconds FROM watch_verified_totals")["seconds"] == 30
-    asyncio.run(sampler.playback_report("u", "d", dict(PlaySessionId="p"), stopped=False))
+    asyncio.run(sampler.playback_report("u", "d", {"PlaySessionId": "p"}, stopped=False))
     sampler._sample([play(NOW + 210, 210)], NOW + 210, None)
     sampler._sample([play(NOW + 240, 240)], NOW + 240, None)
     assert env.db.one("SELECT seconds FROM watch_verified_totals")["seconds"] == 60
-    asyncio.run(sampler.playback_report("u", "d", dict(PlaySessionId="old"), stopped=True))
+    asyncio.run(sampler.playback_report("u", "d", {"PlaySessionId": "old"}, stopped=True))
     sampler._sample([play(NOW + 270, 270)], NOW + 270, None)
     assert env.db.one("SELECT seconds FROM watch_verified_totals")["seconds"] == 90
 
@@ -282,10 +282,10 @@ def test_599_seconds_refused_then_exactly_600_permitted(env):
 def test_negative_base_not_multiplied_drop_independent_and_snapshot_stable(env):
     day = day_bounds(NOW)[0]
     user = next(str(i) for i in range(1000) if draw(SECRET, str(i), day, "base", 41) == 0)
-    env.members.upsert(user, user, dict(group_id="standard"))
+    env.members.upsert(user, user, {"group_id": "standard"})
     proof(env.db, user)
     env.registry.save(
-        "checkin", config=dict(double_ppm=PPM, drops=encode([dict(ppm=PPM, spec=DEFAULT_CARDS[0])]))
+        "checkin", config={"double_ppm": PPM, "drops": encode([{"ppm": PPM, "spec": DEFAULT_CARDS[0]}])}
     )
     result = env.checkin.checkin(user)
     assert (
@@ -295,7 +295,7 @@ def test_negative_base_not_multiplied_drop_independent_and_snapshot_stable(env):
     )
     assert len(env.bag.items(user)) == 1
     env.registry.save(
-        "checkin", config=dict(multiplier=5, streak_tiers=encode([dict(days=1, bonus=100)]))
+        "checkin", config={"multiplier": 5, "streak_tiers": encode([{"days": 1, "bonus": 100}])}
     )
     again = env.checkin.checkin(user)
     assert not again["ok"] and again["saved_result"] == result
@@ -313,16 +313,16 @@ def test_negative_base_not_multiplied_drop_independent_and_snapshot_stable(env):
 def test_positive_lucky_before_streak_and_one_drop(env):
     day = day_bounds(NOW)[0]
     user = next(str(i) for i in range(1000) if draw(SECRET, str(i), day, "base", 41) > 10)
-    env.members.upsert(user, user, dict(group_id="standard"))
+    env.members.upsert(user, user, {"group_id": "standard"})
     proof(env.db, user)
     env.registry.save(
         "checkin",
-        config=dict(
-            double_ppm=PPM,
-            multiplier=2,
-            streak_tiers=encode([dict(days=1, bonus=7)]),
-            drops=encode([dict(ppm=PPM, spec=DEFAULT_CARDS[0])]),
-        ),
+        config={
+            "double_ppm": PPM,
+            "multiplier": 2,
+            "streak_tiers": encode([{"days": 1, "bonus": 7}]),
+            "drops": encode([{"ppm": PPM, "spec": DEFAULT_CARDS[0]}]),
+        },
     )
     result = env.checkin.checkin(user)
     assert result["points"] == result["base"] * 2 + 7 and result["multiplier"] == 2
@@ -357,7 +357,7 @@ def test_concurrent_purchase_and_use_snapshot_limit_and_atomic_failure(env):
     results = parallel(env, lambda e: e.shop.redeem("u", item["id"], request_id="purchase-1"))
     assert all(r == results[0] for r in results)
     assert env.points.balance("u") == 1500 and len(env.bag.items("u")) == 1
-    env.shop.update(item["id"], dict(amount=1, cost=800, name="changed"))
+    env.shop.update(item["id"], {"amount": 1, "cost": 800, "name": "changed"})
     card = env.bag.items("u")[0]
     assert card["spec"]["cost"] == 500 and card["spec"]["name"] == "邀请码卡"
     results = parallel(env, lambda e: e.bag.use("u", card["id"]))
@@ -390,7 +390,7 @@ def test_independent_expiration_keeps_base_and_later_admin_changes(env):
     assert env.members.get("u")["overrides"]["bandwidth_limit_kbps"] == 25 * 1024
     env.clock[0] = NOW + 86400
     assert env.members.get("u")["bandwidth_limit_kbps"] == 45 * 1024
-    env.members.set_overrides("u", dict(bandwidth_limit_kbps=40 * 1024))
+    env.members.set_overrides("u", {"bandwidth_limit_kbps": 40 * 1024})
     assert env.members.get("u")["bandwidth_limit_kbps"] == 60 * 1024
     env.clock[0] = NOW + 2 * 86400
     assert env.members.get("u")["bandwidth_limit_kbps"] == 40 * 1024
@@ -398,7 +398,7 @@ def test_independent_expiration_keeps_base_and_later_admin_changes(env):
 
 
 def test_streams_additive_cap_refusal_does_not_waste_card_and_failure_atomic(env):
-    env.registry.save("inventory", config=dict(streams_cap=3))
+    env.registry.save("inventory", config={"streams_cap": 3})
     env.points.add("u", 1800, "admin.adjust")
     item = env.shop.create(dict(DEFAULT_CARDS[2], enabled=True))
     for _ in range(2):
@@ -432,7 +432,7 @@ def test_purchase_fulfillment_failure_rolls_back_debit_order_and_receipt(env, mo
 
 def test_concurrent_transfer_atomic_both_ledgers_idempotent_and_caps(env):
     env.points.add("u", 1000, "admin.adjust")
-    env.registry.save("points_transfer", config=dict(fee_percent=10))
+    env.registry.save("points_transfer", config={"fee_percent": 10})
     results = parallel(
         env, lambda e: e.transfer.transfer("u", "v", 500, request_id="transfer-1", expected_fee=50)
     )
@@ -451,12 +451,12 @@ def test_transfer_failure_rolls_back_sender_and_receiver_restriction_is_configur
     env, monkeypatch
 ):
     env.points.add("u", 100, "admin.adjust")
-    env.members.upsert("v", "v", dict(status="suspended"))
+    env.members.upsert("v", "v", {"status": "suspended"})
     env.transfer.transfer("u", "v", 1)  # default receivers unrestricted
-    env.registry.save("points_transfer", config=dict(restrict_receivers=True))
+    env.registry.save("points_transfer", config={"restrict_receivers": True})
     with pytest.raises(ValueError):
         env.transfer.transfer("u", "v", 1)
-    env.registry.save("points_transfer", config=dict(restrict_receivers=False))
+    env.registry.save("points_transfer", config={"restrict_receivers": False})
     original = env.points._apply
 
     def fail(conn, user, *args):
@@ -468,7 +468,7 @@ def test_transfer_failure_rolls_back_sender_and_receiver_restriction_is_configur
     with pytest.raises(RuntimeError):
         env.transfer.transfer("u", "v", 20, request_id="failed")
     assert env.points.balance("u") == 99 and env.points.balance("v") == 1
-    env.members.upsert("u", "u", dict(status="suspended"))
+    env.members.upsert("u", "u", {"status": "suspended"})
     with pytest.raises(ValueError, match="失效"):
         env.transfer.transfer("u", "v", 1)
 
@@ -487,11 +487,11 @@ class FakeBot:
     async def _call(self, method, payload=None):
         self.calls.append((method, payload))
         if method == "getMe":
-            return dict(id=900)
+            return {"id": 900}
         if method == "getChatMember":
             if payload["user_id"] == 900:
-                return dict(status="administrator", can_manage_tags=self.permission)
-            return dict(status="member", tag=self.tag)
+                return {"status": "administrator", "can_manage_tags": self.permission}
+            return {"status": "member", "tag": self.tag}
         if method == "setChatMemberTag":
             if self.fail:
                 return None
@@ -607,10 +607,10 @@ def test_missing_tg_permission_is_pending_never_promotes_admin(env):
 def test_admin_backend_config_grant_revoke_and_authentication():
     with TestClient(app) as client:
         assert client.get("/api/economy/members/u").status_code == 401
-        app.state.members.upsert("u", "viewer", dict(group_id="standard"))
+        app.state.members.upsert("u", "viewer", {"group_id": "standard"})
         auth = ("admin", "change-me")
         response = client.post(
-            "/api/economy/members/u/titles", auth=auth, json=dict(tag="后台授予", days=0)
+            "/api/economy/members/u/titles", auth=auth, json={"tag": "后台授予", "days": 0}
         )
         assert response.status_code == 200
         tid = response.json()["title_id"]

@@ -17,14 +17,14 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
     monkeypatch.setenv("TMPDIR", str(tmp_path.parent))
     with TestClient(app) as client:
         client.auth = ("admin", "change-me")
-        app.state.members.upsert("u", "viewer", dict(group_id="standard"))
+        app.state.members.upsert("u", "viewer", {"group_id": "standard"})
         with sync_playwright() as driver:
             browser = driver.chromium.launch(
                 executable_path=os.getenv("MEDIADECK_TEST_CHROMIUM", "/usr/bin/chromium"),
                 args=["--no-sandbox"],
                 headless=True,
             )
-            page = browser.new_page(viewport=dict(width=1440, height=1100))
+            page = browser.new_page(viewport={"width": 1440, "height": 1100})
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
 
@@ -118,7 +118,7 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
             assert '"days":45' in saved_tiers or '"days": 45' in saved_tiers
 
             # Check mobile responsive width doesn't cause body horizontal overflow
-            page.set_viewport_size(dict(width=390, height=844))
+            page.set_viewport_size({"width": 390, "height": 844})
             scroll_width = page.evaluate("document.body.scrollWidth")
             inner_width = page.evaluate("window.innerWidth")
             assert scroll_width <= inner_width + 1

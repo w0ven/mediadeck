@@ -5,13 +5,13 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-
+from test_economy import NOW, parallel, proof, titles_env
 from test_economy import env as economy_env  # noqa: F401
-from test_economy import proof, parallel, titles_env, NOW
+
 from app.core.config import settings
+from app.main import _inventory_expired_effects, app
 from app.modules.economy_rules import DEFAULT_CARDS, PPM, day_bounds
 from app.modules.shop import ShopError
-from app.main import app, _inventory_expired_effects
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def test_concurrent_different_purchases_cannot_overspend(env):
         try:
             return e.shop.redeem("u", item["id"])
         except ValueError:
-            return dict(ok=False)
+            return {"ok": False}
 
     results = parallel(env, buy)
     assert sum(r["ok"] for r in results) == 1
@@ -80,7 +80,7 @@ def test_concurrent_different_transfers_cannot_bypass_daily_cap(env):
         try:
             return e.transfer.transfer("u", "v", 100)
         except ValueError:
-            return dict(ok=False)
+            return {"ok": False}
 
     results = parallel(env, send)
     assert sum(r["ok"] for r in results) == 5
@@ -90,7 +90,7 @@ def test_concurrent_different_transfers_cannot_bypass_daily_cap(env):
 def test_purchase_rechecks_confirmed_spec_inside_transaction(env):
     env.points.add("u", 1000, "admin.adjust")
     item = env.shop.create(dict(DEFAULT_CARDS[0], enabled=True))
-    env.shop.update(item["id"], dict(cost=600))
+    env.shop.update(item["id"], {"cost": 600})
     with pytest.raises(ShopError, match="重新确认"):
         env.shop.redeem("u", item["id"], expected_spec=item, request_id="old-confirmation")
     assert env.points.balance("u") == 1000 and not env.bag.items("u")
@@ -141,13 +141,13 @@ def test_expiration_sync_retries_without_overwriting_base_or_consuming_another_c
     card = env.bag.items("u")[0]
     env.bag.use("u", card["id"])
     env.clock[0] += 86400
-    callback = AsyncMock(return_value=dict(ok=False, remote_ok=False))
+    callback = AsyncMock(return_value={"ok": False, "remote_ok": False})
     asyncio.run(env.bag.reconcile_expired(callback))
     assert callback.call_args.args == ("u", {"bandwidth_card"})
     row = env.bag.items("u")[0]
     assert row["expiry_synced_at"] is None and "待重试" in row["expiry_error"]
     assert env.members.get("u")["bandwidth_limit_kbps"] == 20 * 1024
-    callback.return_value = dict(ok=True, remote_ok=True)
+    callback.return_value = {"ok": True, "remote_ok": True}
     env.clock[0] += 60
     asyncio.run(env.bag.reconcile_expired(callback))
     assert env.bag.items("u")[0]["expiry_synced_at"] == int(env.clock[0])

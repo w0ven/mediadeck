@@ -3,14 +3,13 @@
 import asyncio
 
 import pytest
-
-from test_economy import build, proof, FakeBot, SECRET
-from test_tg_interaction_context import VIEWER, GROUP, command, click
+from test_economy import SECRET, FakeBot, build, proof
+from test_tg_interaction_context import GROUP, VIEWER, click, command
 from test_tg_interaction_context import env as interaction_env  # noqa: F401
 
-from app.modules.titles import TitleService
 from app.core.config import settings
 from app.modules.economy_rules import DEFAULT_CARDS
+from app.modules.titles import TitleService
 
 
 @pytest.fixture

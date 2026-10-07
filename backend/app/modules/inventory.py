@@ -5,11 +5,10 @@ from __future__ import annotations
 import json
 import re
 import time
-from app.modules.economy_rules import economy_write
 import unicodedata
 from typing import Any
 
-from app.modules.economy_rules import encode, validate_card
+from app.modules.economy_rules import economy_write, encode, validate_card
 
 
 def validate_title(raw):
@@ -21,7 +20,7 @@ def validate_title(raw):
     if any(unicodedata.category(c)[0] not in ("L", "N") and c not in " -_·" for c in tag):
         raise ValueError("称号只能包含文字、数字、空格和 -_·，不允许emoji/链接")
     if re.search(
-        r"admin|owner|moderator|https?|www|管理员|管理員|群主|官方|客服|站长|站長", tag, re.I
+        r"admin|owner|moderator|https?|www|管理员|管理員|群主|官方|客服|站长|站長", tag, re.IGNORECASE
     ):
         raise ValueError("称号不可冒充管理或包含链接")
     if any(c in tag for c in (".", "@", "/")):
@@ -31,7 +30,7 @@ def validate_title(raw):
 
 def contributions(db, user, now=None):
     now = int(time.time()) if now is None else now
-    out = dict(bandwidth_limit_kbps=0, max_streams=0)
+    out = {"bandwidth_limit_kbps": 0, "max_streams": 0}
     for row in db.query(
         "SELECT spec_json FROM inventory WHERE emby_user_id=? AND used_at IS NOT NULL "
         "AND expires_at>?",
@@ -84,7 +83,7 @@ class InventoryService:
                     user, {json.loads(r["spec_json"])["kind"] for r in cards}
                 )
                 ok = result.get("ok") is not False and result.get("remote_ok") is not False
-            except Exception:
+            except Exception:  # noqa: BLE001 - failed effect remains durable and retryable
                 ok = False
             with economy_write(self.db) as conn:
                 for row in cards:
@@ -128,9 +127,9 @@ class InventoryService:
             validate_card(spec)
             kind, amount = spec["kind"], spec["amount"]
             expires = now + spec["duration_days"] * 86400 if spec["duration_days"] else None
-            result: dict[str, Any] = dict(
-                ok=True, card_id=int(card_id), expires_at=expires, kind=kind
-            )
+            result: dict[str, Any] = {
+                "ok": True, "card_id": int(card_id), "expires_at": expires, "kind": kind
+            }
             if kind in ("bandwidth_card", "streams_card"):
                 field = "bandwidth_limit_kbps" if kind == "bandwidth_card" else "max_streams"
                 current = member[field]

@@ -14,13 +14,12 @@ and ``run()`` only reports. That shifts what is worth testing.
 from __future__ import annotations
 
 import time
-import json
-from app.modules.economy_rules import day_bounds, draw, encode
 from typing import Any
 
 import pytest
 
 from app.core.db import Database
+from app.modules.economy_rules import day_bounds, encode
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
 from app.modules.plugins import PluginRegistry
@@ -58,7 +57,7 @@ def stack(tmp_path, monkeypatch):
     registry = register_builtin(PluginRegistry(store, db), ctx)
     members.upsert("u1", "alice", {"group_id": "standard"}, actor="test")
     members.upsert("u2", "bob", {"group_id": "standard"}, actor="test")
-    registry.save('checkin',config=dict(weekends=False,holidays='[]'))
+    registry.save('checkin',config={"weekends": False,"holidays": '[]'})
     # Settlement fixtures: actual progress admission is tested with the sampler
     # in test_economy.py, rather than mocking the eligibility function.
     for ago in range(11):
@@ -107,7 +106,7 @@ def test_checking_in_twice_on_one_day_is_refused_without_paying(stack,checkin):
 
 
 def test_a_streak_accumulates_across_consecutive_days(stack,checkin):
-    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0),dict(days=3,bonus=20)]))
+    _configure(stack[0],'checkin',streak_tiers=encode([{"days": 1,"bonus": 0},{"days": 3,"bonus": 20}]))
     now=time.time()
     results=[checkin.checkin('u1',now=now-ago*DAY) for ago in (2,1,0)]
     assert [r['streak'] for r in results]==[1,2,3]
@@ -126,7 +125,7 @@ def test_missing_a_day_restarts_the_streak(stack,checkin):
 
 
 def test_the_streak_bonus_stops_at_its_cap(stack,checkin):
-    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0),dict(days=5,bonus=20)]))
+    _configure(stack[0],'checkin',streak_tiers=encode([{"days": 1,"bonus": 0},{"days": 5,"bonus": 20}]))
     now=time.time()
     results=[checkin.checkin('u1',now=now-(9-i)*DAY) for i in range(10)]
     assert [r['bonus'] for r in results[:4]]==[0]*4
@@ -134,7 +133,7 @@ def test_the_streak_bonus_stops_at_its_cap(stack,checkin):
 
 
 def test_a_zero_bonus_turns_the_streak_reward_off(stack,checkin):
-    _configure(stack[0],'checkin',streak_tiers=encode([dict(days=1,bonus=0)]))
+    _configure(stack[0],'checkin',streak_tiers=encode([{"days": 1,"bonus": 0}]))
     now=time.time()
     first=checkin.checkin('u1',now=now-DAY)
     second=checkin.checkin('u1',now=now)
@@ -157,7 +156,7 @@ def test_a_checkin_without_a_member_id_is_refused(stack,checkin):
 
 def test_the_checkin_card_reports_todays_totals(stack,checkin):
     import asyncio
-    registry,_,_,db=stack
+    registry,_,_,_db=stack
     _configure(registry,'checkin')
     now=time.time()
     checkin.checkin('u1',now=now-DAY)

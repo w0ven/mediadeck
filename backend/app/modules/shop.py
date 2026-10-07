@@ -22,13 +22,20 @@ from __future__ import annotations
 import contextlib
 import json
 import time
-from app.modules.economy_rules import economy_write
 import uuid
-from app.modules.economy_rules import CARD_KINDS, DEFAULT_CARDS, encode, validate_card, receipt, save_receipt
-from app.modules.inventory import InventoryService
 from typing import Any
 
+from app.modules.economy_rules import (
+    CARD_KINDS,
+    DEFAULT_CARDS,
+    economy_write,
+    encode,
+    receipt,
+    save_receipt,
+    validate_card,
+)
 from app.modules.groups import needs_traffic
+from app.modules.inventory import InventoryService
 
 GB = 1024 ** 3
 KBPS_PER_MBPS = 1024
@@ -275,7 +282,7 @@ class ShopService:
         # orders must see the preceding order's limits and personal overlay.
         with economy_write(self._db) as conn:
             key = request_id or uuid.uuid4().hex
-            request = dict(item_id=int(item_id),expected_spec=expected_spec)
+            request = {"item_id": int(item_id),"expected_spec": expected_spec}
             prior = receipt(conn, "purchase", key, user_id, request)
             if prior is not None: return prior
             if expected_spec is not None and self.get(item_id) != expected_spec:

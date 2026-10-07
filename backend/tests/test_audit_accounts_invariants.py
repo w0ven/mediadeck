@@ -4,11 +4,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
-
-from app.core.db import Database
-from app.core.config import settings
-from app.modules.economy_rules import day_bounds
 from test_economy import proof
+
+from app.core.config import settings
+from app.core.db import Database
+from app.modules.economy_rules import day_bounds
 from app.modules.enforcement import EnforcementService, desired_policy
 from app.modules.groups import GroupService
 from app.modules.members import MemberService

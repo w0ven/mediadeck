@@ -18,30 +18,30 @@ which is the question an operator actually has when looking at the card.
 
 from __future__ import annotations
 
-import time
-from app.modules.economy_rules import economy_write, validate_card
-import json
 import contextlib
+import json
+import time
 import uuid
+from typing import Any
 
 from app.core.config import settings
 from app.modules.economy_rules import (
-    RULE_VERSION,
-    PPM,
     DEFAULT_CARDS,
-    encode,
-    day_bounds,
-    draw,
-    watch_progress,
-    default_holidays,
-    validate_checkin,
+    PPM,
+    RULE_VERSION,
     activity_for,
+    day_bounds,
+    default_holidays,
+    draw,
+    economy_write,
+    encode,
     receipt,
     save_receipt,
+    validate_card,
+    validate_checkin,
+    watch_progress,
 )
 from app.modules.inventory import InventoryService
-from typing import Any
-
 from app.modules.plugins import Field, Plugin, Spec
 
 
@@ -80,10 +80,10 @@ class CheckinPlugin(Plugin):
                 kind="text",
                 default=encode(
                     [
-                        dict(days=1, bonus=0),
-                        dict(days=3, bonus=5),
-                        dict(days=7, bonus=15),
-                        dict(days=30, bonus=50),
+                        {"days": 1, "bonus": 0},
+                        {"days": 3, "bonus": 5},
+                        {"days": 7, "bonus": 15},
+                        {"days": 30, "bonus": 50},
                     ]
                 ),
                 help="取不超过连签天数的最高阶梯；断签回第1天。基础-10..30等概率，不可改范围。",
@@ -99,7 +99,7 @@ class CheckinPlugin(Plugin):
                 kind="text",
                 default=encode(
                     [
-                        dict(ppm=ppm, spec=spec)
+                        {"ppm": ppm, "spec": spec}
                         for ppm, spec in zip((5000, 3000, 2000), DEFAULT_CARDS[:3])
                     ]
                 ),
@@ -194,20 +194,20 @@ class CheckinPlugin(Plugin):
                     drop = dict(candidate["spec"])
                 break
         award = base * multiplier + bonus
-        result = dict(
-            ok=True,
-            points=award,
-            base=base,
-            bonus=bonus,
-            streak=streak,
-            multiplier=multiplier,
-            watched_seconds=watched,
-            activity=activity["name"],
-            rule_version=RULE_VERSION,
-            rolls=dict(lucky=lucky_roll, drop=drop_roll),
-            rule_snapshot=config,
-            drop_spec=drop,
-        )
+        result = {
+            "ok": True,
+            "points": award,
+            "base": base,
+            "bonus": bonus,
+            "streak": streak,
+            "multiplier": multiplier,
+            "watched_seconds": watched,
+            "activity": activity["name"],
+            "rule_version": RULE_VERSION,
+            "rolls": {"lucky": lucky_roll, "drop": drop_roll},
+            "rule_snapshot": config,
+            "drop_spec": drop,
+        }
         if drop:
             result["card_id"] = InventoryService.add(conn, user_id, drop, "checkin:" + day, now)
         result["balance"] = points._apply(conn, user_id, award, "checkin", day, "checkin", int(now))
@@ -385,12 +385,12 @@ class PointsTransferPlugin(Plugin):
         if points is None:
             raise ValueError("积分服务不可用")
         from_id, to_id = str(from_id), str(to_id)
-        if isinstance(amount, bool) or isinstance(amount, float):
-            raise ValueError("转账数量必须是正整数")
+        if isinstance(amount, (bool, float)):
+            raise ValueError("转账数量必须是正整数")  # noqa: TRY004 - public validation contract
         request_id = request_id or uuid.uuid4().hex
-        request = dict(to_id=to_id, amount=int(amount), expected_fee=expected_fee)
-        with (economy_write(points._db) if conn is None else contextlib.nullcontext(conn)) as conn:
-            prior = receipt(conn, "transfer", request_id, from_id, request)
+        request = {"to_id": to_id, "amount": int(amount), "expected_fee": expected_fee}
+        with (economy_write(points._db) if conn is None else contextlib.nullcontext(conn)) as tx:
+            prior = receipt(tx, "transfer", request_id, from_id, request)
             if prior is not None:
                 return prior
             if from_id == to_id:
@@ -413,9 +413,9 @@ class PointsTransferPlugin(Plugin):
             if expected_fee is not None and fee != expected_fee:
                 raise ValueError("手续费已变化，请重新确认")
             result = points.transfer(
-                from_id, to_id, int(amount), actor=actor, fee=fee, conn=conn, now=int(now)
+                from_id, to_id, int(amount), actor=actor, fee=fee, conn=tx, now=int(now)
             )
-            save_receipt(conn, "transfer", request_id, from_id, request, result)
+            save_receipt(tx, "transfer", request_id, from_id, request, result)
             return result
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -469,7 +469,7 @@ class EconomyPlugin(Plugin):
     )
 
     async def run(self, config):
-        return dict(带宽上限=config["bandwidth_cap_mbps"], 同播上限=config["streams_cap"])
+        return {"带宽上限": config["bandwidth_cap_mbps"], "同播上限": config["streams_cap"]}
 
 
 POINTS_PLUGINS = (CheckinPlugin, PointsTransferPlugin, EconomyPlugin)

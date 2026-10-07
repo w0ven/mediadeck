@@ -9,10 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-from app.modules.economy_rules import economy_write
 
+from app.modules.economy_rules import economy_write, encode
 from app.modules.inventory import validate_title
-from app.modules.economy_rules import encode
 
 
 class TitleService:
@@ -56,9 +55,9 @@ class TitleService:
             )
             title_id = int(cur.lastrowid)
             self._audit(
-                conn, actor, "title.grant", user, dict(title_id=title_id, tag=tag, days=days)
+                conn, actor, "title.grant", user, {"title_id": title_id, "tag": tag, "days": days}
             )
-        return dict(ok=True, title_id=title_id)
+        return {"ok": True, "title_id": title_id}
 
     async def revoke(self, user, title_id, actor="operator"):
         with economy_write(self.db) as conn:
@@ -73,9 +72,9 @@ class TitleService:
                 "WHERE emby_user_id=? AND title_id=?",
                 (str(user), int(title_id)),
             )
-            self._audit(conn, actor, "title.revoke", user, dict(title_id=title_id))
+            self._audit(conn, actor, "title.revoke", user, {"title_id": title_id})
         await self.sync(user)
-        return dict(ok=True, states=self.states(user))
+        return {"ok": True, "states": self.states(user)}
 
     async def wear(self, user, title_id=None):
         user = str(user)
@@ -113,16 +112,16 @@ class TitleService:
                 "status='pending',generation=generation+1,retry_at=0,emby_user_id=excluded.emby_user_id",
                 (target, str(member["tg_user_id"]), user, title_id, tag),
             )
-            self._audit(conn, "member", "title.wear", user, dict(title_id=title_id, tag=tag))
+            self._audit(conn, "member", "title.wear", user, {"title_id": title_id, "tag": tag})
         await self.sync(user)
         states = self.states(user)
-        return dict(
-            ok=all(r["status"] == "synced" for r in states),
-            states=states,
-            reason="已同步"
+        return {
+            "ok": all(r["status"] == "synced" for r in states),
+            "states": states,
+            "reason": "已同步"
             if all(r["status"] == "synced" for r in states)
             else "标签尚未同步，请查看待重试/保护状态",
-        )
+        }
 
     async def sync(self, user=None):
         async with self._lock:
@@ -147,7 +146,7 @@ class TitleService:
                     continue
                 try:
                     await self._sync_one(row, now)
-                except Exception:
+                except Exception:  # noqa: BLE001 - persist uncertain external delivery
                     # No raw exceptions: client errors may contain the bot URL/token.
                     self._update(
                         row,
@@ -161,8 +160,8 @@ class TitleService:
         chat, user = row["chat_id"], row["tg_user_id"]
         me = await self.bot._call("getMe")
         if not isinstance(me, dict):
-            raise ValueError("TG不可用")
-        admin = await self.bot._call("getChatMember", dict(chat_id=chat, user_id=me["id"]))
+            raise ValueError("TG不可用")  # noqa: TRY004 - operator error, not a caller type
+        admin = await self.bot._call("getChatMember", {"chat_id": chat, "user_id": me["id"]})
         if (
             not isinstance(admin, dict)
             or admin.get("status") not in ("administrator", "creator")
@@ -176,9 +175,9 @@ class TitleService:
                 retry_at=now + 600,
             )
             return
-        current = await self.bot._call("getChatMember", dict(chat_id=chat, user_id=int(user)))
+        current = await self.bot._call("getChatMember", {"chat_id": chat, "user_id": int(user)})
         if not isinstance(current, dict):
-            raise ValueError("无法核对当前标签")
+            raise ValueError("无法核对当前标签")  # noqa: TRY004 - uncertain remote observation
         if current.get("status") not in ("member", "restricted"):
             self._update(
                 row,
@@ -214,7 +213,7 @@ class TitleService:
         if not self._update(row, attempted_tag=desired):
             return  # desired state changed while reading Telegram; never send the stale choice
         result = await self.bot._call(
-            "setChatMemberTag", dict(chat_id=chat, user_id=int(user), tag=desired)
+            "setChatMemberTag", {"chat_id": chat, "user_id": int(user), "tag": desired}
         )
         if result is not True:
             raise ValueError("TG拒绝或结果未知")
