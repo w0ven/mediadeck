@@ -1,21 +1,7 @@
-"""The points shop: what points are for.
+"""Snapshot-based catalogue: every supported purchase enters the owner's bag.
 
-An item is data, not code. Legacy traffic/days/bandwidth/invite products
-remain immediate grants. New *_card products enter a non-transferable bag
-with immutable specifications; use, not purchase, activates their effects.
-Price, size, duration, limits and visibility are operator-editable data. Adding a promotion is a form
-submission, not a release.
-
-The one rule the whole file exists to enforce: **points are never spent
-without the reward being delivered.** Debit and fulfilment happen in one
-transaction, so a failure at any step leaves the member exactly as they were.
-The opposite failure -- delivering without charging -- is equally excluded by
-the same transaction, but it is the cheap one; a member charged for nothing is
-the one who stops trusting the shop.
-
-Seeded items ship disabled. A default catalogue that is live on first boot
-would let members spend points on prices the operator never chose, and the
-first thing they would notice is the bill.
+Legacy products are retired; historical orders remain readable. Operator
+account rewards are deliberately separate from purchase fulfilment.
 """
 from __future__ import annotations
 
@@ -26,51 +12,28 @@ import uuid
 from typing import Any
 
 from app.modules.economy_rules import (
-    CARD_KINDS,
+    BAG_KINDS,
     DEFAULT_CARDS,
+    DEFAULT_WHITELIST_CARD,
     economy_write,
     encode,
     receipt,
     save_receipt,
-    validate_card,
+    validate_bag_spec,
 )
-from app.modules.groups import needs_traffic
 from app.modules.inventory import InventoryService
 
-GB = 1024 ** 3
-KBPS_PER_MBPS = 1024
-
-KINDS = ("traffic", "days", "bandwidth", "invite") + CARD_KINDS
+KINDS = BAG_KINDS
 
 KIND_LABELS = {
-    "traffic": "流量包",
-    "days": "会员天数",
-    "bandwidth": "带宽提速",
-    "invite": "邀请名额",
     "invite_card": "邀请码卡（入包）", "bandwidth_card": "带宽卡（入包）",
     "streams_card": "同播卡（入包）", "title_card": "称号卡（入包）",
+    "whitelist_card": "白名单卡（入包）", "custom": "自定义商品",
 }
-
-# Unit shown next to ``amount`` on the card, per kind.
-KIND_UNITS = {
-    "traffic": "GB",
-    "days": "天",
-    "bandwidth": "Mbps",
-    "invite": "个",
-    "invite_card": "张", "bandwidth_card": "Mbps", "streams_card": "路", "title_card": "张",
-}
-
-SEED_ITEMS = (
-    {"kind": "traffic", "name": "流量包 50GB",
-     "description": "为当前计费周期增加 50GB 额外流量", "cost": 100, "amount": 50},
-    {"kind": "days", "name": "会员 7 天",
-     "description": "有效期延长 7 天", "cost": 200, "amount": 7},
-    {"kind": "bandwidth", "name": "提速 10Mbps",
-     "description": "在当前限速基础上提高 10Mbps；不限速的账号无需兑换",
-     "cost": 300, "amount": 10},
-    {"kind": "invite", "name": "邀请名额 1 个",
-     "description": "获得 1 个邀请名额，可生成邀请码", "cost": 500, "amount": 1},
-)
+KIND_UNITS = {"invite_card": "张", "bandwidth_card": "Mbps", "streams_card": "路", "title_card": "张", "whitelist_card": "张", "custom": "份"}
+# Read-only labels for orders; never accepted by catalogue validation.
+HISTORY_LABELS = {"traffic": "旧版流量包", "days": "旧版会员天数", "bandwidth": "旧版提速", "invite": "旧版邀请名额"}
+HISTORY_UNITS = {"traffic": "GB", "days": "天", "bandwidth": "Mbps", "invite": "个"}
 
 
 class ShopError(Exception):
@@ -110,9 +73,17 @@ def validate_item(payload: Any, *, partial: bool = False) -> dict[str, Any]:
     if "cost" in payload or not partial:
         out["cost"] = _as_int(payload.get("cost"), "消耗积分", 1, 1_000_000)
     if "amount" in payload or not partial:
-        out["amount"] = _as_int(payload.get("amount"), "数量", 1, 1_000_000)
+        out["amount"] = _as_int(payload.get("amount", 1 if out.get("kind") in ("custom", "whitelist_card") else None), "数量", 1, 1_000_000)
     if "duration_days" in payload:
         out["duration_days"] = _as_int(payload["duration_days"], "期限天数", 0, 36500)
+    if "purchase_notice" in payload:
+        if not isinstance(payload['purchase_notice'], str):
+            raise ShopError('购买后说明须为文字')
+        out['purchase_notice'] = payload['purchase_notice'].strip()
+        if len(out['purchase_notice']) > 12000:
+            raise ShopError('购买后说明最多12000字符')
+    if "retention_days" in payload:
+        out['retention_days'] = _as_int(payload['retention_days'], '背包保留天数', 1, 36500)
     if "per_user_limit" in payload:
         out["per_user_limit"] = _as_int(
             payload.get("per_user_limit"), "每人限购", 0, 10_000)
@@ -120,21 +91,24 @@ def validate_item(payload: Any, *, partial: bool = False) -> dict[str, Any]:
         out["sort"] = _as_int(payload.get("sort"), "排序", -10_000, 10_000)
     if "enabled" in payload:
         out["enabled"] = 1 if payload.get("enabled") else 0
-    if out.get("kind") in CARD_KINDS and not partial:
-        out.setdefault('duration_days', 0 if out['kind'] in ('invite_card','title_card') else 30)
+    if out.get("kind") in BAG_KINDS and not partial:
+        out.setdefault('duration_days', 0 if out['kind'] in ('invite_card','title_card','whitelist_card','custom') else 30)
         if out['kind'] == 'title_card' and out['cost'] < 200:
             raise ShopError('称号卡至少200积分')
-        try: validate_card(out)
+        out.setdefault("retention_days", 7)
+        try: validate_bag_spec(out)
         except ValueError as exc: raise ShopError(str(exc)) from None
     return out
 
 
-def _decorate(row: dict[str, Any]) -> dict[str, Any]:
+def _decorate(row: dict[str, Any], *, include_private=False) -> dict[str, Any]:
     out = dict(row)
     kind = str(out.get("kind") or "")
     out["kind_label"] = KIND_LABELS.get(kind, kind)
     out["unit"] = KIND_UNITS.get(kind, "")
     out["enabled"] = bool(out.get("enabled"))
+    if not include_private or kind != 'custom':
+        out.pop("purchase_notice", None)
     return out
 
 
@@ -148,48 +122,30 @@ class ShopService:
 
     # -- catalogue -----------------------------------------------------------
 
-    def seed_defaults(self) -> int:
-        """Insert the starter catalogue once, disabled. Returns rows added.
-
-        Guarded on the table being empty rather than on a marker row: an
-        operator who deleted every item meant to have no catalogue, and
-        re-seeding on the next restart would silently undo that. It only runs
-        on a shop nobody has touched.
-        """
-        existing = self._db.one("SELECT COUNT(*) AS n FROM shop_items") or {}
-        if int(existing.get("n") or 0) > 0:
-            return 0
-        now = int(time.time())
-        added = 0
-        for index, item in enumerate(SEED_ITEMS):
-            self._db.execute(
-                "INSERT INTO shop_items"
-                "(kind,name,description,cost,amount,enabled,per_user_limit,"
-                "sort,created_at) VALUES(?,?,?,?,?,0,0,?,?)",
-                (item["kind"], item["name"], item["description"],
-                 item["cost"], item["amount"], index, now))
-            added += 1
-        return added
-
     def seed_cards(self):
         with economy_write(self._db) as conn:
-            if conn.execute("SELECT 1 FROM meta WHERE key='inventory_catalogue_seeded'").fetchone():
-                return
-            for item in DEFAULT_CARDS:
-                conn.execute('INSERT INTO shop_items(kind,name,cost,amount,duration_days,enabled,created_at) VALUES(?,?,?,?,?,0,?)',
-                             (item['kind'],item['name'],item['cost'],item['amount'],item['duration_days'],int(time.time())))
-            conn.execute("INSERT INTO meta VALUES('inventory_catalogue_seeded','1')")
+            if not conn.execute("SELECT 1 FROM meta WHERE key='inventory_catalogue_seeded'").fetchone():
+                for item in DEFAULT_CARDS:
+                    conn.execute('INSERT INTO shop_items(kind,name,cost,amount,duration_days,enabled,created_at) VALUES(?,?,?,?,?,0,?)',
+                                 (item['kind'],item['name'],item['cost'],item['amount'],item['duration_days'],int(time.time())))
+                conn.execute("INSERT INTO meta VALUES('inventory_catalogue_seeded','1')")
+            if not conn.execute("SELECT 1 FROM meta WHERE key='whitelist_catalogue_seeded'").fetchone():
+                if not conn.execute("SELECT 1 FROM shop_items WHERE kind='whitelist_card'").fetchone():
+                    item = DEFAULT_WHITELIST_CARD
+                    conn.execute('INSERT INTO shop_items(kind,name,cost,amount,duration_days,enabled,created_at) VALUES(?,?,?,?,?,1,?)',
+                                 (item['kind'],item['name'],item['cost'],item['amount'],item['duration_days'],int(time.time())))
+                conn.execute("INSERT INTO meta VALUES('whitelist_catalogue_seeded','1')")
 
-    def items(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+    def items(self, enabled_only: bool = False, *, include_private=False) -> list[dict[str, Any]]:
         sql = "SELECT * FROM shop_items"
         if enabled_only:
             sql += " WHERE enabled=1"
         sql += " ORDER BY sort ASC, id ASC"
-        return [_decorate(r) for r in self._db.query(sql)]
+        return [_decorate(r, include_private=include_private) for r in self._db.query(sql)]
 
-    def get(self, item_id: int) -> dict[str, Any] | None:
+    def get(self, item_id: int, *, include_private=False) -> dict[str, Any] | None:
         row = self._db.one("SELECT * FROM shop_items WHERE id=?", (int(item_id),))
-        return _decorate(row) if row else None
+        return _decorate(row, include_private=include_private) if row else None
 
     def create(self, payload: Any, actor: str = "operator") -> dict[str, Any]:
         clean = validate_item(payload)
@@ -198,37 +154,38 @@ class ShopService:
             cur = conn.execute(
                 "INSERT INTO shop_items"
                 "(kind,name,description,cost,amount,enabled,per_user_limit,"
-                "sort,created_at,duration_days) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                "sort,created_at,duration_days,purchase_notice,retention_days) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                 (clean["kind"], clean["name"], clean.get("description", ""),
                  clean["cost"], clean["amount"],
                  int(clean.get("enabled", 1)), int(clean.get("per_user_limit", 0)),
-                 int(clean.get("sort", 0)), now, clean.get("duration_days", 30)))
+                 int(clean.get("sort", 0)), now, clean.get("duration_days", 30),
+                 clean.get("purchase_notice", ""), clean.get("retention_days", 7)))
             item_id = int(cur.lastrowid or 0)
         self._audit(actor, "shop.item.create", str(item_id),
                     f"{clean['kind']} {clean['name']} cost={clean['cost']}")
-        return self.get(item_id) or {}
+        return self.get(item_id, include_private=True) or {}
 
     def update(self, item_id: int, payload: Any,
                actor: str = "operator") -> dict[str, Any]:
-        item = self.get(item_id)
+        item = self.get(item_id, include_private=True)
         if not item:
             raise KeyError(item_id)
         clean = validate_item(payload, partial=True)
         if not clean:
             return item
-        if clean.get("kind", item["kind"]) in CARD_KINDS:
+        if clean.get("kind", item["kind"]) in BAG_KINDS:
             updated = dict(item, **clean)
             if updated['kind'] == 'title_card' and updated['cost'] < 200:
                 raise ShopError('称号卡至少200积分')
-            try: validate_card(updated)
+            try: validate_bag_spec(updated)
             except ValueError as exc: raise ShopError(str(exc)) from None
         sets = ", ".join(f"{k}=?" for k in clean)
         self._db.execute(
-            f"UPDATE shop_items SET {sets} WHERE id=?",
+            f"UPDATE shop_items SET {sets},revision=revision+1 WHERE id=?",
             (*clean.values(), int(item_id)))
         self._audit(actor, "shop.item.update", str(item_id),
-                    json.dumps(clean, ensure_ascii=False)[:300])
-        return self.get(item_id) or {}
+                    json.dumps({k: v for k, v in clean.items() if k != "purchase_notice"}, ensure_ascii=False)[:300])
+        return self.get(item_id, include_private=True) or {}
 
     def delete(self, item_id: int, actor: str = "operator") -> bool:
         item = self.get(item_id)
@@ -256,8 +213,8 @@ class ShopService:
         params.append(max(1, min(int(limit or 50), 500)))
         rows = self._db.query(sql, tuple(params))
         for row in rows:
-            row["kind_label"] = KIND_LABELS.get(str(row.get("kind")), row.get("kind"))
-            row["unit"] = KIND_UNITS.get(str(row.get("kind")), "")
+            row["kind_label"] = KIND_LABELS.get(str(row.get("kind")), HISTORY_LABELS.get(str(row.get("kind")), row.get("kind")))
+            row["unit"] = KIND_UNITS.get(str(row.get("kind")), HISTORY_UNITS.get(str(row.get("kind")), ""))
         return rows
 
     def redeemed_count(self, user_id: str, item_id: int) -> int:
@@ -294,7 +251,7 @@ class ShopService:
     def _redeem(self, conn: Any, user_id: str, item_id: int,
                 actor: str) -> dict[str, Any]:
         user_id = str(user_id or "")
-        item = self.get(item_id)
+        item = self.get(item_id, include_private=True)
         if not item:
             raise ShopError("商品不存在")
         if not item["enabled"]:
@@ -311,23 +268,15 @@ class ShopService:
         amount = int(item["amount"])
         cost = int(item["cost"])
 
-        # Checked before charging so a member is told "already unlimited"
-        # rather than being billed for a no-op.
-        if kind == "bandwidth":
-            current = int((member.get("overrides") or {}).get(
-                "bandwidth_limit_kbps",
-                member.get("bandwidth_limit_kbps") or 0) or 0)
-            if current <= 0:
-                raise ShopError("你的账号已是不限速，无需兑换提速")
+        if kind not in KINDS:
+            raise ShopError("此类型已停用，不能购买")
 
         now = int(time.time())
         balance = self._points._apply(
             conn, user_id, -cost, "shop.redeem", f"item:{item_id}", actor, now)
-        if kind in CARD_KINDS:
-            card_id = InventoryService.add(conn,user_id,item,"purchase",now)
-            note = f"道具已入背包（#{card_id}），使用后生效"
-        else:
-            note = self._grant(conn, user_id, member, kind, amount)
+        card_id = InventoryService.add(conn,user_id,item,"purchase",now)
+        note = (f"购买后说明已存入背包（#{card_id}），保留{item['retention_days']}天"
+                if kind == "custom" else f"道具已入背包（#{card_id}），使用后生效")
         conn.execute(
             "INSERT INTO shop_orders"
             "(emby_user_id,item_id,item_name,cost,kind,amount,created_at,spec_json) "
@@ -338,94 +287,12 @@ class ShopService:
             (now, actor, 'shop.redeem', user_id, f'item={item_id} cost={cost} {note}'))
         return {
             "ok": True,
-            "item": item,
+            "item": _decorate(item),
+            "card_id": card_id,
             "cost": cost,
             "balance": balance,
             "granted": note,
         }
-
-    def grant(self, user_id: str, kind: str, amount: int,
-              actor: str = "operator") -> str:
-        """Deliver a reward without charging for it.
-
-        Exists so the admin /gift command hands out exactly what the shop
-        hands out. A second implementation would drift -- the shop's "+50GB"
-        and an admin's "+50GB" have to be the same write, or the two paths
-        eventually disagree about what a gift even is.
-        """
-        kind = str(kind or "").strip()
-        if kind not in ("traffic", "days", "bandwidth", "invite"):
-            raise ShopError(f"类型必须是 {'/'.join(KINDS)} 之一")
-        amount = _as_int(amount, "数量", 1, 1_000_000)
-        with economy_write(self._db) as conn:
-            member = self._members.get(str(user_id)) if self._members else None
-            if not member:
-                raise ShopError("账号不存在")
-            note = self._grant(conn, str(user_id), member, kind, amount)
-        self._audit(actor, "shop.grant", str(user_id), f"{kind} {amount} {note}")
-        return note
-
-    def _grant(self, conn: Any, user_id: str, member: dict[str, Any],
-               kind: str, amount: int) -> str:
-        """Deliver one reward on the caller's open transaction.
-
-        Written against the connection rather than through MemberService
-        because those methods commit on their own: calling them here would put
-        the grant outside the transaction that guards the debit, which is
-        exactly the split this class exists to prevent.
-        """
-        now = int(time.time())
-        if kind == "traffic":
-            if not needs_traffic(member.get('billing_mode') or ''):
-                raise ShopError('账号不计流量，无需兑换流量包')
-            overrides = dict(member.get("overrides") or {})
-            before = int(overrides.get("extra_traffic_bytes") or 0)
-            overrides["extra_traffic_bytes"] = before + amount * GB
-            conn.execute(
-                "UPDATE members SET overrides_json=?,updated_at=? "
-                "WHERE emby_user_id=?",
-                (json.dumps(overrides, ensure_ascii=False, sort_keys=True),
-                 now, user_id))
-            return f"+{amount}GB 流量"
-
-        if kind == "days":
-            effective = member.get('expires_at_effective')
-            if not effective:
-                raise ShopError('永久用户无需兑换天数，请先明确设置有效期')
-            expires = max(now, int(effective)) + amount * 86400
-            overrides = dict(member.get('overrides') or {})
-            field, value = 'expires_at', expires
-            if 'expires_at_override' in overrides:
-                overrides['expires_at_override'] = expires
-                field, value = 'overrides_json', json.dumps(overrides, ensure_ascii=False, sort_keys=True)
-            conn.execute(
-                f"UPDATE members SET {field}=?, status=CASE WHEN status IN "
-                "('expired','exhausted') THEN 'active' ELSE status END,"
-                "updated_at=? WHERE emby_user_id=?", (value, now, user_id))
-            return f"+{amount} 天"
-
-        if kind == "bandwidth":
-            overrides = dict(member.get("overrides") or {})
-            current = int(overrides.get(
-                "bandwidth_limit_kbps",
-                (member.get("bandwidth_limit_kbps") or 0) - (member.get("card_contributions") or {}).get("bandwidth_limit_kbps", 0)) or 0)
-            if current <= 0:
-                raise ShopError('账号已不限速，无需提速')
-            overrides["bandwidth_limit_kbps"] = current + amount * KBPS_PER_MBPS
-            conn.execute(
-                "UPDATE members SET overrides_json=?,updated_at=? "
-                "WHERE emby_user_id=?",
-                (json.dumps(overrides, ensure_ascii=False, sort_keys=True),
-                 now, user_id))
-            return f"+{amount}Mbps 限速"
-
-        if kind == "invite":
-            conn.execute(
-                "UPDATE members SET invite_quota=COALESCE(invite_quota,0)+?,"
-                "updated_at=? WHERE emby_user_id=?", (amount, now, user_id))
-            return f"+{amount} 个邀请名额"
-
-        raise ShopError(f"未知商品类型：{kind}")
 
     def _audit(self, actor: str, action: str, subject: str,
                detail: str) -> None:

@@ -39,6 +39,7 @@ import httpx
 
 from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
+from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_rebinding import RebindBotMixin
 from app.modules.bot_requests import RequestBotMixin
@@ -56,7 +57,9 @@ from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
 from app.modules.group_points import GroupPointsBotMixin, GroupPointsError, reliable_user
 from app.modules.groups import WHITELIST_GROUP_ID
+from app.modules.member_rewards import RewardError, grant_reward
 from app.modules.rebinding import RebindingService
+from app.modules.red_packets import CALLBACKS as PACKET_CALLBACKS
 from app.modules.report_delivery import CALL_DELIVERY
 from app.modules.report_delivery import failure as delivery_failure
 from app.modules.requests import RequestError
@@ -149,7 +152,8 @@ ADMIN_HELP = """🛠 <b>管理员命令</b>
 
 <b>积分与发放</b>
 群内回复收款人本人消息：<code>/transfer 100</code> 或 <code>/转账 100</code>
-系统管理员走「管理员发放」，不扣本人余额；仅TG群管理身份无发放权限。
+核对收款人、金额、手续费与到账后，本人确认发放；仅TG群管理身份无奖励发放权限。
+群内 <code>/红包 100 10</code> 发拼手气红包，<code>/红包 等额 100 10</code> 发等额红包。
 <code>/score 用户 ±数量</code> 调整积分
 <code>/scoreall 数量</code> 全员加分（需确认）
 <code>/gift 用户 traffic|days|bandwidth|invite 数量</code> 直接发放
@@ -256,7 +260,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin):
+class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -521,7 +525,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 {"command": "usage", "description": "用量与观看"},
                 {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
                 {"command": "today", "description": "今日榜 · 截至查看时"},
-                {"command": "transfer", "description": "回复消息系统发放积分" if admin else "回复消息转账（扣本人余额）"},
+                {"command": "transfer", "description": "回复消息发放积分" if admin else "回复消息转账（扣本人余额）"},
+                {"command": "redpacket", "description": "积分红包 · 模式/金额/份数"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
             ]
@@ -1174,7 +1179,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 "· <b>背包</b>：邀请码、积分兑换\n"
                 "· <b>求片</b>：选片后确认提交\n"
                 "· <b>准则</b>：账号使用约定\n"
-                "· 群内回复收款人本人消息：/transfer 100 或 /转账 100；普通成员扣余额，系统管理员直接发放，须本人确认。\n"
+                "· 群内回复收款人本人消息：/transfer 100 或 /转账 100；核对收款人、数量、手续费和到账后本人确认。\n"
+                "· 群内 /红包 100 10 发拼手气红包；/红包 等额 100 10 发等额红包，可在确认卡选领取范围。\n"
                 "· 无响应请用 /transfer@" + (self._bot_username or "机器人用户名") + " 100；隐私模式可能不投递回复他人的裸命令/中文命令。\n"
                 "· 私聊转账始终扣本人余额，群聊不公开成员余额。\n"
                 "· /start 返回菜单\n\n"
@@ -1726,10 +1732,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 f"当前余额：<b>{result.get('balance', self._balance(user_id))}</b>")
             return
         bonus = int(result.get("bonus") or 0)
-        extra = f"（含连签奖励 +{bonus}）" if bonus else ""
+        extra = f"（含连签加成 +{bonus}）" if bonus else ""
         await feedback(
             f"✅ <b>签到成功</b>\n\n积分变动：<b>{int(result.get('points') or 0):+d}</b>{extra}\n"
-            f"基础：{result.get('base')} × {result.get('multiplier',1)} · 连签：+{bonus}\n"
+            f"基础：{result.get('base')} × {result.get('multiplier',1)}\n"
+            f"连签：{result.get('streak_percent', 0)}% · +{bonus}（仅基础正分，不参与翻倍）\n"
             + (f"掉落：{escape(str((result.get('drop_spec') or {}).get('name')))}（已入包）\n" if result.get('drop_spec') else "")
             + f"连续签到：<b>{result.get('streak')}</b> 天\n"
             f"当前余额：<b>{result.get('balance')}</b>")
@@ -1910,7 +1917,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             f"🎁 <b>确认兑换</b>\n用 <b>{item['cost']}</b> 积分兑换 <b>{escape(str(item['name']))}</b>？\n"
             f"内容：{item['amount']}{escape(str(item.get('unit') or ''))} · "
             f"{escape(str(item.get('kind_label') or ''))}\n"
-            + (f"购买后入包，使用/创建起计时：{item['duration_days']}天（0为永久/邀请名额）" if item['kind'].endswith('_card') else "购买后立即生效"),
+            + (f"购买后说明私聊发送，背包保留{item['retention_days']}天；不代表人工服务完成。"
+               if item['kind'] == 'custom' else f"购买后入包，使用/创建起计时：{item['duration_days']}天（0为永久/邀请名额）"),
             [[{"text": "✅ 确认兑换", "callback_data": f"buyok:{item['id']}"},
               {"text": "取消", "callback_data": "shop"}]])
 
@@ -1937,14 +1945,61 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             await self._edit(chat_id, message_id, f"❌ 兑换失败：{_public_error(exc)}",
                              self.bag_menu())
             return
-        notice = await self._after_member_change(member)
+        # All supported products enter the bag. No member policy changes until
+        # actual card use; custom sends only its paid instruction snapshot.
+        notice = ''
         item = result.get("item") or {}
-        await self._edit(
-            chat_id, message_id,
+        if item.get('kind') == 'custom':
+            delivered = await self._send_custom_notice(member, result['card_id'])
+            if not delivered:
+                notice += '\n⚠ 私聊说明发送未确认，内容已保存；请从本人背包再次查看，不会重复扣费。'
+        await self.send_message(
+            chat_id,
             f"✅ <b>兑换成功</b>\n\n商品：{escape(str(item.get('name')))}\n"
             f"发放：{escape(str(result.get('granted')))}\n"
             f"消耗：{result.get('cost')} 分 · 余额：<b>{result.get('balance')}</b>{notice}",
-            self.bag_menu())
+            self.bag_menu(), reply_to_message_id=message_id)
+
+    async def _send_custom_notice(self, member, card_id):
+        user = str(member['emby_user_id'])
+        current = self._members.get(user)
+        tg = str(member.get('tg_user_id') or '')
+        if not tg or not current or str(current.get('tg_user_id') or '') != tg:
+            self._inventory.mark_notice(user, card_id, False)
+            return False
+        content = self._inventory.custom_notice(user, card_id)
+        # Bound escaped chunks never split HTML entities or exceed Telegram's limit.
+        chunks, chunk = [], ''
+        for char in content['notice']:
+            piece = escape(char)
+            if len(chunk) + len(piece) > 3000:
+                chunks.append(chunk)
+                chunk = ''
+            chunk += piece
+        if chunk:
+            chunks.append(chunk)
+        sent = True
+        for index, body in enumerate(chunks):
+            header = f"📬 <b>{escape(content['name'])} · 购买后说明</b>\n\n" if index == 0 else ''
+            try:
+                posted = await self._call('sendMessage', {'chat_id': tg, 'text': header + body,
+                    'parse_mode': 'HTML', 'disable_web_page_preview': True})
+                ok = isinstance(posted, dict) and type(posted.get('message_id')) is int and posted['message_id'] > 0
+            except Exception:  # noqa: BLE001 - delivery failure must not hide paid content
+                ok = False
+            if not ok:
+                sent = False
+                break
+        self._inventory.mark_notice(user, card_id, sent)
+        return sent
+
+    async def _custom_notice_view(self, chat_id, member, card_id):
+        try:
+            delivered = await self._send_custom_notice(member, int(card_id))
+            body = '📬 购买后说明已发送到本人私聊。' if delivered else '⚠ 私聊发送未确认，说明仍保存在本人背包，请检查是否已开启Bot私聊后重试。'
+        except (ValueError, TypeError):
+            body = '说明不存在、不属于你或保留期已结束。'
+        await self.send(chat_id, body, self.bag_menu())
 
     async def _orders_view(self, chat_id: Any, message_id: int,
                            member: dict[str, Any]) -> None:
@@ -1981,7 +2036,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             dur_label = '永久' if not spec['duration_days'] else f"{spec['duration_days']} 天"
             lines.append(f"📦 <b>{escape(spec['name'])}</b> <code>#{row['id']}</code>")
             lines.append(f"   · 规格期限：{dur_label}")
-            if row['used_at'] is None:
+            if spec['kind'] == 'custom':
+                keep = time.strftime('%Y-%m-%d %H:%M', time.gmtime(row['expires_at']+8*3600))
+                lines.append(f"   · 购买后说明保留至 {keep}；不代表人工服务完成")
+                if row['notice_state'] == 'failed':
+                    lines.append('   · ⚠ 私聊发送未确认，点击下方再次查看')
+                keyboard.append([{"text": '📬 查看购买后说明', "callback_data": f"notice:{row['id']}"}])
+            elif row['used_at'] is None:
                 lines.append("   · 状态：<b>未使用</b>")
                 keyboard.append([{"text": '⚡ 使用 '+spec['name'], "callback_data": f"card:{row['id']}"}])
             else:
@@ -2016,7 +2077,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 return
             result = self._inventory.use(member['emby_user_id'],int(card_id))
             notice = await self._after_member_change(member)
-            await self._edit(chat_id,message_id,escape(result['granted'])+notice,self.bag_menu())
+            await self.send_message(chat_id,escape(result['granted'])+notice,self.bag_menu(), reply_to_message_id=message_id)
         except Exception as exc:  # noqa: BLE001 - safely render external fulfillment failures
             await self._edit(chat_id,message_id,'使用失败：'+_public_error(exc),self.bag_menu())
 
@@ -3414,7 +3475,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return
         try:
             return await handler(chat_id, actor, args)
-        except (ConfigError, ShopError, RequestError) as exc:
+        except (ConfigError, ShopError, RequestError, RewardError) as exc:
             await self.send(chat_id, f"❌ {_public_error(exc)}")
         except Exception as exc:  # noqa: BLE001 - reported, never swallowed
             self._last_error = f"{type(exc).__name__}"
@@ -3546,7 +3607,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if not target or target.get('emby_missing_since'):
             await self._show(chat_id, '账号不存在或已标记缺失，未授予白名单；不会自动注册。')
             return
-        if target.get('group_id') == WHITELIST_GROUP_ID:
+        if (target.get('group_id') == WHITELIST_GROUP_ID
+                and 'whitelist_card_expires_at' not in target):
             body = 'ℹ ' + member_mention(target) + ' 已在白名单，未重复授予。'
             updated = target
         else:
@@ -3768,10 +3830,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if self._shop is None:
             await self.send(chat_id, "商城服务不可用。")
             return
-        # Same write the shop performs, so a gift and a purchase cannot mean
-        # two different things.
-        note = self._shop.grant(str(target.get("emby_user_id")), kind,
-                                int(args[2]), actor=actor)
+        # Shared administrator reward, deliberately outside catalogue fulfilment.
+        note = grant_reward(self._members._db, self._members,
+                            str(target.get("emby_user_id")), kind, int(args[2]), actor)
         notice = await self._after_member_change(target)
         await self.send(chat_id, f"🎁 已发放给 <b>{escape(str(target.get('username')))}</b>：{note}{notice}")
 
@@ -4074,6 +4135,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         text = str(message.get("text") or "").strip()
         if not chat_id or not tg_user_id:
             return
+        if await self._packet_command(message):
+            return
         checkin = self._checkin_command(text)
         if checkin:
             try:
@@ -4303,7 +4366,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         tg_user_id = str(from_user.get("id") or "")
         tg_name = from_user.get("first_name") or "朋友"
         callback_id = str(callback.get("id") or "")
-        if data == 'checkin':
+        if data.startswith(PACKET_CALLBACKS):
+            await self._packet_callback(data, message, from_user, callback_id)
+            return
+        if data == 'checkin' or data.startswith(('notice:', 'card:', 'buy:', 'buyok:')):
             try:
                 reliable_user({'from': from_user})
             except GroupPointsError:
@@ -4760,6 +4826,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 "这里是你的邀请码、可兑换的商品和兑换记录。",
                 self.bag_menu())
             return
+        if data.startswith('notice:'):
+            await self._custom_notice_view(chat_id, member, data.split(':', 1)[1]); return
         if data == 'inventory' or data.startswith('invpage:'):
             await self._inventory_view(chat_id,message_id,member,0 if data=='inventory' else data.split(':')[1]); return
         if data.startswith('card:'):
@@ -4951,6 +5019,10 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if self._task and not self._task.done():
             return
         self._task = asyncio.create_task(self.run())
+        if self._db is not None and self._points is not None:
+            packet_task = asyncio.create_task(self._packet_worker())
+            self._in_flight.add(packet_task)
+            packet_task.add_done_callback(self._in_flight.discard)
         if self._gift_receipts and self.enabled:
             receipt_task = asyncio.create_task(self._gift_receipts.run())
             self._in_flight.add(receipt_task)

@@ -103,8 +103,13 @@ def test_real_member_transfer_and_system_admin_mint_have_distinct_confirmations_
         assert env.services.points.balance("u1") == 30 and env.services.points.balance("u2") == 18
         minted = await dispatch(env, msg("/转账 100", actor=ADMIN, mid=202))
         card = env.tg.text(GROUP, minted["confirmation_message_id"])
-        assert "管理员发放" in card and "不扣管理员余额" in card and "手续费：0" in card
+        assert "管理员发放" in card and "手续费：0" in card
+        assert '不扣' not in card and 'mint' not in card
+        assert '904' in card and 'ViewerB' in card
         await asyncio.gather(*[confirm(env, minted) for _ in range(5)])
+        success = env.tg.text(GROUP, minted['confirmation_message_id'])
+        assert '不扣' not in success and 'mint' not in success
+        assert 'ViewerB' in success and '904' in success and '对方到账：100' in success
         assert (
             env.services.points.balance("admin") == 0 and env.services.points.balance("u2") == 118
         )

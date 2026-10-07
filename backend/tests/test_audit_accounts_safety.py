@@ -44,7 +44,7 @@ def test_points_cap_checked_under_same_lock(stack, monkeypatch):
 
 
 def test_shop_limit_and_grants_serialized(stack):
-    item = stack.shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 10,
+    item = stack.shop.create({'kind': 'invite_card', 'name': 'Bundle', 'cost': 10,
                               'amount': 1, 'per_user_limit': 3})
     def redeem(_):
         try:
@@ -56,7 +56,8 @@ def test_shop_limit_and_grants_serialized(stack):
         results = list(pool.map(redeem, range(10)))
     assert sum(results) == 3
     assert stack.points.balance('u1') == 970
-    assert stack.members.get('u1')['overrides']['extra_traffic_bytes'] == 3 * 1024**3
+    assert stack.db.one('SELECT COUNT(*) AS n FROM inventory')['n'] == 3
+    assert stack.members.get('u1')['invite_quota'] == 0  # not activated on purchase
 
 
 def test_password_result_not_disclosed_after_rebinding(bot):
@@ -234,7 +235,7 @@ def test_rebind_notice_alias_retry_does_not_duplicate(bot):
 
 def test_unknown_shop_failure_is_not_echoed_to_member(bot):
     bot._members.bind_telegram('u1', '12')
-    item = bot._shop.create({'kind': 'invite', 'name': 'Slot', 'cost': 10, 'amount': 1})
+    item = bot._shop.create({'kind': 'invite_card', 'name': 'Slot', 'cost': 10, 'amount': 1})
     def fail(*args, **kwargs):
         raise RuntimeError('unlabelled-example-private-value')
     bot._shop.redeem = fail

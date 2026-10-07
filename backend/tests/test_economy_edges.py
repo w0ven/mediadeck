@@ -183,6 +183,7 @@ def test_additive_migration_preserves_legacy_ledger_and_streak_history(env):
     assert env.db.one("SELECT * FROM checkins") == row_before
     proof(env.db, "u")
     result = env.checkin.checkin("u")
-    assert result["streak"] == 30 and result["bonus"] == 50
+    assert result["streak"] == 30 and result['streak_percent'] == 50
+    assert result["bonus"] == max(result['base'], 0) * 50 // 100
     assert env.points.balance("u") == 100 + result["points"]
     assert env.db.one("SELECT * FROM checkins WHERE day=?", (yesterday,)) == row_before

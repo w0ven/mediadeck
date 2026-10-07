@@ -35,6 +35,7 @@ from app.modules.economy_rules import (
     draw,
     economy_write,
     encode,
+    percent_tiers,
     receipt,
     save_receipt,
     validate_card,
@@ -76,17 +77,17 @@ class CheckinPlugin(Plugin):
         fields=[
             Field(
                 "streak_tiers",
-                "连签阶梯（JSON）",
+                "连签加成（%）",
                 kind="text",
                 default=encode(
                     [
-                        {"days": 1, "bonus": 0},
-                        {"days": 3, "bonus": 5},
-                        {"days": 7, "bonus": 15},
-                        {"days": 30, "bonus": 50},
+                        {"days": 1, "percent": 0},
+                        {"days": 3, "percent": 5},
+                        {"days": 7, "percent": 15},
+                        {"days": 30, "percent": 50},
                     ]
                 ),
-                help="取不超过连签天数的最高阶梯；断签回第1天。基础-10..30等概率，不可改范围。",
+                help="仅最高达标档：基础正积分×百分比，向下取整；0/负积分不加成，加成不参与幸运翻倍。断签回第1天，基础-10..30等概率。",
             ),
             Field("weekends", "周末活动", kind="bool", default=True),
             Field(
@@ -173,7 +174,8 @@ class CheckinPlugin(Plugin):
         secret = settings().mediadeck_checkin_secret
         base = draw(secret, user_id, day, "base", 41) - 10
         tiers = json.loads(config["streak_tiers"])
-        bonus = max((t for t in tiers if t["days"] <= streak), key=lambda t: t["days"])["bonus"]
+        percent = max((t for t in tiers if t["days"] <= streak), key=lambda t: t["days"])["percent"]
+        bonus = max(base, 0) * percent // 100
         activity = activity_for(config, now)
         lucky_roll = draw(secret, user_id, day, "lucky", PPM)
         multiplier = (
@@ -199,6 +201,8 @@ class CheckinPlugin(Plugin):
             "points": award,
             "base": base,
             "bonus": bonus,
+            "streak_percent": percent,
+            "calculation_version": "base-percent-v2",
             "streak": streak,
             "multiplier": multiplier,
             "watched_seconds": watched,
@@ -216,6 +220,9 @@ class CheckinPlugin(Plugin):
             (user_id, day, streak, award, int(now), encode(result)),
         )
         return result
+
+    def normalize_config(self, config):
+        return dict(config, streak_tiers=encode(percent_tiers(config['streak_tiers'])))
 
     def validate_config(self, config):
         validate_checkin(config)
@@ -452,11 +459,12 @@ class EconomyPlugin(Plugin):
         fields=[
             Field(
                 "bandwidth_cap_mbps",
-                "带宽叠加后的上限Mbps",
+                "额外道具带宽上限（Mbps）",
                 kind="int",
-                default=100,
-                min=1,
+                default=0,
+                min=0,
                 max=100000,
+                help="0=不封顶；正数仅限制未到期道具的总加成，不包含原基础带宽。每张独立到期。1Mbps=1000kbps=0.125MB/s。",
             ),
             Field("streams_cap", "同播叠加后的上限", kind="int", default=10, min=1, max=100),
             Field(
@@ -469,7 +477,29 @@ class EconomyPlugin(Plugin):
     )
 
     async def run(self, config):
-        return {"带宽上限": config["bandwidth_cap_mbps"], "同播上限": config["streams_cap"]}
+        return {"额外道具带宽上限Mbps": config["bandwidth_cap_mbps"] or "不封顶", "同播上限": config["streams_cap"]}
 
 
-POINTS_PLUGINS = (CheckinPlugin, PointsTransferPlugin, EconomyPlugin)
+class RedPacketsPlugin(Plugin):
+    spec = Spec(
+        id='red_packets', name='群积分红包', category='points', icon='🧧', interval=0,
+        description='授权群内的拼手气/等额红包，须本人确认。关闭仅停止新建和确认；已有红包仍可领取、到期结算。普通包未领部分退回原账号，奖励包到期结束；后台审计分开记录。',
+        fields=[
+            Field('enabled_for_members', '开放普通成员发红包', kind='bool', default=True),
+            Field('max_total', '每包总积分上限', kind='int', default=5000, min=1, max=1000000),
+            Field('max_parts', '每包最多份数', kind='int', default=50, min=1, max=200),
+            Field('ttl_hours', '红包有效期（小时）', kind='int', default=24, min=1, max=168),
+        ],
+    )
+
+    async def run(self, config):
+        db = self.ctx.db
+        active = db.one("SELECT COUNT(*) AS n,COALESCE(SUM(remaining),0) AS remaining FROM red_packets WHERE status='active'") or {}
+        errors = db.one("SELECT COUNT(*) AS n FROM red_packets WHERE settlement_error<>'' OR publish_error<>'' OR (card_send_state='sending' AND card_message_id IS NULL)") or {}
+        reward = db.one("SELECT COALESCE(SUM(c.amount),0) AS n FROM red_packet_claims c JOIN red_packets r ON r.nonce=c.nonce WHERE r.funding='reward'") or {}
+        return {'进行中红包': active.get('n', 0), '尚未领取积分': active.get('remaining', 0),
+                '奖励已入账积分': reward.get('n', 0), '待重试或核实': errors.get('n', 0),
+                '总额上限': config['max_total'], '最多份数': config['max_parts'], '有效小时': config['ttl_hours']}
+
+
+POINTS_PLUGINS = (CheckinPlugin, PointsTransferPlugin, EconomyPlugin, RedPacketsPlugin)

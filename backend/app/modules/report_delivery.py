@@ -35,6 +35,8 @@ def failure(body: Any = None, exc: Exception | None = None) -> dict[str, Any]:
         return {"state": "failed", "reason": reason}
     if code == 401:
         return {"state": "failed", "reason": "机器人凭据不可用"}
+    if code == 400 and 'message is not modified' in description:
+        return {'state': 'failed', 'reason': '消息内容未变化', 'not_modified': True}
     if code == 400:
         reason = "会话不存在或用户尚未启动机器人" if "chat not found" in description else "Telegram 拒绝消息内容"
         return {"state": "failed", "reason": reason, "content_error": "chat not found" not in description}

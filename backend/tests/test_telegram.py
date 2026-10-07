@@ -1179,20 +1179,27 @@ def test_the_shop_lists_only_items_that_are_on_sale() -> None:
     assert "500" in text  # the balance, so the price means something
 
 
-def test_buying_asks_before_it_spends(transactional_bot) -> None:
+def test_buying_asks_before_it_spends(transactional_bot, monkeypatch) -> None:
     bot = transactional_bot
+    posts = []
+    async def record(method, payload=None, **kwargs):
+        posts.append((method, payload or {}))
+        return {'message_id': 3}
+    monkeypatch.setattr(bot, '_call', record)
     bot._members.upsert('u1', 'viewer', {'group_id': 'standard'})
     bot._members.bind_telegram('u1', '1')
     bot._points.add('u1', 500, 'admin.adjust')
-    item = bot._shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 100, 'amount': 50})
+    item = bot._shop.create({'kind': 'invite_card', 'name': 'Bundle', 'cost': 100, 'amount': 1})
     asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
     assert '确认兑换' in bot.edits[0] and '100' in bot.edits[0]
     assert bot._shop.orders('u1') == [] and bot._points.balance('u1') == 500
     member = bot._members.get('u1')
     asyncio.run(bot._shop_redeem(1, 2, member, str(item['id'])))
     assert len(bot._shop.orders('u1')) == 1 and bot._points.balance('u1') == 400
-    assert bot._members.get('u1')['overrides']['extra_traffic_bytes'] == 50 * 1024**3
-    assert '兑换成功' in bot.edits[-1]
+    assert bot._db.one('SELECT COUNT(*) AS n FROM inventory')['n'] == 1
+    assert bot._members.get('u1')['invite_quota'] == 0
+    assert any(method == 'sendMessage' and '兑换成功' in p['text'] for method, p in posts)
+    assert '确认兑换' in bot.edits[-1]  # success is a new receipt, not replacing the old card
 
 
 def test_confirming_a_withdrawn_item_is_refused() -> None:
@@ -1207,12 +1214,13 @@ def test_a_failed_redemption_explains_why(transactional_bot) -> None:
     bot = transactional_bot
     bot._members.upsert('u1', 'viewer', {'group_id': 'standard'})
     bot._members.bind_telegram('u1', '1')
-    item = bot._shop.create({'kind': 'traffic', 'name': 'Bundle', 'cost': 100, 'amount': 50})
+    item = bot._shop.create({'kind': 'invite_card', 'name': 'Bundle', 'cost': 100, 'amount': 1})
     asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
     asyncio.run(bot._shop_redeem(1, 2, bot._members.get('u1'), str(item['id'])))
     assert '兑换失败' in bot.edits[-1] and '积分不足' in bot.edits[-1]
     assert bot._points.balance('u1') == 0 and not bot._shop.orders('u1')
-    assert not bot._members.get('u1')['overrides'].get('extra_traffic_bytes')
+    assert not bot._db.query('SELECT * FROM inventory')
+    assert bot._members.get('u1')['invite_quota'] == 0
 
 
 def test_the_points_view_shows_a_balance_and_where_it_came_from() -> None:

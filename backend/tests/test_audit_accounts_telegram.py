@@ -5,6 +5,7 @@ import time
 import pytest
 from test_audit_accounts_invariants import stack as account_stack  # noqa: F401
 
+from app.modules.inventory import InventoryService
 from app.modules.registration import RegistrationService
 from app.modules.telegram import TelegramBot
 
@@ -42,6 +43,7 @@ def bot(stack):
     reg = RegistrationService(stack.db, stack.groups, lambda: cfg)
     b = TelegramBot(lambda: cfg, stack.members, Emby(), db=stack.db, registration=reg,
                     groups=stack.groups, shop=stack.shop, points=stack.points)
+    b._inventory = InventoryService(stack.db, stack.members, stack.shop, dict)
     b.calls = []
     async def call(method, payload=None, timeout=20):
         b.calls.append((method, payload or {}))
@@ -53,7 +55,7 @@ def bot(stack):
 
 
 def callback(data, user=12, mid=80):
-    return {'id': 'cb', 'data': data, 'from': {'id': user},
+    return {'id': 'cb', 'data': data, 'from': {'id': user, 'is_bot': False},
             'message': {'chat': {'id': user, 'type': 'private'}, 'message_id': mid}}
 
 
@@ -113,7 +115,7 @@ def test_expired_request_confirmation_cannot_submit(bot):
 
 def test_purchase_confirmation_is_single_use(bot):
     bot._members.bind_telegram('u1', '12')
-    item = bot._shop.create({'kind': 'invite', 'name': 'Slot', 'cost': 10, 'amount': 1})
+    item = bot._shop.create({'kind': 'invite_card', 'name': 'Slot', 'cost': 10, 'amount': 1})
     async def run():
         await bot._handle_callback(callback('buy:' + str(item['id'])))
         await bot._handle_callback(callback('buyok:' + str(item['id'])))
@@ -212,7 +214,7 @@ def test_registration_cancellation_cleans_remote_account(bot):
 
 def test_request_and_shop_render_external_text_as_literal(bot):
     bot._members.bind_telegram('u1', '12')
-    bot._shop.create({'kind': 'invite', 'name': '<b>external</b>',
+    bot._shop.create({'kind': 'invite_card', 'name': '<b>external</b>',
                      'description': '<a href="https://invalid.example">text</a>',
                      'cost': 10, 'amount': 1})
     asyncio.run(bot._shop_view(12, 80, bot._members.get('u1')))

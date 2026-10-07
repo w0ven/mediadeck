@@ -212,7 +212,8 @@ def merge_effective(group: dict[str, Any] | None, overrides: dict[str, Any] | No
         expires_at = stored_expires
     # Billing dimensions belong to the target group. A personal date cannot
     # enable time billing on a traffic-only or non-billed group.
-    if group and not needs_duration(group.get("billing_mode") or ""):
+    if (group and not needs_duration(group.get("billing_mode") or "")
+            and not (member or {}).get("preserve_account_expiry")):
         expires_at = None
 
     extra = int(ov.get("extra_traffic_bytes") or 0)
@@ -361,6 +362,8 @@ class MemberService:
 
     def _decorate(self, row: dict[str, Any]) -> dict[str, Any]:
         out = dict(row)
+        from app.modules.whitelist_cards import project_authoritative_group
+        project_authoritative_group(self._db, out)
         group = self._groups.get(out.get("group_id") or "")
         out["group"] = group
         out["group_name"] = group["name"] if group else "(未分组)"
@@ -467,6 +470,8 @@ class MemberService:
         stored = str(member.get("status") or "active")
         if stored in MANUAL_STATES:
             return stored, "管理员手动设置"
+        if member.get('card_group_unavailable'):
+            return 'suspended', '白名单卡到期，原用户组不可用，待管理员处理'
         if not group:
             return "active", "未分组，不做计费"
 
@@ -480,7 +485,7 @@ class MemberService:
         expires = effective.get("expires_at", member.get("expires_at"))
         has_expiry_override = "expires_at_override" in (member.get("overrides") or {})
         if expires and now >= expires and (
-                has_expiry_override or needs_duration(mode)):
+                has_expiry_override or needs_duration(mode) or member.get('preserve_account_expiry')):
             return "expired", "已过期"
 
         quota = int(effective.get("traffic_quota_bytes") or 0)
@@ -554,11 +559,13 @@ class MemberService:
         elif expires_at is not None:
             expires_at = int(expires_at)
 
+        from app.modules.whitelist_cards import owned_grant
+        card_owned = owned_grant(self._db, existing) if existing else None
         group_changed = bool(existing and group_id != existing.get('group_id'))
         explicit_term = expiry_policy != 'keep' or payload.get('expires_at', '__keep__') != '__keep__'
         overrides_before = parse_overrides(existing.get('overrides_json')) if existing else {}
         overrides_after = dict(overrides_before)
-        if group and not needs_duration(group['billing_mode']):
+        if group and not needs_duration(group['billing_mode']) and not card_owned:
             # Changing to whitelist/traffic-only means no time limit, even
             # when the selected policy is keep. Never reset usage ledgers.
             if group_changed or explicit_term or not existing:
@@ -566,7 +573,7 @@ class MemberService:
                 overrides_after.pop('expires_at_override', None)
         elif group_changed and expiry_policy == 'keep' and not explicit_term:
             old_group = self._groups.get(existing.get('group_id')) if existing.get('group_id') else None
-            if old_group and not needs_duration(old_group['billing_mode']):
+            if old_group and not needs_duration(old_group['billing_mode']) and not card_owned:
                 # Preserve the actual unlimited term, not an inactive stale date.
                 expires_at = None
                 overrides_after.pop('expires_at_override', None)
@@ -615,8 +622,11 @@ class MemberService:
             execute(
                 "UPDATE members SET username=?,group_id=?,roles=?,status=?,"
                 "expires_at=?,traffic_used_bytes=?,traffic_period_start=?,"
-                "note=?,contact=?,updated_at=?,overrides_json=? WHERE emby_user_id=?",
-                row + (overrides_json, user_id,))
+                "note=?,contact=?,updated_at=?,overrides_json=?,group_revision=group_revision+? WHERE emby_user_id=?",
+                row + (overrides_json, int('group_id' in payload), user_id,))
+            if card_owned and explicit_term:
+                execute("UPDATE whitelist_card_grants SET enforce_account_expiry=? WHERE emby_user_id=?",
+                        (int(expires_at is not None), user_id))
             self.audit(actor, "member.update", user_id, encode_audit_detail(audit_diff(
                 {"group_id": existing.get("group_id"),
                  "roles": existing.get("roles"),
@@ -1170,6 +1180,10 @@ class MemberService:
             "UPDATE members SET overrides_json=?,updated_at=? WHERE emby_user_id=?",
             (json.dumps(cleaned, ensure_ascii=False, sort_keys=True),
              int(time.time()), user_id))
+        if 'expires_at_override' in cleaned:
+            self._db.execute(
+                "UPDATE whitelist_card_grants SET enforce_account_expiry=? WHERE emby_user_id=? AND status='active'",
+                (int(cleaned['expires_at_override'] is not None), user_id))
         self.audit(actor, "member.overrides", user_id,
                    encode_audit_detail(audit_diff(before, cleaned)))
         return self.get(user_id)  # type: ignore[return-value]

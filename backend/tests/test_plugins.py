@@ -936,7 +936,7 @@ def test_the_points_category_carries_the_points_plugins() -> None:
     """The automation page renders these from the category alone."""
     with TestClient(app) as client:
         cards = client.get("/api/plugins?category=points", auth=ADMIN).json()
-        assert {c["id"] for c in cards} == {"checkin", "points_transfer", "inventory"}
+        assert {c["id"] for c in cards} == {"checkin", "points_transfer", "inventory", "red_packets"}
         # Neither is scheduled: a member triggers them, so a timer that fired
         # them would be awarding points nobody asked for.
         assert all(c["interval"] == 0 and c["hour"] is None for c in cards)

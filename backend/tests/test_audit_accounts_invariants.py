@@ -11,6 +11,7 @@ from app.core.db import Database
 from app.modules.economy_rules import day_bounds
 from app.modules.enforcement import EnforcementService, desired_policy
 from app.modules.groups import GroupService
+from app.modules.member_rewards import grant_reward
 from app.modules.members import MemberService
 from app.modules.plugins_points import CheckinPlugin
 from app.modules.points import PointsService
@@ -34,23 +35,22 @@ def stack(tmp_path):
     db.close()
 
 
-def test_shop_extends_effective_override_not_hidden_base(stack):
+def test_shared_reward_extends_effective_override_not_hidden_base(stack):
     expires = int(time.time()) + 90 * 86400
     stack.members.set_overrides('u1', {'expires_at_override': expires, 'max_streams': 4})
-    item = stack.shop.create({'kind': 'days', 'name': 'Term', 'cost': 10, 'amount': 7})
-    stack.shop.redeem('u1', item['id'])
+    grant_reward(stack.db, stack.members, 'u1', 'days', 7, actor='isolated.test')
     member = stack.members.get('u1')
     assert member['expires_at_effective'] == expires + 7 * 86400
     assert member['overrides']['max_streams'] == 4
 
 
 @pytest.mark.parametrize('kind,group', [('days', 'whitelist'), ('traffic', 'whitelist')])
-def test_shop_never_charges_for_ineffective_reward(stack, kind, group):
+def test_retired_shop_types_cannot_be_recreated_or_charged(stack, kind, group):
     stack.members.upsert('u1', 'viewer', {'group_id': group})
     before = stack.members.get('u1')
-    item = stack.shop.create({'kind': kind, 'name': 'Reward', 'cost': 10, 'amount': 7})
     with pytest.raises(ShopError):
-        stack.shop.redeem('u1', item['id'])
+        stack.shop.create({'kind': kind, 'name': 'Reward', 'cost': 10, 'amount': 7})
+    assert not stack.shop.items()
     assert stack.points.balance('u1') == 1000
     assert not stack.shop.orders('u1')
     assert stack.members.get('u1')['expires_at'] == before['expires_at']

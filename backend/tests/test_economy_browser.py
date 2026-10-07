@@ -4,6 +4,7 @@ Run with a system Chromium (MEDIADECK_TEST_CHROMIUM may override its path).
 """
 
 import os
+import shutil
 from urllib.parse import urlsplit
 
 from fastapi.testclient import TestClient
@@ -20,7 +21,7 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
         app.state.members.upsert("u", "viewer", {"group_id": "standard"})
         with sync_playwright() as driver:
             browser = driver.chromium.launch(
-                executable_path=os.getenv("MEDIADECK_TEST_CHROMIUM", "/usr/bin/chromium"),
+                executable_path=os.getenv("MEDIADECK_TEST_CHROMIUM", shutil.which('chromium') or "/usr/bin/chromium"),
                 args=["--no-sandbox"],
                 headless=True,
             )
@@ -95,7 +96,7 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
             )
             assert app.state.titles.titles("u")[0]["revoked_at"] is not None
             page.evaluate("automation.category='points'; go('automation')")
-            page.locator("#pl-checkin-streak_tiers").wait_for()
+            page.locator("#pl-checkin-streak_tiers").wait_for(state='attached')
             assert "2026-02-17" in page.locator("#pl-checkin-holidays").input_value()
             page.fill("#pl-checkin-double_ppm", "123456")
             page.locator('[data-plugin="checkin"] [data-act="save"]').click()
@@ -108,10 +109,10 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
             page.locator("[data-add-tier='checkin']").click()
             new_row_input = page.locator("[data-tier-rows='checkin'] tr:last-child [data-tier-days]")
             new_row_input.fill("45")
-            new_bonus_input = page.locator("[data-tier-rows='checkin'] tr:last-child [data-tier-bonus]")
+            new_bonus_input = page.locator("[data-tier-rows='checkin'] tr:last-child [data-tier-percent]")
             new_bonus_input.fill("88")
-            # Close advanced details to ensure itemized editor takes precedence
-            page.evaluate("document.querySelector('#details-pl-checkin-streak_tiers').removeAttribute('open')")
+            # Visual is the default editing source; raw JSON is folded.
+            assert not page.locator('#details-pl-checkin-streak_tiers').evaluate('(e)=>e.open')
             page.locator('[data-plugin="checkin"] [data-act="save"]').click()
             page.wait_for_function("document.querySelector('[data-plugin=checkin]').textContent.includes('已保存')")
             saved_tiers = app.state.plugins.config("checkin")["streak_tiers"]

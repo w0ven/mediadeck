@@ -26,11 +26,12 @@ import pytest
 
 from app.core.db import Database
 from app.modules.groups import GroupService
+from app.modules.member_rewards import GB, KBPS_PER_MBPS
 from app.modules.members import MemberService
 from app.modules.points import PointsService
 from app.modules.registration import RegistrationService
 from app.modules.requests import RequestService
-from app.modules.shop import GB, KBPS_PER_MBPS, ShopService
+from app.modules.shop import ShopService
 from app.modules.telegram import TelegramBot
 
 FAKE_CRED = "1234567" + ":" + "placeholder-not-a-real-credential"
@@ -562,7 +563,7 @@ def test_req_reports_the_totals(bot) -> None:
     ("/invite alice 2", "member.invite_quota"),
     ("/auth 123456", "registration.grant"),
     ("/code standard 30 1", "redeem.generate"),
-    ("/gift alice traffic 5", "shop.grant"),
+    ("/gift alice traffic 5", "member.reward"),
 ])
 def test_commands_are_written_to_the_audit_trail_naming_the_admin(
         bot, command, action) -> None:
