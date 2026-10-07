@@ -35,7 +35,14 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Set isolated browser cache path
         run: echo "PLAYWRIGHT_BROWSERS_PATH=$RUNNER_TEMP/mediadeck-browsers" >> "$GITHUB_ENV"
+      - name: Use official HTTPS mirrors for isolated browser dependencies
+        run: |
+          # The hosted runner's HTTP Azure mirror can stall apt for the whole
+          # job. Change only this disposable CI runner, not deployed hosts.
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu' 'https://security.ubuntu.com/ubuntu' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'Acquire::http::Timeout "30";' 'Acquire::https::Timeout "30";' 'Acquire::Retries "1";' | sudo tee /etc/apt/apt.conf.d/99-mediadeck-ci-timeouts >/dev/null
       - name: Install isolated browser test runtime
+        timeout-minutes: 5
         run: python -m playwright install --with-deps chromium
       - name: Select actual headless shell for offline CLI browser tests
         run: |
