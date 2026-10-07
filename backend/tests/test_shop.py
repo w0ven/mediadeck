@@ -346,7 +346,7 @@ def test_the_shop_api_refuses_bad_items_and_unknown_ids() -> None:
 def test_the_shop_ships_a_disabled_starter_catalogue_on_first_boot() -> None:
     with TestClient(app) as client:
         items = client.get("/api/shop/items", auth=ADMIN).json()
-        assert len(items) == 4
+        assert len(items) == 8
         assert all(i["enabled"] is False for i in items)
         assert client.get("/api/shop/items?enabled_only=true",
                           auth=ADMIN).json() == []

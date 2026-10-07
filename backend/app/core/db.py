@@ -692,6 +692,8 @@ class Database:
                     "INSERT INTO meta(key,value) VALUES('schema_version',?)",
                     (str(SCHEMA_VERSION),),
                 )
+            from app.modules.economy_schema import migrate as migrate_economy
+            migrate_economy(self)
             self._ensure_column(
                 "members", "overrides_json", "TEXT NOT NULL DEFAULT '{}'")
             # v0.14: groups replace plans; roles are additive job functions.

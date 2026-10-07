@@ -370,6 +370,13 @@ class MemberService:
         overrides.pop("max_devices", None)
         out["overrides"] = overrides
         effective = merge_effective(group, overrides, out)
+        from app.modules.inventory import contributions
+        cards = contributions(self._db, out['emby_user_id'])
+        out['card_contributions'] = cards
+        for key, value in cards.items():
+            # Zero means unlimited; never turn it into a finite limit.
+            if effective[key] > 0:
+                effective[key] += value
         out["effective"] = effective
         out["overridden_keys"] = list(effective["overridden_keys"])
         # Flatten the fields the rest of the panel reads.

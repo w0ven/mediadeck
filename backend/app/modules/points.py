@@ -12,9 +12,8 @@ what the balance was believed to be at that moment, so a later audit can point
 at the exact row where reality diverged. Nothing reads it to answer "how many
 points does this member have".
 
-Points can never go negative. A member who cannot afford something is refused
-before anything is written, rather than being allowed to go into debt that the
-panel would then have to model, display and collect.
+Check-in can produce a negative balance. Spending still requires sufficient
+funds; incoming credits remain valid even while the account is negative.
 
 Transfers are one transaction: the debit and the credit are written under a
 single lock, and both rows carry a reference to the other. A transfer that
@@ -38,6 +37,7 @@ REASON_LABELS = {
     "shop.redeem": "商城兑换",
     "shop.refund": "兑换回滚",
     "admin.adjust": "管理员调整",
+    "admin.mint": "系统管理员发放",
 }
 
 
@@ -128,7 +128,7 @@ class PointsService:
             "WHERE emby_user_id=?", (user_id,))
         current = int((cur.fetchone() or {"total": 0})["total"] or 0)
         after = current + delta
-        if after < 0:
+        if delta < 0 and after < 0 and reason != 'checkin':
             raise ValueError("积分不足")
         conn.execute(
             "INSERT INTO points_ledger"
@@ -157,7 +157,7 @@ class PointsService:
 
     def transfer(self, from_id: str, to_id: str, amount: int,
                  actor: str = "member", fee: int = 0, *,
-                 conn: sqlite3.Connection | None = None) -> dict[str, Any]:
+                 conn: sqlite3.Connection | None = None, now: int | None = None) -> dict[str, Any]:
         """Move points between two members, atomically.
 
         ``fee`` is destroyed rather than paid to anyone: it exists to make
@@ -177,7 +177,7 @@ class PointsService:
         if received <= 0:
             raise ValueError("手续费过高，对方将收不到积分")
 
-        now = int(time.time())
+        now = int(time.time()) if now is None else int(now)
         # One transaction for both halves: a debit that lands without its
         # credit is the failure this whole method exists to prevent.
         with (contextlib.nullcontext(conn) if conn is not None else self._db.write()) as tx:

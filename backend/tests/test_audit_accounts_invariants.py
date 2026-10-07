@@ -4,8 +4,11 @@ import time
 from types import SimpleNamespace
 
 import pytest
+from test_economy import proof
 
+from app.core.config import settings
 from app.core.db import Database
+from app.modules.economy_rules import day_bounds
 from app.modules.enforcement import EnforcementService, desired_policy
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
@@ -53,8 +56,17 @@ def test_shop_never_charges_for_ineffective_reward(stack, kind, group):
     assert stack.members.get('u1')['expires_at'] == before['expires_at']
 
 
-def test_checkin_payment_failure_does_not_spend_day(stack):
-    plugin = CheckinPlugin(SimpleNamespace(db=stack.db, points=stack.points))
+def _qualified_checkin(stack, monkeypatch):
+    monkeypatch.setenv('MEDIADECK_CHECKIN_SECRET', 'isolated-checkin-failure-test-secret-32bytes')
+    settings.cache_clear()
+    noon = day_bounds(time.time())[1] + 12*3600
+    monkeypatch.setattr(time, 'time', lambda: noon)
+    proof(stack.db, 'u1', now=noon)
+    return CheckinPlugin(SimpleNamespace(db=stack.db, points=stack.points, members=stack.members))
+
+
+def test_checkin_payment_failure_does_not_spend_day(stack, monkeypatch):
+    plugin = _qualified_checkin(stack, monkeypatch)
     stack.db.execute("CREATE TRIGGER fail_checkin BEFORE INSERT ON points_ledger WHEN NEW.reason='checkin' BEGIN SELECT RAISE(ABORT, 'injected'); END")
     with pytest.raises(Exception, match='injected'):
         plugin.checkin('u1')
@@ -152,13 +164,13 @@ def test_remote_errors_are_secret_safe(text):
     assert 'example' not in redact(text)
 
 
-def test_checkin_double_call_threads_returns_normal_refusal(stack):
+def test_checkin_double_call_threads_returns_normal_refusal(stack, monkeypatch):
     from concurrent.futures import ThreadPoolExecutor
-    plugin = CheckinPlugin(SimpleNamespace(db=stack.db, points=stack.points))
+    plugin = _qualified_checkin(stack, monkeypatch)
     with ThreadPoolExecutor(2) as pool:
         results = list(pool.map(lambda _: plugin.checkin('u1'), range(2)))
     assert sum(r['ok'] for r in results) == 1
-    assert stack.points.balance('u1') == 1010
+    assert stack.points.balance('u1') == 1000 + next(r['points'] for r in results if r['ok'])
 
 
 def test_group_default_switch_failure_keeps_original_default(stack):

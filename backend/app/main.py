@@ -46,6 +46,7 @@ from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
 from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeStore
+from app.modules.inventory import InventoryService
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.metering import UNIT as METER_UNIT
 from app.modules.metering import MeasuredMeteringService
@@ -84,6 +85,7 @@ from app.modules.storage import MockStorage, StorageManager
 from app.modules.streams import StreamAdmission, matching_sessions
 from app.modules.tasks import MockTasks, TasksReader
 from app.modules.telegram import TelegramBot
+from app.modules.titles import TitleService
 from app.modules.tmdb import TmdbClient
 from app.modules.updater import MockUpdater, Updater
 from app.modules.usage import UsageSampler, run_usage_io
@@ -376,6 +378,7 @@ async def _startup() -> None:
     app.state.shop = ShopService(app.state.db, app.state.members,
                                  app.state.points)
     app.state.shop.seed_defaults()
+    app.state.shop.seed_cards()
     # Requests need a group to promote into (/prouser) and one to charge the
     # monthly allowance against, so they are built after groups and members.
     app.state.tmdb = TmdbClient(
@@ -435,6 +438,12 @@ async def _startup() -> None:
                 await app.state.usage.tick(node_of=_node_for_item)
 
             now = time.time()
+            if hasattr(app.state,"titles"):
+                with contextlib.suppress(Exception):
+                    await app.state.titles.sync()
+            if hasattr(app.state,"inventory"):
+                with contextlib.suppress(Exception):
+                    await app.state.inventory.reconcile_expired(_inventory_expired_effects)
             if now >= member_sync_due:
                 member_sync_due = now + 900
                 # Flag members whose Emby account disappeared, clear the flag
@@ -540,6 +549,12 @@ async def _startup() -> None:
     # Handed over after registration rather than at construction: the bot
     # renders its keyboard from which points plugins are switched on, and the
     # registry does not exist until the plugins are registered against it.
+    app.state.inventory = InventoryService(app.state.db,app.state.members,app.state.shop,
+        lambda: app.state.plugins.config("inventory"))
+    app.state.titles = TitleService(app.state.db,app.state.members,app.state.telegram,
+        lambda: app.state.plugins.config("inventory"))
+    app.state.telegram._inventory = app.state.inventory
+    app.state.telegram._titles = app.state.titles
     app.state.telegram.bind_plugins(app.state.plugins)
     app.state.plugins.start()
 
@@ -1756,6 +1771,8 @@ async def playback_activity(request: Request) -> Response:
         async def issue():
             return await app.state.emby.report_playback(event, dict(request.headers), query, payload)
         code = await app.state.streams.report_activity(uid, payload, issue)
+        if event == 'started' and 200 <= code < 300:
+            await app.state.usage.playback_report(uid, device, payload, stopped=False)
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001 - failed delivery cannot observe a play
@@ -1773,6 +1790,8 @@ async def playback_stopped(request: Request) -> Response:
         raise HTTPException(401, "playback authentication required")
     try:
         code = await app.state.streams.report_stopped(uid, device, token, payload)
+        if 200 <= code < 300:
+            await app.state.usage.playback_report(uid, device, payload, stopped=True)
     except Exception:  # noqa: BLE001 - do not release a lease on uncertain delivery
         raise HTTPException(503, "playback report unavailable") from None
     return Response(status_code=code, headers={"Cache-Control": "private, no-store"})
@@ -2088,6 +2107,20 @@ async def _apply_telegram_member_change(user_id: str, previous_bandwidth: int | 
     if enabled:
         return await app.state.enforcement.enforce_now(user_id, 'Telegram 成员权益已更新')
     return member_ops.action_result(local_ok=True, remote_ok=None)
+
+
+async def _inventory_expired_effects(user_id: str, kinds: set[str]) -> dict[str, Any]:
+    """Use the existing actual cap reissue path, including old signed URLs."""
+    try:
+        enabled = bool(app.state.settings_service.membership_config().get('enforcement_enabled'))
+        if 'bandwidth_card' in kinds:
+            return await _reissue_rate_caps(user_id=user_id,reason='带宽道具已独立到期',
+                                           enforce=enabled,kick=True,report_failures=True)
+        if enabled:
+            return await app.state.enforcement.enforce_now(user_id,'同播道具已独立到期')
+        return {'ok': True, 'remote_ok': None}
+    finally:
+        _invalidate_member_snapshot()
 
 
 # ---- user groups -----------------------------------------------------------
@@ -3399,6 +3432,35 @@ async def shop_item_delete(item_id: int,
 async def shop_orders(user_id: str | None = None,
                       limit: int = 50) -> list[dict[str, Any]]:
     return app.state.shop.orders(user_id=user_id, limit=limit)
+
+
+# Administrative UI only. Members use the bot and the same business services.
+@app.get('/api/economy/members/{user_id}', dependencies=[Depends(_auth)])
+async def economy_member(user_id: str):
+    return {"inventory": app.state.inventory.items(user_id),"titles": app.state.titles.titles(user_id),
+                "tags": app.state.titles.states(user_id)}
+
+
+@app.post('/api/economy/members/{user_id}/titles', dependencies=[Depends(_auth)])
+async def economy_title_grant(user_id: str, payload: dict[str, Any] = Body(...), user: str = Depends(_auth)):  # noqa: B008
+    try:
+        return app.state.titles.grant(user_id,payload.get('tag'),payload.get('days',0),actor=user)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from None
+
+
+@app.delete('/api/economy/members/{user_id}/titles/{title_id}', dependencies=[Depends(_auth)])
+async def economy_title_revoke(user_id: str,title_id: int,user: str = Depends(_auth)):
+    try:
+        return await app.state.titles.revoke(user_id,title_id,actor=user)
+    except ValueError as exc:
+        raise HTTPException(400,str(exc)) from None
+
+
+@app.post('/api/economy/members/{user_id}/titles/retry', dependencies=[Depends(_auth)])
+async def economy_title_retry(user_id: str):
+    await app.state.titles.sync(user_id)
+    return app.state.titles.states(user_id)
 
 
 # ---- media requests ---------------------------------------------------------

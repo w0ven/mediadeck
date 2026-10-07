@@ -924,7 +924,7 @@ class _FakeTransferPlugin:
     def fee_for(self, amount: int) -> int:
         return self._fee
 
-    def transfer(self, from_id: str, to_id: str, amount: int):
+    def transfer(self, from_id: str, to_id: str, amount: int, *, request_id=None, expected_fee=None):
         self.calls.append((from_id, to_id, amount))
         return {"amount": amount, "fee": self._fee,
                 "received": amount - self._fee,
@@ -974,7 +974,7 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "devices", "resetpw", "home", "rebind", "me"}
-    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "checkin", "transfer"}
+    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "checkin", "transfer", "inventory", "titles"}
 
 
 def test_the_backpack_holds_invites_shop_and_history() -> None:
@@ -1112,7 +1112,7 @@ def test_the_recipient_is_told_they_received_points() -> None:
     bot = _points_bot(members, enabled={"points_transfer"},
                       plugins={"points_transfer": plugin})
     bot._pending["1"] = ("transfer_confirm", time.time() + 600,
-                         {"to_id": "u2", "to_name": "bob", "amount": 50})
+                         {"to_id": "u2", "to_name": "bob", "amount": 50, "fee": 0, "request_id": "confirmed-test-transfer"})
 
     asyncio.run(bot._transfer_execute(1, 2, members._linked["999"]))
 

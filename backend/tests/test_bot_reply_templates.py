@@ -66,7 +66,7 @@ def demo_bot():
     bot._requests = SimpleNamespace(remaining=lambda uid: 3)
     bot._shop = SimpleNamespace(get=lambda iid: {
         'id': 1, 'name': '10 GiB 流量', 'enabled': True, 'cost': 30,
-        'amount': 10, 'unit': ' GiB', 'kind_label': '流量',
+        'amount': 10, 'unit': ' GiB', 'kind_label': '流量', 'kind': 'traffic', 'duration_days': 30,
     })
     bot._panel['1001'] = 11
     captured = []

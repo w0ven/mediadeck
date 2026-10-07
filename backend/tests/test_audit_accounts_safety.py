@@ -24,7 +24,8 @@ def bot(request):
 
 
 def test_points_cap_checked_under_same_lock(stack, monkeypatch):
-    plugin = PointsTransferPlugin(SimpleNamespace(db=stack.db, points=stack.points))
+    stack.members.upsert('recipient', 'recipient', {'group_id': 'standard'})
+    plugin = PointsTransferPlugin(SimpleNamespace(db=stack.db, points=stack.points, members=stack.members))
     original = stack.points.spent_since
     def spent(*args):
         value = original(*args)

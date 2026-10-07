@@ -242,6 +242,37 @@ class UsageSampler:
         self._tick_lock = asyncio.Lock()
         self._publish_live()
 
+    async def playback_report(self, user_id: str, device: str, payload: dict, *, stopped: bool) -> None:
+        """Successful authenticated Stopped closes watch proof immediately.
+
+        Cached /Sessions rows cannot resurrect that same play. Started creates
+        a fresh baseline; delayed Stop for an older PlaySessionId is ignored.
+        """
+        async with self._tick_lock:
+            await run_usage_io(self._playback_report, user_id, device, payload, stopped)
+
+    def _playback_report(self, user_id, device, payload, stopped):
+        sid = str(payload.get('SessionId') or '')
+        play = str(payload.get('PlaySessionId') or '')
+        for current_sid, state in self._live.items():
+            if state['user_id'] != user_id or (sid and current_sid != sid):
+                continue
+            if device and str(state.get('device_id') or '') != device:
+                continue
+            if stopped and play and str(state.get('play_id') or '') != play:
+                continue
+            if not sid and not device and not play:
+                continue  # no identity evidence: do not stop unrelated streams
+            state['stopped_by_report'] = bool(stopped)
+            state['watch_observation'] = None
+            if stopped:
+                state['was_playing'] = False
+                state['watch_reason'] = 'stopped'
+            with self._db.write() as conn:
+                conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
+                             (current_sid, json.dumps(state)))
+        self._publish_live()
+
     # -- main loop -----------------------------------------------------------
     async def tick(self, node_of: Any = None) -> dict[str, Any]:
         # One tick owns session state until its worker commits, even if its
@@ -349,6 +380,7 @@ class UsageSampler:
                     "watch_observation": observation,
                     "watch_reason": observation['reason'] or 'baseline',
                     "play_id": observation['play_id'],
+                    "stopped_by_report": False,
                     "last_ts": now,
                     "was_playing": playing,
                     "seconds": 0.0,
@@ -368,6 +400,8 @@ class UsageSampler:
                 "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
             })
             delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
+            if state.get('stopped_by_report'):
+                observation['reason'] = 'stopped'
             before = state.get('watch_observation')
             start, end, reason = verified_watch_interval(before, observation, delta, self._verified_since)
             watch_delta = end - start
