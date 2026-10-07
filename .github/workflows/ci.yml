@@ -21,6 +21,7 @@ jobs:
     env:
       TZ: Asia/Shanghai
       MEDIADECK_MOCK: "1"
+      PLAYWRIGHT_BROWSERS_PATH: ${{ runner.temp }}/mediadeck-browsers
     defaults:
       run:
         working-directory: backend
@@ -35,10 +36,26 @@ jobs:
         run: python -m pip install -e '.[dev]'
       - name: Install isolated browser test runtime
         run: python -m playwright install --with-deps chromium
+      - name: Select real Chromium instead of the runner snap launcher
+        run: |
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          from playwright.sync_api import sync_playwright
+
+          directory = Path(os.environ["RUNNER_TEMP"]) / "mediadeck-test-bin"
+          directory.mkdir()
+          with sync_playwright() as driver:
+              executable = driver.chromium.executable_path
+          assert Path(executable).is_file()
+          (directory / "chromium").symlink_to(executable)
+          with open(os.environ["GITHUB_PATH"], "a") as path:
+              path.write(str(directory) + "\n")
+          PY
       - name: Lint
         run: ruff check app tests
-      - name: Test
-        run: python -m pytest tests -q
+      - name: Test including isolated nginx and network-namespace fixtures
+        run: sudo env "PATH=$PATH" "TZ=$TZ" "MEDIADECK_MOCK=$MEDIADECK_MOCK" "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" "$(command -v python)" -m pytest tests -q
       - name: Mock startup and health
         run: |
           python - <<'PY'
