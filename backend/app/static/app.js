@@ -1173,6 +1173,7 @@ function entryRows(entries) {
       <span class="muted" style="min-width:150px">${e.stream_origin
         ? '推流 ' + esc(e.stream_origin) + ' → ' + esc(e.node)
         : '按路径分流（全部节点）'}</span>
+      ${e.whitelist_only ? '<span class="tag ok">白名单专属</span>' : ''}
       <span class="tag ${e.proxy_key_set ? 'ok' : 'bad'}">${e.proxy_key_set ? '凭据已生成' : '缺凭据'}</span>
       <button class="btn" data-act="export" data-id="${esc(e.id)}">生成配置</button>
       <button class="btn" data-act="rotate" data-id="${esc(e.id)}">换凭据</button>

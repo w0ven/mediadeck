@@ -87,6 +87,18 @@ from app.modules.telegram import TelegramBot
 from app.modules.tmdb import TmdbClient
 from app.modules.updater import MockUpdater, Updater
 from app.modules.usage import UsageSampler, run_usage_io
+from app.modules.whitelist_route import (
+    CAP_ARG,
+    ISSUER,
+    MEDIA,
+    NO_STORE,
+    PLAYBACK,
+    WhitelistRoute,
+    public_bootstrap,
+    query_value,
+    refuse,
+    target,
+)
 
 app = FastAPI(title="mediadeck", version="0.1.0")
 security = HTTPBasic(auto_error=False)
@@ -378,6 +390,7 @@ async def _startup() -> None:
         app.state.db, app.state.members, app.state.emby, app.state.enforcement,
         sharing=app.state.sharing)
     app.state.streams = StreamAdmission(app.state.members, app.state.emby)
+    app.state.whitelist_route = WhitelistRoute(app.state, cfg.mediadeck_route_mobile_registry)
     app.state.stats.bind_live_watch(app.state.usage.live_watch)
 
     image_cfg = app.state.settings_service.image_cache_config()
@@ -1497,6 +1510,11 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
     session = data.get("SessionInfo") or {}
     user = data.get("User") or {}
     uid = str(user.get("Id") or "")
+    entry = app.state.whitelist_route.entry(request.headers)
+    if entry and entry.whitelist_only:
+        if not uid or str(session.get("UserId") or "") != uid:
+            refuse(503, "authenticated identity unavailable")
+        app.state.whitelist_route.member(uid)
     if service.config()["web_login"]["enabled"] and is_web_client(session):
         if not uid or str(session.get("UserId") or "") != uid:
             raise HTTPException(503, "authenticated identity unavailable", headers=headers)
@@ -1529,8 +1547,11 @@ async def _admit_playback(request: Request, item_id: str,
     headers = {"Cache-Control": "private, no-store"}
     if not token:
         raise HTTPException(401, "playback authentication required", headers=headers)
+    entry = app.state.whitelist_route.entry(request.headers)
+    strict_uid = (await app.state.whitelist_route.user(request.headers, query)
+                  if entry and entry.whitelist_only else None)
     try:
-        uid = await app.state.emby.user_for_token(token, device)
+        uid = strict_uid or await app.state.emby.user_for_token(token, device)
         permitted = await app.state.emby.verify_item_access(item_id, token)
     except Exception:  # noqa: BLE001 - upstream failure must not issue a URL
         raise HTTPException(503, "playback authentication unavailable", headers=headers) from None
@@ -1567,8 +1588,12 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
     device = caller_device(request.headers, query)
     session_profile = caller_session_profile(request.headers, query)
     async def issue():
-        return await app.state.emby.playback_info(item_id, request.method,
-                                                 dict(request.headers), query, payload)
+        code, data = await app.state.emby.playback_info(item_id, request.method,
+                                                       dict(request.headers), query, payload)
+        entry = app.state.whitelist_route.entry(request.headers)
+        if entry and entry.whitelist_only and 200 <= code < 300:
+            data = app.state.whitelist_route.decorate(entry, uid, item_id, data)
+        return code, data
     try:
         admission, code, data = await app.state.streams.issue_info(
             uid, device, query.get("SessionId", query.get("sessionId", "")), issue,
@@ -1581,6 +1606,105 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
         raise HTTPException(status, "playback admission refused", headers={
             "Cache-Control": "private, no-store", "X-Mediadeck-Decision": admission.reason})
     return JSONResponse(data, status_code=code, headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/api/access/route-login", include_in_schema=False)
+@app.post("/api/access/route-login/{user_id}", include_in_schema=False)
+async def whitelist_route_login(request: Request, user_id: str = "") -> Response:
+    app.state.whitelist_route.entry(request.headers, required=True)
+    return await restricted_emby_login(request, user_id)
+
+
+@app.get("/api/access/route-admit", include_in_schema=False)
+async def whitelist_route_admit(request: Request) -> Response:
+    guard = app.state.whitelist_route
+    entry = guard.entry(request.headers, required=True)
+    path, query = target(request.headers.get("x-original-uri", ""))
+    method = request.headers.get("x-original-method", "")
+    if public_bootstrap(path, method) and request.headers.get("upgrade", "").lower() != "websocket":
+        return Response(status_code=204, headers=NO_STORE)
+    uid = await guard.user(request.headers, query)
+    media = MEDIA.fullmatch(path)
+    if media and PLAYBACK.fullmatch(media[2]):
+        direct = (bool(ISSUER.fullmatch(media[2])) and
+                  (media[2].lower().startswith("original") or
+                   query_value(query, "Static").lower() in ("true", "1")))
+        if not direct:
+            claims = guard.claims(entry, uid, path, query)
+            if claims["kind"] != "gd":
+                refuse()
+        await _admit_playback(request, media[1], query)
+    return Response(status_code=204, headers=NO_STORE)
+
+
+@app.get("/api/access/route-file-admit", include_in_schema=False)
+async def whitelist_route_file_admit(request: Request) -> Response:
+    guard = app.state.whitelist_route
+    guard.entry(request.headers, required=True)
+    if request.headers.get("x-original-method", "") not in ("GET", "HEAD"):
+        refuse()
+    guard.file_user(request.headers.get("x-original-uri", ""))
+    return Response(status_code=204, headers=NO_STORE)
+
+
+@app.api_route("/api/access/route-manifest", methods=["GET", "HEAD"], include_in_schema=False)
+async def whitelist_route_manifest(request: Request) -> Response:
+    guard = app.state.whitelist_route
+    entry = guard.entry(request.headers, required=True)
+    original = request.headers.get("x-original-uri", "")
+    path, query = target(original)
+    if not path.lower().endswith(".m3u8"):
+        refuse()
+    uid = await guard.user(request.headers, query)
+    claims = guard.claims(entry, uid, path, query)
+    if claims["kind"] != "gd":
+        official = app.state.settings_service.integration_config()["emby_public_url"].rstrip("/")
+        query = {k: v for k, v in query.items() if k.lower() != CAP_ARG}
+        return RedirectResponse(official + path + "?" + urlencode(query), status_code=307, headers=NO_STORE)
+    await _admit_playback(request, claims["item"], query)
+    try:
+        code, text = await app.state.emby.playback_manifest(path, request.headers, query)
+        if code != 200:
+            return Response(status_code=code, headers=NO_STORE)
+        text = guard.rewrite_playlist(entry, uid, original, text,
+                                      caller_token(request.headers, query))
+    except HTTPException:
+        raise
+    except Exception:  # noqa: BLE001 - do not disclose credential-bearing upstream errors
+        refuse(503, "manifest unavailable")
+    return Response(content=b"" if request.method == "HEAD" else text,
+                    media_type="application/vnd.apple.mpegurl", headers=NO_STORE)
+
+
+@app.api_route("/api/access/route-download", methods=["GET", "HEAD"], include_in_schema=False)
+async def whitelist_route_download(request: Request) -> Response:
+    """Decide the media hop, never transport a download body through Deck."""
+    guard = app.state.whitelist_route
+    guard.entry(request.headers, required=True)
+    original = request.headers.get("x-original-uri", "")
+    path, query = target(original)
+    match = re.fullmatch(r"/(?:emby/)?Items/([^/]+)/(Download|File)", path, re.IGNORECASE)
+    if not match:
+        refuse()
+    await guard.user(request.headers, query)
+    token = caller_token(request.headers, query)
+    try:
+        sources = await app.state.emby.media_sources_for_token(match[1], token)
+    except Exception:  # noqa: BLE001 - unverifiable source must never transport video
+        refuse(503, "download source unavailable")
+    sid = query_value(query, "MediaSourceId")
+    selected = next((source for source in sources if str(source.get("Id")) == sid), None) if sid else sources[0]
+    if not selected:
+        refuse()
+    # Guard both default and requested editions: Emby versions differ in
+    # whether the Download/File endpoint honors MediaSourceId.
+    kinds = {guard.source_kind(match[1], sources[0]), guard.source_kind(match[1], selected)}
+    if "mobile" in kinds:
+        official = app.state.settings_service.integration_config()["emby_public_url"].rstrip("/")
+        query = {k: v for k, v in query.items() if k.lower() not in (CAP_ARG, "api_key", "apikey")}
+        query["api_key"] = token
+        return RedirectResponse(official + path + "?" + urlencode(query), status_code=307, headers=NO_STORE)
+    return Response(status_code=418, headers=NO_STORE)  # nginx named, fixed Emby hop
 
 
 @app.get("/api/playback/admit", include_in_schema=False)

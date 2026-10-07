@@ -1,0 +1,180 @@
+# Render placeholders privately; never publish the resulting entry credential.
+# Additional TLS vhost only. Do not replace the ordinary media entrance.
+map $http_upgrade $md_wl_connection { default upgrade; '' close; }
+map "$uri:$arg_static" $md_wl_direct {
+    default 0;
+    ~*^/(?:emby/)?Videos/[^/]+/original(?:\.[A-Za-z0-9]+)?: 1;
+    ~*^/(?:emby/)?Videos/[^/]+/stream(?:\.[A-Za-z0-9]+)?:(?:true|1)$ 1;
+}
+log_format md_whitelist '$time_iso8601 $remote_addr $request_method $uri $status $body_bytes_sent';
+server {
+    listen __ORIGIN_IP__:8443 ssl http2;
+    server_name __OFFICIAL_HOST__;
+    ssl_certificate /etc/letsencrypt/live/__OFFICIAL_HOST__/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/__OFFICIAL_HOST__/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    allow __ENTRY_IP__;
+    deny all;
+    set $md_wl_entry "__ENTRY_ID__";
+    set $md_wl_key "__ENTRY_KEY__";
+    if ($http_x_mediadeck_entry != $md_wl_entry) { return 403; }
+    if ($http_x_mediadeck_entry_key != $md_wl_key) { return 403; }
+    access_log /var/log/nginx/mediadeck-whitelist-origin.log md_whitelist;
+    # nginx error messages may include the raw credential-bearing request URI.
+    error_log /dev/null crit;
+    client_max_body_size 0;
+    merge_slashes off;
+    proxy_buffering off;
+    proxy_request_buffering off;
+    proxy_cache off;
+    proxy_redirect off;
+    proxy_intercept_errors off;
+    proxy_http_version 1.1;
+    proxy_read_timeout 3600s;
+    proxy_send_timeout 3600s;
+    proxy_set_header Host __OFFICIAL_HOST__;
+    proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+    proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+    proxy_set_header X-Real-IP $http_x_real_ip;
+    proxy_set_header X-Forwarded-For $http_x_real_ip;
+    proxy_set_header X-Forwarded-Proto https;
+    proxy_hide_header X-Mediadeck-Entry-Key;
+    add_header Cache-Control 'private, no-store' always;
+
+    location = /_wl_admission {
+        internal;
+        proxy_pass http://127.0.0.1:8300/api/access/route-admit;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $md_wl_uri;
+        proxy_set_header X-Original-Method $md_wl_method;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+        proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 30s;
+    }
+    # Fixed remote auth hop used by the new edge's internal file subrequest.
+    location = /__md_wl_file {
+        proxy_pass http://127.0.0.1:8300/api/access/route-file-admit;
+        proxy_pass_request_body off;
+        proxy_pass_request_headers off;
+        proxy_set_header Content-Length "";
+        proxy_set_header X-Original-URI $http_x_original_uri;
+        proxy_set_header X-Original-Method $http_x_original_method;
+        proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+        proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+    }
+    location ^~ /_wl { return 404; }
+    location ^~ /__md { return 404; }
+    location ~* ^/(emby/)?Users/AuthenticateByName$ {
+        rewrite ^ /api/access/route-login break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ~* ^/(emby/)?Users/([a-zA-Z0-9-]+)/Authenticate$ {
+        rewrite (?i)^/(?:emby/)?Users/([a-zA-Z0-9-]+)/Authenticate$ /api/access/route-login/$1 break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ~* ^/(emby/)?Items/([^/]+)/PlaybackInfo$ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        rewrite (?i)^/(?:emby/)?Items/([^/]+)/PlaybackInfo$ /api/playback/info/$1 break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    # HLS manifests are bounded metadata; Deck rewrites only authenticated URIs.
+    location ~* ^/(emby/)?(Videos|Audio)/[^/]+/.+\.m3u8$ {
+        if ($request_method !~ "^(GET|HEAD)$") { return 405; }
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header X-Original-Method $request_method;
+        proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+        proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+        rewrite ^ /api/access/route-manifest break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ~* ^/(emby/)?Items/[^/]+/(Download|File)$ {
+        if ($request_method !~ "^(GET|HEAD)$") { return 405; }
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        proxy_set_header X-Original-URI $request_uri;
+        proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+        proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+        rewrite ^ /api/access/route-download break;
+        proxy_pass http://127.0.0.1:8300;
+        proxy_intercept_errors on;
+        error_page 418 = @wl_gd_origin;
+    }
+    location ~* ^/(emby/)?Videos/[^/]+/(stream|original)(\.[A-Za-z0-9]+)?$ {
+        if ($request_method !~ "^(GET|HEAD)$") { return 405; }
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        error_page 418 = @wl_direct;
+        if ($md_wl_direct) { return 418; }
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8096;
+        proxy_set_header X-Mediadeck-Entry "";
+        proxy_set_header X-Mediadeck-Entry-Key "";
+    }
+    location @wl_direct {
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8339;
+        proxy_set_header Host __PANEL_HOST__;
+        proxy_set_header X-Forwarded-Host __PANEL_HOST__;
+        proxy_set_header X-Mediadeck-Entry $md_wl_entry;
+        proxy_set_header X-Mediadeck-Entry-Key $md_wl_key;
+        proxy_set_header X-Mediadeck-Proxy nginx;
+        proxy_set_header X-Mediadeck-Origin-Fallback off;
+    }
+    # Actual HLS/other video bytes never pass through Deck.
+    location ~* ^/(emby/)?(Videos|Audio)/[^/]+/(stream|original|master|main|manifest|live|hls[0-9]*|universal)([./].*)?$ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8096;
+        proxy_set_header X-Mediadeck-Entry "";
+        proxy_set_header X-Mediadeck-Entry-Key "";
+    }
+    location ~* ^/(emby/)?Sessions/Playing$ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        rewrite ^ /api/playback/started break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ~* ^/(emby/)?Sessions/Playing/Progress$ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        rewrite ^ /api/playback/progress break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ~* ^/(emby/)?Sessions/Playing/Stopped$ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        rewrite ^ /api/playback/stopped break;
+        proxy_pass http://127.0.0.1:8300;
+    }
+    location ^~ /cmcc-source/ {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8339;
+    }
+    location @wl_gd_origin {
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8096$md_wl_uri;
+        proxy_set_header X-Mediadeck-Entry "";
+        proxy_set_header X-Mediadeck-Entry-Key "";
+    }
+    location / {
+        set $md_wl_uri $request_uri;
+        set $md_wl_method $request_method;
+        auth_request /_wl_admission;
+        proxy_pass http://127.0.0.1:8096;
+        proxy_set_header X-Mediadeck-Entry "";
+        proxy_set_header X-Mediadeck-Entry-Key "";
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $md_wl_connection;
+    }
+}

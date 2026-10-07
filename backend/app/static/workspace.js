@@ -139,6 +139,7 @@ function initPlaybackLinesEditor() {
       label: String(item.label || '').trim(),
       url: String(item.url || '').trim(),
       hint: String(item.hint || '').trim(),
+      ...(item.whitelist_only ? {whitelist_only: true} : {}),
     })).filter(item => item.label || item.url || item.hint));
     const preview = $('#tg-line-preview');
     if (!preview) return;
@@ -167,6 +168,7 @@ function initPlaybackLinesEditor() {
       <div class="form-row"><label for="tg-line-label-${i}">名称</label><input id="tg-line-label-${i}" maxlength="40" value="${esc(item.label || '')}" placeholder="例如 电信优选"></div>
       <div class="form-row"><label for="tg-line-url-${i}">地址</label><input id="tg-line-url-${i}" type="url" value="${esc(item.url || '')}" placeholder="https://play.example.com"></div>
       <div class="form-row"><label for="tg-line-hint-${i}">说明</label><input id="tg-line-hint-${i}" maxlength="80" value="${esc(item.hint || '')}" placeholder="可选，例如建议挂梯"></div>
+      <div class="form-row"><label for="tg-line-whitelist-${i}">仅白名单可见</label><input id="tg-line-whitelist-${i}" type="checkbox" ${item.whitelist_only ? 'checked' : ''}></div>
     </article>`).join('');
     host.querySelectorAll('[data-line-row]').forEach(row => {
       const index = Number(row.dataset.lineRow);
@@ -175,6 +177,7 @@ function initPlaybackLinesEditor() {
           label: row.querySelector(`#tg-line-label-${index}`).value,
           url: row.querySelector(`#tg-line-url-${index}`).value,
           hint: row.querySelector(`#tg-line-hint-${index}`).value,
+          ...(row.querySelector(`#tg-line-whitelist-${index}`).checked ? {whitelist_only: true} : {}),
         };
         sync(); updateDirtyBadges();
       };

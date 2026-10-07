@@ -98,6 +98,8 @@ def friend_config(entry: dict[str, str], emby_url: str, nodes: list[StreamNode],
                   server: str = "caddy") -> str:
     if server not in SERVERS:
         raise ConfigError("反代类型仅支持 Caddy 或 nginx")
+    if entry.get("whitelist_only"):
+        raise ConfigError("白名单入口需要专用受限回源与字节准入配置，不能导出普通朋友反代模板")
     plan = _plan(entry, emby_url, nodes)
     if plan.pinned is not None:
         return _caddy_pinned(plan) if server == "caddy" else _nginx_pinned(plan)

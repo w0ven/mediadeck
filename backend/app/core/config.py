@@ -133,6 +133,9 @@ class Settings(BaseSettings):
 
     repo_root: str = ""
     service_name: str = "mediadeck"
+    # Local CMCC source authority for restricted-entry source classification.
+    # Never inferred from client URLs or shipped as a production path.
+    mediadeck_route_mobile_registry: str = ""
 
     rclone_binary: str = "rclone"
     rclone_config_path: str = ""

@@ -336,6 +336,45 @@ class LiveEmby:
             return uids.pop()
         return None
 
+    async def personal_user_for_token(self, token: str) -> str | None:
+        """Restricted routes never select an owner by a caller's DeviceId.
+
+        Auth/Keys is an Emby API-key authority: ordinary personal credentials
+        get 403; management credentials can list keys. Refuse any matching API
+        key even when only one user's sessions happen to exist. Admin personal
+        tokens still need an unambiguous scoped owner; no role exemption.
+        """
+        token = (token or "").strip()
+        if not token or len(token) > 2048:
+            return None
+        base, _, timeout, verify = self._conn()
+        headers = {"X-Emby-Token": token}
+        async with self._client(timeout, verify) as client:
+            key_reply = await client.get(f"{base}/emby/Auth/Keys", headers=headers)
+            if key_reply.status_code == 401:
+                return None
+            if key_reply.status_code == 200:
+                keys = key_reply.json()
+                if not isinstance(keys, dict) or not isinstance(keys.get("Items"), list):
+                    raise RuntimeError("credential authority unavailable")
+                if any(isinstance(k, dict) and str(k.get("AccessToken") or "") == token
+                       for k in keys["Items"]):
+                    return None
+            elif key_reply.status_code != 403:
+                raise RuntimeError("credential authority unavailable")
+            reply = await client.get(f"{base}/emby/Sessions", headers=headers)
+            if reply.status_code in (401, 403):
+                return None
+            if reply.status_code != 200:
+                raise RuntimeError("credential identity unavailable")
+            sessions = reply.json()
+        if not isinstance(sessions, list):
+            raise TypeError("credential identity unavailable")
+        if any(not isinstance(s, dict) or not s.get("UserId") for s in sessions):
+            return None
+        owners = {str(s["UserId"]) for s in sessions}
+        return owners.pop() if len(owners) == 1 else None
+
     async def item_media_paths(self, item_id: str) -> dict[str, str]:
         """Map MediaSourceId -> on-disk file path for one item.
 
@@ -447,7 +486,8 @@ class LiveEmby:
         base, _, timeout, verify = self._conn()
         # Caller headers only: never substitute the configured admin API key.
         forwarded = {k: v for k, v in headers.items() if k.lower() not in
-                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}}
+                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding",
+                      "x-mediadeck-entry", "x-mediadeck-entry-key", "x-original-uri", "x-original-method"}}
         async with self._client(timeout, verify) as client:
             r = await client.request(method, f"{base}/emby/Items/{quote(item, safe='')}/PlaybackInfo",
                                      headers=forwarded, params=query, json=payload)
@@ -466,12 +506,58 @@ class LiveEmby:
                 raise TypeError("invalid PlaybackInfo response")
             return r.status_code, data
 
+    async def media_sources_for_token(self, item: str, token: str) -> list[dict[str, Any]]:
+        """Read source identity with the caller's credential, without a play lease."""
+        base, _, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            reply = await client.get(f"{base}/emby/Items/{quote(item, safe='')}/PlaybackInfo",
+                                     headers={"X-Emby-Token": token})
+        if reply.status_code != 200:
+            raise RuntimeError("media source verification unavailable")
+        data = reply.json()
+        sources = data.get("MediaSources") if isinstance(data, dict) else None
+        if not isinstance(sources, list) or not sources:
+            raise RuntimeError("media source verification unavailable")
+        return sources
+
+    async def playback_manifest(self, path: str, headers: Any,
+                                query: dict[str, str]) -> tuple[int, str]:
+        """Bounded manifest metadata only; never proxy a video representation."""
+        from app.modules.playback import caller_device, caller_token
+        if not path.lower().endswith(".m3u8"):
+            raise ValueError("unsupported manifest path")
+        token = caller_token(headers, query)
+        if not token:
+            raise ValueError("manifest credential required")
+        base, _, timeout, verify = self._conn()
+        own_headers = {"X-Emby-Token": token,
+                       "X-Emby-Device-Id": caller_device(headers, query)}
+        own_query = {k: v for k, v in query.items() if k.lower() not in
+                     {"md_route", "api_key", "apikey", "x-emby-token", "x-mediabrowser-token"}}
+        url_path = path if path.lower().startswith("/emby/") else "/emby" + path
+        body = bytearray()
+        async with (
+            self._client(max(timeout, 90), verify) as client,
+            client.stream("GET", base + url_path, headers=own_headers, params=own_query) as reply,
+        ):
+            if reply.status_code != 200:
+                return reply.status_code, ""
+            async for chunk in reply.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > 4 * 1024 * 1024:
+                    raise ValueError("manifest too large")
+        text = body.decode("utf-8", "strict")
+        if not text.startswith("#EXTM3U"):
+            raise ValueError("invalid manifest")
+        return 200, text
+
     async def report_playback(self, event: str, headers: dict[str, str],
                               query: dict[str, str], payload: dict[str, Any]) -> int:
         base, _, timeout, verify = self._conn()
         suffix = {"started": "", "progress": "/Progress"}[event]
         forwarded = {k: v for k, v in headers.items() if k.lower() not in
-                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding"}}
+                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding",
+                      "x-mediadeck-entry", "x-mediadeck-entry-key", "x-original-uri", "x-original-method"}}
         async with self._client(timeout, verify) as client:
             r = await client.post(f"{base}/emby/Sessions/Playing{suffix}",
                                   headers=forwarded, params=query, json=payload)
