@@ -43,7 +43,9 @@ class PlayAccess:
         thread = message.get('message_thread_id') or 0
         if type(thread) is not int or thread < 0:
             raise PlayError('话题无效')
-        return str(chat['id']), thread
+        # Non-topic replies can carry a changing reply-chain thread id.
+        # Match TelegramBot._thread_id: only a real forum topic binds a scope.
+        return str(chat['id']), thread if message.get('is_topic_message') else 0
 
 
 class RoundCards(PlayAccess):

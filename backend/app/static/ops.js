@@ -1393,7 +1393,7 @@ function pluginFields(c) {
     red_packets:[['红包额度与有效期',['enabled_for_members','max_total','max_parts','ttl_hours'],true]],
     checkin_cleanup:[['群消息保留',['delay_seconds'],true]],
     blackwhite:[['押注设置',['default_stake','min_stake','max_stake'],true],['高级设置',['lobby_seconds'],false]],
-    poker:[['底注与预算',['default_ante','min_ante','max_ante','budget'],true],['高级设置',['lobby_seconds','step_seconds'],false]],
+    poker:[['底注与预算',['default_ante','min_ante','max_ante','default_budget','budget'],true],['高级设置',['lobby_seconds','step_seconds'],false]],
     stock_market:[['市场与手续费',['ipo_enabled','trading_enabled','fee_bps','news_enabled'],true],['高级风控',['ipo_limit','holding_limit','order_quantity','max_price','max_notional','max_orders','order_hours','halted_codes'],false]],
     points_ranking:[['排行榜显示',['page_size'],true]]
   }[c.id];

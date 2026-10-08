@@ -28,7 +28,8 @@ def help_text(cfg):
             '轮到你可跟注、加底注一档或翻倍加注、弃牌、与在局对手比牌。比牌付本人当前跟注额2倍；同牌力发起者出局。\n'
             '任何人达到预算上限，或下一次付费超过其未用预算，所有仍在局的玩家立即摊牌，不追加扣款。最高牌力平分全池，整数余数随机公平分配，无抽成；未用预算全退。只剩一人即获全池。\n'
             '结束群里只公开仍在局的牌图，不公开已弃牌手牌。\n\n'
-            f'底注 {cfg["min_ante"]}～{cfg["max_ante"]} 积分；每人预算 {cfg["budget"]}。'
+            f'底注 {cfg["min_ante"]}～{cfg["max_ante"]} 积分；本局每人预算 {(cfg["budget"] if "budget_limit" in cfg else cfg.get("default_budget", cfg["budget"]))}（可选至 {cfg.get("budget_limit", cfg["budget"])}）。'
+            '\n默认 /炸金花；指定 /炸金花 10 30（底注、每人共同预算）。'
             f'组局 {cfg["lobby_seconds"]} 秒未开始取消（报名无扣款）；每步 {cfg["step_seconds"]} 秒未操作自动弃牌。'
             '\n有效绑定成员可参与，管理员同样扣本人积分；旧局使用开局时规则。')
 
@@ -46,7 +47,7 @@ class PokerBotMixin:
         cfg = json.loads(row['config_json'])
         nonce, turn = row['nonce'], row['turn']
         keyboard = []
-        text = f'🃏 <b>炸金花</b>\n{name(row["actor_name"])} · 底注 {row["stake"]} · 预算 {cfg["budget"]}/人'
+        text = f'🃏 <b>炸金花</b>\n{name(row["actor_name"])} · 底注 {row["stake"]} · 开局冻结 {cfg["budget"]}/人'
         if row['state'] == 'lobby':
             text += f'\n\n已报名 <b>{len(players)}/5</b>'
             text += ''.join('\n'+name(p['display_name']) for p in players)
@@ -113,9 +114,10 @@ class PokerBotMixin:
                 await self._poker_publish(nonce)
                 return True
             if chat.get('type') not in ('group', 'supergroup') or not self._group_chat_allowed(chat): return True
-            if len(parts) > 2 or (len(parts) == 2 and not re.fullmatch(r'[0-9]{1,6}', parts[1])):
-                raise PlayError('用法：/炸金花 10')
-            row = self._poker_service().create(message, int(parts[1]) if len(parts) == 2 else None)
+            if len(parts) > 3 or any(not re.fullmatch(r'[0-9]{1,6}', part) for part in parts[1:]):
+                raise PlayError('用法：/炸金花 或 /炸金花 10 30（底注、每人局预算）')
+            row = self._poker_service().create(message, int(parts[1]) if len(parts) >= 2 else None,
+                                                int(parts[2]) if len(parts) == 3 else None)
             await self._poker_publish(row['nonce'])
         except (PlayError, GroupPointsError) as exc:
             await self.send_message(chat.get('id'), escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))

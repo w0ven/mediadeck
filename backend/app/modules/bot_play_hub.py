@@ -19,13 +19,13 @@ class PlayHubBotMixin:
             body='🎲 <b>游戏与市场</b>'
             if self._plugin_on('blackwhite'):
                 cfg={**BW_DEFAULTS,**self._plugins.config('blackwhite')}
-                body+=f'\n黑白板 · 5人 · 默认 {cfg["default_stake"]} 积分/人'
+                body+=f'\n黑白板 · 5人 · 参与需 {cfg["default_stake"]} 积分/人'
                 choices=[button('黑白板玩法','gamehelp','bw')]
                 if not private:choices.insert(0,button('创建黑白板','launch','bw'))
                 rows.append(choices)
             if self._plugin_on('poker'):
                 cfg={**POKER_DEFAULTS,**self._plugins.config('poker')}
-                body+=f'\n炸金花 · 2～5人 · 底注 {cfg["default_ante"]}'
+                body+=f'\n炸金花 · 2～5人 · 底注 {cfg["default_ante"]} · 需冻结 {cfg["default_budget"]}/人'
                 choices=[button('炸金花玩法','gamehelp','poker')]
                 if not private:choices.insert(0,button('创建炸金花','launch','poker'))
                 rows.append(choices)
@@ -39,7 +39,7 @@ class PlayHubBotMixin:
                 cfg={**BW_DEFAULTS,**self._plugins.config('blackwhite')}
                 body=('⚫⚪ <b>黑白板 · 玩法</b>\n\n5人同额押注，秘密选黑或白，选后不可更改。满5人自动开奖，少数方平分全部奖池，整数余数随机公平分配；同面全退，无抽成。\n'
                       f'当前可押 {cfg["min_stake"]}～{cfg["max_stake"]} 积分/人，默认 {cfg["default_stake"]}；{cfg["lobby_seconds"]} 秒未满5人全退。有效绑定群成员可参与，管理员同样扣本人积分。\n'
-                      '开奖公开展示名、选择与本局所得，不公开余额。已创建的局按原参数执行。\n\n<code>/黑白板 50</code> 在授权群创建，然后点手心白板或手背黑板。')
+                      '开奖公开展示名、选择与本局所得，不公开余额。已创建的局按原参数执行。\n\n<code>/黑白板 10</code> 在授权群创建，然后点手心白板或手背黑板。')
             elif which=='poker':body=poker_help({**POKER_DEFAULTS,**self._plugins.config('poker')})
             elif which=='stock':body=market_help(self._plugins.config('stock_market'))
             else:raise PlayError('玩法页面不存在')

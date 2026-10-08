@@ -11,7 +11,7 @@ from app.modules.play_rounds import RoundCards, fair_split
 from app.modules.plugins import Field, Plugin, Spec
 from app.modules.red_packets import public_name
 
-DEFAULTS = {'default_ante': 10, 'min_ante': 10, 'max_ante': 50, 'budget': 500,
+DEFAULTS = {'default_ante': 10, 'min_ante': 10, 'max_ante': 50, 'budget': 500, 'default_budget': 30,
             'lobby_seconds': 600, 'step_seconds': 60}
 CATEGORIES = ('单张', '对子', '顺子', '金花', '顺金', '豹子')
 
@@ -50,13 +50,14 @@ class PokerService(RoundCards):
 
     def _register(self, conn, row, actor, tg, uid, clock):
         if self._occupied(conn, uid, tg): raise PlayError('请先结束另一局炸金花')
-        if self.points.balance(uid) < json.loads(row['config_json'])['budget']:
-            raise PlayError('积分不足以冻结本局预算，未报名')
+        budget = json.loads(row['config_json'])['budget']
+        if self.points.balance(uid) < budget:
+            raise PlayError(f'本局每人需 {budget} 积分可用积分以冻结预算；积分不足，未报名')
         cur = conn.execute('INSERT INTO play_players(nonce,user_id,tg_id,display_name,joined_at) VALUES(?,?,?,?,?)',
                            (row['nonce'], uid, tg, public_name(actor), clock))
         conn.execute('INSERT INTO poker_hands(player_id) VALUES(?)', (cur.lastrowid,))
 
-    def create(self, message, ante=None, *, now=None):
+    def create(self, message, ante=None, budget=None, *, now=None):
         clock = time.time() if now is None else float(now)
         self.expire_due(now=clock)
         chat, thread = self.group(message)
@@ -66,15 +67,20 @@ class PokerService(RoundCards):
             if not self.enabled(): raise PlayError('炸金花暂未开放')
             cfg = {**DEFAULTS, **self.config()}
             ante = cfg['default_ante'] if ante is None else ante
-            integer(ante, '底注', cfg['min_ante'], min(cfg['max_ante'], cfg['budget']))
-            prior = conn.execute("SELECT nonce,actor_user_id,actor_tg_id,thread_id,stake FROM play_rounds WHERE kind='poker' AND bot_id=? AND chat_id=? AND command_message_id=?", (self.bot_id, chat, message['message_id'])).fetchone()
+            integer(ante, '底注', cfg['min_ante'], cfg['max_ante'])
+            requested_budget = budget
+            budget = cfg['default_budget'] if budget is None else budget
+            integer(budget, '本局每人预算', ante, cfg['budget'])
+            prior = conn.execute("SELECT nonce,actor_user_id,actor_tg_id,thread_id,stake,config_json FROM play_rounds WHERE kind='poker' AND bot_id=? AND chat_id=? AND command_message_id=?", (self.bot_id, chat, message['message_id'])).fetchone()
             if prior:
                 if (prior['actor_user_id'] != member['emby_user_id'] or prior['actor_tg_id'] != tg
-                        or prior['thread_id'] != thread or prior['stake'] != ante):
+                        or prior['thread_id'] != thread or prior['stake'] != ante
+                        or (requested_budget is not None and json.loads(prior['config_json'])['budget'] != budget)):
                     raise PlayError('原消息已有其他游戏意图')
                 return self.get(prior['nonce'])
             if conn.execute("SELECT 1 FROM play_rounds WHERE kind='poker' AND bot_id=? AND chat_id=? AND thread_id=? AND state IN ('lobby','running')", (self.bot_id, chat, thread)).fetchone():
                 raise PlayError('本话题已有炸金花，请使用原卡')
+            cfg = {**cfg, 'budget_limit': cfg['budget'], 'budget': budget}
             nonce = secrets.token_hex(12)
             values = {'nonce': nonce, 'kind': 'poker', 'bot_id': self.bot_id, 'chat_id': chat,
                       'thread_id': thread, 'command_message_id': message['message_id'], 'actor_tg_id': tg,
@@ -312,13 +318,16 @@ class PokerPlugin(Plugin):
         Field('default_ante', '默认底注', kind='int', default=10, min=10, max=50),
         Field('min_ante', '最低底注', kind='int', default=10, min=10, max=50),
         Field('max_ante', '最高底注', kind='int', default=50, min=10, max=50),
-        Field('budget', '每人每局投入上限', kind='int', default=500, min=10, max=500),
+        Field('default_budget', '默认每人本局预算', kind='int', default=30, min=10, max=500),
+        Field('budget', '允许的最高局预算', kind='int', default=500, min=10, max=500),
         Field('lobby_seconds', '组局超时秒数', kind='int', default=600, min=60, max=3600),
         Field('step_seconds', '操作超时秒数', kind='int', default=60, min=15, max=300)])
 
     def validate_config(self, cfg):
-        if not cfg['min_ante'] <= cfg['default_ante'] <= cfg['max_ante'] <= cfg['budget']:
-            raise ValueError('最低底注≤默认底注≤最高底注≤每人预算')
+        if not cfg['min_ante'] <= cfg['default_ante'] <= cfg['max_ante']:
+            raise ValueError('最低底注≤默认底注≤最高底注')
+        if not cfg['default_ante'] <= cfg['default_budget'] <= cfg['budget']:
+            raise ValueError('默认底注≤默认局预算≤允许的最高局预算')
 
     async def run(self, config):
         if self.ctx.telegram: await self.ctx.telegram._poker_tick()

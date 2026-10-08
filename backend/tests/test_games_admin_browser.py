@@ -34,7 +34,7 @@ def test_five_plugin_api_live_readonly_unknown_preservation_validation_and_auth(
             assert saved['config']['unknown_saved']=={'nested':'keep'} and 'untrusted_new' not in saved['config']
             assert registry._store.section('plugins')[pid]['extra_top']=={'keep':[1,2]}
         invalid=(('checkin_cleanup',{'delay_seconds':59}),('blackwhite',{'min_stake':200,'max_stake':100}),
-                 ('poker',{'budget':30}),('stock_market',{'ipo_limit':300,'holding_limit':200}),
+                 ('poker',{'budget':29}),('stock_market',{'ipo_limit':300,'holding_limit':200}),
                  ('stock_market',{'halted_codes':'MD061'}),('points_ranking',{'page_size':4}),('poker',{'step_seconds':15.5}))
         for pid,cfg in invalid:
             old=copy.deepcopy(registry.config(pid))

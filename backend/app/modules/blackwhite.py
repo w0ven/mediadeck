@@ -11,13 +11,13 @@ from app.modules.play_rounds import RoundCards, fair_split
 from app.modules.plugins import Field, Plugin, Spec
 from app.modules.red_packets import public_name
 
-DEFAULTS = {'min_stake': 10, 'max_stake': 500, 'default_stake': 100, 'lobby_seconds': 600}
+DEFAULTS = {'min_stake': 10, 'max_stake': 500, 'default_stake': 10, 'lobby_seconds': 600}
 
 
 class BlackwhiteService(RoundCards):
     def __init__(self, db, members, points, config, enabled, allowed, bot_id):
         super().__init__(db, members, allowed, bot_id)
-        self.cash = CashBook(points)
+        self.points, self.cash = points, CashBook(points)
         self.config, self.enabled = config, enabled
 
     def create(self, message, stake=None, *, now=None):
@@ -42,6 +42,8 @@ class BlackwhiteService(RoundCards):
             active = conn.execute("SELECT nonce FROM play_rounds WHERE kind='blackwhite' AND bot_id=? AND chat_id=? AND thread_id=? AND state='lobby'", (self.bot_id, chat, thread)).fetchone()
             if active:
                 raise PlayError('本话题已有黑白板，请参与原卡')
+            if self.points.balance(member['emby_user_id']) < stake:
+                raise PlayError(f'发起本局需至少 {stake} 积分可用积分；积分不足，未创建')
             nonce = secrets.token_hex(12)
             values = {'nonce': nonce, 'kind': 'blackwhite', 'bot_id': self.bot_id, 'chat_id': chat,
                       'thread_id': thread, 'command_message_id': mid, 'actor_tg_id': tg,
@@ -85,7 +87,7 @@ class BlackwhiteService(RoundCards):
                 self.cash.consume(conn, 'blackwhite', nonce, uid, row['stake'], 'blackwhite', nonce, now=clock)
             except ValueError as exc:
                 if '积分不足' in str(exc):
-                    raise PlayError('积分不足，未参与') from None
+                    raise PlayError(f'参与本局需至少 {row["stake"]} 积分可用积分；积分不足，未参与') from None
                 raise
             conn.execute('INSERT INTO play_players(nonce,user_id,tg_id,display_name,choice,joined_at) VALUES(?,?,?,?,?,?)',
                          (nonce, uid, tg, public_name(actor), choice, clock))
@@ -139,7 +141,7 @@ class BlackwhiteService(RoundCards):
 class BlackwhitePlugin(Plugin):
     spec = Spec(id='blackwhite', name='黑白板', icon='⚫', category='points',
                 description='五人同注，少数胜；同面或组局超时全退。', fields=[
-                    Field('default_stake', '默认押注', kind='int', default=100, min=10, max=500),
+                    Field('default_stake', '默认押注', kind='int', default=10, min=10, max=500),
                     Field('min_stake', '最低押注', kind='int', default=10, min=10, max=500),
                     Field('max_stake', '最高押注', kind='int', default=500, min=10, max=500),
                     Field('lobby_seconds', '组局超时秒数', kind='int', default=600, min=60, max=3600)])
