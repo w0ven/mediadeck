@@ -8,11 +8,12 @@ import secrets
 import time
 from html import escape
 
+from app.modules.bot_market_digest import MarketDigestBotMixin
 from app.modules.economy_rules import economy_write, encode
 from app.modules.group_points import GroupPointsError, reliable_user
 from app.modules.market import MarketService
 from app.modules.market_data import DEFAULTS, fee
-from app.modules.market_views import chart, market_help, news_tick
+from app.modules.market_views import chart, market_help, market_rules, news_tick
 from app.modules.play_money import PlayError, integer
 
 PAGE = 8
@@ -21,7 +22,7 @@ PAGE = 8
 def text(value): return escape(str(value))
 
 
-class MarketBotMixin:
+class MarketBotMixin(MarketDigestBotMixin):
     def _market_service(self):
         if self._db is None or self._points is None: raise PlayError('积分服务暂不可用')
         self._check_bot_identity()
@@ -93,7 +94,7 @@ class MarketBotMixin:
     def _market_view(self, panel):
         service, p = self._market_service(), json.loads(panel['payload_json'])
         private = panel['chat_id'] == panel['tg_id']
-        view, page = p.get('view', 'search'), int(p.get('page', 0))
+        view, page = p.get('view', 'home'), int(p.get('page', 0))
         keyboard = []
         def button(label, op, arg=''):
             return {'text': label, 'callback_data': f'st:{panel["nonce"]}:{op}'+(':'+str(arg) if arg != '' else '')}
@@ -108,7 +109,26 @@ class MarketBotMixin:
         if view=='leaderboard': return self._ranking_view(panel,p)
         if view in ('playhub','gamehelp'): return self._play_hub_view(panel,p)
         title='📈 <b>模拟股票</b>'
-        if view in ('search','watch'):
+        if view=='home':
+            cfg={**DEFAULTS,**service.config()};book=service.public_book()
+            body=title+' · 小群推荐\n1股起 · 新买单/认购费 '+str(cfg['fee_bps']/100)+'%'
+            body+=f'\n真实待买 {sum(r["side"]=="buy" for r in book)} 单 / 待卖 {sum(r["side"]=="sell" for r in book)} 单'
+            for c in service.featured():
+                body+='\n\n<b>'+text(c['name'])+'</b> · '+c['code']+f'\n发行认购 {c["issue_price"]} 积分/股'
+                keyboard.append([button(c['code']+' · '+c['name'],'company',c['code'])])
+            body+='\n\n<i>卖出需真实买家，不保证成交。</i>'
+            keyboard.append([button('看真实挂单','view','book'),button('全部60家公司','view','search')])
+        elif view=='book':
+            rows=service.public_book(code=p.get('code'));chosen,number=pager(rows)
+            body=title+' · 真实待买卖\n'+number
+            if not rows:body+='\n\n暂无待买卖挂单；卖出需买家。'
+            for r in chosen:
+                body+='\n\n'+r['code']+' '+text(r['name'])+' · '+('待买' if r['side']=='buy' else '待卖')+f' {r["remaining"]} 股 × {r["price"]}'
+                choices=[button('查看 '+r['code'],'company',r['code'])]
+                if private:choices.append(button(('卖' if r['side']=='buy' else '买')+'1股 · 确认','take',r['nonce']))
+                keyboard.insert(0,choices)
+            body+='\n\n<i>挂单会变化；本人确认后才冻结，不保证成交。</i>'
+        elif view in ('search','watch'):
             keyword=str(p.get('keyword') or '')[:80]
             if view=='watch':
                 self._market_private(panel)
@@ -139,11 +159,12 @@ class MarketBotMixin:
             if c['halted']:body+='\n已暂停'
             event=self._db.one('SELECT * FROM market_news WHERE code=? ORDER BY slot DESC LIMIT 1',(c['code'],))
             if event:body+='\n\n模拟资讯 · '+text(event['title'])+'\n'+text(event['body'])
-            keyboard.append([button('真实走势','chart',c['code']),button('资讯','view','news')])
+            keyboard.append([button('真实走势','chart',c['code']),button('真实挂单','book',c['code']),button('资讯','view','news')])
             if private:
                 watched=self._db.one('SELECT 1 n FROM market_watch WHERE user_id=? AND code=?',(panel['user_id'],c['code']))
                 keyboard.append([button('移出自选' if watched else '加入自选','favorite',c['code']+('_off' if watched else '_on'))])
-                keyboard.append([button('认购','input','ipo_'+c['code']),button('买入','input','buy_'+c['code']),button('卖出','input','sell_'+c['code'])])
+                keyboard.append([button('发行认购1股','quick','ipo_'+c['code']),button('玩家买入1股','quick','buy_'+c['code'])])
+                keyboard.append([button('自定义认购','input','ipo_'+c['code']),button('自定义买入','input','buy_'+c['code']),button('卖出','input','sell_'+c['code'])])
         elif view=='input':
             self._market_private(panel)
             state=self._db.one('SELECT * FROM market_inputs WHERE bot_id=? AND tg_id=? AND panel=?',(self._active_bot_id,panel['tg_id'],panel['nonce']))
@@ -158,7 +179,8 @@ class MarketBotMixin:
             cfg=json.loads(intent['config_json']);op=intent['operation'];gross=intent['quantity']*intent['price'];charge=fee(gross,cfg['fee_bps']) if op!='sell' else 0
             body=title+'\n\n<b>确认'+{'ipo':'认购','buy':'买入','sell':'卖出'}[op]+'</b> · '+intent['code']+f'\n{intent["quantity"]} 股 · {intent["price"]} 积分/股'
             body+='\n'+(f'支付 {gross+charge} 积分' if op=='ipo' else f'最多冻结 {gross+charge} 积分' if op=='buy' else f'冻结 {intent["quantity"]} 股')
-            if charge:body+=f' · 含费 {charge}'
+            body+=f' · 手续费 {charge}'
+            body+='\n发行认购：本金回收，不是玩家成交。' if op=='ipo' else '\n玩家转让：有匹配买卖单才成交，无对手盘仅挂单。'
             keyboard.append([button('确认','confirm',intent['nonce']),button('取消','dismiss',intent['nonce'])])
         elif view in ('hold','orders','history'):
             self._market_private(panel)
@@ -192,10 +214,12 @@ class MarketBotMixin:
             rows=self._db.query('SELECT n.*,c.name FROM market_news n JOIN market_companies c ON c.code=n.code ORDER BY slot DESC');chosen,number=pager(rows);body=title+' · 模拟资讯\n'+number
             if not rows:body+='\n\n暂无资讯'
             for r in chosen:body+='\n\n'+text(r['name'])+' · '+text(r['title'])+'\n'+text(r['body'])
-        elif view=='help':body=market_help(service.config())
+        elif view=='help':
+            body=market_help(service.config());keyboard.append([button('完整规则','view','rules')])
+        elif view=='rules':body=market_rules(service.config())
         elif view=='done':body=p['text']
         else:raise PlayError('股票页面无效')
-        menu=[button('公司','view','search'),button('资讯','view','news'),button('玩法','view','help')]
+        menu=[button('市场','view','home'),button('挂单','view','book'),button('全部公司','view','search'),button('玩法','view','help')]
         keyboard.append(menu)
         if private:keyboard.append([button('持仓','view','hold'),button('委托','view','orders'),button('成交','view','history'),button('自选','view','watch')])
         else:keyboard+=self._market_link()
@@ -284,8 +308,8 @@ class MarketBotMixin:
                 if len(parts)!=expected or any(not re.fullmatch('[0-9]{1,9}',x) for x in parts[2:]):raise PlayError('用法：/认购 MD001 5 或 /买入 MD001 5 10、/卖出 MD001 5 12')
                 intent=service.preview(message['from'],{'/认购':'ipo','/买入':'buy','/卖出':'sell'}[verb],parts[1],int(parts[2]),int(parts[3]) if expected==4 else None,request_key=f'{tg}:{message["message_id"]}')
                 await self._market_new_panel(message,{'view':'confirm','intent':intent['nonce']});return True
-            view={'/持仓':'hold','/委托':'orders','/成交':'history','/自选':'watch','/股市帮助':'help','/股票资讯':'news'}.get(verb,'search')
             keyword=' '.join(parts[1:]) if verb=='/股票' else ''
+            view={'/持仓':'hold','/委托':'orders','/成交':'history','/自选':'watch','/股市帮助':'help','/股票资讯':'news'}.get(verb,'search' if keyword else 'home')
             c=service.company(keyword) if keyword else None
             await self._market_new_panel(message,{'view':'company','code':c['code']} if c else {'view':view,'keyword':keyword,'page':0})
         except (PlayError,GroupPointsError) as exc:
@@ -293,6 +317,9 @@ class MarketBotMixin:
         return True
 
     async def _market_callback(self,data,message,actor,callback_id):
+        if data.startswith('std:'):
+            await self._market_digest_callback(data,message,actor,callback_id)
+            return
         await self._answer_callback(callback_id)
         try:
             parts=data.split(':')
@@ -314,6 +341,23 @@ class MarketBotMixin:
                 if not arg or not re.fullmatch('[0-9]{1,7}',arg): raise PlayError('页码无效')
                 integer(int(arg),'页码',0,1000000);p['page']=int(arg);await self._market_set(panel,p)
             elif op=='company':await self._market_set(panel,{'view':'company','code':arg})
+            elif op=='book':await self._market_set(panel,{'view':'book','code':arg,'page':0})
+            elif op in ('quick','take'):
+                self._market_private(panel);_,member=service.actor(actor)
+                if op=='take':
+                    order=self._db.one("SELECT * FROM market_orders WHERE nonce=? AND state='open' AND remaining>0 AND expires_at>?",(arg,time.time()))
+                    if not order:raise PlayError('该挂单已变化，请刷新市场')
+                    if order['user_id']==member['emby_user_id'] or order['tg_id']==tg:raise PlayError('不能匹配本人的挂单；可在委托中撤单')
+                    operation,code,price=('sell' if order['side']=='buy' else 'buy'),order['code'],order['price']
+                else:
+                    if not arg or not re.fullmatch(r'(ipo|buy)_MD[0-9]{3}',arg):raise PlayError('默认1股操作无效')
+                    operation,code=arg.split('_');company=service.company(code)
+                    if not company:raise PlayError('公司不存在')
+                    ask=self._db.one("SELECT MIN(price) price FROM market_orders WHERE code=? AND side='sell' AND state='open' AND expires_at>? AND user_id<>? AND tg_id<>?",(code,time.time(),member['emby_user_id'],tg))['price']
+                    last=self._db.one('SELECT price FROM market_trades WHERE code=? ORDER BY id DESC LIMIT 1',(code,))
+                    price=ask if ask is not None else last['price'] if last else company['issue_price']
+                intent=service.preview(actor,operation,code,1,price,request_key=panel['nonce']+':'+op+':'+str(arg))
+                await self._market_set(panel,{'view':'confirm','intent':intent['nonce']})
             elif op=='favorite':
                 self._market_private(panel);service.actor(actor)
                 if not arg or not re.fullmatch(r'MD[0-9]{3}_(on|off)',arg): raise PlayError('自选操作无效')
@@ -378,3 +422,4 @@ class MarketBotMixin:
                 if c['halted']!=wanted:conn.execute('UPDATE market_companies SET halted=? WHERE code=?',(wanted,c['code']))
         service.maintain()
         if service.enabled() and cfg.get('news_enabled',True):news_tick(self._db)
+        await self._market_digest_tick(cfg)

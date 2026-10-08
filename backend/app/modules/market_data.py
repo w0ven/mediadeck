@@ -13,7 +13,8 @@ SECTORS = [
 ]
 COMPANIES = [{'code': f'MD{i+1:03}', 'name': name, 'sector': sector, 'supply': 1000, 'issue_price': (10, 15, 20, 25, 30)[i % 5]}
              for i, (sector, name) in enumerate((sector, n) for sector, names in SECTORS for n in names)]
-DEFAULTS = {'fee_bps': 50, 'ipo_limit': 50, 'holding_limit': 200, 'order_quantity': 100,
+DEFAULTS = {'fee_bps': 0, 'recommended_codes': '', 'digest_enabled': False,
+            'digest_times': '10:00,18:00', 'ipo_limit': 50, 'holding_limit': 200, 'order_quantity': 100,
             'max_price': 1000, 'max_notional': 5000, 'max_orders': 20, 'order_hours': 24,
             'ipo_enabled': True, 'trading_enabled': True}
 

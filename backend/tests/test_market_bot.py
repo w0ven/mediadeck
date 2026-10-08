@@ -20,7 +20,7 @@ from app.modules.market_views import chart, news_tick
 @pytest.fixture
 def env(request):
     e=request.getfixturevalue('bw_env')
-    e.services.registry.save('stock_market',enabled=True)
+    e.services.registry.save('stock_market',enabled=True,config={'fee_bps':50})
     e.services.registry.get('stock_market').ctx.telegram=e.bot
     for uid in e.uids:e.services.points.add(uid,20000,'isolated.fixture')
     e.mid=800
@@ -300,6 +300,7 @@ def test_inputs_expire_and_db_reopen_keeps_exact_private_confirmation(env,monkey
 def test_all_60_search_pages_and_long_portfolio_history_orders_reachable(env):
     async def run():
         row=await cmd(env,'/start market')
+        row=await click(env,row,'view','search')  # all 60 remain reachable from focused home
         names=[]
         for i in range(8):
             if i:row=await click(env,row,'page',i)

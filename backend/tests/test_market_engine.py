@@ -32,7 +32,8 @@ def env(tmp_path):
         members.bind_telegram(uid, str(tg))
         points.add(uid, 20000, 'isolated.fixture')
         actors.append({'id': tg, 'is_bot': False, 'first_name': f'<投资者{i}>'})
-    cfg = dict(DEFAULTS)
+    # Keep original 50bp fee/conservation regressions explicit; new defaults have separate tests.
+    cfg = dict(DEFAULTS, fee_bps=50)
     e = SimpleNamespace(db=db, members=members, points=points, actors=actors, cfg=cfg, enabled=True)
     e.service = local(e, db)
     e.initial = cash(e)

@@ -79,7 +79,10 @@ class MarketPlugin(Plugin):
     spec = Spec(id='stock_market', name='模拟股票', icon='📈', category='points', description='固定供给现货；玩家限价撮合，已有积分交易。', fields=[
         Field('ipo_enabled','开放认购',kind='bool',default=True),
         Field('trading_enabled','开放二级交易',kind='bool',default=True),
-        Field('fee_bps','买方手续费基点（50=0.5%）',kind='int',default=50,min=0,max=100),
+        Field('fee_bps','新买单与认购手续费基点（0=免费）',kind='int',default=0,min=0,max=100),
+        Field('recommended_codes','首页推荐公司（3个代码，逗号分隔）',default='',help='留空稳定推荐发行价最低的3家公司，其余60公司仍可搜索。'),
+        Field('digest_enabled','授权互动群定时资讯',kind='bool',default=False,help='仅现有授权群ID；不使用注册通知群，不启动即推或补发历史。'),
+        Field('digest_times','群资讯北京时间（最多两个）',default='10:00,18:00',help='09:00～21:59，每群每天最多两条；未知送达不自动重发。'),
         Field('ipo_limit','每人每公司累计认购上限',kind='int',default=50,min=1,max=1000),
         Field('holding_limit','每人每公司持仓含待买上限',kind='int',default=200,min=1,max=1000),
         Field('order_quantity','单委托最大股数',kind='int',default=100,min=1,max=100),
@@ -96,6 +99,12 @@ class MarketPlugin(Plugin):
         if codes-valid: raise ValueError('暂停列表须使用MD001～MD060公司代码')
         cfg['halted_codes']=','.join(sorted(codes))
         if cfg['ipo_limit']>cfg['holding_limit']: raise ValueError('认购上限不能超过持仓上限')
+        picks=[x.strip().upper() for x in cfg['recommended_codes'].replace('，',',').split(',') if x.strip()]
+        if picks and (len(picks)!=3 or len(set(picks))!=3 or set(picks)-valid):
+            raise ValueError('推荐须为3个不同的MD001～MD060代码，或留空自动推荐')
+        cfg['recommended_codes']=','.join(picks)
+        from app.modules.market_digest import times
+        cfg['digest_times']=','.join(f'{m//60:02}:{m%60:02}' for m in times(cfg['digest_times']))
 
     async def run(self,config):
         if self.ctx.telegram: await self.ctx.telegram._market_tick()
@@ -104,7 +113,9 @@ class MarketPlugin(Plugin):
     def readonly_status(self):
         db=self.ctx.db
         sinks={r['kind']:r['n'] for r in db.query("SELECT kind,SUM(amount) n FROM play_funds WHERE kind IN ('issuance','fee') GROUP BY kind")}
-        return {'公司':db.one('SELECT COUNT(*) n FROM market_companies')['n'],
+        from app.modules.market_digest import DigestService
+        digest=DigestService(db,getattr(self.ctx.telegram,'_active_bot_id','')).summary()
+        return {**digest,'公司':db.one('SELECT COUNT(*) n FROM market_companies')['n'],
                 '未发行股数':db.one('SELECT SUM(inventory) n FROM market_companies')['n'],
                 '发行资金回收':sinks.get('issuance',0),'手续费回收':sinks.get('fee',0),
                 '未结委托':db.one("SELECT COUNT(*) n FROM market_orders WHERE state='open'")['n'],
@@ -113,8 +124,22 @@ class MarketPlugin(Plugin):
 
 def market_help(cfg):
     cfg={**DEFAULTS,**cfg}
-    return ('📈 <b>模拟股票 · 玩法</b>\n\n'
-            '60家虚构公司，10个行业，每家一次发行1000股。固定认购价10/15/20/25/30积分，未售完可持续认购，不加发。认购使用已有积分，资金进不可花发行回收账户；认购不计二级价量。\n\n'
+    return ('📈 <b>模拟股票 · 新手</b>\n\n'
+            '先看首页3家公司和真实挂单，1股起；其余60家公司可搜索或看全部。\n'
+            '认购按固定发行价（最低10积分/股）买库存，本金回收；玩家转让由买卖单撮合，本金付卖家。每家公司固定1000股，不加发。\n'
+            f'新买单/认购费 {cfg["fee_bps"]/100:g}%；确认页显示总额，本人确认后才冻结。无对手盘仅挂单，不保证成交；卖出必须有真实买家。\n'
+            '小群流动性低，资讯不会自动涨价；无杠杆、做空、分红、赠送本金或保底回购。\n'
+            '未成交可在本人私聊“委托”撤单，退未用积分/股票。原委托保留旧费率。\n\n'
+            '<code>/股票</code> 看市场 · <code>/股票 关键词</code> 搜索\n'
+            '<code>/持仓</code> · <code>/委托</code> · <code>/成交</code>')
+
+
+def market_rules(cfg):
+    cfg={**DEFAULTS,**cfg}
+    return ('📈 <b>模拟股票 · 完整规则</b>\n\n'
+            '新手：先看首页3家低价公司和真实挂单，1股起，再在本人私聊确认。新单默认0手续费。其余60家公司可搜索或看全部。\n'
+            '小群成交可能很少；卖出必须有真实买家，不承诺随时卖出。资讯不会自动涨价，也不保底回购。\n\n'
+            '认购：按固定发行价向公司购买未发行股票，本金回收，不是玩家成交；玩家转让：买卖挂单撮合，本金付给卖家。60家虚构公司、10个行业，每家一次发行1000股，发行价10/15/20/25/30积分，不加发。\n\n'
             '只做现货，无杠杆、做空、分红、赠送本金或保底回购。公司页可认购、买入、卖出；整数股数、整数每股积分限价，先确认后冻结。\n'
             '买单按最高总金额含手续费冻结已有积分，卖单冻结已有股票。买高卖低优先，同价先来先得，成交用在簿被动单价格。跳过本人订单，无对手盘只挂单、不保证成交，不造价格和成交量。\n'
             f'仅买方收费 {cfg["fee_bps"]/100:g}%，卖方不收费；按每个买单累计真实金额向上取整，分次成交只收累计差额。认购按本次金额同费率收费，费用独立回收，不发给其他玩家。\n'

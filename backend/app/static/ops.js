@@ -1394,7 +1394,7 @@ function pluginFields(c) {
     checkin_cleanup:[['群消息保留',['delay_seconds'],true]],
     blackwhite:[['押注设置',['default_stake','min_stake','max_stake'],true],['高级设置',['lobby_seconds'],false]],
     poker:[['底注与预算',['default_ante','min_ante','max_ante','default_budget','budget'],true],['高级设置',['lobby_seconds','step_seconds'],false]],
-    stock_market:[['市场与手续费',['ipo_enabled','trading_enabled','fee_bps','news_enabled'],true],['高级风控',['ipo_limit','holding_limit','order_quantity','max_price','max_notional','max_orders','order_hours','halted_codes'],false]],
+    stock_market:[['市场与手续费',['ipo_enabled','trading_enabled','fee_bps','recommended_codes'],true],['资讯与群排期',['news_enabled','digest_enabled','digest_times'],true],['高级风控',['ipo_limit','holding_limit','order_quantity','max_price','max_notional','max_orders','order_hours','halted_codes'],false]],
     points_ranking:[['排行榜显示',['page_size'],true]]
   }[c.id];
   if (!groups) return (c.fields||[]).map(f=>pluginField(c.id,f,c.config?.[f.key])).join('');
