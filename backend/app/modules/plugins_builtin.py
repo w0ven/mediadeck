@@ -35,6 +35,7 @@ from app.modules.blackwhite import BlackwhitePlugin
 from app.modules.checkin_cleanup import CheckinCleanupPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
+from app.modules.market_views import MarketPlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
 from app.modules.poker import PokerPlugin
@@ -912,6 +913,7 @@ BUILTIN_PLUGINS = (
     CheckinCleanupPlugin,
     BlackwhitePlugin,
     PokerPlugin,
+    MarketPlugin,
 )
 
 

@@ -32,7 +32,8 @@ class MarketService(PlayAccess):
     def _check(self, conn, uid, operation, code, quantity, price, cfg):
         c = self.company(code)
         if not c: raise PlayError('公司代码不存在')
-        if c['halted']: raise PlayError('该公司已暂停交易和认购')
+        paused={s.strip().upper() for s in str(self.config().get('halted_codes') or '').split(',') if s.strip()}
+        if c['halted'] or code in paused: raise PlayError('该公司已暂停交易和认购')
         if not self.enabled(): raise PlayError('模拟股票暂未开放')
         integer(quantity, '股数', 1, cfg['ipo_limit'] if operation == 'ipo' else cfg['order_quantity'])
         integer(price, '限价', 1, cfg['max_price'])
@@ -53,7 +54,7 @@ class MarketService(PlayAccess):
         elif self.position(uid, code)['shares']-self.position(uid, code)['locked'] < quantity:
             raise PlayError('可卖股数不足，未挂单')
 
-    def preview(self, actor, operation, code, quantity, price=None, *, now=None):
+    def preview(self, actor, operation, code, quantity, price=None, *, now=None, request_key=''):
         clock = time.time() if now is None else float(now)
         if operation not in ('ipo', 'buy', 'sell'): raise PlayError('股票操作无效')
         with economy_write(self.db) as conn:
@@ -64,10 +65,17 @@ class MarketService(PlayAccess):
             if not c: raise PlayError('公司代码不存在')
             cfg = {**DEFAULTS, **self.config()}
             if operation == 'ipo': price = c['issue_price']
+            if request_key:
+                if not isinstance(request_key,str) or len(request_key)>120: raise PlayError('原消息来源无效')
+                prior=conn.execute('SELECT * FROM market_intents WHERE bot_id=? AND user_id=? AND request_key=?',(self.bot_id,member['emby_user_id'],request_key)).fetchone()
+                if prior:
+                    if (prior['tg_id']!=tg or prior['operation']!=operation or prior['code']!=code or prior['quantity']!=quantity or prior['price']!=price):
+                        raise PlayError('原消息已用于其他意图，请发送新消息')
+                    return dict(prior)
             self._check(conn, member['emby_user_id'], operation, code, quantity, price, cfg)
             nonce = secrets.token_hex(12)
-            conn.execute('INSERT INTO market_intents(nonce,bot_id,user_id,tg_id,operation,code,quantity,price,config_json,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                         (nonce, self.bot_id, member['emby_user_id'], tg, operation, code, quantity, price, encode(cfg), clock, clock+120))
+            conn.execute('INSERT INTO market_intents(nonce,bot_id,user_id,tg_id,operation,code,quantity,price,config_json,created_at,expires_at,request_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (nonce, self.bot_id, member['emby_user_id'], tg, operation, code, quantity, price, encode(cfg), clock, clock+120, request_key))
             return self.intent(nonce)
 
     def intent(self, nonce):

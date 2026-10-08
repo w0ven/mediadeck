@@ -6,20 +6,24 @@ import time
 from contextlib import contextmanager
 
 from app.modules.bot_blackwhite import BlackwhiteBotMixin
+from app.modules.bot_market import MarketBotMixin
 from app.modules.bot_poker import PokerBotMixin
 from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
 from app.modules.report_delivery import CALL_DELIVERY
 
-PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:')
+PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'st:')
 
 
-class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin):
+class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin):
     async def _play_command(self, message):
-        return await self._blackwhite_command(message) or await self._poker_command(message)
+        return (await self._blackwhite_command(message) or await self._poker_command(message)
+                or await self._market_command(message))
 
     async def _play_callback(self, data, message, actor, callback_id):
         if data.startswith(('bw:', 'bwh:')):
             await self._blackwhite_callback(data, message, actor, callback_id)
+        elif data.startswith('st:'):
+            await self._market_callback(data, message, actor, callback_id)
         else:
             await self._poker_callback(data, message, actor, callback_id)
 
@@ -102,7 +106,7 @@ class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin):
 
     async def _play_worker(self):
         while True:
-            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._poker_tick):
+            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._poker_tick, self._market_tick):
                 try:
                     await work()
                 except asyncio.CancelledError:

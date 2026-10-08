@@ -57,6 +57,30 @@ def migrate(db):
         cost_delta INTEGER NOT NULL DEFAULT 0, realized_delta INTEGER NOT NULL DEFAULT 0, created_at REAL NOT NULL
     );
     """)
+    db._conn.executescript("""
+    CREATE TABLE IF NOT EXISTS market_watch (
+        user_id TEXT NOT NULL, code TEXT NOT NULL, PRIMARY KEY(user_id,code)
+    );
+    CREATE TABLE IF NOT EXISTS market_news (
+        slot INTEGER PRIMARY KEY, code TEXT NOT NULL, title TEXT NOT NULL, body TEXT NOT NULL, created_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS market_panels (
+        nonce TEXT PRIMARY KEY, bot_id TEXT NOT NULL, user_id TEXT NOT NULL, tg_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0, message_id INTEGER,
+        payload_json TEXT NOT NULL, created_at REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS market_inputs (
+        bot_id TEXT NOT NULL, tg_id TEXT NOT NULL, user_id TEXT NOT NULL, panel TEXT NOT NULL,
+        operation TEXT NOT NULL, code TEXT NOT NULL, phase TEXT NOT NULL, quantity INTEGER NOT NULL DEFAULT 0,
+        expires_at REAL NOT NULL, PRIMARY KEY(bot_id,tg_id)
+    );
+    CREATE TABLE IF NOT EXISTS market_input_messages (
+        bot_id TEXT NOT NULL, tg_id TEXT NOT NULL, message_id INTEGER NOT NULL,
+        PRIMARY KEY(bot_id,tg_id,message_id)
+    );
+    """)
+    db._ensure_column('market_intents','request_key',"TEXT NOT NULL DEFAULT ''")
+    db._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS market_intent_source ON market_intents(bot_id,user_id,request_key) WHERE request_key<>''")
     # INSERT OR IGNORE does not refill inventory. Immutable supply/price trigger guards reseeding.
     for c in COMPANIES:
         db._conn.execute('INSERT OR IGNORE INTO market_companies(code,name,sector,supply,issue_price,inventory) VALUES(?,?,?,?,?,?)',
