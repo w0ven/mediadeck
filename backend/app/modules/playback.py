@@ -233,7 +233,8 @@ def match_pool(media_path: str, pools: list[Any]) -> tuple[Any, str] | None:
 
 class PlaybackRouter:
     def __init__(self, emby: Any, scheduler: Any, config_provider: Any,
-                 emby_config_provider: Any, rate_resolver: Any = None) -> None:
+                 emby_config_provider: Any, rate_resolver: Any = None,
+                 short_sources: Any = None) -> None:
         self._emby = emby
         self._scheduler = scheduler
         self._config = config_provider
@@ -242,6 +243,7 @@ class PlaybackRouter:
         # Lives outside this module so the router stays ignorant of member
         # semantics; None means "sign without a per-user cap" (mock mode).
         self._rate_resolver = rate_resolver
+        self._short_sources = short_sources
         self._cache = TTLCache()
         self._auth_cache = TTLCache(ttl=60.0)
         self._log: list[dict[str, Any]] = []
@@ -326,15 +328,47 @@ class PlaybackRouter:
                     query: dict[str, str], caller_token: str = "",
                     require_auth: bool = False,
                     caller_device: str = "", cache_scope: str = "direct",
-                    only_node: str = "") -> Decision:
+                    only_node: str = "", short_issue: bool = False) -> Decision:
         """``only_node``: restrict selection to one node. Used by pinned
         external entries whose stream domain proxies exactly that node; any
         other choice would 404 on the friend's CDN. If that node cannot serve
         the item the normal fail-open passthrough applies."""
         cfg = self._config() or {}
 
+        short = self._short_sources.item(item_id, query.get("MediaSourceId") or query.get("mediaSourceId") or "") if self._short_sources else None
         if not cfg.get("enabled"):
+            if short is not None:
+                return Decision(False, "", "short-routing-disabled")
             return self._passthrough(request_path, query, "disabled")
+
+        # Registered shorts never fall back to ca1 media/transcoding. Original
+        # admission is still performed by the caller before entering this router.
+        if short is not None:
+            if not request_path.lower().endswith('/stream.m3u8') or query.get('Static', '').lower() in ('false', '0'):
+                decision = Decision(False, "", "short-unsupported-mode")
+            elif not caller_token or not await self._authorised(item_id, caller_token, cache_scope):
+                decision = Decision(False, "", "short-unauthorised")
+            else:
+                chosen = self._scheduler.pick(context=short["media_path"], predicate=lambda s:
+                    s.node.name == short["node"] and (not only_node or s.node.name == only_node))
+                if chosen is None or not chosen.node.sign_secret or self._rate_resolver is None:
+                    decision = Decision(False, "", "short-node-unavailable")
+                else:
+                    try:
+                        rate, tag = await self._rate_resolver(caller_token, caller_device, cache_scope)
+                    except Exception:  # noqa: BLE001 - retain fail-closed short caller attribution
+                        rate, tag = 0, ""
+                    if not re.fullmatch(r"[0-9a-f]{10}", tag or ""):
+                        decision = Decision(False, "", "short-unattributed-caller")
+                    else:
+                        target = await self._short_sources.issue_url(
+                            chosen.node, short, item_id, query.get("MediaSourceId", ""),
+                            query.get("PlaySessionId", ""), int(rate), tag, short_issue)
+                        decision = Decision(True, target, "short-direct", node=chosen.node.name,
+                                            media_path=short["media_path"], pool="short", signed=True,
+                                            utag=tag, rate_bps=int(rate))
+            self._record(decision, item_id)
+            return decision
 
         if cfg.get("direct_only", True) and is_transcode_request(request_path, query):
             decision = self._passthrough(request_path, query, "transcode")

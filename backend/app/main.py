@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import re
 import secrets
 import threading
@@ -79,6 +80,7 @@ from app.modules.scheduler import PROBE_INTERVAL, Scheduler
 from app.modules.settings import SettingsService
 from app.modules.sharing import SharingDetector
 from app.modules.shop import ShopError, ShopService
+from app.modules.short_drama import ShortDramaSources
 from app.modules.signing import user_tag
 from app.modules.stats import StatsService
 from app.modules.storage import MockStorage, StorageManager
@@ -335,12 +337,14 @@ async def _startup() -> None:
         app.state.cache.set(cache_key, result, ttl=60 if result[1] else 10)
         return result
 
+    app.state.short_drama = ShortDramaSources(os.getenv("MEDIADECK_SHORT_REGISTRY", ""))
     app.state.playback = PlaybackRouter(
         app.state.emby,
         app.state.scheduler,
         app.state.settings_service.playback_config,
         app.state.settings_service.emby_config,
         rate_resolver=_member_rate,
+        short_sources=app.state.short_drama,
     )
 
     # ---- membership, billing, statistics --------------------------------
@@ -392,6 +396,7 @@ async def _startup() -> None:
         app.state.db, app.state.members, app.state.emby, app.state.enforcement,
         sharing=app.state.sharing)
     app.state.streams = StreamAdmission(app.state.members, app.state.emby)
+    app.state.short_drama.admission = app.state.streams
     app.state.whitelist_route = WhitelistRoute(app.state, cfg.mediadeck_route_mobile_registry)
     app.state.stats.bind_live_watch(app.state.usage.live_watch)
 
@@ -1601,17 +1606,38 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
     uid = await _admit_playback(request, item_id, query, reserve=False)
     device = caller_device(request.headers, query)
     session_profile = caller_session_profile(request.headers, query)
+    short_context = {} if app.state.short_drama.item(item_id) is not None else None
     async def issue():
-        code, data = await app.state.emby.playback_info(item_id, request.method,
-                                                       dict(request.headers), query, payload)
+        if app.state.short_drama.item(item_id) is not None:
+            code, data = await app.state.emby.short_catalogue_info(item_id, dict(request.headers))
+            if 200 <= code < 300 and request.method != "HEAD":
+                # The existing issue_info lock binds this ordinary play id to
+                # the original seat; no ca1 media probe/transcode is started.
+                data["PlaySessionId"] = secrets.token_hex(16)
+        else:
+            code, data = await app.state.emby.playback_info(item_id, request.method,
+                                                           dict(request.headers), query, payload)
         entry = app.state.whitelist_route.entry(request.headers)
         if entry and entry.whitelist_only and 200 <= code < 300:
             data = app.state.whitelist_route.decorate(entry, uid, item_id, data)
+        if 200 <= code < 300 and request.method != "HEAD":
+            data = await app.state.short_drama.decorate_info(
+                app.state.playback, item_id, data, payload, query,
+                caller_token(request.headers, query), device,
+                only_node=entry.node if entry and entry.pinned else "", session=short_context)
         return code, data
     try:
         admission, code, data = await app.state.streams.issue_info(
             uid, device, query.get("SessionId", query.get("sessionId", "")), issue,
-            session_profile=session_profile)
+            session_profile=session_profile, short_context=short_context)
+        if short_context is not None and 200 <= code < 300 and request.method != "HEAD":
+            source = data["MediaSources"][0]
+            address = urlsplit(source["DirectStreamUrl"])
+            node = app.state.scheduler.pick(context=address.path, predicate=lambda s: s.node.name == "nc1").node
+            expiry = int(dict(parse_qsl(address.query))[node.sign_arg_expires])
+            app.state.streams.bind_short(uid, data["PlaySessionId"], item_id, str(source["Id"]), address.path, expiry)
+    except HTTPException:
+        raise
     except Exception:  # noqa: BLE001 - never return a partially checked URL
         raise HTTPException(503, "PlaybackInfo unavailable") from None
     if not admission.allowed:
@@ -1713,6 +1739,8 @@ async def whitelist_route_download(request: Request) -> Response:
     # Guard both default and requested editions: Emby versions differ in
     # whether the Download/File endpoint honors MediaSourceId.
     kinds = {guard.source_kind(match[1], sources[0]), guard.source_kind(match[1], selected)}
+    if "short" in kinds:
+        refuse(409, "short drama download/origin fallback is not supported; use direct HLS playback")
     if "mobile" in kinds:
         official = app.state.settings_service.integration_config()["emby_public_url"].rstrip("/")
         query = {k: v for k, v in query.items() if k.lower() not in (CAP_ARG, "api_key", "apikey")}
@@ -1734,7 +1762,27 @@ async def playback_admit(request: Request) -> Response:
     if not match:
         raise HTTPException(403, "unsupported playback path")
     await _admit_playback(request, match[1], dict(parse_qsl(original.query)))
+    if app.state.short_drama.item(match[1]) is not None:
+        # This exact standard issuer ALREADY goes to 8339's controlled 302,
+        # not to Emby media origin. Other short origin/transcode paths refuse.
+        query = dict(parse_qsl(original.query))
+        app.state.short_drama.item(match[1], query.get("MediaSourceId", ""))
+        if not original.path.lower().endswith("/stream.m3u8") or query.get("Static", "").lower() in ("false", "0"):
+            raise HTTPException(403, "short origin/transcoding is not supported")
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
+
+
+@app.post("/api/playback/short-session", include_in_schema=False)
+async def short_session_check(request: Request) -> Response:
+    # Node presents a valid original v2 capability, never a user's token.
+    # No media body, no independent admission: inspect the existing lease.
+    try:
+        body = await request.body()
+        payload = json.loads(body) if len(body) <= 1024 else None
+        allowed = isinstance(payload, dict) and all(isinstance(v, str) for v in payload.values()) and await app.state.short_drama.validate_session(app.state.playback, payload)
+    except Exception:  # noqa: BLE001 - all validation failures refuse the capability
+        allowed = False
+    return Response(status_code=204 if allowed else 403, headers={"Cache-Control": "private, no-store"})
 
 
 async def _playback_report_payload(request: Request) -> dict[str, Any]:
@@ -1850,6 +1898,9 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
     # Capacity/storage loss is an outage, not authorization to stream from
     # the origin. Keep the admitted failure diagnostic and never leak nginx's
     # internal fallback sentinel to players.
+    if not decision.redirected and decision.reason.startswith("short-"):
+        return Response(status_code=409 if decision.reason == "short-unsupported-mode" else 503,
+                        headers={**response_headers, "X-Mediadeck-Decision": decision.reason})
     if not decision.redirected and (
         decision.reason == "no-capable-node"
         or request.headers.get("x-mediadeck-origin-fallback") == "off"
@@ -1876,7 +1927,7 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
 
     if not decision.target:
         raise HTTPException(409, "Emby origin not configured", headers=response_headers)
-    if decision.redirected and entry:
+    if decision.redirected and entry and decision.reason != "short-direct":
         decision.target = entry_target(decision.target, decision.node or "", entry)
     return RedirectResponse(decision.target, status_code=302, headers={
         **response_headers,
