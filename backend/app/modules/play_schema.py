@@ -55,4 +55,30 @@ def migrate(db):
         joined_at REAL NOT NULL, result_amount INTEGER NOT NULL DEFAULT 0 CHECK(result_amount>=0),
         UNIQUE(nonce,user_id), UNIQUE(nonce,tg_id)
     );
+    CREATE TABLE IF NOT EXISTS poker_state (
+        nonce TEXT PRIMARY KEY REFERENCES play_rounds(nonce),
+        turn INTEGER NOT NULL DEFAULT 0 CHECK(turn>=0), current_seat INTEGER NOT NULL DEFAULT 0,
+        blind INTEGER NOT NULL CHECK(blind>0), start_error TEXT NOT NULL DEFAULT ''
+    );
+    CREATE TABLE IF NOT EXISTS poker_hands (
+        player_id INTEGER PRIMARY KEY REFERENCES play_players(id), seat INTEGER NOT NULL DEFAULT 0,
+        cards_json TEXT NOT NULL DEFAULT '[]', seen INTEGER NOT NULL DEFAULT 0 CHECK(seen IN (0,1)),
+        folded INTEGER NOT NULL DEFAULT 0 CHECK(folded IN (0,1)), invested INTEGER NOT NULL DEFAULT 0 CHECK(invested>=0)
+    );
+    CREATE TABLE IF NOT EXISTS poker_actions (
+        nonce TEXT NOT NULL, turn INTEGER NOT NULL, player_id INTEGER NOT NULL,
+        action TEXT NOT NULL, amount INTEGER NOT NULL CHECK(amount>=0), created_at REAL NOT NULL,
+        PRIMARY KEY(nonce,turn)
+    );
+    CREATE TABLE IF NOT EXISTS play_photos (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, bot_id TEXT NOT NULL, nonce TEXT NOT NULL,
+        recipient TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('private','result')),
+        user_id TEXT NOT NULL DEFAULT '', thread_id INTEGER NOT NULL DEFAULT 0,
+        content_json TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued',
+        attempts INTEGER NOT NULL DEFAULT 0, due_at REAL NOT NULL DEFAULT 0,
+        lease_until REAL NOT NULL DEFAULT 0, lease_token TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '', message_id INTEGER,
+        created_at REAL NOT NULL, UNIQUE(bot_id,nonce,recipient,mode)
+    );
+    CREATE INDEX IF NOT EXISTS play_photos_due ON play_photos(bot_id,state,due_at,lease_until);
     """)

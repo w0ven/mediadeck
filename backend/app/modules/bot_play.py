@@ -6,18 +6,22 @@ import time
 from contextlib import contextmanager
 
 from app.modules.bot_blackwhite import BlackwhiteBotMixin
+from app.modules.bot_poker import PokerBotMixin
 from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
 from app.modules.report_delivery import CALL_DELIVERY
 
-PLAY_CALLBACKS = ('bw:', 'bwh:')
+PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:')
 
 
-class PlayBotMixin(BlackwhiteBotMixin):
+class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin):
     async def _play_command(self, message):
-        return await self._blackwhite_command(message)
+        return await self._blackwhite_command(message) or await self._poker_command(message)
 
     async def _play_callback(self, data, message, actor, callback_id):
-        await self._blackwhite_callback(data, message, actor, callback_id)
+        if data.startswith(('bw:', 'bwh:')):
+            await self._blackwhite_callback(data, message, actor, callback_id)
+        else:
+            await self._poker_callback(data, message, actor, callback_id)
 
     @contextmanager
     def _checkin_cleanup_context(self, message, *, command=False, actor=None):
@@ -98,7 +102,7 @@ class PlayBotMixin(BlackwhiteBotMixin):
 
     async def _play_worker(self):
         while True:
-            for work in (self._drain_checkin_deletes, self._blackwhite_tick):
+            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._poker_tick):
                 try:
                     await work()
                 except asyncio.CancelledError:
