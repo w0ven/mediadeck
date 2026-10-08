@@ -32,4 +32,27 @@ def migrate(db):
         UNIQUE(bot_id,job_key)
     );
     CREATE INDEX IF NOT EXISTS play_jobs_due ON play_jobs(state,due_at,lease_until);
+    CREATE TABLE IF NOT EXISTS play_rounds (
+        nonce TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('blackwhite','poker')),
+        bot_id TEXT NOT NULL, chat_id TEXT NOT NULL, thread_id INTEGER NOT NULL DEFAULT 0,
+        command_message_id INTEGER NOT NULL, actor_tg_id TEXT NOT NULL, actor_user_id TEXT NOT NULL,
+        actor_name TEXT NOT NULL, stake INTEGER NOT NULL CHECK(stake>0), config_json TEXT NOT NULL,
+        secret TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'lobby', created_at REAL NOT NULL,
+        expires_at REAL NOT NULL, result_json TEXT NOT NULL DEFAULT '{}',
+        revision INTEGER NOT NULL DEFAULT 0, rendered_revision INTEGER NOT NULL DEFAULT -1,
+        card_message_id INTEGER, card_send_state TEXT NOT NULL DEFAULT 'pending',
+        publish_token TEXT NOT NULL DEFAULT '', publish_lease REAL NOT NULL DEFAULT 0,
+        next_publish_at REAL NOT NULL DEFAULT 0, publish_error TEXT NOT NULL DEFAULT '',
+        UNIQUE(kind,bot_id,chat_id,command_message_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS play_rounds_one_active
+        ON play_rounds(kind,bot_id,chat_id,thread_id) WHERE state IN ('lobby','running');
+    CREATE INDEX IF NOT EXISTS play_rounds_due ON play_rounds(kind,state,expires_at);
+    CREATE TABLE IF NOT EXISTS play_players (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, nonce TEXT NOT NULL REFERENCES play_rounds(nonce),
+        user_id TEXT NOT NULL, tg_id TEXT NOT NULL, display_name TEXT NOT NULL,
+        choice TEXT NOT NULL DEFAULT '' CHECK(choice IN ('','black','white')),
+        joined_at REAL NOT NULL, result_amount INTEGER NOT NULL DEFAULT 0 CHECK(result_amount>=0),
+        UNIQUE(nonce,user_id), UNIQUE(nonce,tg_id)
+    );
     """)

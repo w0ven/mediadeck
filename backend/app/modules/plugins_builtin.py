@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.modules import report_delivery
+from app.modules.blackwhite import BlackwhitePlugin
 from app.modules.checkin_cleanup import CheckinCleanupPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
@@ -908,6 +909,7 @@ BUILTIN_PLUGINS = (
     RequestLibraryWatchPlugin,
     *POINTS_PLUGINS,
     CheckinCleanupPlugin,
+    BlackwhitePlugin,
 )
 
 

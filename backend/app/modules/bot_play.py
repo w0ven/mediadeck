@@ -5,11 +5,20 @@ import asyncio
 import time
 from contextlib import contextmanager
 
+from app.modules.bot_blackwhite import BlackwhiteBotMixin
 from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
 from app.modules.report_delivery import CALL_DELIVERY
 
+PLAY_CALLBACKS = ('bw:', 'bwh:')
 
-class PlayBotMixin:
+
+class PlayBotMixin(BlackwhiteBotMixin):
+    async def _play_command(self, message):
+        return await self._blackwhite_command(message)
+
+    async def _play_callback(self, data, message, actor, callback_id):
+        await self._blackwhite_callback(data, message, actor, callback_id)
+
     @contextmanager
     def _checkin_cleanup_context(self, message, *, command=False, actor=None):
         chat = message.get('chat') or {}
@@ -89,10 +98,11 @@ class PlayBotMixin:
 
     async def _play_worker(self):
         while True:
-            try:
-                await self._drain_checkin_deletes()
-            except asyncio.CancelledError:
-                raise
-            except Exception:  # noqa: BLE001 - worker failure retains the durable queue
-                self._last_error = '签到清理任务异常，任务保留待恢复'
+            for work in (self._drain_checkin_deletes, self._blackwhite_tick):
+                try:
+                    await work()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - one durable job must not block other refunds
+                    self._last_error = '游戏或清理任务异常，状态保留待重试'
             await asyncio.sleep(5)

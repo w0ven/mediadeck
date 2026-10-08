@@ -41,7 +41,7 @@ from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
-from app.modules.bot_play import PlayBotMixin
+from app.modules.bot_play import PLAY_CALLBACKS, PlayBotMixin
 from app.modules.bot_rebinding import RebindBotMixin
 from app.modules.bot_requests import RequestBotMixin
 from app.modules.bot_views import (
@@ -4142,6 +4142,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         text = str(message.get("text") or "").strip()
         if not chat_id or not tg_user_id:
             return
+        if await self._play_command(message):
+            return
         if await self._packet_command(message):
             return
         checkin = self._checkin_command(text)
@@ -4374,6 +4376,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         tg_user_id = str(from_user.get("id") or "")
         tg_name = from_user.get("first_name") or "朋友"
         callback_id = str(callback.get("id") or "")
+        if data.startswith(PLAY_CALLBACKS):
+            await self._play_callback(data, message, from_user, callback_id)
+            return
         if data.startswith(PACKET_CALLBACKS):
             await self._packet_callback(data, message, from_user, callback_id)
             return
