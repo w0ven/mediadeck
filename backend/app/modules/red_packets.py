@@ -10,6 +10,7 @@ import json
 import re
 import secrets
 import time
+import unicodedata
 
 from app.modules.economy_rules import economy_write, encode
 from app.modules.group_points import GroupPointsError, reliable_user
@@ -17,7 +18,8 @@ from app.modules.groups import WHITELIST_GROUP_ID
 
 DEFAULT_PACKET_CONFIG = {'max_total': 5000, 'max_parts': 50, 'ttl_hours': 24,
                          'enabled_for_members': True}
-CALLBACKS = ('rpok:', 'rpcancel:', 'rpclaim:', 'rpedit:')
+CALLBACKS = ('rpok:', 'rpcancel:', 'rpclaim:', 'rpedit:', 'rppage:')
+RESULTS_PER_PAGE = 10
 COMMANDS = {'/红包', '/redpacket', '/packet'}
 SQL_MAX = 2**63 - 1
 
@@ -59,6 +61,14 @@ def allocations(total, parts, mode):
         remaining -= amount
     values.append(remaining)
     return values
+
+
+def public_name(actor):
+    """Only Telegram's public display name, never an account/handle/numeric ID."""
+    name = ' '.join(actor.get(k, '') for k in ('first_name', 'last_name')
+                    if isinstance(actor.get(k), str))
+    name = ' '.join(''.join(c for c in name if unicodedata.category(c) not in ('Cc', 'Cf')).split())
+    return (name[:128] + ('…' if len(name) > 128 else '')) if name and not name.isdecimal() else '成员'
 
 
 class PacketService:
@@ -142,6 +152,7 @@ class PacketService:
             row = {'nonce': secrets.token_hex(16), 'chat_id': cid, 'command_message_id': mid,
                    'actor_tg_id': tg, 'actor_user_id': member['emby_user_id'],
                    'actor_name': str(member.get('username') or '已绑定成员'), 'funding': funding,
+                   'public_actor_name': public_name(message['from']),
                    'mode': mode, 'audience': audience, 'total': total, 'parts': parts,
                    'config_json': encode(config), 'command_json': command, 'thread_id': thread,
                    'created_at': now, 'confirm_by': now + 600}
@@ -260,10 +271,11 @@ class PacketService:
             amount = values[slot]
             reason = 'packet.claim' if row['funding'] == 'user' else 'packet.reward'
             self._credit(conn, uid, amount, reason, nonce, 'packet:' + row['actor_user_id'], now)
-            conn.execute('INSERT INTO red_packet_claims VALUES(?,?,?,?,?,?)', (nonce, uid, tg, amount, slot, now))
+            conn.execute('INSERT INTO red_packet_claims(nonce,user_id,tg_user_id,amount,slot,claimed_at,display_name) VALUES(?,?,?,?,?,?,?)',
+                         (nonce, uid, tg, amount, slot, now, public_name(actor)))
             exhausted = slot + 1 == row['parts']
-            conn.execute('UPDATE red_packets SET remaining=remaining-?,claimed_count=claimed_count+1,status=?,render_version=render_version+1,next_publish_at=0 WHERE nonce=?',
-                         (amount, 'exhausted' if exhausted else 'active', nonce))
+            conn.execute('UPDATE red_packets SET remaining=remaining-?,claimed_count=claimed_count+1,status=?,result_page=?,render_version=render_version+1,next_publish_at=0 WHERE nonce=?',
+                         (amount, 'exhausted' if exhausted else 'active', slot // RESULTS_PER_PAGE, nonce))
             conn.execute('INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)',
                          (now, 'tg:' + tg, 'points.packet.' + row['funding'] + '.claim', uid,
                           encode({'nonce': nonce, 'amount': amount, 'slot': slot, 'sender': row['actor_user_id'],
@@ -312,6 +324,31 @@ class PacketService:
                         (version if success else -1, 0 if success else int(time.time()) + 10,
                          '' if success else '群卡更新未确认，后台将重试；不会重复扣费', nonce, version))
 
+    def claims(self, nonce, count):
+        # Bound to the rendered row's committed progress, not a later claim.
+        return self.db.query('SELECT amount,slot,display_name FROM red_packet_claims '
+                             'WHERE nonce=? AND slot<? ORDER BY slot', (nonce, count))
+
+    def page(self, nonce, actor, message, page):
+        with economy_write(self.db) as conn:
+            row = self.get(nonce)
+            if not row:
+                raise PacketError('红包不存在')
+            self._context(row, message)
+            try:
+                reliable_user({'from': actor})
+            except GroupPointsError as exc:
+                raise PacketError(str(exc)) from None
+            buttons = [b.get('callback_data') for line in (message.get('reply_markup') or {}).get('inline_keyboard', []) for b in line]
+            if ('rppage:' + nonce + ':' + str(page) not in buttons
+                    or row['status'] in ('draft', 'cancelled')
+                    or not 0 <= page <= max(0, (row['claimed_count'] - 1) // RESULTS_PER_PAGE)):
+                raise PacketError('请使用原红包的翻页按钮')
+            if row['result_page'] != page:
+                conn.execute('UPDATE red_packets SET result_page=?,render_version=render_version+1,next_publish_at=0 WHERE nonce=?',
+                             (page, nonce))
+            return self.get(nonce)
+
     def best(self, nonce):
-        return self.db.one('SELECT c.*,COALESCE(m.username,\'成员\') AS username FROM red_packet_claims c '
-                           'LEFT JOIN members m ON m.emby_user_id=c.user_id WHERE nonce=? ORDER BY amount DESC,slot ASC LIMIT 1', (nonce,))
+        return self.db.one('SELECT amount,slot,display_name FROM red_packet_claims '
+                           'WHERE nonce=? ORDER BY amount DESC,slot ASC LIMIT 1', (nonce,))

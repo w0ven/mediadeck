@@ -118,3 +118,7 @@ def migrate(db):
         PRIMARY KEY(nonce,user_id), UNIQUE(nonce,tg_user_id), UNIQUE(nonce,slot)
     );
     """)
+    # Additive public presentation snapshots only; existing money/history stays.
+    db._ensure_column('red_packets', 'public_actor_name', "TEXT NOT NULL DEFAULT ''")
+    db._ensure_column('red_packets', 'result_page', 'INTEGER NOT NULL DEFAULT 0')
+    db._ensure_column('red_packet_claims', 'display_name', "TEXT NOT NULL DEFAULT ''")

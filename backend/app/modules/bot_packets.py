@@ -8,7 +8,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from html import escape
 
-from app.modules.red_packets import COMMANDS, PacketError, PacketService
+from app.modules.red_packets import (
+    COMMANDS,
+    RESULTS_PER_PAGE,
+    PacketError,
+    PacketService,
+    public_name,
+)
 from app.modules.report_delivery import CALL_DELIVERY
 
 
@@ -25,18 +31,18 @@ class PacketBotMixin:
     def _packet_view(self, row, service):
         nonce = row['nonce']
         mode = '等额' if row['mode'] == 'equal' else '拼手气'
-        audience = '白名单专属' if row['audience'] == 'whitelist' else '全体有效成员'
-        title = '🎁 <b>积分奖励红包</b>' if row['funding'] == 'reward' else '🧧 <b>积分红包</b>'
-        body = (title + f"\n发起人：<b>{escape(row['actor_name'])}</b>"
-                f"\n<b>{row['total']} 积分</b> · {row['parts']} 份 · {mode}"
-                f'\n领取范围：{audience}')
+        def name(value):
+            value = public_name({'first_name': value or ''})
+            return escape(value[:40] + ('…' if len(value) > 40 else ''))
+        title = f'🎁 <b>{mode}红包</b>'
+        if row['audience'] == 'whitelist':
+            title += ' · 白名单'
+        body = (title + f"\n<b>{name(row.get('public_actor_name'))}</b>"
+                f" · {row['total']} 积分 · {row['parts']} 份")
         keyboard = []
         if row['status'] == 'draft':
             hours = json.loads(row['config_json'])['ttl_hours']
-            body += (f'\n有效期：确认后 {hours} 小时\n'
-                     + ('确认发出后从本人积分扣除总额，未领部分到期退回。' if row['funding'] == 'user'
-                        else '确认后向符合条件的领取者发放奖励，未领部分到期结束。')
-                     + '\n\n请选择参数，核对后发出；此确认10分钟有效。')
+            body += f'\n\n有效 {hours} 小时 · 待确认'
             def edit(field, value, text):
                 return {'text': text, 'callback_data': f'rpedit:{nonce}:{field}:{value}'}
             keyboard.append([edit('mode', 'random', ('✓ ' if mode == '拼手气' else '') + '拼手气'),
@@ -56,26 +62,31 @@ class PacketBotMixin:
                              {'text': '取消', 'callback_data': 'rpcancel:' + nonce}])
             return body, keyboard
         if row['status'] == 'cancelled':
-            body += '\n\n已取消或确认过期，未扣费。'
-        elif row['status'] == 'active' and row['expires_at'] > time.time():
-            # Explicit timezone; the server's timezone need not be Beijing.
+            return body + '\n\n已取消', keyboard
+        active = row['status'] == 'active' and row['expires_at'] > time.time()
+        state = '已领取' if active else ('已领完' if row['status'] == 'exhausted' else '已过期')
+        body += f"\n\n{state} <b>{row['claimed_count']}/{row['parts']}</b>"
+        results = service.claims(nonce, row['claimed_count'])
+        pages = max(1, (len(results) + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
+        page = min(max(0, row.get('result_page', 0)), pages - 1)
+        for claim in results[page * RESULTS_PER_PAGE:(page + 1) * RESULTS_PER_PAGE]:
+            body += f"\n{name(claim['display_name'])} · <b>{claim['amount']}</b> 积分"
+        if row['status'] == 'exhausted' and results:
+            best = min(results, key=lambda c: (-c['amount'], c['slot']))
+            body += f"\n\n🏆 手气最佳 <b>{name(best['display_name'])}</b> · {best['amount']} 积分"
+        if active:
             deadline = datetime.fromtimestamp(row['expires_at'], timezone(timedelta(hours=8)))
-            body += f"\n已领 <b>{row['claimed_count']} / {row['parts']}</b> 份"
-            body += '\n截止：' + deadline.strftime('%m-%d %H:%M') + '（北京时间）'
-            body += '\n\n每人一次，发起人不可领；领取结果仅本人可见。'
-            keyboard = [[{'text': '🧧 领取红包', 'callback_data': 'rpclaim:' + nonce}]]
-        elif row['status'] == 'exhausted':
-            body += f"\n\n✨ 已全部领完 · {row['parts']} / {row['parts']} 份"
-            best = service.best(nonce)
-            if best:
-                body += f"\n🏆 手气最佳：{escape(best['username'])} · {best['amount']} 积分"
-        else:
-            body += f"\n\n已到期 · 已领 {row['claimed_count']} / {row['parts']} 份"
-            if row['status'] == 'expired':
-                body += (f"\n未领 {row['refunded']} 积分已退回发起账号。" if row['funding'] == 'user'
-                         else '\n未领部分已结束，已领取积分不受影响。')
-            else:
-                body += '\n到期结算待重试，已领取积分不受影响。'
+            body += '\n\n<i>截止 ' + deadline.strftime('%m-%d %H:%M') + '</i>'
+            keyboard.append([{'text': '领取红包', 'callback_data': 'rpclaim:' + nonce}])
+        if pages > 1:
+            def turn(number, text):
+                return {'text': text, 'callback_data': f'rppage:{nonce}:{number}'}
+            keys = [turn(page, f'{page + 1}/{pages}')]
+            if page > 0:
+                keys.insert(0, turn(page - 1, '‹'))
+            if page < pages - 1:
+                keys.append(turn(page + 1, '›'))
+            keyboard.append(keys)
         return body, keyboard
 
     async def _packet_command(self, message):
@@ -145,8 +156,8 @@ class PacketBotMixin:
                                       'disable_web_page_preview': True})
             success = bool(result) or bool((CALL_DELIVERY.get() or {}).get('not_modified'))
             service.rendered(nonce, row['render_version'], success)
-            if row['status'] in ('expired', 'exhausted', 'cancelled') and success:
-                self._packet_render_locks.pop(nonce, None)
+            # Terminal cards remain pageable. Keep the same lock while older
+            # waiters exist, so a new page cannot race them on a different lock.
 
     async def _packet_callback(self, data, message, actor, callback_id):
         try:
@@ -156,6 +167,9 @@ class PacketBotMixin:
             if tokens[0] == 'rpclaim' and len(tokens) == 2:
                 result = service.claim(nonce, actor, message)
                 text = ('已领取过：' if result['already'] else '🧧 领取成功：') + str(result['amount']) + ' 积分'
+            elif tokens[0] == 'rppage' and len(tokens) == 3:
+                service.page(nonce, actor, message, int(tokens[2]))
+                text = '领取记录'
             elif tokens[0] == 'rpedit' and len(tokens) == 4:
                 service.edit_draft(nonce, actor, message, tokens[2], tokens[3])
                 text = '参数已更新，请核对后确认'
