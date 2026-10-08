@@ -55,7 +55,8 @@ def total(env):
 def command(env, text='/炸金花 10', index=0, mid=710, thread=22, private=False):
     actor = env.actors[index]
     return {'from': actor, 'chat': {'id': actor['id'] if private else GROUP, 'type': 'private' if private else 'supergroup'}, 'message_id': mid,
-            'text': text, **({} if private else {'message_thread_id': thread})}
+            'text': text, **({} if private else {'message_thread_id': thread}),
+            **({'is_topic_message': True} if not private and thread else {})}
 
 
 async def create(env, **kw):
@@ -69,6 +70,8 @@ def card(env, row):
     body['from'] = {'id': 123, 'is_bot': True}
     body['message_id'] = row['card_message_id']
     body['reply_to_message'] = {'message_id': row['command_message_id']}
+    if row['thread_id']:
+        body['is_topic_message'] = True
     return body
 
 

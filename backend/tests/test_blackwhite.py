@@ -40,7 +40,8 @@ def env(request):
 
 def command_message(env, mid=601, text='/黑白板 50', thread=25):
     return {'from': env.actors[0], 'chat': {'id': GROUP, 'type': 'supergroup'},
-            'message_id': mid, 'message_thread_id': thread, 'text': text}
+            'message_id': mid, 'message_thread_id': thread, 'text': text,
+            **({'is_topic_message': True} if thread else {})}
 
 
 async def create(env, stake=50, mid=601, thread=25):
@@ -54,6 +55,8 @@ def card(env, row):
     body['from'] = {'id': 123, 'is_bot': True}
     body['message_id'] = row['card_message_id']
     body['reply_to_message'] = {'message_id': row['command_message_id']}
+    if row['thread_id']:
+        body['is_topic_message'] = True
     body.pop('from_', None)
     return body
 
