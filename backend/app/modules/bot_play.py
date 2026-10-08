@@ -20,6 +20,8 @@ class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRank
     async def _play_command(self, message):
         first=str(message.get('text') or '').strip().split()
         verb=first[0].lower().split('@',1)[0] if first else ''
+        if verb.startswith('/') and ('@' not in first[0] or self._bot_username and first[0].rsplit('@',1)[1].lower()==self._bot_username.lower()):
+            self._market_abandon_input(message,message.get('from') or {})
         if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助',
                     '/股票','/stock','/认购','/买入','/卖出','/持仓','/委托','/成交','/自选','/股市帮助','/股票资讯',
                     '/积分榜','/pointsrank','/游戏','/games','/玩法'):

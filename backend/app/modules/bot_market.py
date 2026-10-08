@@ -29,6 +29,15 @@ class MarketBotMixin:
                              lambda: self._plugins.config('stock_market') if self._plugins else {},
                              lambda: self._plugin_on('stock_market'), self._active_bot_id)
 
+    def _market_abandon_input(self,message,actor):
+        if self._db is None or any(message.get(k) for k in ('forward_origin','forward_date','sender_chat','is_automatic_forward')):return
+        try:tg=reliable_user({'from':actor})
+        except GroupPointsError:return
+        chat=message.get('chat') or {}
+        if chat.get('type')!='private' or str(chat.get('id'))!=tg:return
+        self._check_bot_identity()
+        self._db.execute('DELETE FROM market_inputs WHERE bot_id=? AND tg_id=?',(self._active_bot_id,tg))
+
     def _market_link(self):
         return [[{'text': '私聊股票', 'url': f'https://t.me/{self._bot_username}'+ '?start=market'}]] if self._bot_username else []
 
@@ -73,6 +82,7 @@ class MarketBotMixin:
             if str(chat.get('id')) != tg: raise PlayError('仅本人私聊可操作')
             thread = 0
         else: _, thread = service.group(message)
+        if chat.get('type')=='private':self._market_abandon_input(message,message.get('from') or {})
         token = secrets.token_hex(12)
         self._db.execute('INSERT INTO market_panels(nonce,bot_id,user_id,tg_id,chat_id,thread_id,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?)',
                          (token, self._active_bot_id, member['emby_user_id'], tg, str(chat['id']), thread, encode(payload), time.time()))
@@ -206,6 +216,8 @@ class MarketBotMixin:
 
     async def _market_set(self,panel,payload):
         if payload.get('view') in ('watch','input','confirm','hold','orders','history','done'): self._market_private(panel)
+        if payload.get('view')!='input':
+            self._db.execute('DELETE FROM market_inputs WHERE bot_id=? AND tg_id=? AND panel=?',(self._active_bot_id,panel['tg_id'],panel['nonce']))
         self._db.execute('UPDATE market_panels SET payload_json=? WHERE nonce=?',(encode(payload),panel['nonce']))
         await self._market_draw(self._market_panel(panel['nonce']))
 
@@ -216,6 +228,16 @@ class MarketBotMixin:
         deep=verb=='/start' and len(parts)==2 and parts[1]=='market'
         numeric=bool(parts and (re.fullmatch('[0-9]{1,9}',parts[0]) or parts[0]=='取消'))
         if verb not in commands and not deep and not numeric:return False
+        # Ordinary numbers/cancel belong to existing registration, requests and admin flows
+        # unless this exact private user has persisted market input (or a processed duplicate).
+        if numeric:
+            chat=message.get('chat') or {};uid=(message.get('from') or {}).get('id')
+            if (self._db is None or type(uid) is not int or uid<=0 or chat.get('type')!='private'
+                    or str(chat.get('id'))!=str(uid)):return False
+            self._check_bot_identity()
+            pending=self._db.one('SELECT 1 n FROM market_inputs WHERE bot_id=? AND tg_id=?',(self._active_bot_id,str(uid)))
+            duplicate=self._db.one('SELECT 1 n FROM market_input_messages WHERE bot_id=? AND tg_id=? AND message_id=?',(self._active_bot_id,str(uid),message.get('message_id')))
+            if not pending and not duplicate:return False
         self._check_bot_identity()
         if '@' in first and (not self._bot_username or first.split('@',1)[1]!=self._bot_username.lower()):return True
         chat=message.get('chat') or {}

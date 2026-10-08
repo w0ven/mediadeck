@@ -4643,6 +4643,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return
         if in_group and data.startswith("resetpw"):
             return
+        if not in_group and str(tg_user_id).isascii() and str(tg_user_id).isdecimal():
+            self._market_abandon_input(message,{'id':int(tg_user_id),'is_bot':False})
         self._touch_panel(chat_id, message_id)
         if message.get('photo'):
             self._photo_panels.add((str(chat_id), int(message_id)))
