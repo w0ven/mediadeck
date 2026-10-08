@@ -528,6 +528,11 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 {"command": "today", "description": "今日榜 · 截至查看时"},
                 {"command": "transfer", "description": "回复消息发放积分" if admin else "回复消息转账（扣本人余额）"},
                 {"command": "redpacket", "description": "积分红包 · 模式/金额/份数"},
+                {"command": "games", "description": "游戏与市场 · 玩法"},
+                {"command": "blackwhite", "description": "黑白板 · 五人同注"},
+                {"command": "poker", "description": "炸金花 · 三张牌"},
+                {"command": "stock", "description": "模拟股票 · 公司行情"},
+                {"command": "pointsrank", "description": "积分榜 · 当前可用"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
             ]
@@ -546,6 +551,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             {"command": "me", "description": "我的账号"},
             {"command": "usage", "description": "用量与观看时长"},
             {"command": "rebind", "description": "TG 换绑申请"},
+            {"command": "games", "description": "游戏与市场 · 玩法"},
+            {"command": "stock", "description": "模拟股票 · 交易持仓"},
+            {"command": "pointsrank", "description": "积分榜 · 当前可用"},
             {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
             {"command": "today", "description": "今日榜 · 截至查看时"},
             {"command": "help", "description": "使用说明"},
@@ -1092,7 +1100,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return False
 
     def member_menu(self) -> list[list[dict[str, str]]]:
-        return [
+        rows = [
             [{"text": "👤 我的账号", "callback_data": "me"},
              {"text": "🌐 播放线路", "callback_data": "me_nodes"}],
             [{"text": "🎬 求片中心", "callback_data": "request_center"},
@@ -1100,6 +1108,15 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             [{"text": "🏆 排行榜", "callback_data": "rank"},
              {"text": "帮助", "callback_data": "help"}],
         ]
+        play = []
+        if self._plugin_on('blackwhite') or self._plugin_on('poker'):
+            play.append({'text': '🎲 游戏玩法', 'callback_data': 'play_hub'})
+        if self._plugin_on('stock_market'):
+            play.append({'text': '📈 模拟股票', 'callback_data': 'market_home'})
+        if self._plugin_on('points_ranking'):
+            play.append({'text': '🏆 积分榜', 'callback_data': 'points_board'})
+        rows.extend(play[i:i+2] for i in range(0,len(play),2))
+        return rows
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
@@ -4382,7 +4399,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if data.startswith(PACKET_CALLBACKS):
             await self._packet_callback(data, message, from_user, callback_id)
             return
-        if data == 'checkin' or data.startswith(('notice:', 'card:', 'buy:', 'buyok:')):
+        if data in ('checkin','play_hub','market_home','points_board') or data.startswith(('notice:', 'card:', 'buy:', 'buyok:')):
             try:
                 reliable_user({'from': from_user})
             except GroupPointsError:
@@ -4545,7 +4562,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return
         if in_group:
             public = data in ('membership_recheck', 'me', 'me_status', 'usage', 'home', 'help', 'rules', 'rank', 'top',
-                              'panel_close', 'admin', 'admin_root', 'admin_find', 'admin_card',
+                              'panel_close', 'play_hub', 'market_home', 'points_board', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_more', 'admin_renew', 'admin_score', 'admin_usage',
                               'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift', 'admin_disable', 'admin_enable')
             public = public or data.startswith(('admin_access_ok:', 'admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
@@ -4640,7 +4657,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         # submit a request after the member has returned to the parent menu.
         if data in ('home', 'me', 'bag', 'bag_records', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
-                    'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry'):
+                    'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry',
+                    'play_hub', 'market_home', 'points_board'):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
@@ -4664,6 +4682,13 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return
         if data == "rebind":
             await self._start_rebind(chat_id, tg_user_id)
+            return
+        if data in ('play_hub','market_home','points_board'):
+            from app.modules.play_money import PlayError
+            try:
+                await self._play_menu_open(data,chat_id,tg_user_id,tg_name,message)
+            except PlayError as exc:
+                await self._answer_callback(callback_id,str(exc))
             return
         if data == "help":
             await self._edit(

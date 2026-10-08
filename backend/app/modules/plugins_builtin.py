@@ -38,6 +38,7 @@ from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.market_views import MarketPlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
+from app.modules.points_ranking import PointsRankingPlugin
 from app.modules.poker import PokerPlugin
 
 # How long a "we told you" note is kept before it is considered stale. Without
@@ -914,6 +915,7 @@ BUILTIN_PLUGINS = (
     BlackwhitePlugin,
     PokerPlugin,
     MarketPlugin,
+    PointsRankingPlugin,
 )
 
 

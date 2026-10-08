@@ -1219,6 +1219,19 @@ async function runGroupAudit() {
    job to the panel means adding a file on the server, not editing this file. */
 
 const automation = { category: 'task', open: {}, busy: {} };
+const PLAY_PLUGINS = ['checkin_cleanup','blackwhite','poker','stock_market','points_ranking'];
+
+function pluginFeatureGroups(cards) {
+  const grid = rows => `<div class="plugin-grid">${rows.map(pluginCard).join('')}</div>`;
+  if (automation.category !== 'points') return grid(cards);
+  const original = cards.filter(c => !PLAY_PLUGINS.includes(c.id));
+  const groups = [['群消息清理',['checkin_cleanup']],['群内游戏',['blackwhite','poker']],['股票与积分榜',['stock_market','points_ranking']]];
+  return (original.length ? grid(original) : '') + groups.map(([name, ids]) => {
+    const rows = cards.filter(c => ids.includes(c.id));
+    if (!rows.length) return '';
+    return `<details class="plugin-feature-group" open><summary>${esc(name)} <span class="muted">${rows.filter(c=>c.enabled).length}/${rows.length} 已启用</span></summary>${grid(rows)}</details>`;
+  }).join('');
+}
 
 const PLUGIN_CATEGORIES = [
   { id: 'task', label: '任务' },
@@ -1244,13 +1257,13 @@ PAGES.automation = async (context = pageContext('automation')) => {
     request: '还没有已注册的求片任务' })[automation.category]
     || '还没有已注册的任务';
   const body = cards.length
-    ? `<div class="plugin-grid">${cards.map(pluginCard).join('')}</div>`
+    ? pluginFeatureGroups(cards)
     : `<div class="card"><div class="empty">${emptyLabel}</div></div>`;
 
   $('#view').innerHTML = `
     <div class="help">${{
     points: `积分功能和定时任务共用同一套开关与配置。<b>签到和转账由成员在机器人里触发</b>，
-       这里的「立即运行」只统计不发放；<b>关掉签到/转账开关，机器人里对应的按钮就会消失；背包配置不改变商品上下架或已有权益</b>。`,
+       这里的「立即运行」只统计不发放；<b>关掉签到/转账开关，机器人里对应的按钮就会消失；背包配置不改变商品上下架或已有权益</b>。游戏/股票关闭后不再接新风险，已有局结算、退款与撤单仍可进行。`,
     request: `求片相关的定时任务。<b>每条求片在提交时就会推给上片员</b>，
        这里的摘要只是每天提醒一次还有多少没人接，避免没人接的求片一直没动静。`,
   }[automation.category]
@@ -1377,7 +1390,12 @@ function pluginFields(c) {
     checkin:[['基础与连签',['streak_tiers'],true],['周末与默认活动',['weekends','double_ppm','multiplier','drops'],true],['节日管理',['holidays'],true]],
     inventory:[['道具叠加限制',['bandwidth_cap_mbps','streams_cap'],true],['称号同步设置',['title_chat'],false]],
     points_transfer:[['转账额度与手续费',['enabled_for_members','daily_limit','min_amount','fee_percent'],true],['收款安全设置',['restrict_receivers'],false]],
-    red_packets:[['红包额度与有效期',['enabled_for_members','max_total','max_parts','ttl_hours'],true]]
+    red_packets:[['红包额度与有效期',['enabled_for_members','max_total','max_parts','ttl_hours'],true]],
+    checkin_cleanup:[['群消息保留',['delay_seconds'],true]],
+    blackwhite:[['押注设置',['default_stake','min_stake','max_stake'],true],['高级设置',['lobby_seconds'],false]],
+    poker:[['底注与预算',['default_ante','min_ante','max_ante','budget'],true],['高级设置',['lobby_seconds','step_seconds'],false]],
+    stock_market:[['市场与手续费',['ipo_enabled','trading_enabled','fee_bps','news_enabled'],true],['高级风控',['ipo_limit','holding_limit','order_quantity','max_price','max_notional','max_orders','order_hours','halted_codes'],false]],
+    points_ranking:[['排行榜显示',['page_size'],true]]
   }[c.id];
   if (!groups) return (c.fields||[]).map(f=>pluginField(c.id,f,c.config?.[f.key])).join('');
   const used = new Set(groups.flatMap(g=>g[1]));
@@ -1451,6 +1469,11 @@ function pluginDelivery(c) {
     </details>`;
 }
 
+function pluginLiveStatus(c) {
+  if (!c.live_status) return '';
+  return `<div class="plugin-live kv-row" aria-label="当前状态">${Object.entries(c.live_status).map(([key,value])=>`<span class="kv"><b>${esc(key)}</b>${esc(String(value))}</span>`).join('')}</div>`;
+}
+
 function pluginLastRun(c) {
   const last = c.last_run;
   if (!last) return '<div class="muted">尚未运行过</div>';
@@ -1487,11 +1510,13 @@ function pluginCard(c) {
     </div>
     <div class="card-body">
       <div class="muted" style="line-height:1.6;margin-bottom:12px">${esc(c.description)}</div>
+      ${pluginLiveStatus(c)}
       ${pluginFields(c)}
       <div class="toolbar" style="margin-top:12px">
         <button class="btn primary" data-act="save" ${busy ? 'disabled' : ''}>保存</button>
         <button class="btn" data-act="run" ${busy ? 'disabled' : ''}>
-          ${busy ? '运行中…' : '立即运行'}</button>
+          ${busy ? '运行中…' : c.id==='checkin_cleanup' ? '重试未删消息' : PLAY_PLUGINS.includes(c.id) ? '检查与恢复' : '立即运行'}</button>
+        ${PLAY_PLUGINS.includes(c.id) ? '<button class="btn sm" data-act="refresh-status">刷新状态</button>' : ''}
         <button class="btn sm" data-act="history">${open ? '收起历史' : '历史'}</button>
         ${c.id === 'viewing_report' ? `<button class="btn" data-act="retry-failed" ${busy || !c.delivery?.retryable ? 'disabled' : ''}>仅重试失败对象</button><button class="btn sm" data-act="refresh-delivery">刷新结果</button>` : ''}
       </div>
@@ -1600,6 +1625,20 @@ function bindPluginCard(c) {
   const el = pluginCardEl(c.id);
   if (!el) return;
   bindItemizedEditor(el, c.id);
+  if (PLAY_PLUGINS.includes(c.id)) (c.fields || []).forEach(f => {
+    const input = el.querySelector(`#pl-${c.id}-${f.key}`);
+    if (input) input.dataset.initialValue = f.kind === 'bool' ? String(input.checked) : input.value;
+  });
+  if (PLAY_PLUGINS.includes(c.id)) el.querySelector(`#pl-${c.id}-enabled`).dataset.initialValue = String(c.enabled);
+  const liveRefresh = el.querySelector('[data-act="refresh-status"]');
+  if (liveRefresh) liveRefresh.onclick = async () => {
+    try {
+      const fresh = await api(`/api/plugins/${encodeURIComponent(c.id)}`);
+      if (!el.isConnected) return;
+      el.querySelector('.plugin-live').outerHTML = pluginLiveStatus(fresh);
+      configFeedback(el, '状态已更新；输入草稿未修改。');
+    } catch (error) { if (el.isConnected) configFeedback(el, '状态读取失败：'+error.message,true); }
+  };
   el.querySelector('[data-act="save"]').onclick = () => savePlugin(c);
   el.querySelector('[data-act="run"]').onclick = () => runPlugin(c);
   el.querySelector('[data-act="history"]').onclick = () => togglePluginHistory(c);
@@ -1622,10 +1661,13 @@ function pluginPayload(c) {
   (c.fields || []).forEach((f) => {
     const fieldEl = $(`#pl-${c.id}-${f.key}`);
     if (!fieldEl) return;
-    config[f.key] = f.kind === 'bool' ? fieldEl.checked : fieldEl.value;
+    const value = f.kind === 'bool' ? fieldEl.checked : fieldEl.value;
+    if (!PLAY_PLUGINS.includes(c.id) || String(value) !== fieldEl.dataset.initialValue) config[f.key] = value;
   });
   const sw = $(`#pl-${c.id}-enabled`);
-  return { enabled: sw ? sw.checked : c.enabled, config };
+  const payload = { config };
+  if (!PLAY_PLUGINS.includes(c.id) || !sw || String(sw.checked)!==sw.dataset.initialValue) payload.enabled = sw ? sw.checked : c.enabled;
+  return payload;
 }
 
 async function savePlugin(c, run = false) {
@@ -1635,6 +1677,12 @@ async function savePlugin(c, run = false) {
   if (invalid) { invalid.reportValidity(); return; }
   // Capture before any DOM update, and never reload unrelated plugin editors.
   const payload = pluginPayload(c);
+  const submitted = {};
+  if (PLAY_PLUGINS.includes(c.id)) (c.fields || []).forEach(f => {
+    const input = el.querySelector(`#pl-${c.id}-${f.key}`);
+    if (input) submitted[f.key] = f.kind === 'bool' ? String(input.checked) : input.value;
+  });
+  const submittedEnabled = el.querySelector(`#pl-${c.id}-enabled`).checked;
   const buttons = [...el.querySelectorAll('[data-act="save"],[data-act="run"]')];
   automation.busy[c.id] = true;
   buttons.forEach(button => { button.disabled = true; });
@@ -1643,10 +1691,29 @@ async function savePlugin(c, run = false) {
     const saved = await api(`/api/plugins/${encodeURIComponent(c.id)}`, {
       method: 'POST', body: JSON.stringify(payload) });
     Object.assign(c, saved);
+    if (PLAY_PLUGINS.includes(c.id) && el.isConnected) {
+      (c.fields || []).forEach(f => {
+        const input = el.querySelector(`#pl-${c.id}-${f.key}`);
+        if (!input) return;
+        const fresh = String(c.config?.[f.key] ?? f.default);
+        const current = f.kind === 'bool' ? String(input.checked) : input.value;
+        if (current === submitted[f.key]) { if (f.kind === 'bool') input.checked = fresh==='true'; else input.value = fresh; }
+        input.dataset.initialValue = fresh;
+      });
+      const sw = el.querySelector(`#pl-${c.id}-enabled`);
+      if (sw.checked===submittedEnabled) sw.checked=c.enabled;
+      sw.dataset.initialValue=String(c.enabled);
+      el.querySelector('.plugin-live').outerHTML = pluginLiveStatus(c);
+      const group = el.closest('.plugin-feature-group');
+      if (group) { const switches=[...group.querySelectorAll('.plugin-switch input')]; group.querySelector(':scope > summary .muted').textContent=`${switches.filter(input=>input.checked).length}/${switches.length} 已启用`; }
+    }
     if (run) {
       const r = await api(`/api/plugins/${encodeURIComponent(c.id)}/run`, { method: 'POST' });
       // The run response includes the recorded result, even on task failure.
-      if (r.card && el.isConnected) el.querySelector('.plugin-result').innerHTML = pluginLastRun(r.card);
+      if (r.card && el.isConnected) {
+        el.querySelector('.plugin-result').innerHTML = pluginLastRun(r.card);
+        if (PLAY_PLUGINS.includes(c.id)) el.querySelector('.plugin-live').outerHTML = pluginLiveStatus(r.card);
+      }
       if (!r.ok) throw new Error(r.error || '任务运行失败，见运行历史');
     }
     if (!el.isConnected) return;

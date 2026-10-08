@@ -234,6 +234,10 @@ def test_private_failure_marked_seen_cost_doubles_then_retry_same_cards_no_debit
         p = next(p for p in service(env).players(row['nonce']) if p['id'] == first['id'])
         assert p['seen'] == 1 and p['cards_json'] == saved_cards
         assert env.db.one("SELECT state FROM play_photos WHERE mode='private'")['state'] == 'blocked'
+        report=env.services.registry.card('poker')['live_status']
+        assert report['牌图待处理']==1
+        assert report['最近牌图异常']==env.db.one("SELECT last_error FROM play_photos WHERE mode='private'")['last_error']
+        assert saved_cards not in json.dumps(report)
         assert env.db.query('SELECT * FROM points_ledger ORDER BY id') == before
         row = await click(env, row, 'follow')
         assert env.db.one('SELECT amount FROM poker_actions')['amount'] == 20
@@ -241,6 +245,7 @@ def test_private_failure_marked_seen_cost_doubles_then_retry_same_cards_no_debit
         await env.bot._dispatch_update({'message': command(env, '/看牌 '+row['nonce'], index=index_for(env, first), private=True)})
         assert env.photo_calls[-1]['png'] == failed_bytes[0]
         assert env.db.one("SELECT state FROM play_photos WHERE mode='private'")['state'] == 'sent'
+        assert env.services.registry.card('poker')['live_status']['牌图待处理']==0
         assert next(p for p in service(env).players(row['nonce']) if p['id'] == first['id'])['cards_json'] == saved_cards
         assert env.db.query('SELECT * FROM points_ledger ORDER BY id') == before
         n = len(env.photo_calls)

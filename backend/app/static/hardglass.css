@@ -334,6 +334,11 @@ body.member-drawer-open{overflow:hidden}#member-detail:not(.hidden){position:fix
 }
 
 /* Scoped points settings: original glass cards, compact editable summaries. */
+.plugin-feature-group { margin:18px 0; }
+.plugin-feature-group > summary { cursor:pointer; padding:12px 4px; color:#c6d3ec; font-weight:600; }
+.plugin-feature-group > summary .muted { margin-left:10px; font-size:11px; font-weight:400; }
+.plugin-live { margin-bottom:12px; overflow-wrap:anywhere; }
+.plugin-live .kv { max-width:100%; white-space:normal; }
 .plugin-settings-group { border-top:1px solid #a2b3df18; margin:10px 0; padding-top:4px; }
 .plugin-settings-group > summary { cursor:pointer; padding:10px 0; color:#c6d3ec; font-size:12px; }
 .plugin-settings-group > summary .muted { margin-left:8px; }

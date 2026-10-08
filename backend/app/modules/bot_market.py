@@ -95,6 +95,8 @@ class MarketBotMixin:
             if page+1<pages: nav.append(button('下一页 ›','page',page+1))
             if nav: keyboard.append(nav)
             return rows[page*PAGE:(page+1)*PAGE],f'{page+1}/{pages}页'
+        if view=='leaderboard': return self._ranking_view(panel,p)
+        if view in ('playhub','gamehelp'): return self._play_hub_view(panel,p)
         title='📈 <b>模拟股票</b>'
         if view in ('search','watch'):
             keyword=str(p.get('keyword') or '')[:80]
@@ -209,6 +211,7 @@ class MarketBotMixin:
 
     async def _market_command(self,message):
         parts=str(message.get('text') or '').strip().split();first=parts[0].lower() if parts else '';verb=first.split('@',1)[0]
+        if verb=='/stock':verb='/股票'
         commands={'/股票','/认购','/买入','/卖出','/持仓','/委托','/成交','/自选','/股市帮助','/股票资讯'}
         deep=verb=='/start' and len(parts)==2 and parts[1]=='market'
         numeric=bool(parts and (re.fullmatch('[0-9]{1,9}',parts[0]) or parts[0]=='取消'))
@@ -274,6 +277,17 @@ class MarketBotMixin:
             if len(parts) not in (3,4):raise PlayError('股票按钮无效')
             panel=self._market_panel(parts[1]);tg=self._market_context(panel,message,actor,data);service=self._market_service();p=json.loads(panel['payload_json']);op=parts[2];arg=parts[3] if len(parts)==4 else None
             if op=='view':await self._market_set(panel,{'view':arg,'page':0})
+            elif op=='gamehelp':await self._market_set(panel,{'view':'gamehelp','which':arg})
+            elif op=='launch':
+                if message.get('chat',{}).get('type') not in ('group','supergroup'): raise PlayError('请在授权群创建牌局')
+                source={**message,'from':actor}
+                if arg=='bw':
+                    row=self._blackwhite_service().create(source)
+                    await self._blackwhite_publish(row['nonce'])
+                elif arg=='poker':
+                    row=self._poker_service().create(source)
+                    await self._poker_publish(row['nonce'])
+                else:raise PlayError('游戏操作无效')
             elif op=='page':
                 if not arg or not re.fullmatch('[0-9]{1,7}',arg): raise PlayError('页码无效')
                 integer(int(arg),'页码',0,1000000);p['page']=int(arg);await self._market_set(panel,p)

@@ -151,11 +151,17 @@ class BlackwhitePlugin(Plugin):
     async def run(self, config):
         if self.ctx.telegram:
             await self.ctx.telegram._blackwhite_tick()
+        return self.readonly_status()
+
+    def readonly_status(self):
         db = self.ctx.db
         states = {r['state']: r['n'] for r in db.query("SELECT state,COUNT(*) n FROM play_rounds WHERE kind='blackwhite' GROUP BY state")}
         errors = db.one("SELECT COUNT(*) n FROM play_rounds WHERE kind='blackwhite' AND (publish_error<>'' OR (card_message_id IS NULL AND card_send_state='sending'))")['n']
-        return {'等待中': states.get('lobby', 0), '已结算': states.get('settled', 0),
-                '已全退': states.get('expired', 0) + states.get('cancelled', 0), '群卡待处理': errors}
+        report = {'等待中': states.get('lobby', 0), '已结算': states.get('settled', 0),
+                  '已全退': states.get('expired', 0) + states.get('cancelled', 0), '群卡待处理': errors}
+        issue = db.one("SELECT publish_error FROM play_rounds WHERE kind='blackwhite' AND publish_error<>'' ORDER BY created_at DESC LIMIT 1")
+        if issue: report['最近群卡异常'] = issue['publish_error'][:240]
+        return report
 
 
 def results(row):

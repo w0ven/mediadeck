@@ -7,19 +7,29 @@ from contextlib import contextmanager
 
 from app.modules.bot_blackwhite import BlackwhiteBotMixin
 from app.modules.bot_market import MarketBotMixin
+from app.modules.bot_play_hub import PlayHubBotMixin
 from app.modules.bot_poker import PokerBotMixin
 from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
+from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
 
 PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'st:')
 
 
-class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin):
+class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRankingBotMixin, PlayHubBotMixin):
     async def _play_command(self, message):
+        first=str(message.get('text') or '').strip().split()
+        verb=first[0].lower().split('@',1)[0] if first else ''
+        if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助',
+                    '/股票','/stock','/认购','/买入','/卖出','/持仓','/委托','/成交','/自选','/股市帮助','/股票资讯',
+                    '/积分榜','/pointsrank','/游戏','/games','/玩法'):
+            self._play_remember(message,message.get('from') or {})
         return (await self._blackwhite_command(message) or await self._poker_command(message)
+                or await self._ranking_command(message) or await self._play_hub_command(message)
                 or await self._market_command(message))
 
     async def _play_callback(self, data, message, actor, callback_id):
+        self._play_remember(message,actor)
         if data.startswith(('bw:', 'bwh:')):
             await self._blackwhite_callback(data, message, actor, callback_id)
         elif data.startswith('st:'):

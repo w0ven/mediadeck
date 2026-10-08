@@ -89,7 +89,12 @@ class CheckinCleanupPlugin(Plugin):
         return CleanupService(self.ctx.db).summary()
 
     def status(self):
-        return CleanupService(self.ctx.db).summary()
+        report = CleanupService(self.ctx.db).summary()
+        issue = self.ctx.db.one("SELECT last_error FROM play_jobs WHERE kind='checkin.delete' AND last_error<>'' AND state NOT IN ('deleted','gone') ORDER BY id DESC LIMIT 1")
+        if issue: report['最近未删原因'] = issue['last_error'][:240]
+        return report
+
+    readonly_status = status
 
 
 def payload(job):

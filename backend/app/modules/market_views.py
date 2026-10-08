@@ -99,6 +99,9 @@ class MarketPlugin(Plugin):
 
     async def run(self,config):
         if self.ctx.telegram: await self.ctx.telegram._market_tick()
+        return self.readonly_status()
+
+    def readonly_status(self):
         db=self.ctx.db
         sinks={r['kind']:r['n'] for r in db.query("SELECT kind,SUM(amount) n FROM play_funds WHERE kind IN ('issuance','fee') GROUP BY kind")}
         return {'公司':db.one('SELECT COUNT(*) n FROM market_companies')['n'],

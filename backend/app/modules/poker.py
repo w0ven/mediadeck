@@ -322,6 +322,14 @@ class PokerPlugin(Plugin):
 
     async def run(self, config):
         if self.ctx.telegram: await self.ctx.telegram._poker_tick()
+        return self.readonly_status()
+
+    def readonly_status(self):
         states = {r['state']: r['n'] for r in self.ctx.db.query("SELECT state,COUNT(*) n FROM play_rounds WHERE kind='poker' GROUP BY state")}
         failed = self.ctx.db.one("SELECT COUNT(*) n FROM play_photos WHERE state IN ('blocked','failed') OR last_error<>''")['n']
-        return {'组局': states.get('lobby', 0), '进行中': states.get('running', 0), '已结算': states.get('settled', 0), '牌图待处理': failed}
+        report = {'组局': states.get('lobby', 0), '进行中': states.get('running', 0), '已结算': states.get('settled', 0), '牌图待处理': failed}
+        issue = self.ctx.db.one("SELECT last_error FROM play_photos WHERE last_error<>'' ORDER BY id DESC LIMIT 1")
+        if issue: report['最近牌图异常'] = issue['last_error'][:240]
+        group = self.ctx.db.one("SELECT publish_error FROM play_rounds WHERE kind='poker' AND publish_error<>'' ORDER BY created_at DESC LIMIT 1")
+        if group: report['最近群卡异常'] = group['publish_error'][:240]
+        return report
