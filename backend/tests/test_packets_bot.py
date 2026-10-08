@@ -53,7 +53,8 @@ def test_received_command_options_confirm_claim_popup_progress_and_best(env, tex
         row = await dispatch(env, text)
         assert row['mode'] == mode and row['card_message_id'] and row['thread_id'] == 7
         body = env.tg.text(GROUP, row['card_message_id'])
-        assert '100 积分' in body and '10 份' in body and '24 小时' in body and '从本人积分扣除总额' in body
+        assert '100 积分' in body and '10 份' in body and '24 小时' in body and '待确认' in body
+        assert '扣除' not in body and '领取范围' not in body
         assert env.services.points.balance('u1') == 5000
         actions = env.tg.actions(GROUP, row['card_message_id'])
         assert all(len(b['callback_data'].encode()) <= 64 for b in actions)
@@ -64,13 +65,14 @@ def test_received_command_options_confirm_claim_popup_progress_and_best(env, tex
         await callback(env, row, 'rpedit', suffix=':parts:1')
         await asyncio.gather(*[callback(env, row) for _ in range(3)])
         assert env.services.points.balance('u1') == 4500
-        assert '0 / 1' in env.tg.text(GROUP, row['card_message_id'])
+        assert '0/1' in env.tg.text(GROUP, row['card_message_id'])
         assert 'rpclaim:' in str(env.tg.actions(GROUP, row['card_message_id']))
         await callback(env, row, 'rpclaim', actor=904)
         assert env.services.points.balance('u2') == 500
         assert alert(env)['show_alert'] and '500 积分' in alert(env)['text']
         end = env.tg.text(GROUP, row['card_message_id'])
-        assert '全部领完' in end and '手气最佳' in end and 'ViewerB' in end
+        assert '已领完' in end and '手气最佳' in end and '成员' in end
+        assert 'ViewerB' not in end  # missing TG display name must not expose account name
         assert not env.tg.actions(GROUP, row['card_message_id'])
         public = '\n'.join(p.get('text', '') for m, p in env.tg.calls if m in ('sendMessage', 'editMessageText'))
         assert '余额' not in public and 'mint' not in public and '不扣管理员' not in public
@@ -89,7 +91,7 @@ def test_full_reward_flow_distinct_finance_and_public_copy_and_backend_audit(env
         row = await dispatch(env, '/红包 等额 100 1', actor=ADMIN)
         assert row['funding'] == 'reward'
         text = env.tg.text(GROUP, row['card_message_id'])
-        assert '奖励红包' in text and '扣除' not in text and 'mint' not in text and '不扣' not in text
+        assert '等额红包' in text and '奖励红包' not in text and '扣除' not in text and 'mint' not in text and '不扣' not in text
         await callback(env, row)
         assert env.services.points.balance('admin') == 0
         await callback(env, row, 'rpclaim', actor=904)
@@ -200,7 +202,8 @@ def test_publish_failure_duplicate_confirm_and_restart_worker_same_message_only(
         final = env.db.one('SELECT * FROM red_packets')
         assert final['status'] == 'expired'
         assert env.services.points.balance('u1') + env.services.points.balance('u2') == 5000
-        assert '已退回' in env.tg.text(GROUP, row['card_message_id'])
+        assert '已过期' in env.tg.text(GROUP, row['card_message_id'])
+        assert '已退回' not in env.tg.text(GROUP, row['card_message_id'])
     asyncio.run(run())
 
 

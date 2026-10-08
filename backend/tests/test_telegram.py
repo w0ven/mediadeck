@@ -1006,7 +1006,8 @@ def test_checking_in_from_the_bot_reports_points_and_streak() -> None:
     text = bot.posts[0]["text"]  # type: ignore[attr-defined]
     assert bot.posts[0]["reply_parameters"] == {"message_id": 2}  # type: ignore[attr-defined]
     assert "签到成功" in text and "+15" in text
-    assert "2" in text and "115" in text
+    assert "连签奖励" in text and "+5" in text and "115" in text
+    assert "连续签到" not in text and "基础" not in text
 
 
 def test_a_second_checkin_says_so_instead_of_paying_again() -> None:
