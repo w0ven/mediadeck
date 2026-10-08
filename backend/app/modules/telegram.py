@@ -41,6 +41,7 @@ from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
+from app.modules.bot_play import PlayBotMixin
 from app.modules.bot_rebinding import RebindBotMixin
 from app.modules.bot_requests import RequestBotMixin
 from app.modules.bot_views import (
@@ -260,7 +261,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin):
+class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -872,6 +873,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if keyboard:
             payload["reply_markup"] = {"inline_keyboard": keyboard}
         result = await self._call("sendMessage", payload)
+        self._capture_checkin_feedback(payload, result)
         if isinstance(result, dict) and result.get("message_id"):
             if _GROUP.get() and self._in_bound_chat(chat_id):
                 key = self._pkey(chat_id)
@@ -913,6 +915,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if reply_to_message_id is not None:
             payload['reply_parameters'] = {'message_id': reply_to_message_id}
         result = await self._call("sendMessage", payload)
+        self._capture_checkin_feedback(payload, result)
         if isinstance(result, dict) and result.get("message_id"):
             self._remember_menu(chat_id, result["message_id"], keyboard)
             return result.get("message_id")
@@ -1703,7 +1706,8 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         if _THREAD.get():
             payload["message_thread_id"] = _THREAD.get()
         # A receipt is not a menu: do not edit or replace the user's old panel.
-        await self._call("sendMessage", payload)
+        result = await self._call("sendMessage", payload)
+        self._capture_checkin_feedback(payload, result)
 
     async def _checkin(self, chat_id: Any, message_id: int,
                        member: dict[str, Any] | None, name: str = "") -> None:
@@ -4185,11 +4189,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                                     tg_user_id: str, tg_username: str, tg_name: str,
                                     text: str, in_group: bool) -> None:
         if self._checkin_command(text):
-            member = self._member_for_chat(tg_user_id)
-            if not member or await self.membership.gate(
-                    chat_id, tg_user_id, fresh_message=True,
-                    reply_to_message_id=message['message_id']):
-                await self._checkin(chat_id, message['message_id'], member, tg_name)
+            with self._checkin_cleanup_context(message, command=True, actor=tg_user_id):
+                member = self._member_for_chat(tg_user_id)
+                if not member or await self.membership.gate(
+                        chat_id, tg_user_id, fresh_message=True,
+                        reply_to_message_id=message['message_id']):
+                    await self._checkin(chat_id, message['message_id'], member, tg_name)
             return
         command = text.split()[0].lower().split('@', 1)[0] if text else ''
         reply = (message.get('reply_to_message') or {}).get('message_id')
@@ -4502,11 +4507,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             return
         if data == 'checkin':
             await self._answer_callback(callback_id)
-            member = self._member_for_chat(tg_user_id)
-            if not member or await self.membership.gate(
-                    chat_id, tg_user_id, fresh_message=True,
-                    reply_to_message_id=int(message_id)):
-                await self._checkin(chat_id, int(message_id), member, tg_name)
+            with self._checkin_cleanup_context(message, actor=tg_user_id):
+                member = self._member_for_chat(tg_user_id)
+                if not member or await self.membership.gate(
+                        chat_id, tg_user_id, fresh_message=True,
+                        reply_to_message_id=int(message_id)):
+                    await self._checkin(chat_id, int(message_id), member, tg_name)
             return
         panel = self._admin_panel(chat_id, message_id)
         targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
@@ -5026,6 +5032,9 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             packet_task = asyncio.create_task(self._packet_worker())
             self._in_flight.add(packet_task)
             packet_task.add_done_callback(self._in_flight.discard)
+            play_task = asyncio.create_task(self._play_worker())
+            self._in_flight.add(play_task)
+            play_task.add_done_callback(self._in_flight.discard)
         if self._gift_receipts and self.enabled:
             receipt_task = asyncio.create_task(self._gift_receipts.run())
             self._in_flight.add(receipt_task)
