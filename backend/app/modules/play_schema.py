@@ -82,3 +82,5 @@ def migrate(db):
     );
     CREATE INDEX IF NOT EXISTS play_photos_due ON play_photos(bot_id,state,due_at,lease_until);
     """)
+    from app.modules.market_schema import migrate as migrate_market
+    migrate_market(db)
