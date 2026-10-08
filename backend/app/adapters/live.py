@@ -508,6 +508,24 @@ class LiveEmby:
                 raise TypeError("invalid PlaybackInfo response")
             return r.status_code, data
 
+    async def short_catalogue_info(self, item: str, headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
+        """Real caller-scoped catalogue only; never open an unsigned STRM on ca1."""
+        base, _, timeout, verify = self._conn()
+        forwarded = {k: v for k, v in headers.items() if k.lower() not in
+                     {"host", "content-length", "connection", "transfer-encoding", "accept-encoding",
+                      "x-mediadeck-entry", "x-mediadeck-entry-key", "x-original-uri", "x-original-method"}}
+        async with self._client(timeout, verify) as client:
+            reply = await client.get(f"{base}/emby/Items", headers=forwarded,
+                                     params={"Ids": item, "Limit": "1", "Fields": "MediaSources,MediaStreams,Path"})
+        if reply.status_code != 200:
+            return reply.status_code, {}
+        document = reply.json()
+        items = document.get("Items") if isinstance(document, dict) else None
+        rows = [r for r in items or [] if isinstance(r, dict) and str(r.get("Id") or "") == item]
+        if len(rows) != 1 or not isinstance(rows[0].get("MediaSources"), list) or not rows[0]["MediaSources"]:
+            raise ValueError("short catalogue source unavailable")
+        return 200, {"MediaSources": rows[0]["MediaSources"]}
+
     async def media_sources_for_token(self, item: str, token: str) -> list[dict[str, Any]]:
         """Read source identity with the caller's credential, without a play lease."""
         base, _, timeout, verify = self._conn()

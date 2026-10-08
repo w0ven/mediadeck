@@ -122,6 +122,10 @@ class StreamAdmission:
         # A replacement must not be observed by its predecessor's snapshot.
         # Persist this guard so a Deck restart cannot reintroduce that race.
         self._db._ensure_column("stream_leases", "snapshot_guard", "INTEGER NOT NULL DEFAULT 0")
+        # Ancillary binding on the ORIGINAL lease, not a second admission store.
+        for field, kind in (("short_item", "TEXT NOT NULL DEFAULT ''"), ("short_source", "TEXT NOT NULL DEFAULT ''"),
+                            ("short_path", "TEXT NOT NULL DEFAULT ''"), ("short_expiry", "INTEGER NOT NULL DEFAULT 0")):
+            self._db._ensure_column("stream_leases", field, kind)
         # Legacy rows have no trustworthy issuance time. Give them one grace
         # period, not an immediate wipe; never reset deadlines on a restart.
         self._db.execute("UPDATE stream_leases SET pending_at=? WHERE pending_at=0",
@@ -362,6 +366,7 @@ class StreamAdmission:
     async def issue_info(self, uid: str, device: str, session_id: str,
                          issue: Any,
                          session_profile: dict[str, str] | None = None,
+                         short_context: dict[str, Any] | None = None,
                          ) -> tuple[Admission, int, dict[str, Any]]:
         """Keep admission + upstream issuance + PlaySessionId binding atomic.
 
@@ -377,6 +382,10 @@ class StreamAdmission:
             if not result.allowed:
                 return result, 403, {}
             matches = self._matching(rows, uid, device, session_id, session_profile)
+            if short_context is not None:
+                if len(matches) != 1:
+                    return replace(result, allowed=False, reason="session-unresolved"), 503, {}
+                short_context.update(matches[0])
             def release_failed_start():
                 # Only this request's newly acquired seat; never release a
                 # previous play when replacement metadata fails.
@@ -395,6 +404,10 @@ class StreamAdmission:
                 # the previous play's observed flag release this pending start
                 # when an old Stopped report makes the session briefly idle.
                 sid = str(matches[0]["Id"])
+                if short_context is not None:
+                    # Preserve original unlimited/admin exemption, but bind its
+                    # real session too so a signed short cannot survive a Stop.
+                    self._db.execute("INSERT OR IGNORE INTO stream_leases (user_id,session_id,pending_at) VALUES (?,?,?)", (uid, sid, time.time()))
                 previous = self._db.one("SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?", (uid, sid))
                 replacement = bool(previous and (previous["play_id"] or matches[0].get("NowPlayingItem")))
                 self._db.execute("UPDATE stream_leases SET "
@@ -405,6 +418,50 @@ class StreamAdmission:
                                  (str(data["PlaySessionId"]), str(data["PlaySessionId"]), int(replacement),
                                   str(data["PlaySessionId"]), time.time(), str(data["PlaySessionId"]), uid, sid))
             return result, code, data
+
+    def short_grant(self, play: str, item: str, source: str, tag: str) -> dict[str, Any] | None:
+        from app.modules.signing import user_tag
+        rows = self._db.query("SELECT * FROM stream_leases WHERE play_id=? AND short_item=?", (play, item))
+        if len(rows) != 1:
+            return None
+        row = rows[0]
+        if user_tag(row["user_id"]) != tag or (source and row["short_source"] != source) or row["short_expiry"] <= time.time():
+            return None
+        return row
+
+    def bind_short(self, uid: str, play: str, item: str, source: str, path: str, expiry: int) -> None:
+        from app.modules.signing import user_tag
+        self._db.execute("UPDATE stream_leases SET short_item=?,short_source=?,short_path=?,short_expiry=? WHERE user_id=? AND play_id=?",
+                                  (item, source, path, expiry, uid, play))
+        if not self.short_grant(play, item, source, user_tag(uid)):
+            raise ValueError("short lease binding lost")
+
+    async def check_short(self, play: str, item: str, path: str, expiry: int, tag: str) -> bool:
+        async with self._lock:
+            bound = self.short_grant(play, item, "", tag)
+            if not bound or bound["short_path"] != path or bound["short_expiry"] != expiry:
+                return False
+            uid, sid = bound["user_id"], bound["session_id"]
+            try:
+                sessions = await self._snapshot()
+                exact = [s for s in sessions if str(s.get("Id")) == sid and str(s.get("UserId")) == uid]
+                if len(exact) != 1:
+                    return False
+                session = exact[0]
+                playing = session.get("NowPlayingItem") or {}
+                if playing and str(playing.get("Id")) != item:
+                    return False
+                if not playing and (bound["observed"] or time.time() - bound["pending_at"] >= PENDING_START_SECONDS):
+                    return False
+                # Same original rules; never recreate a missing/replaced play.
+                admission = await self._native_admin_exemption(self._admit(uid, str(session.get("DeviceId") or ""), sid, sessions, play))
+                users = await self._emby.list_users()
+                user = [u for u in users if str(u.get("Id")) == uid]
+                if len(user) != 1 or (user[0].get("Policy") or {}).get("IsDisabled"):
+                    return False
+                return admission.allowed and self.short_grant(play, item, "", tag) is not None
+            except Exception:  # noqa: BLE001 - upstream faults never authorize a short session
+                return False
 
     async def report_activity(self, uid: str, payload: dict[str, Any], issue: Any) -> int:
         """Observe only an existing bound play AFTER Emby accepts its event.

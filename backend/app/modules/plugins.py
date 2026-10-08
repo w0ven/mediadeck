@@ -289,6 +289,13 @@ class PluginRegistry:
         plugin = self._plugins[plugin_id]
         spec = plugin.spec
         last = self.last_result(plugin_id)
+        live = None
+        reader = getattr(plugin, 'readonly_status', None)
+        if callable(reader):
+            try:
+                live = reader()
+            except Exception:  # noqa: BLE001 - unavailable evidence must not be shown as zero or success
+                live = {'状态': '暂不可读取，请重新检查'}
         return {
             "id": spec.id,
             "name": spec.name,
@@ -303,6 +310,7 @@ class PluginRegistry:
             "hidden": bool(spec.hidden),
             "running": plugin_id in self._running,
             "last_run": last,
+            **({'live_status': live} if live is not None else {}),
             **({"delivery": plugin.delivery_status()} if hasattr(plugin, "delivery_status") else {}),
         }
 

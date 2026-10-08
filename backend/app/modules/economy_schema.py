@@ -122,3 +122,5 @@ def migrate(db):
     db._ensure_column('red_packets', 'public_actor_name', "TEXT NOT NULL DEFAULT ''")
     db._ensure_column('red_packets', 'result_page', 'INTEGER NOT NULL DEFAULT 0')
     db._ensure_column('red_packet_claims', 'display_name', "TEXT NOT NULL DEFAULT ''")
+    from app.modules.play_schema import migrate as migrate_play
+    migrate_play(db)

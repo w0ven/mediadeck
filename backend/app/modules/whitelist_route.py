@@ -163,6 +163,9 @@ class WhitelistRoute:
 
     def source_kind(self, item: str, source: dict[str, Any]) -> str:
         sid = str(source.get("Id") or "")
+        short = getattr(self.state, "short_drama", None)
+        if short is not None and short.source(item, source) is not None:
+            return "short"
         mobile = self.mobile_registry()
         if sid in mobile:
             if item not in mobile[sid]:
@@ -227,6 +230,10 @@ class WhitelistRoute:
             refuse(503, "original entrance unavailable")
         for source in output.get("MediaSources", []):
             kind = self.source_kind(item, source)
+            if kind == "short":
+                # Original PlaybackInfo admission subsequently issues bounded
+                # nc1 media capabilities. Never mint an origin-transcode cap.
+                continue
             for field in ("DirectStreamUrl", "TranscodingUrl"):
                 value = source.get(field)
                 if not value:

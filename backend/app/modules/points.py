@@ -38,6 +38,10 @@ REASON_LABELS = {
     "shop.refund": "兑换回滚",
     "admin.adjust": "管理员调整",
     "admin.mint": "系统管理员发放",
+    "play.reserve": "玩法资金冻结",
+    "play.release": "未用资金退回",
+    "play.payout": "游戏奖池结算",
+    "market.sell": "股票成交收入",
 }
 
 
