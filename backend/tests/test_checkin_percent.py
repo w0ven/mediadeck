@@ -133,4 +133,5 @@ def test_actual_api_legacy_percent_normalization_and_bot_response_43(monkeypatch
         asyncio.run(app.state.telegram._checkin(902,10,app.state.members.get(uid)))
         assert app.state.points.balance(uid) == 43
         joined='\n'.join(p.get('text','') for m,p in texts)
-        assert '+43' in joined and '15%' in joined and '不参与翻倍' in joined
+        assert '+43' in joined and '连签奖励 <b>+3</b>' in joined and '幸运 ×2' in joined
+        assert '15%' not in joined and '不参与翻倍' not in joined and '基础' not in joined

@@ -1731,15 +1731,18 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
                 f"📅 {escape(str(result.get('reason') or '今天已签到'))}\n\n"
                 f"当前余额：<b>{result.get('balance', self._balance(user_id))}</b>")
             return
+        lines = ["✅ <b>签到成功</b>",
+                 f"积分 <b>{int(result.get('points') or 0):+d}</b>",
+                 f"余额 <b>{result.get('balance')}</b>"]
         bonus = int(result.get("bonus") or 0)
-        extra = f"（含连签加成 +{bonus}）" if bonus else ""
-        await feedback(
-            f"✅ <b>签到成功</b>\n\n积分变动：<b>{int(result.get('points') or 0):+d}</b>{extra}\n"
-            f"基础：{result.get('base')} × {result.get('multiplier',1)}\n"
-            f"连签：{result.get('streak_percent', 0)}% · +{bonus}（仅基础正分，不参与翻倍）\n"
-            + (f"掉落：{escape(str((result.get('drop_spec') or {}).get('name')))}（已入包）\n" if result.get('drop_spec') else "")
-            + f"连续签到：<b>{result.get('streak')}</b> 天\n"
-            f"当前余额：<b>{result.get('balance')}</b>")
+        if bonus > 0:
+            lines.append(f"连签奖励 <b>+{bonus}</b>")
+        multiplier = int(result.get("multiplier") or 1)
+        if multiplier > 1:
+            lines.append(f"🍀 幸运 ×{multiplier}")
+        if result.get('drop_spec'):
+            lines.append('🎁 ' + escape(str(result['drop_spec'].get('name') or '道具')))
+        await feedback('\n'.join(lines))
 
     def _node_snapshot(self) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
