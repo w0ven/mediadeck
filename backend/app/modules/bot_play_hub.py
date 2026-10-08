@@ -29,7 +29,7 @@ class PlayHubBotMixin:
                 choices=[button('炸金花玩法','gamehelp','poker')]
                 if not private:choices.insert(0,button('创建炸金花','launch','poker'))
                 rows.append(choices)
-            if self._plugin_on('stock_market'):rows.append([button('模拟股票','view','search'),button('股票玩法','gamehelp','stock')])
+            if self._plugin_on('stock_market'):rows.append([button('模拟股票','view','home'),button('股票玩法','gamehelp','stock')])
             if self._plugin_on('points_ranking'):rows.append([button('积分榜','view','leaderboard')])
             if private and (self._plugin_on('poker') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /炸金花 创建牌局。'
             if not rows:body+='\n\n暂未开放玩法'
@@ -76,7 +76,7 @@ class PlayHubBotMixin:
         actor={'id':int(tg_id),'is_bot':False,'first_name':tg_name}
         source={**message,'from':actor}
         if source.get('chat') is None:raise PlayError('原菜单归属不明')
-        view={'play_hub':'playhub','market_home':'search','points_board':'leaderboard'}[data]
+        view={'play_hub':'playhub','market_home':'home','points_board':'leaderboard'}[data]
         await self._market_new_panel(source,{'view':view,'page':0})
 
     def _play_remember(self,message,actor):

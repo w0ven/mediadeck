@@ -1,5 +1,6 @@
 """Additive fixed stock supply, ownership and matched trades, separate from cash."""
 from app.modules.market_data import COMPANIES
+from app.modules.market_digest import migrate as digest_migrate
 
 
 def migrate(db):
@@ -88,3 +89,4 @@ def migrate(db):
         row = db._conn.execute('SELECT supply,issue_price FROM market_companies WHERE code=?', (c['code'],)).fetchone()
         if row['supply'] != c['supply'] or row['issue_price'] != c['issue_price']:
             raise RuntimeError('fixed market offering differs from authoritative seed')
+    digest_migrate(db)

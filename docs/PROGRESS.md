@@ -2453,3 +2453,11 @@ three only appear at production scale or during a routine operation.
 - Default poker to ante 10 and a clearly shown common 30-point budget. Support explicit `/炸金花 10 30` up to the configured 500-point ceiling; atomically freeze all players on start, keep old round snapshots, refund unused funds, never lend or mint.
 - Default five-player blackwhite to 10 points. Check the creator's stake eligibility without an early debit and recheck atomically on joining. Keep choices sealed and the five-player settlement rules unchanged.
 - Show required points at the game entrance without exposing private balances; add actual callback/menu, insufficient-funds, snapshot and conservation regression tests.
+
+## 2026-10-09 — v0.40.2 small-group spot market and scheduled summaries
+- Focus the market home on three stable low-price companies, configurable by code; keep all 60 searchable and preserve fixed offerings and existing assets/orders.
+- Surface actual open buy/sell orders and one-share previews. Only the original private actor's final confirmation moves funds/shares. Keep custom quantities, holdings and cancellation paths.
+- Default new subscriptions/buy orders to zero fees, retaining existing persistent intent/order fee snapshots and all prior trades; explain primary offering versus player resale and low liquidity in a short beginner page.
+- Add future-only summaries to authorized interaction group IDs, not registration destinations. Default scheduled times are 10:00 and 18:00 Beijing, at most two slots per group/day, with a hard 22:00–09:00 quiet window. No startup blast, historical catch-up or release announcement.
+- Persist unique group/slot jobs and payload/receipts. Bound known transport/429 retries within the slot, expose permission failures and unknown sends to operators, never blindly replay uncertain delivery. Keep configuration closure independent of asset withdrawals.
+- Test actual handler discovery/confirmations, 60-company reachability, low-cash and legacy-fee conservation, restart/concurrent claims, time/config changes, quiet-window crossings, rate limits and unknown transport. Preserve parallel production edits rather than stash/reset or absorb them.

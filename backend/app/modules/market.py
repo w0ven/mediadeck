@@ -21,6 +21,17 @@ class MarketService(PlayAccess):
     def company(self, code):
         return self.db.one('SELECT * FROM market_companies WHERE code=?', (str(code).upper(),))
 
+    def featured(self):
+        cfg = {**DEFAULTS, **self.config()}
+        codes = [x.strip().upper() for x in cfg['recommended_codes'].split(',') if x.strip()]
+        if codes:
+            return [self.company(code) for code in codes if self.company(code)]
+        return self.db.query('SELECT * FROM market_companies ORDER BY issue_price,code LIMIT 3')
+
+    def public_book(self, *, code=None, now=None):
+        clock = time.time() if now is None else float(now)
+        return self.db.query("SELECT o.nonce,o.code,o.side,o.price,o.remaining,c.name FROM market_orders o JOIN market_companies c ON c.code=o.code WHERE o.state='open' AND o.remaining>0 AND o.expires_at>? AND c.halted=0" + (' AND o.code=?' if code else '') + ' ORDER BY o.code,o.side,o.price,o.id', (clock, code) if code else (clock,))
+
     def position(self, uid, code):
         return self.db.one('SELECT * FROM market_positions WHERE user_id=? AND code=?', (str(uid), code)) or {'user_id': str(uid), 'code': code, 'shares': 0, 'locked': 0, 'cost': 0, 'realized': 0}
 

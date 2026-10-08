@@ -13,7 +13,7 @@ from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
 from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
 
-PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'st:')
+PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'st:', 'std:')
 
 
 class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRankingBotMixin, PlayHubBotMixin):
@@ -34,7 +34,7 @@ class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRank
         self._play_remember(message,actor)
         if data.startswith(('bw:', 'bwh:')):
             await self._blackwhite_callback(data, message, actor, callback_id)
-        elif data.startswith('st:'):
+        elif data.startswith(('st:', 'std:')):
             await self._market_callback(data, message, actor, callback_id)
         else:
             await self._poker_callback(data, message, actor, callback_id)
