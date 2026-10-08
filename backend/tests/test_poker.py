@@ -29,7 +29,8 @@ from app.modules.report_delivery import CALL_DELIVERY
 @pytest.fixture
 def env(request):
     e = request.getfixturevalue('bw_env')
-    e.services.registry.save('poker', enabled=True)
+    # Legacy regression suite intentionally exercises original 500-point snapshots.
+    e.services.registry.save('poker', enabled=True, config={'default_budget': 500})
     e.services.registry.get('poker').ctx.telegram = e.bot
     e.photo_calls = []
     async def multipart(method, fields, files, **kw):
@@ -305,7 +306,7 @@ def force_hands(env, row, values):
 
 def test_compare_equal_initiator_out_and_final_tie_fair_integer_split(env):
     async def run():
-        env.services.registry.save('poker', config={'budget': 51})
+        env.services.registry.save('poker', config={'budget': 51, 'default_budget': 51})
         row = await opened(env)
         # Same pair/tiebreaker, different suits, distinct cards in the injected test deal.
         force_hands(env, row, [[c(8), c(8, 1), c(14)], [c(8, 2), c(8, 3), c(14, 1)], [c(2), c(7, 1), c(9, 2)]])
@@ -334,7 +335,7 @@ def test_compare_equal_initiator_out_and_final_tie_fair_integer_split(env):
 
 def test_exact_budget_limit_and_unchanged_configuration_snapshots(env):
     async def run():
-        env.services.registry.save('poker', config={'max_ante': 10, 'budget': 20})
+        env.services.registry.save('poker', config={'max_ante': 10, 'budget': 20, 'default_budget': 20})
         row = await opened(env, n=2)
         env.services.registry.save('poker', config={'budget': 500, 'step_seconds': 120})
         row = await click(env, row, 'follow')

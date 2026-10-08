@@ -60,7 +60,7 @@ def test_five_connections_cross_game_packet_market_checkin_cash_competition_and_
     proof(env.db,uid,now=time.time())
     async def prepare():
         bw=await bw_create(env,stake=500)
-        pg=await pg_create(env)
+        pg=await pg_create(env,text='/炸金花 10 500')
         pg=await pg_click(env,pg,'join',index=1)
         return bw,pg
     bw,pg=asyncio.run(prepare())

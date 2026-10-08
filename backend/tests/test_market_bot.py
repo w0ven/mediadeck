@@ -44,7 +44,7 @@ def message(e,value,index=0,group=False,mid=None,reply=None):
     if mid is None:e.mid+=1;mid=e.mid
     actor=e.actors[index]
     result={'from':actor,'chat':{'id':GROUP if group else actor['id'],'type':'supergroup' if group else 'private'},'message_id':mid,'text':value}
-    if group:result['message_thread_id']=27
+    if group:result.update(message_thread_id=27,is_topic_message=True)
     if reply:result['reply_to_message']={'message_id':reply,'from':{'id':123,'is_bot':True}}
     return result
 
@@ -62,6 +62,7 @@ def card(e,row):
     m=copy.deepcopy(e.tg.message(row['chat_id'],row['message_id']))
     m.update(chat={'id':int(row['chat_id']),'type':'private' if row['chat_id']==row['tg_id'] else 'supergroup'},
              message_id=row['message_id'],**{'from':{'id':123,'is_bot':True}})
+    if row['thread_id']:m['is_topic_message']=True
     return m
 
 

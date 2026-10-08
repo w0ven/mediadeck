@@ -2447,3 +2447,9 @@ three only appear at production scale or during a routine operation.
 - Send independent check-in receipts instead of editing menus; keep callback acknowledgements, group actor/reply/topic isolation, and membership gates. Other menu rendering is unchanged.
 - Exercise actual update dispatch for Chinese reply transfers without command entities and with Bot suffixes; preserve confirmation, admin mint, ordinary and private-transfer semantics.
 - Preserve live catalogue/configuration and all prior main changes; ship through the standard PR/CI/tag workflow. Live-user Telegram messages and financial actions are not test probes.
+
+## 2026-10-09 — v0.40.1 low-budget group games
+- Bind only real forum topics, not incidental reply-chain thread IDs; keep original Bot/card/group/actor checks.
+- Default poker to ante 10 and a clearly shown common 30-point budget. Support explicit `/炸金花 10 30` up to the configured 500-point ceiling; atomically freeze all players on start, keep old round snapshots, refund unused funds, never lend or mint.
+- Default five-player blackwhite to 10 points. Check the creator's stake eligibility without an early debit and recheck atomically on joining. Keep choices sealed and the five-player settlement rules unchanged.
+- Show required points at the game entrance without exposing private balances; add actual callback/menu, insufficient-funds, snapshot and conservation regression tests.
