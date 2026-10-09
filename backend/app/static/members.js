@@ -4,7 +4,7 @@
    exists. Live updates use registerLiveUpdater(topic,payload,context) or a
    dedicated EventSource on the members topic (never renderPage). */
 (function () {
-  const COLS = ['<input type="checkbox" id="m-pick-page" aria-label="选择当前页全部用户">', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '活跃', ''];
+  const COLS = ['<input type="checkbox" id="m-pick-page" aria-label="选择当前页全部用户">', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '最后播放', ''];
   const TABS = [
     ['overview', '概况'],
     ['entitlements', '权益权限'],
@@ -123,7 +123,7 @@
       q: 'search', page: 'page', page_size: 'page_size', sort: 'sort',
       order: 'order', status: 'status', group_id: 'group_id', tg: 'tg',
       expiring: 'expiring', emby_status: 'emby_status', sync_status: 'sync_status',
-      role: 'role', register_via: 'register_via', inviter_id: 'inviter_id',
+      role: 'role', register_via: 'register_via', inviter_id: 'inviter_id', activity: 'activity',
     };
     Object.keys(map).forEach((k) => {
       const v = params.get(k);
@@ -263,6 +263,22 @@
     return `${entitlementTag(m)} <span>${esc(label)}</span>${extra}`;
   }
 
+  function playbackCell(m) {
+    const a = m.playback_activity || {};
+    const known = Number.isFinite(a.days_since_played);
+    const played = m.last_played_available !== true ? '数据不可用'
+      : (m.last_played_at && known ? (a.days_since_played < 1 / 1440 ? '刚刚' : fmtAge(a.days_since_played * 86400) + '前') : '暂无播放记录');
+    const score = Number.isFinite(a.score) ? a.score + '分' : '未知';
+    const labels = {inactive: '候选 · ' + score, observing: '观察中', pending: '未开通', ready: score, unavailable: '数据不可用'};
+    const observed = Number.isFinite(a.observed_days) ? Math.floor(a.observed_days) + '天' : '未知';
+    const summary = (labels[a.status] || '数据不可用') + (a.status === 'observing' ? ' · ' + observed : '');
+    const days = Number.isFinite(a.watch_days_30d) ? a.watch_days_30d + '天' : '未知';
+    const hours = Number.isFinite(a.watch_hours_30d) ? a.watch_hours_30d.toFixed(2) + '小时' : '未知';
+    const detail = `仅核验播放进度；距最后播放 D=${known ? a.days_since_played.toFixed(1) + '天' : '未知'}；近30天观看 ${days} / ${hours}（滚动窗口，按北京自然日，日累计≥5分钟）；已观察 ${observed}。` +
+      `参考分=round(60×2^(-D/7)+25×min(观看天数/8,1)+15×min(观看小时/10,1))；${a.observation_complete ? '' : '未满30天不判长期不活跃；'}完整观察且（至少14天未播放或观察内无有效播放）、低于30分才为候选，仅供筛选。${a.reason || ''}`;
+    return `<span class="last-played">${esc(played)}</span><div class="muted s playback-activity" tabindex="0" title="${esc(detail)}" aria-label="${esc(summary + '。' + detail)}">${esc(summary)}</div>`;
+  }
+
   function rowHtml(m) {
     const id = m.emby_user_id;
     const checked = ms.selected.has(id) ? 'checked' : '';
@@ -273,7 +289,7 @@
       <td>${expiryCell(m)}</td>
       <td>${embySyncCell(m)}</td>
       <td>${usageCell(m)}</td>
-      <td>${esc(m.last_activity ? fmtAgeTs(Date.parse(m.last_activity) / 1000) : (m.last_seen_at ? fmtAgeTs(m.last_seen_at) : '—'))}</td>
+      <td>${playbackCell(m)}</td>
       <td class="row-actions">
         <button class="btn sm" type="button" data-act="open" data-id="${esc(id)}">详情</button>
         <details class="hg-row-more"><summary aria-label="${esc(m.username)}的更多操作">${workspaceIcon('more')}</summary><div class="hg-row-menu">
@@ -325,7 +341,8 @@
           `<option value="${s}" ${params.get('status') === s ? 'selected' : ''}>${labels[s] || s}</option>`).join('')}
       </select></label>
       <label>用户组 <select id="m-group" aria-label="用户组"><option value="">全部</option>${gopts}</select></label>
-      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最近活跃']], 'username')}
+      ${pick('m-activity','activity','活跃度',[['','全部'],['inactive','不活跃候选'],['observing','观察中'],['unavailable','数据不可用'],['pending','未开通']])}
+      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最后播放']], 'username')}
       <details class="hg-advanced-filters" ${['emby_status','sync_status','tg','expiring','role','register_via','order'].some(k=>params.get(k))?'open':''}><summary>${workspaceIcon('filter')}更多筛选</summary><div class="toolbar">
       <label>Emby <select id="m-emby" aria-label="Emby 状态">
         <option value="">全部</option>
@@ -397,7 +414,7 @@
       };
     }
     [['m-status', 'status'], ['m-group', 'group_id'], ['m-emby', 'emby_status'],
-      ['m-sync', 'sync_status'], ['m-sort','sort'], ['m-order','order'], ['m-tg','tg'],
+      ['m-sync', 'sync_status'], ['m-sort','sort'], ['m-order','order'], ['m-tg','tg'], ['m-activity','activity'],
       ['m-expiring','expiring'], ['m-role','role'], ['m-via','register_via']].forEach(([id, key]) => {
       const el = document.getElementById(id);
       if (el && !el.dataset.bound) {

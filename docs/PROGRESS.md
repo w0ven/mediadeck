@@ -2,6 +2,21 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — playback-line ordering and verified member activity
+
+- Add pointer/touch and keyboard ordering to the playback-line editor. Keep unsaved
+  edits, notes, whitelist restrictions, explicit saves and the Bot's persisted order.
+- Replace the member list's access-time display/sort with verified playback time.
+  Compute a read-only score from recency, active days and watch hours over 30 days;
+  incomplete observation and unavailable sources never become inactivity evidence.
+- Add composable inactivity/observation filters before pagination. This is an
+  operator reference only: no new disable/delete, billing or punishment behavior.
+- Verify desktop/touch/keyboard browser interactions, API/Bot ordering, strict
+  playback evidence, interval boundaries, failures and event-loop responsiveness.
+  Full local regression found one outdated fixture, then its correction and all
+  new behaviors passed the focused 65-test regression; root Ruff and syntax pass.
+- Release through PR/CI/tag. No schema or dependency changes; panel/Bot restart only.
+
 ## 2026-10-10 — shared scratch card and fixed-collateral banker rooms
 
 - Add one shared nine-cell activity with owner-bound fee confirmation, independent

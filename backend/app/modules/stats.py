@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from app.core.db import Database
+from app.modules.activity import member_activity
 from app.modules.members import MemberService, merge_effective, parse_overrides
 
 MAX_DAYS = 366
@@ -86,6 +87,16 @@ class StatsService:
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
+
+    def member_activity(self, members: list[dict[str, Any]], *, now: float,
+                        sampling_status: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
+        try:
+            live = self._live_watch() or []
+            failed = False
+        except Exception:  # noqa: BLE001 - Optional provider failures suppress scoring as unknown.
+            live, failed = [], True
+        return member_activity(self._db, members, now=now, live_watch=live,
+                               sampling_status=sampling_status, source_failed=failed)
 
     def watch_windows(self, since: float, until: float, user_id: str | None = None) -> dict[str, dict]:
         """One verified interval ledger for profiles, user charts and daily series."""

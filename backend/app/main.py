@@ -2273,7 +2273,8 @@ async def members_list(status: str | None = None, group_id: str | None = None,
                        order: str | None = None, tg: str | None = None,
                        expiring: str | None = None,
                        emby_status: str | None = None,
-                       sync_status: str | None = None) -> dict[str, Any]:
+                       sync_status: str | None = None,
+                       activity: str | None = None) -> dict[str, Any]:
     """Members plus the Emby accounts that are not enrolled yet.
 
     Showing both in one payload is deliberate: the operator needs to see who is
@@ -2281,12 +2282,18 @@ async def members_list(status: str | None = None, group_id: str | None = None,
     silently. unmanaged is computed against every member id, not the current
     page, so pagination cannot mis-label an enrolled account as unmanaged.
     """
+    now = time.time()
     paged = page is not None or offset is not None
-    fetch_limit = None if paged else max(1, min(int(limit or 500), 5000))
+    legacy_limit = max(1, min(int(limit or 500), 5000))
+    full_activity = bool(activity) or sort in ('last_seen', 'last_played')
+    fetch_limit = None if paged or full_activity else legacy_limit
     members = await asyncio.to_thread(
         app.state.members.list, status=status, group_id=group_id,
         role=role, search=search, limit=fetch_limit,
         register_via=register_via, inviter_id=inviter_id)
+    playback = await asyncio.to_thread(
+        app.state.stats.member_activity, members, now=now,
+        sampling_status=app.state.usage.status())
     hours = {}
     with contextlib.suppress(Exception):
         hours = await asyncio.to_thread(app.state.stats.hours_this_month)
@@ -2297,6 +2304,7 @@ async def members_list(status: str | None = None, group_id: str | None = None,
     with contextlib.suppress(Exception):
         edge = await asyncio.to_thread(app.state.ledger.summary_for_users)
     for member in members:
+        member.update(playback[member['emby_user_id']])
         member["watch_hours"] = hours.get(member["emby_user_id"], 0.0)
         member["points"] = balances.get(member["emby_user_id"], 0)
         member["edge"] = edge.get(member["emby_user_id"],
@@ -2314,7 +2322,7 @@ async def members_list(status: str | None = None, group_id: str | None = None,
         members, emby_users, emby_error=unmanaged_error)
     members = member_ops.apply_list_filters(
         members, tg=tg, expiring=expiring, emby_status=emby_status,
-        sync_status=sync_status)
+        sync_status=sync_status, activity=activity, now=now)
     members = member_ops.sort_rows(members, sort, order)
     counts = member_ops.counts_for(members)
     total = len(members)
@@ -2335,11 +2343,11 @@ async def members_list(status: str | None = None, group_id: str | None = None,
             unmanaged = [u for u in unmanaged
                          if needle in (u["username"] or "").lower()]
     if not paged:
-        truncated = total >= fetch_limit
-        return {"members": members, "unmanaged": unmanaged[:500],
+        truncated = total >= legacy_limit
+        return {"members": members[:legacy_limit], "unmanaged": unmanaged[:500],
                 "unmanaged_total": len(unmanaged),
                 "unmanaged_error": unmanaged_error, "truncated": truncated,
-                "limit": fetch_limit, "total": total, "counts": counts}
+                "limit": legacy_limit, "total": total, "counts": counts}
     page_size_n = max(1, min(int(page_size or 50), 200))
     if offset is not None:
         off = max(0, int(offset))
