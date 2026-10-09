@@ -380,7 +380,8 @@ async def _startup() -> None:
     # and can be built as soon as it exists. The shop is what spends them.
     app.state.points = PointsService(app.state.db)
     app.state.shop = ShopService(app.state.db, app.state.members,
-                                 app.state.points)
+                                 app.state.points,
+                                 notice_config=app.state.settings_service.telegram_config)
     app.state.shop.seed_cards()
     # Requests need a group to promote into (/prouser) and one to charge the
     # monthly allowance against, so they are built after groups and members.

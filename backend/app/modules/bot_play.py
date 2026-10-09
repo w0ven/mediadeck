@@ -6,36 +6,36 @@ import time
 from contextlib import contextmanager
 
 from app.modules.bot_blackwhite import BlackwhiteBotMixin
-from app.modules.bot_market import MarketBotMixin
+from app.modules.bot_niuniu import NiuniuBotMixin
 from app.modules.bot_play_hub import PlayHubBotMixin
+from app.modules.bot_play_panels import PlayPanelsBotMixin
 from app.modules.bot_poker import PokerBotMixin
 from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
 from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
+from app.modules.shop_notices import ShopNoticeBotMixin
 
-PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'st:', 'std:')
+PLAY_CALLBACKS = ('bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'nn:', 'nnh:', 'pp:')
 
 
-class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRankingBotMixin, PlayHubBotMixin):
+class PlayBotMixin(BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, PlayPanelsBotMixin, PointsRankingBotMixin, PlayHubBotMixin, ShopNoticeBotMixin):
     async def _play_command(self, message):
         first=str(message.get('text') or '').strip().split()
         verb=first[0].lower().split('@',1)[0] if first else ''
-        if verb.startswith('/') and ('@' not in first[0] or self._bot_username and first[0].rsplit('@',1)[1].lower()==self._bot_username.lower()):
-            self._market_abandon_input(message,message.get('from') or {})
-        if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助',
-                    '/股票','/stock','/认购','/买入','/卖出','/持仓','/委托','/成交','/自选','/股市帮助','/股票资讯',
+        if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助','/牛牛','/niuniu','/牛牛帮助',
                     '/积分榜','/pointsrank','/游戏','/games','/玩法'):
             self._play_remember(message,message.get('from') or {})
-        return (await self._blackwhite_command(message) or await self._poker_command(message)
-                or await self._ranking_command(message) or await self._play_hub_command(message)
-                or await self._market_command(message))
+        return (await self._blackwhite_command(message) or await self._niuniu_command(message) or await self._poker_command(message)
+                or await self._ranking_command(message) or await self._play_hub_command(message))
 
     async def _play_callback(self, data, message, actor, callback_id):
         self._play_remember(message,actor)
         if data.startswith(('bw:', 'bwh:')):
             await self._blackwhite_callback(data, message, actor, callback_id)
-        elif data.startswith(('st:', 'std:')):
-            await self._market_callback(data, message, actor, callback_id)
+        elif data.startswith(('nn:', 'nnh:')):
+            await self._niuniu_callback(data, message, actor, callback_id)
+        elif data.startswith('pp:'):
+            await self._play_panel_callback(data, message, actor, callback_id)
         else:
             await self._poker_callback(data, message, actor, callback_id)
 
@@ -118,7 +118,7 @@ class PlayBotMixin(BlackwhiteBotMixin, PokerBotMixin, MarketBotMixin, PointsRank
 
     async def _play_worker(self):
         while True:
-            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._poker_tick, self._market_tick):
+            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._shop_notice_tick):
                 try:
                     await work()
                 except asyncio.CancelledError:

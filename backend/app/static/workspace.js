@@ -216,7 +216,7 @@ function initTelegramSettings(tg) {
   const appearance = box.firstElementChild; appearance.querySelector('.logo-body').append(logoRow,help,preview);
   const save = document.createElement('button'); save.type = 'button'; save.className = 'btn primary'; save.id = 'tg-save-logo'; save.textContent = '保存首页外观'; appearance.querySelector('.logo-body').append(save);
   $('#view').append(appearance);
-  const groupBox = document.createElement('div'); groupBox.innerHTML = card('群内交互','换绑只在这里配置的群中审核，群管理员还需具备 Deck 管理员角色', `<div class="card-body"><div class="form-row"><label for="tg-reviewgroups">审核与交互群</label><textarea id="tg-reviewgroups" rows="3" placeholder="-100xxxxxxxxx，每行一个群">${esc((tg.group_interaction_chats || []).join('\n'))}</textarea></div><p class="help">Bot 需要加入这些群。原 TG 失效的用户可用新 TG 验证 Emby 密码申请换绑，无需旧 TG 确认。</p><button class="btn primary" id="tg-save-groups">保存交互群</button></div>`);
+  const groupBox = document.createElement('div'); groupBox.innerHTML = card('群内交互','换绑只在这里配置的群中审核，群管理员还需具备 Deck 管理员角色', `<div class="card-body"><div class="form-row"><label for="tg-reviewgroups">审核与交互群</label><textarea id="tg-reviewgroups" rows="3" placeholder="-100xxxxxxxxx，每行一个群">${esc((tg.group_interaction_chats || []).join('\n'))}</textarea></div><p class="help">Bot 需要加入这些群。原 TG 失效的用户可用新 TG 验证 Emby 密码申请换绑，无需旧 TG 确认。</p><label class="check"><input id="tg-shop-notice" type="checkbox" ${tg.shop_purchase_broadcast ? 'checked' : ''}> 成功购买群播报</label><p class="help">只向以上互动群展示购买者公开名字和商品名；关闭时不记录待发播报，之后也不补发。</p><button class="btn primary" id="tg-save-groups">保存交互群</button></div>`);
   $('#view').append(groupBox.firstElementChild);
   $('#view').insertAdjacentHTML('beforeend', membershipSettingsCards(tg));
   $('#tg-save').textContent = '保存机器人连接'; $('#tg-save2').textContent = '保存注册规则'; $('#tg-test').textContent = '测试已保存连接';
@@ -225,7 +225,7 @@ function initTelegramSettings(tg) {
   configureSave('tg-save','/api/settings/telegram','POST',() => payloadKeys(['bot_token','enabled','emby_public_url']));
   configureSave('tg-save2','/api/settings/telegram','POST',() => payloadKeys(['allow_admin_grant','allow_invite','allow_redeem','register_days','max_users','default_group_id','registration_notify_chat_id','registration_notify_thread_id']));
   configureSave('tg-save-logo','/api/settings/telegram','POST',() => ({menu_logo_url:$('#tg-logo').value.trim()}));
-  configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean)}));
+  configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean),shop_purchase_broadcast:$('#tg-shop-notice').checked}));
   initPlaybackLinesEditor();
   initMembershipSettings(tg);
   // Editors rewrite hidden JSON after the first baseline snapshot.

@@ -4,44 +4,41 @@ from __future__ import annotations
 from html import escape
 
 from app.modules.blackwhite import DEFAULTS as BW_DEFAULTS
-from app.modules.bot_poker import help_text as poker_help
-from app.modules.market_views import market_help
+from app.modules.bot_niuniu import help_text as niuniu_help
+from app.modules.niuniu import DEFAULTS as NIUNIU_DEFAULTS
 from app.modules.play_money import PlayError
-from app.modules.poker import DEFAULTS as POKER_DEFAULTS
 
 
 class PlayHubBotMixin:
     def _play_hub_view(self,panel,p):
         token=panel['nonce'];private=panel['chat_id']==panel['tg_id']
-        def button(label,op,arg):return {'text':label,'callback_data':f'st:{token}:{op}:{arg}'}
+        def button(label,op,arg):return {'text':label,'callback_data':f'pp:{token}:{op}:{arg}'}
         rows=[]
         if p['view']=='playhub':
-            body='🎲 <b>游戏与市场</b>'
+            body='🎲 <b>一起玩一局</b>'
             if self._plugin_on('blackwhite'):
                 cfg={**BW_DEFAULTS,**self._plugins.config('blackwhite')}
                 body+=f'\n黑白板 · 5人 · 参与需 {cfg["default_stake"]} 积分/人'
                 choices=[button('黑白板玩法','gamehelp','bw')]
                 if not private:choices.insert(0,button('创建黑白板','launch','bw'))
                 rows.append(choices)
-            if self._plugin_on('poker'):
-                cfg={**POKER_DEFAULTS,**self._plugins.config('poker')}
-                body+=f'\n炸金花 · 2～5人 · 底注 {cfg["default_ante"]} · 需冻结 {cfg["default_budget"]}/人'
-                choices=[button('炸金花玩法','gamehelp','poker')]
-                if not private:choices.insert(0,button('创建炸金花','launch','poker'))
+            if self._plugin_on('niuniu'):
+                cfg={**NIUNIU_DEFAULTS,**self._plugins.config('niuniu')}
+                body+=f'\n🐂 牛牛 · 2～5人 · 每人投入 {cfg["default_stake"]} 积分'
+                choices=[button('牛牛玩法','gamehelp','niuniu')]
+                if not private:choices.insert(0,button('创建牛牛','launch','niuniu'))
                 rows.append(choices)
-            if self._plugin_on('stock_market'):rows.append([button('模拟股票','view','home'),button('股票玩法','gamehelp','stock')])
             if self._plugin_on('points_ranking'):rows.append([button('积分榜','view','leaderboard')])
-            if private and (self._plugin_on('poker') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /炸金花 创建牌局。'
+            if private and (self._plugin_on('niuniu') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /牛牛 创建牌局。'
             if not rows:body+='\n\n暂未开放玩法'
         else:
             which=p['which']
             if which=='bw':
                 cfg={**BW_DEFAULTS,**self._plugins.config('blackwhite')}
                 body=('⚫⚪ <b>黑白板 · 玩法</b>\n\n5人同额押注，秘密选黑或白，选后不可更改。满5人自动开奖，少数方平分全部奖池，整数余数随机公平分配；同面全退，无抽成。\n'
-                      f'当前可押 {cfg["min_stake"]}～{cfg["max_stake"]} 积分/人，默认 {cfg["default_stake"]}；{cfg["lobby_seconds"]} 秒未满5人全退。有效绑定群成员可参与，管理员同样扣本人积分。\n'
+                      f'当前可押 {cfg["min_stake"]}～{cfg["max_stake"]} 积分/人，默认 {cfg["default_stake"]}；{cfg["lobby_seconds"]} 秒未满5人全退。选好就锁定，等人未满全退。\n'
                       '开奖公开展示名、选择与本局所得，不公开余额。已创建的局按原参数执行。\n\n<code>/黑白板 10</code> 在授权群创建，然后点手心白板或手背黑板。')
-            elif which=='poker':body=poker_help({**POKER_DEFAULTS,**self._plugins.config('poker')})
-            elif which=='stock':body=market_help(self._plugins.config('stock_market'))
+            elif which=='niuniu':body=niuniu_help({**NIUNIU_DEFAULTS,**self._plugins.config('niuniu')})
             else:raise PlayError('玩法页面不存在')
             rows.append([button('返回玩法','view','playhub')])
         return body,rows
@@ -67,7 +64,7 @@ class PlayHubBotMixin:
         if not self._play_entry_valid(message):return True
         try:
             if len(first)!=1:raise PlayError('用法：/游戏')
-            await self._market_new_panel(message,{'view':'playhub'})
+            await self._play_new_panel(message,{'view':'playhub'})
         except ValueError as exc:
             await self.send_message(chat.get('id'),escape(str(exc)),thread_id=self._thread_id(message),reply_to_message_id=message.get('message_id'))
         return True
@@ -76,8 +73,8 @@ class PlayHubBotMixin:
         actor={'id':int(tg_id),'is_bot':False,'first_name':tg_name}
         source={**message,'from':actor}
         if source.get('chat') is None:raise PlayError('原菜单归属不明')
-        view={'play_hub':'playhub','market_home':'home','points_board':'leaderboard'}[data]
-        await self._market_new_panel(source,{'view':view,'page':0})
+        view={'play_hub':'playhub','points_board':'leaderboard'}[data]
+        await self._play_new_panel(source,{'view':view,'page':0})
 
     def _play_remember(self,message,actor):
         from app.modules.group_points import GroupPointsError, reliable_user

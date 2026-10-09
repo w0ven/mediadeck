@@ -61,6 +61,8 @@ def context(row, *, claim=False):
 
 def prepare(env, *, sender=1, total=100, parts=10, mode='random', audience='all', mid=20):
     row = env.service.prepare(command(sender, mid), total, parts, mode, audience)
+    # Pre-upgrade snapshot fixture; new permanent behavior has its own actual-handler suite.
+    env.db.execute('UPDATE red_packets SET permanent=0,thread_id=7 WHERE nonce=?',(row['nonce'],))
     assert env.service.bind_card(row['nonce'], mid + 100)
     return env.service.get(row['nonce'])
 
@@ -235,6 +237,8 @@ def test_whitelist_only_and_valid_account_eligibility_and_rebinding_cannot_claim
 
 def test_unknown_confirmation_ack_no_charge_and_publish_lost_ack_restart_keeps_single_escrow(env):
     row = env.service.prepare(command(), 100, 10)
+    env.db.execute('UPDATE red_packets SET permanent=0 WHERE nonce=?',(row['nonce'],))
+    row=env.service.get(row['nonce'])
     unknown = dict(row, card_message_id=120)
     with pytest.raises(PacketError, match='原Bot'):
         env.service.confirm(row['nonce'], actor(), context(unknown))

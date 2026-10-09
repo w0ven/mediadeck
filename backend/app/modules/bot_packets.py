@@ -5,9 +5,9 @@ import asyncio
 import json
 import sqlite3
 import time
-from datetime import datetime, timedelta, timezone
 from html import escape
 
+from app.modules.packet_delivery import EFFECTS, PacketDelivery
 from app.modules.red_packets import (
     COMMANDS,
     RESULTS_PER_PAGE,
@@ -34,15 +34,14 @@ class PacketBotMixin:
         def name(value):
             value = public_name({'first_name': value or ''})
             return escape(value[:40] + ('…' if len(value) > 40 else ''))
-        title = f'🎁 <b>{mode}红包</b>'
+        title = f'🧧 <b>{mode}红包</b>'
         if row['audience'] == 'whitelist':
             title += ' · 白名单'
         body = (title + f"\n<b>{name(row.get('public_actor_name'))}</b>"
                 f" · {row['total']} 积分 · {row['parts']} 份")
         keyboard = []
         if row['status'] == 'draft':
-            hours = json.loads(row['config_json'])['ttl_hours']
-            body += f'\n\n有效 {hours} 小时 · 待确认'
+            body += '\n\n✨ 核对一下，确认后大家就能领取'
             def edit(field, value, text):
                 return {'text': text, 'callback_data': f'rpedit:{nonce}:{field}:{value}'}
             keyboard.append([edit('mode', 'random', ('✓ ' if mode == '拼手气' else '') + '拼手气'),
@@ -63,6 +62,14 @@ class PacketBotMixin:
             return body, keyboard
         if row['status'] == 'cancelled':
             return body + '\n\n已取消', keyboard
+        if row['permanent']:
+            body += f'\n\n已领取 <b>{row["claimed_count"]}/{row["parts"]}</b>'
+            if row['status']=='active':
+                body += '\n🌸 留一份好手气，等你来领取'
+                keyboard.append([{'text':'🧧 拆开好运','callback_data':'rpclaim:'+nonce}])
+            else:
+                body += '\n✨ 已领完，领取结果见独立结果卡'
+            return body,keyboard
         active = row['status'] == 'active' and row['expires_at'] > time.time()
         state = '已领取' if active else ('已领完' if row['status'] == 'exhausted' else '已过期')
         body += f"\n\n{state} <b>{row['claimed_count']}/{row['parts']}</b>"
@@ -75,8 +82,6 @@ class PacketBotMixin:
             best = min(results, key=lambda c: (-c['amount'], c['slot']))
             body += f"\n\n🏆 手气最佳 <b>{name(best['display_name'])}</b> · {best['amount']} 积分"
         if active:
-            deadline = datetime.fromtimestamp(row['expires_at'], timezone(timedelta(hours=8)))
-            body += '\n\n<i>截止 ' + deadline.strftime('%m-%d %H:%M') + '</i>'
             keyboard.append([{'text': '领取红包', 'callback_data': 'rpclaim:' + nonce}])
         if pages > 1:
             def turn(number, text):
@@ -156,6 +161,7 @@ class PacketBotMixin:
                                       'disable_web_page_preview': True})
             success = bool(result) or bool((CALL_DELIVERY.get() or {}).get('not_modified'))
             service.rendered(nonce, row['render_version'], success)
+            if success:await self._packet_effects(nonce)
             # Terminal cards remain pageable. Keep the same lock while older
             # waiters exist, so a new page cannot race them on a different lock.
 
@@ -164,6 +170,11 @@ class PacketBotMixin:
             service = self._packet_service()
             tokens = data.split(':')
             nonce = tokens[1]
+            if tokens[0] == 'rpresult' and len(tokens)==3:
+                row,payload=PacketDelivery(service).page(nonce,actor,message,int(tokens[2]))
+                await self._call('editMessageText',dict(payload,chat_id=int(row['chat_id']),message_id=row['receipt_message_id']))
+                await self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':'领取结果'})
+                return
             if tokens[0] == 'rpclaim' and len(tokens) == 2:
                 result = service.claim(nonce, actor, message)
                 text = ('已领取过：' if result['already'] else '🧧 领取成功：') + str(result['amount']) + ' 积分'
@@ -195,6 +206,29 @@ class PacketBotMixin:
         if self.enabled:
             for row in service.pending_renders():
                 await self._packet_render(row['nonce'])
+            for row in self._db.query("SELECT nonce FROM red_packets WHERE permanent=1 AND (pin_state IN ('pending','retry','sending') OR unpin_state IN ('pending','retry','sending') OR receipt_state IN ('pending','retry','sending')) ORDER BY created_at LIMIT 100"):
+                await self._packet_effects(row['nonce'])
+
+    async def _packet_effects(self,nonce):
+        if not self.enabled:return
+        delivery=PacketDelivery(self._packet_service())
+        for kind in EFFECTS:
+            row=delivery.claim(nonce,kind)
+            if not row:continue
+            CALL_DELIVERY.set(None)
+            if not self._group_chat_allowed({'id':int(row['chat_id']),'type':'supergroup'}):
+                delivery.finish(row,None,{'state':'failed','reason':'群授权已变化'})
+                continue
+            if kind=='receipt':
+                payload=dict(json.loads(row['receipt_payload']),chat_id=int(row['chat_id']))
+                payload['reply_parameters']={'message_id':row['card_message_id'],'allow_sending_without_reply':True}
+                if row['thread_id']:payload['message_thread_id']=row['thread_id']
+                result=await self._call('sendMessage',payload)
+            else:
+                payload={'chat_id':int(row['chat_id']),'message_id':row['card_message_id']}
+                if kind=='pin':payload['disable_notification']=True
+                result=await self._call('pinChatMessage' if kind=='pin' else 'unpinChatMessage',payload)
+            delivery.finish(row,result,CALL_DELIVERY.get() or {})
 
     async def _packet_worker(self):
         while True:

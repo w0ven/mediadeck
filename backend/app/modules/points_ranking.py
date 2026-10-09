@@ -66,10 +66,10 @@ class PointsRankingBotMixin:
             label=row['name'][:32]+('…' if len(row['name'])>32 else '')
             body+=f'\n{badge} {escape(label)} · <b>{row["points"]}</b>'
         nav=[];token=panel['nonce']
-        if page:nav.append({'text':'‹ 上一页','callback_data':f'st:{token}:page:{page-1}'})
-        if page+1<pages:nav.append({'text':'下一页 ›','callback_data':f'st:{token}:page:{page+1}'})
+        if page:nav.append({'text':'‹ 上一页','callback_data':f'pp:{token}:page:{page-1}'})
+        if page+1<pages:nav.append({'text':'下一页 ›','callback_data':f'pp:{token}:page:{page+1}'})
         keyboard=[nav] if nav else []
-        keyboard.append([{'text':'刷新','callback_data':f'st:{token}:page:{page}'}])
+        keyboard.append([{'text':'刷新','callback_data':f'pp:{token}:page:{page}'}])
         return body,keyboard
 
     async def _ranking_command(self,message):
@@ -88,7 +88,7 @@ class PointsRankingBotMixin:
             page=int(parts[1])-1 if len(parts)==2 else 0
             if page<0:raise PlayError('页码从1开始')
             if not self._plugin_on('points_ranking'):raise PlayError('积分榜暂未开放')
-            await self._market_new_panel(message,{'view':'leaderboard','page':page})
+            await self._play_new_panel(message,{'view':'leaderboard','page':page})
         except ValueError as exc:
             await self.send_message(chat.get('id'),escape(str(exc)),thread_id=self._thread_id(message),reply_to_message_id=message.get('message_id'))
         return True

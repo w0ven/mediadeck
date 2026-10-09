@@ -366,7 +366,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
     admin_cmds = next(p["commands"] for m, p in bot.calls
                       if m == "setMyCommands" and p["scope"]["type"] == "chat_member")
     assert {c["command"] for c in member_cmds} == {"start", "me", "usage", "rank", "today", "rules", "help", "transfer", "redpacket",
-                                               "games", "blackwhite", "poker", "stock", "pointsrank"}
+                                               "games", "blackwhite", "niuniu", "pointsrank"}
     assert '扣本人余额' in next(c['description'] for c in member_cmds if c['command']=='transfer')
     assert '发放积分' in next(c['description'] for c in admin_cmds if c['command']=='transfer')
     assert {"kk", "renew", "rmemby", "score"} <= {c["command"] for c in admin_cmds}

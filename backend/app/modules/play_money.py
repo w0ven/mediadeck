@@ -78,12 +78,6 @@ class CashBook:
                      (kind, fund_ref, amount, amount))
         self._event(conn, scope, ref, uid, 'consume', amount, f'{kind}:{fund_ref}', now)
 
-    def transfer_held(self, conn, scope, ref, buyer, seller, amount, *, now=None):
-        """Matched buyer's real reserved cash, never a grant/reward pathway."""
-        self._take(conn, scope, ref, buyer, amount, 'spent')
-        self.points._apply(conn, seller, amount, 'market.sell', ref, 'market', int(time.time() if now is None else now))
-        self._event(conn, scope, ref, buyer, 'trade', amount, str(seller), now)
-
     def payout(self, conn, kind, fund_ref, uid, amount, *, now=None):
         self._tx(conn)
         if kind not in ('blackwhite', 'poker'):

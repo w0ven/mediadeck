@@ -122,5 +122,14 @@ def migrate(db):
     db._ensure_column('red_packets', 'public_actor_name', "TEXT NOT NULL DEFAULT ''")
     db._ensure_column('red_packets', 'result_page', 'INTEGER NOT NULL DEFAULT 0')
     db._ensure_column('red_packet_claims', 'display_name', "TEXT NOT NULL DEFAULT ''")
+    db._ensure_column('red_packets', 'permanent', 'INTEGER NOT NULL DEFAULT 0')
+    db._ensure_column('red_packets', 'receipt_message_id', 'INTEGER')
+    db._ensure_column('red_packets', 'receipt_page', 'INTEGER NOT NULL DEFAULT 0')
+    db._ensure_column('red_packets', 'receipt_payload', "TEXT NOT NULL DEFAULT ''")
+    for effect in ('pin','unpin','receipt'):
+        for key, declaration in (('state', "TEXT NOT NULL DEFAULT ''"), ('attempts', 'INTEGER NOT NULL DEFAULT 0'), ('lease', 'REAL NOT NULL DEFAULT 0'), ('due', 'REAL NOT NULL DEFAULT 0'), ('error', "TEXT NOT NULL DEFAULT ''")):
+            db._ensure_column('red_packets', effect+'_'+key, declaration)
     from app.modules.play_schema import migrate as migrate_play
     migrate_play(db)
+    from app.modules.shop_notices import migrate as migrate_shop_notices
+    migrate_shop_notices(db)

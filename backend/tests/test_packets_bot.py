@@ -22,9 +22,15 @@ def env(request):
 async def dispatch(e, text='/红包 100 10', actor=VIEWER, mid=20, thread=7):
     message = msg(text, actor=actor, mid=mid, thread=thread)
     message.pop('reply_to_message')
+    if thread:message['is_topic_message']=True
     assert 'entities' not in message
     await e.bot._dispatch_update({'message': message})
-    return e.db.one('SELECT * FROM red_packets WHERE command_message_id=?', (mid,))
+    row=e.db.one('SELECT * FROM red_packets WHERE command_message_id=?', (mid,))
+    if row:
+        # Existing expiring envelope snapshot; new semantics use test_packet_permanent.
+        e.db.execute('UPDATE red_packets SET permanent=0 WHERE nonce=?',(row['nonce'],))
+        row=e.db.one('SELECT * FROM red_packets WHERE nonce=?',(row['nonce'],))
+    return row
 
 
 def card_message(e, row):
@@ -53,7 +59,8 @@ def test_received_command_options_confirm_claim_popup_progress_and_best(env, tex
         row = await dispatch(env, text)
         assert row['mode'] == mode and row['card_message_id'] and row['thread_id'] == 7
         body = env.tg.text(GROUP, row['card_message_id'])
-        assert '100 积分' in body and '10 份' in body and '24 小时' in body and '待确认' in body
+        assert '100 积分' in body and '10 份' in body and '确认后' in body
+        assert '小时' not in body and '截止' not in body
         assert '扣除' not in body and '领取范围' not in body
         assert env.services.points.balance('u1') == 5000
         actions = env.tg.actions(GROUP, row['card_message_id'])

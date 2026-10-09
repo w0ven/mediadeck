@@ -78,22 +78,28 @@ def face(card):
     return image
 
 
-def render(content, *, private=False):
+def render(content, *, private=False, niuniu=False):
     if not 1 <= len(content) <= 5: raise ValueError('invalid poker image rows')
-    width, row_height = 780, 340
+    width, row_height = (1100 if niuniu else 780), 340
     image = Image.new('RGB', (width, 92+len(content)*row_height+24), '#102f36')
     d = ImageDraw.Draw(image)
-    d.text((34, 20), '炸金花 · 我的手牌' if private else '炸金花 · 摊牌结果', font=font(30), fill='#f0dbb1')
+    title = '牛牛 · 五张揭晓' if niuniu else '炸金花 · 我的手牌' if private else '炸金花 · 摊牌结果'
+    d.text((34, 20), title, font=font(30), fill='#f0dbb1')
     for i, player in enumerate(content):
         cards = player['cards']
-        category = CATEGORIES[strength(cards)[0]]
+        if niuniu:
+            from app.modules.niuniu import CATEGORIES as BULL_CATEGORIES
+            from app.modules.niuniu import strength as bull_strength
+            category = BULL_CATEGORIES[bull_strength(cards)[0]]
+        else:
+            category = CATEGORIES[strength(cards)[0]]
         y = 92 + i*row_height
         name = str(player.get('name') or '成员')[:25]
         label = f'{name}  ·  {category}'
         if not private and player.get('award'): label += f'  ·  获得 {player["award"]} 积分'
         d.text((38, y), label, font=font(22), fill='#f5f7f4')
         for j, card in enumerate(cards):
-            x = 88+j*208
+            x = (36 if niuniu else 88)+j*208
             d.rounded_rectangle((x+3, y+43, x+191, y+310), radius=15, fill='#08212a')
             image.paste(face(card), (x, y+38))
     output = BytesIO()
