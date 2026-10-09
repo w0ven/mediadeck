@@ -23,14 +23,19 @@ from app.modules.members import MemberService
 from app.modules.play_money import PlayError
 from app.modules.points import PointsService
 from app.modules.report_delivery import CALL_DELIVERY
-from app.modules.scratch9 import DEFAULTS, TIERS, Scratch9Service, configuration, next_slots, reward
+from app.modules.scratch9 import DEFAULTS, Scratch9Service, configuration, next_slots, reward
 from app.modules.scratch9_view import html_preview, render
+
+# Original fixed distribution is explicit test input, not the new default.
+FIXED_TIERS = [{'reward': amount, 'probability': probability} for amount, probability in
+               ((0, 10), (5, 15), (10, 20), (20, 25), (30, 15), (50, 10),
+                (100, 4), (300, .6), (500, .3), (888, .1))]
 
 
 @pytest.fixture
 def env(request):
     e = request.getfixturevalue('bw_env')
-    e.services.registry.save('scratch9', enabled=True)
+    e.services.registry.save('scratch9', enabled=True, config={'reward_tiers': json.dumps(FIXED_TIERS)})
     e.media = []
     for i in (7, 8):
         uid, tg = f'scratch-user-{i}', 990+i
@@ -90,12 +95,12 @@ async def confirm(e, intent, index=0, action='yes', original=None):
     return e.db.one('SELECT * FROM scratch9_intents WHERE token=?', (intent['token'],))
 
 
-def test_default_probabilities_exact_integer_boundaries_and_crypto_rng(monkeypatch):
-    cfg = configuration({})
+def test_legacy_fixed_probabilities_exact_integer_boundaries_and_crypto_rng(monkeypatch):
+    cfg = configuration({'reward_tiers': json.dumps(FIXED_TIERS)})
     assert {k: v for k, v in cfg.items() if k != 'reward_tiers'} == {k: v for k, v in DEFAULTS.items() if k != 'reward_tiers'}
-    assert json.loads(cfg['reward_tiers']) == TIERS and sum(Decimal(str(t['probability'])) for t in TIERS) == 100
+    assert json.loads(cfg['reward_tiers']) == FIXED_TIERS and sum(Decimal(str(t['probability'])) for t in FIXED_TIERS) == 100
     boundary = 0
-    for tier in TIERS:
+    for tier in FIXED_TIERS:
         width = int(Decimal(str(tier['probability']))*10000)
         assert reward(cfg, lambda n, value=boundary: value) == tier['reward']
         assert reward(cfg, lambda n, value=boundary+width-1: value) == tier['reward']

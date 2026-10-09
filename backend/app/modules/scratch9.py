@@ -14,9 +14,9 @@ from app.modules.play_rounds import PlayAccess
 from app.modules.plugins import Field, Plugin, Spec
 from app.modules.red_packets import public_name
 
-TIERS = [{'reward': a, 'probability': p} for a, p in
-         ((0, 10), (5, 15), (10, 20), (20, 25), (30, 15), (50, 10),
-          (100, 4), (300, .6), (500, .3), (888, .1))]
+TIERS = [{'min': low, 'max': high, 'probability': p} for low, high, p in
+         ((0, 0, 3), (1, 30, 70), (31, 50, 20), (51, 100, 4),
+          (101, 200, 2), (201, 400, .8), (401, 888, .2))]
 DEFAULTS = {'cost': 30, 'per_person': 1, 'duration_minutes': 30,
             'schedule_times': '12:00,20:00', 'reward_tiers': encode(TIERS)}
 DRAW_SIZE = 1_000_000
@@ -37,37 +37,65 @@ def configuration(raw):
         if not isinstance(tiers, list) or not 1 <= len(tiers) <= 40:
             raise ValueError('奖励档位须为1～40项JSON数组')
         total = Decimal(0)
-        seen = set()
+        bounds = []
+        normalized = []
+        # Snapshot shape is the rules version: all old reward entries remain
+        # fixed-value draws, while min/max entries are closed uniform ranges.
+        shape = None
         for tier in tiers:
-            if not isinstance(tier, dict) or set(tier) != {'reward', 'probability'}:
-                raise ValueError('奖励档位仅含reward和probability')
-            reward = tier['reward']
+            if not isinstance(tier, dict):
+                raise TypeError('奖励档位须为对象')
+            keys = set(tier)
+            if keys not in ({'reward', 'probability'}, {'min', 'max', 'probability'}):
+                raise ValueError('区间档位仅含min、max、probability；旧固定档兼容reward、probability')
+            if shape is not None and keys != shape:
+                raise ValueError('同一配置不可混用固定奖励与区间档位')
+            shape = keys
+            low, high = (tier['reward'], tier['reward']) if 'reward' in tier else (tier['min'], tier['max'])
+            if type(low) is not int or type(high) is not int or not 0 <= low <= high <= 1000000:
+                raise ValueError('奖励边界须为0～1000000整数且min不大于max')
+            if any(low <= end and high >= start for start, end in bounds):
+                raise ValueError('奖励区间不可重叠，闭区间端点也不可重复')
+            if 'reward' not in tier and (isinstance(tier['probability'], (bool, str))):
+                raise ValueError('概率须为数值百分比')
             probability = Decimal(str(tier['probability']))
-            if type(reward) is not int or not 0 <= reward <= 1000000 or reward in seen:
-                raise ValueError('奖励须为不重复的0～1000000整数')
             if (not probability.is_finite() or not 0 <= probability <= 100
                     or probability * 10000 != (probability * 10000).to_integral_value()):
                 raise ValueError('概率须为0～100的数，最多4位小数')
             total += probability
-            seen.add(reward)
+            bounds.append((low, high))
+            normalized.append({**tier, 'probability': float(probability)})
         if total != 100:
             raise ValueError('奖励概率之和必须严格为100%')
     except (TypeError, InvalidOperation, json.JSONDecodeError, KeyError) as exc:
         raise ValueError('奖励档位JSON无效') from exc
-    cfg['reward_tiers'] = encode([{'reward': t['reward'], 'probability': float(Decimal(str(t['probability'])))} for t in tiers])
+    cfg['reward_tiers'] = encode(normalized)
     return {k: cfg[k] for k in DEFAULTS}
 
 
 def reward(config, randbelow=None):
-    draw = (randbelow or secrets.randbelow)(DRAW_SIZE)
+    rng = randbelow or secrets.randbelow
+    draw = rng(DRAW_SIZE)
     if type(draw) is not int or not 0 <= draw < DRAW_SIZE:
         raise ValueError('随机值超出范围')
     bound = 0
     for tier in json.loads(config['reward_tiers']):
         bound += int(Decimal(str(tier['probability'])) * 10000)
         if draw < bound:
-            return tier['reward']
+            if 'reward' in tier:
+                return tier['reward']  # historical fixed-value snapshot: one draw
+            width = tier['max'] - tier['min'] + 1
+            offset = rng(width)
+            if type(offset) is not int or not 0 <= offset < width:
+                raise ValueError('区间随机值超出范围')
+            return tier['min'] + offset
     raise RuntimeError('奖励权重无效')
+
+
+def max_reward(config):
+    # Zero-weight tiers are not possible prizes. Never peek at an unclaimed draw.
+    return max(t.get('max', t.get('reward')) for t in json.loads(config['reward_tiers'])
+               if Decimal(str(t['probability'])) > 0)
 
 
 def next_slots(config, now, count=2):
@@ -392,7 +420,7 @@ class Scratch9Plugin(Plugin):
                         Field('per_person', '每人每场最多格数', kind='int', default=1, min=1, max=9),
                         Field('duration_minutes', '每场分钟数', kind='int', default=30, min=1, max=1440),
                         Field('schedule_times', '每日北京时间', default=DEFAULTS['schedule_times'], help='HH:MM逗号分隔；空白仅手动开启。'),
-                        Field('reward_tiers', '奖励及概率（仅后台）', kind='text', default=DEFAULTS['reward_tiers'], help='JSON数组：reward为奖励整数，probability为百分比；严格合计100。新配置仅影响新场。')])
+                        Field('reward_tiers', '奖励区间及概率（仅后台）', kind='text', default=DEFAULTS['reward_tiers'], help='JSON数组：min/max为闭区间整数，不能重叠；probability为百分比，最多4位小数且合计100。先选档，再在档内均匀抽整数。旧reward格式保旧规则；新配置仅影响新场。')])
 
     def validate_config(self, cfg):
         configuration(cfg)
