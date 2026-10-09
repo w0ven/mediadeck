@@ -54,18 +54,18 @@ def test_true_topic_still_rejects_a_different_topic_without_debit(env):
     asyncio.run(run())
 
 
-def test_30_available_points_cannot_register_explicit_500_budget_even_with_10_ante(env):
+def test_30_available_points_cannot_register_explicit_500_fixed_niuniu_stake(env):
     e = env
-    e.services.registry.save('poker', enabled=True)
+    e.services.registry.save('niuniu', enabled=True)
     uid = e.uids[0]
     e.services.points.add(uid, 30-e.services.points.balance(uid), 'isolated.budget-threshold')
-    assert e.services.registry.config('poker')['budget'] == 500
     ledger = copy.deepcopy(e.services.points.ledger(uid))
-    source = command_message(e, text='/炸金花 10 500', thread=0)
+    source = command_message(e, text='/牛牛 500', thread=0)
     asyncio.run(e.bot._dispatch_update({'message': source}))
     assert e.db.one("SELECT COUNT(*) n FROM play_rounds WHERE kind='poker'")['n'] == 0
     assert e.db.one('SELECT COUNT(*) n FROM poker_hands')['n'] == 0
+    assert e.db.one('SELECT COUNT(*) n FROM niuniu_rounds')['n'] == 0
     assert e.db.one('SELECT COUNT(*) n FROM play_escrows')['n'] == 0
     assert e.services.points.balance(uid) == 30 and e.services.points.ledger(uid) == ledger
-    assert any(method=='sendMessage' and payload.get('text')=='本局每人需 500 积分可用积分以冻结预算；积分不足，未报名'
+    assert any(method=='sendMessage' and payload.get('text')=='🍃 本局需 500 积分，积分不足，未加入'
                for method, payload in e.tg.calls)
