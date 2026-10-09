@@ -1802,6 +1802,20 @@ async def _playback_report_payload(request: Request) -> dict[str, Any]:
     return payload
 
 
+async def _playback_report_user(request: Request, token: str, device: str) -> str:
+    # A restricted entry must use the same personal-owner proof as admission.
+    # The legacy DeviceId lookup can reject an otherwise unique personal owner
+    # when Emby also returns an ownerless discovery row for that device.
+    guard = app.state.whitelist_route
+    entry = guard.entry(request.headers)
+    if entry is not None and entry.whitelist_only:
+        return await guard.user(request.headers, dict(request.query_params))
+    uid = await app.state.emby.user_for_token(token, device) if token else None
+    if not uid:
+        raise HTTPException(401, "playback authentication required")
+    return uid
+
+
 @app.post("/api/playback/started", include_in_schema=False)
 @app.post("/api/playback/progress", include_in_schema=False)
 async def playback_activity(request: Request) -> Response:
@@ -1812,9 +1826,7 @@ async def playback_activity(request: Request) -> Response:
     if not token:
         raise HTTPException(401, "playback authentication required")
     try:
-        uid = await app.state.emby.user_for_token(token, device)
-        if not uid:
-            raise HTTPException(401, "playback authentication required")
+        uid = await _playback_report_user(request, token, device)
         event = "progress" if request.url.path.endswith("/progress") else "started"
         async def issue():
             return await app.state.emby.report_playback(event, dict(request.headers), query, payload)
@@ -1833,9 +1845,7 @@ async def playback_stopped(request: Request) -> Response:
     payload = await _playback_report_payload(request)
     token = caller_token(request.headers, dict(request.query_params))
     device = caller_device(request.headers, dict(request.query_params))
-    uid = await app.state.emby.user_for_token(token, device) if token else None
-    if not uid:
-        raise HTTPException(401, "playback authentication required")
+    uid = await _playback_report_user(request, token, device)
     try:
         code = await app.state.streams.report_stopped(uid, device, token, payload)
         if 200 <= code < 300:
