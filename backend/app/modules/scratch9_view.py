@@ -10,13 +10,14 @@ from PIL import Image, ImageDraw
 
 from app.modules.economy_rules import BEIJING
 from app.modules.poker_image import font
+from app.modules.scratch9 import max_reward
 
 
 def view(row, cells):
     cfg = json.loads(row['config_json'])
     found = {c['cell']: c for c in cells}
     ended = row['state'] == 'closed'
-    text = f'🎟 <b>九宫格刮刮乐</b>\n每格 <b>{cfg["cost"]}</b> 积分 · 每人最多 {cfg["per_person"]} 格'
+    text = f'🎟 <b>九宫格刮刮乐</b>\n每格 <b>{cfg["cost"]}</b> 积分 · 每人最多 {cfg["per_person"]} 格 · 最高 {max_reward(cfg)} 积分'
     text += '\n' + ('🍃 本场已结束' if ended else '⏳ 截止 '+datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M'))
     text += f' · 已刮 {len(cells)}/9\n'
     for c in cells:
@@ -44,7 +45,7 @@ def render(row, cells):
     d = ImageDraw.Draw(image)
     d.rounded_rectangle((32, 26, 1068, 1084), radius=34, fill='#172940', outline='#dcb867', width=2)
     d.text((72, 58), '九宫格刮刮乐', font=font(54), fill='#fff0c6')
-    d.text((74, 139), f'每格 {cfg["cost"]} 积分   /   每人最多 {cfg["per_person"]} 格', font=font(27), fill='#becbdc')
+    d.text((74, 139), f'每格 {cfg["cost"]} 积分   /   每人最多 {cfg["per_person"]} 格   /   最高 {max_reward(cfg)} 积分', font=font(27), fill='#becbdc')
     ended = row['state'] == 'closed'
     phase = '本场已结束 · 好运留在这里' if ended else '截止 '+datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M')+' · 同一格点两次，确认后揭晓'
     d.text((74, 185), phase, font=font(24), fill='#c9d3df')
