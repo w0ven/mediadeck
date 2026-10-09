@@ -27,6 +27,20 @@ def port():
         return sock.getsockname()[1]
 
 
+def fixture_upstream_ports(text, ports):
+    import re
+    # Replace original upstream tokens once: an ephemeral port such as 44317
+    # must never be interpreted as the old :443 prefix in a later replacement.
+    return re.sub(r'127\.0\.0\.1:(8443|443|8300|8096|8339)(?!\d)',
+                  lambda match: f'127.0.0.1:{ports[int(match[1])]}', text)
+
+
+def test_fixture_ephemeral_port_prefix_collision_is_not_rewritten():
+    ports = {8443: 44317, 443: 46281, 8300: 83391, 8096: 83001, 8339: 80961}
+    original = '127.0.0.1:8443 127.0.0.1:443 127.0.0.1:8300 127.0.0.1:8096 127.0.0.1:8339 127.0.0.1:44399'
+    assert fixture_upstream_ports(original, ports) == '127.0.0.1:44317 127.0.0.1:46281 127.0.0.1:83391 127.0.0.1:83001 127.0.0.1:80961 127.0.0.1:44399'
+
+
 def test_real_edge_origin_phases_and_bytes(client, tmp_path):  # noqa: F811
     client.delete("/api/nodes/edge-b", auth=ADMIN)
     client.put("/api/members/u1", auth=ADMIN, json={"group_id": "whitelist"})
@@ -114,8 +128,7 @@ def test_real_edge_origin_phases_and_bytes(client, tmp_path):  # noqa: F811
         text = (Path(__file__).resolve().parents[2] / "deploy/nginx" / name).read_text()
         for src, dest in values.items():
             text = text.replace(src, dest)
-        text = text.replace("127.0.0.1:8443", f"127.0.0.1:{origin}").replace("127.0.0.1:443", f"127.0.0.1:{node}")
-        text = text.replace("127.0.0.1:8300", f"127.0.0.1:{deck}").replace("127.0.0.1:8096", f"127.0.0.1:{emby}").replace("127.0.0.1:8339", f"127.0.0.1:{gateway}")
+        text = fixture_upstream_ports(text, {8443: origin, 443: node, 8300: deck, 8096: emby, 8339: gateway})
         text = text.replace("listen 443", f"listen 127.0.0.1:{edge}").replace("listen 80", f"listen 127.0.0.1:{plain}")
         import re
         text = re.sub(r"/etc/letsencrypt/live/[^/]+/fullchain.pem", str(cert), text)
