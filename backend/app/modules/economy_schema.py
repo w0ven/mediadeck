@@ -133,3 +133,5 @@ def migrate(db):
     migrate_play(db)
     from app.modules.shop_notices import migrate as migrate_shop_notices
     migrate_shop_notices(db)
+    from app.modules.scratch9 import migrate as migrate_scratch9
+    migrate_scratch9(db)

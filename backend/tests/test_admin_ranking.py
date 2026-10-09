@@ -102,7 +102,7 @@ def test_hub_buttons_launch_both_games_idempotently_and_help_is_separate(env):
         await click(env,row,'launch','niuniu')
         assert env.db.one('SELECT COUNT(*) n FROM niuniu_rounds')['n']==1
         after=env.db.query('SELECT * FROM points_ledger ORDER BY id')
-        assert after[:-1]==before and after[-1]['delta']==-10  # one creation share, never a replay
+        assert after[:-1]==before and after[-1]['delta']==-40  # fixed four-share banker collateral, never a replay
         await click(env,row,'gamehelp','niuniu')
         help_body=body(env,row)
         for rule in ('五张','JQK','A低','K高','花色','100','无抽成'):assert rule in help_body

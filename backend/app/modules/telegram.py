@@ -53,6 +53,7 @@ from app.modules.bot_views import (
     short_label,
     watch_rank_mention,
 )
+from app.modules.command_cleanup import GroupCommandCleanupMixin, capture_response
 from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
@@ -261,7 +262,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
+class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -469,6 +470,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             self._record_call_error(redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
         self._record_call_error('')
+        capture_response(method, payload or {}, body.get('result'))
         return body.get("result")
 
     async def _call_multipart(self, method: str, fields: dict[str, Any],
@@ -504,6 +506,7 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             self._record_call_error(redact(str(description or "Telegram 拒绝了请求").replace(auth_part, '***')))
             return None
         self._record_call_error('')
+        capture_response(method, fields, body.get('result'))
         return body.get("result")
 
     async def verify(self) -> dict[str, Any]:
@@ -4147,6 +4150,12 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
         return text
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
+        with self._group_command_context(message):
+            await self._handle_current_message(message)
+        with contextlib.suppress(Exception):
+            await self._drain_group_commands()
+
+    async def _handle_current_message(self, message: dict[str, Any]) -> None:
         chat_id = (message.get("chat") or {}).get("id")
         from_user = message.get("from") or {}
         tg_user_id = str(from_user.get("id") or "")
@@ -4366,9 +4375,6 @@ class TelegramBot(PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPoints
             command = text.split()[0].lower().split('@', 1)[0]
             if shown and in_group and command in GROUP_TEMP_COMMANDS:
                 self._schedule_brief_cleanup(chat_id)
-            if shown and (command in ('/kk', '/me', '/rank', '/today', '/renew', '/score')
-                          or in_group and command in GROUP_TEMP_COMMANDS):
-                await self._delete_trigger_command(chat_id, message.get('message_id'))
             return
 
         if in_group:

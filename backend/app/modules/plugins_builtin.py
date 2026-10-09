@@ -33,6 +33,7 @@ from typing import Any
 from app.modules import report_delivery
 from app.modules.blackwhite import BlackwhitePlugin
 from app.modules.checkin_cleanup import CheckinCleanupPlugin
+from app.modules.command_cleanup import GroupCommandCleanupPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.niuniu import NiuniuPlugin
@@ -40,6 +41,7 @@ from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
 from app.modules.points_ranking import PointsRankingPlugin
 from app.modules.poker import PokerPlugin
+from app.modules.scratch9 import Scratch9Plugin
 
 # How long a "we told you" note is kept before it is considered stale. Without
 # this the state document grows one entry per member forever, and a member who
@@ -915,6 +917,8 @@ BUILTIN_PLUGINS = (
     BlackwhitePlugin,
     PokerPlugin,
     NiuniuPlugin,
+    Scratch9Plugin,
+    GroupCommandCleanupPlugin,
     PointsRankingPlugin,
 )
 
