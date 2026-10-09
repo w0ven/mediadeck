@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — shared scratch card and fixed-collateral banker rooms
+
+- Add one shared nine-cell activity with owner-bound fee confirmation, independent
+  system reward ledger, immutable configuration, deadline and future-only slots.
+  Keep probabilities in the operator configuration, not chat or buttons.
+- New Niuniu creators freeze exactly four stakes; each of up to four guests
+  compares only with the banker for one stake. Release unused collateral, reject
+  voluntary leaving, keep system cancellation refunds and legacy rule snapshots.
+- Start new Niuniu rooms as images and edit their original media/caption/buttons;
+  retain old text cards without a second result image. Red packets keep their
+  explicit independent result/unpin exception.
+- Persist only trusted current recognized group-command IDs after responses;
+  private/ordinary/forwarded/reply-target messages are not cleanup targets.
+  Deletion failure never repeats or blocks financial business.
+- Verify isolated handlers, native transport, concurrent SQLite writers, money,
+  failure/recovery and renderers; local full lint/tests and CI gate every release.
+  No production gambling or group test probes.
+
 ## 2026-10-07 — complete Bot interaction simplification and visible request outcomes
 
 - Deliver all six interaction changes: minimal request cards with linked titles,

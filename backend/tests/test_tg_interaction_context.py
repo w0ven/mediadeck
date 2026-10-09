@@ -39,12 +39,16 @@ class FakeTelegram:
             self.next_id += 1
             self.messages[(str(payload['chat_id']), self.next_id)] = payload
             return {'message_id': self.next_id, 'chat': {'id': payload['chat_id']}}
-        if method in ('editMessageText', 'editMessageReplyMarkup'):
+        if method in ('editMessageText', 'editMessageReplyMarkup', 'editMessageMedia', 'editMessageCaption'):
             if self.edit_error and method == 'editMessageText':
                 self.bot._last_error = self.edit_error
                 return None
             key = (str(payload['chat_id']), payload['message_id'])
             self.messages.setdefault(key, {}).update(payload)
+            if method == 'editMessageMedia':
+                import json
+                media = json.loads(payload['media']) if isinstance(payload['media'], str) else payload['media']
+                self.messages[key]['caption'] = media.get('caption', '')
             return {'message_id': payload['message_id']}
         return True
 

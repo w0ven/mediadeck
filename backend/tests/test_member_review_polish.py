@@ -17,7 +17,10 @@ from app.modules.telegram import GROUP_ADMIN_COMMANDS, GROUP_MEMBER_COMMANDS
 
 @pytest.fixture
 def env(request):
-    return request.getfixturevalue('base_env')
+    e = request.getfixturevalue('base_env')
+    old = e.bot._plugin_on
+    e.bot._plugin_on = lambda plugin: plugin == 'group_command_cleanup' or old(plugin)
+    return e
 
 
 def confirm_action(env, mid):

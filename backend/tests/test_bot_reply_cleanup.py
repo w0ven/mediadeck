@@ -17,10 +17,17 @@ from app.modules.report_delivery import CALL_DELIVERY
 from app.modules.telegram import _CALL_ERROR, GROUP_BRIEF_TTL
 
 
+@pytest.fixture(autouse=True)
+def enable_authorized_cleanup(bot):
+    previous = bot._plugin_on
+    bot._plugin_on = lambda plugin: plugin == 'group_command_cleanup' or previous(plugin)
+
+
 def message(text='/usage@cola_embybot', *, user=ALICE, thread=12, mid=42, chat=GROUP):
     msg = _msg(text, user=user, thread=thread, chat=chat,
                chat_type='private' if int(chat) > 0 else 'supergroup')
     msg['message_id'] = mid
+    msg['from']['is_bot'] = False
     return msg
 
 
@@ -66,7 +73,8 @@ def test_unanswered_or_invalid_group_messages_are_kept(bot, monkeypatch, text, u
     schedule = Mock()
     monkeypatch.setattr(bot, '_schedule_brief_cleanup', schedule)
     asyncio.run(bot._handle_message(message(text, user=user, chat=chat)))
-    assert not deletions(bot)
+    # A recognized bad-argument command has been answered and is now cleaned too.
+    assert deletions(bot) == ([42] if text == '/me extra' else [])
     schedule.assert_not_called()
 
 

@@ -14,12 +14,15 @@ from app.modules.telegram import TelegramBot
 
 @pytest.fixture
 def env(request):
-    return request.getfixturevalue('context_env')
+    e = request.getfixturevalue('context_env')
+    old = e.bot._plugin_on
+    e.bot._plugin_on = lambda plugin: plugin == 'group_command_cleanup' or old(plugin)
+    return e
 
 
 async def dispatch(env, text, chat=GROUP, user=ADMIN, mid=31, reply=None):
     message = {'chat': {'id': chat, 'type': 'supergroup' if chat < 0 else 'private'},
-               'from': {'id': user}, 'text': text}
+               'from': {'id': user, 'is_bot': False}, 'text': text}
     if mid is not None:
         message['message_id'] = mid
     if reply:
@@ -39,16 +42,17 @@ def test_successful_cards_delete_only_trigger_after_send(env, chat, text, reply,
     asyncio.run(dispatch(env, text, chat=chat, reply=reply))
     sent = [p for m, p in env.tg.calls if m == 'sendMessage']
     assert len(sent) == 1 and target in sent[0]['text']
-    assert deletions(env) == [{'chat_id': chat, 'message_id': 31}]
+    assert deletions(env) == ([{'chat_id': chat, 'message_id': 31}] if chat == GROUP else [])
     methods = [m for m, _ in env.tg.calls]
-    assert methods.index('deleteMessage') > methods.index('sendMessage')
+    if chat == GROUP:
+        assert methods.index('deleteMessage') > methods.index('sendMessage')
     assert any(k[1] != 31 for k in env.tg.messages)
 
 
 @pytest.mark.parametrize('text', ['/prouser ViewerA'])
-def test_other_commands_never_delete_the_trigger(env, text):
+def test_other_recognized_successful_group_commands_also_delete_only_trigger(env, text):
     asyncio.run(dispatch(env, text))
-    assert not deletions(env)
+    assert deletions(env) == [{'chat_id': GROUP, 'message_id': 31}]
 
 
 @pytest.mark.parametrize('case', ['send_failed', 'usage', 'unknown', 'unregistered_id',
@@ -78,7 +82,8 @@ def test_no_cleanup_without_requested_card_success(env, case):
     else:
         text = '/me unexpected'
     asyncio.run(dispatch(env, text, chat=chat, user=user, mid=mid))
-    assert not deletions(env)
+    responded = any(m == 'sendMessage' for m, _ in env.tg.calls) and not env.tg.fail_send
+    assert deletions(env) == ([{'chat_id': chat, 'message_id': 31}] if responded and chat == GROUP and mid else [])
 
 
 @pytest.mark.parametrize('chat', [GROUP, ADMIN])
@@ -102,9 +107,9 @@ def test_cleanup_failure_is_quiet_and_preserves_unrelated_error(env, monkeypatch
         return await original(method, payload, timeout)
     env.bot._call = transport
     asyncio.run(dispatch(env, '/kk ViewerA', chat=chat))
-    assert deletions(env) == [{'chat_id': chat, 'message_id': 31}]
+    assert deletions(env) == ([{'chat_id': chat, 'message_id': 31}] if chat == GROUP else [])
     assert len([m for m, _ in env.tg.calls if m == 'sendMessage']) == 1
-    assert env.bot._last_error == 'unrelated-operation-failed'
+    assert env.bot._last_error == ('unrelated-operation-failed' if chat == GROUP else '')
     assert env.members.get('u1')['group_id'] == 'standard'
 
 

@@ -24,7 +24,7 @@ class PlayHubBotMixin:
                 rows.append(choices)
             if self._plugin_on('niuniu'):
                 cfg={**NIUNIU_DEFAULTS,**self._plugins.config('niuniu')}
-                body+=f'\n🐂 牛牛 · 2～5人 · 每人投入 {cfg["default_stake"]} 积分'
+                body+=f'\n🐂 牛牛 · 庄家担保 {4*cfg["default_stake"]} 积分 · 闲家每位 {cfg["default_stake"]} 积分'
                 choices=[button('牛牛玩法','gamehelp','niuniu')]
                 if not private:choices.insert(0,button('创建牛牛','launch','niuniu'))
                 rows.append(choices)

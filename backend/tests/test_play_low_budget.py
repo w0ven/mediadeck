@@ -127,17 +127,18 @@ def test_bw_create_checks_ten_but_does_not_debit_join_rechecks_and_requires_five
     asyncio.run(run())
 
 
-def test_actual_menu_shows_fixed_ten_and_launches_for_30_point_member(env):
+def test_actual_menu_shows_fixed_4n_collateral_and_rejects_30_point_banker(env):
     async def run():
         available(env, 0, 30)
         source=command_message(env,text='/游戏',thread=0)
         await env.bot._dispatch_update({'message':source})
         panel=env.db.one('SELECT * FROM play_panels ORDER BY created_at DESC LIMIT 1')
         body=env.tg.message(GROUP,panel['message_id'])
-        assert '参与需 10' in body['text'] and '每人投入 10 积分' in body['text']
+        assert '参与需 10' in body['text'] and '庄家担保 40 积分' in body['text'] and '闲家每位 10 积分' in body['text']
         body.update(chat={'id':GROUP,'type':'supergroup'},message_id=panel['message_id'])
         body['from']={'id':123,'is_bot':True}
         await env.bot._dispatch_update({'callback_query':{'id':'menu-launch','data':f'pp:{panel["nonce"]}:launch:niuniu', 'from':env.actors[0], 'message':body}})
         row=env.db.one('SELECT * FROM niuniu_rounds')
-        assert row and row['stake']==10 and env.services.points.balance(env.uids[0])==20
+        assert row is None and env.services.points.balance(env.uids[0])==30
+        assert not env.db.query("SELECT * FROM play_escrows WHERE scope='niuniu'")
     asyncio.run(run())

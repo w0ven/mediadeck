@@ -3,6 +3,18 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Confirmed shared scratch card and group interaction package
+- Shared nine cells, owner fee confirmation, independent system rewards, immutable
+  configuration and future-only scheduled rooms; probability configuration is Web-only.
+- New Niuniu fixed four-stake banker collateral and up to four one-stake guests,
+  pairwise basic bull comparison, no voluntary leaving, unused collateral release,
+  system cancellation refunds and legacy money snapshots.
+- New Niuniu original picture from lobby through result; old text stays text.
+  Delete only responded-to current trusted group commands, never private/ordinary/
+  reply-target/history messages. Preserve the packet result/unpin exception.
+- Isolated handler/money/concurrency/transport/render tests and normal PR/CI/release
+  gates precede separately authorized minimal deployment; no live gambling probes.
+
 ## Full-source functionality and interaction audit — local corrective cycle
 - [x] Cover all 69 production source files plus project configuration with explicit
       ownership and evidence; preserve the approved business rules and Hard Glass UI.
