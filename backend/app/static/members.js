@@ -237,13 +237,10 @@
     const used = measuredMode ? m.measured_used_bytes : m.traffic_used_bytes;
     const quota = m.traffic_quota_bytes ? measuredBytes(m.traffic_quota_bytes) : '不限';
     const label = measuredMode ? '本月流量' : '估算配额（未切换实测）';
-    const coverage = sample.coverage || {};
     const usageLabel = sample.measurement_status === 'no_usage_records'
       ? '本月尚无实测记录' : measuredBytes(used);
-    const missingNodes = (coverage.nodes || []).filter(n => !n.ok).map(n => n.name).join('、');
     return `<div class="s"><b>${label}</b> ${esc(usageLabel)} / ${esc(quota)}
-      ${!measuredMode && m.metering ? `<div class="muted">实测监测 ${esc(measuredBytes(sample.measured_used_bytes))}（未用于限额）</div>` : ''}
-      ${coverage.degraded ? `<div class="tag warn">采集不完整${missingNodes ? '：' + esc(missingNodes) : ''} · 待恢复核实</div>` : ''}</div>`;
+      ${!measuredMode && m.metering ? `<div class="muted">实测监测 ${esc(measuredBytes(sample.measured_used_bytes))}（未用于限额）</div>` : ''}</div>`;
   }
 
   function accountCell(m) {

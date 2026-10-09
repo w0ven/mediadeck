@@ -2,6 +2,15 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — keep the retired collection warning out of member rows
+
+- Remove the member-list copy of the collection/recovery warning already retired
+  from Bot replies. Preserve unknown values, zero, measured bytes and no-records copy.
+- Keep all backend coverage, collection, node switches, quota and sanction behavior
+  unchanged. This patch changes one static UI renderer only.
+- Reproduce the old warning in real Chromium first; verify eight coverage/value
+  combinations and 27 focused member/activity/route browser regressions after removal.
+
 ## 2026-10-10 — playback-line ordering and verified member activity
 
 - Add pointer/touch and keyboard ordering to the playback-line editor. Keep unsaved
