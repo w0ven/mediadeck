@@ -128,6 +128,70 @@ function initSystemSettings() {
   configureSave('mb-save','/api/settings/membership','PUT',() => ({enforcement_enabled:$('#mb-enforcement').checked,sample_interval_seconds:Number($('#mb-interval').value),retention_days:Number($('#mb-keep').value)}));
   configureSave('ic-save','/api/settings/image-cache','PUT',() => ({enabled:$('#ic-enabled').checked,max_gib:Number($('#ic-gib').value),max_age_days:Number($('#ic-age').value)}),refreshImageCacheStats);
 }
+// One pointer path supports mouse, pen and touch; only the handle captures it.
+function bindPlaybackLineReorder(host, move, saving) {
+  const rows = [...host.querySelectorAll('[data-line-row]')];
+  rows.forEach((row, index) => {
+    const handle = row.querySelector('.line-drag-handle');
+    let drag = null, frame = null;
+    const clear = () => {
+      const previous = drag; drag = null;
+      cancelAnimationFrame(frame); frame = null;
+      rows.forEach(el => el.classList.remove('line-dragging', 'line-drop-before', 'line-drop-after'));
+      if (previous && handle.hasPointerCapture(previous.id)) handle.releasePointerCapture(previous.id);
+      return previous;
+    };
+    const target = () => {
+      rows.forEach(el => el.classList.remove('line-drop-before', 'line-drop-after'));
+      const box = host.getBoundingClientRect();
+      drag.to = index;
+      if (drag.x < box.left || drag.x > box.right || drag.y < box.top - 32 || drag.y > box.bottom + 32) return;
+      const others = rows.filter(el => el !== row);
+      let to = others.findIndex(el => { const r = el.getBoundingClientRect(); return drag.y < r.top + r.height / 2; });
+      if (to < 0) to = others.length;
+      drag.to = to;
+      if (to !== index) (others[to] || others.at(-1))?.classList.add(to < others.length ? 'line-drop-before' : 'line-drop-after');
+    };
+    const tick = () => {
+      if (!drag || !row.isConnected || saving()) { clear(); return; }
+      const box = host.getBoundingClientRect();
+      if (drag.x >= box.left && drag.x <= box.right) {
+        const scroll = drag.y < 64 ? -16 : drag.y > innerHeight - 64 ? 16 : 0;
+        if (scroll) window.scrollBy(0, scroll);
+      }
+      target(); frame = requestAnimationFrame(tick);
+    };
+    handle.onpointerdown = event => {
+      if (!event.isPrimary || event.button !== 0 || rows.length < 2 || saving()) return;
+      event.preventDefault(); handle.focus();
+      drag = {id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, to: index, moved: false};
+      handle.setPointerCapture(event.pointerId);
+    };
+    handle.onpointermove = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      drag.x = event.clientX; drag.y = event.clientY;
+      if (!drag.moved && Math.hypot(drag.x - drag.startX, drag.y - drag.startY) >= 6) {
+        drag.moved = true; row.classList.add('line-dragging'); tick();
+      }
+      if (drag?.moved) { event.preventDefault(); target(); }
+    };
+    handle.onpointerup = event => {
+      if (!drag || event.pointerId !== drag.id) return;
+      if (drag.moved) { drag.x = event.clientX; drag.y = event.clientY; target(); }
+      const result = clear();
+      if (result?.moved && !saving() && result.to !== index) move(index, result.to);
+    };
+    handle.onpointercancel = handle.onlostpointercapture = () => clear();
+    handle.onkeydown = event => {
+      if (event.key === 'Escape' && drag) { event.preventDefault(); clear(); return; }
+      if (drag || saving()) return;
+      const to = {ArrowUp: index - 1, ArrowDown: index + 1, Home: 0, End: rows.length - 1}[event.key];
+      if (to === undefined) return;
+      event.preventDefault();
+      if (to >= 0 && to < rows.length && to !== index) move(index, to);
+    };
+  });
+}
 function initPlaybackLinesEditor() {
   const field = $('#tg-lines');
   if (!field) return;
@@ -164,12 +228,18 @@ function initPlaybackLinesEditor() {
     if (!host) return;
     if (!lines.length) lines = [{label: '', url: '', hint: ''}];
     host.innerHTML = lines.map((item, i) => `<article class="line-row" data-line-row="${i}">
-      <header><span>线路 ${i + 1}</span><button type="button" class="btn sm line-remove" ${lines.length < 2 && !(item.label || item.url || item.hint) ? 'hidden' : ''}>移除</button></header>
+      <header><span class="line-heading"><button type="button" class="btn sm line-drag-handle" aria-label="调整线路 ${i + 1} 顺序" title="拖动排序；也可用上下方向键、Home 或 End" ${lines.length < 2 ? 'disabled' : ''}>⋮⋮</button><span>线路 ${i + 1}</span></span><button type="button" class="btn sm line-remove" ${lines.length < 2 && !(item.label || item.url || item.hint) ? 'hidden' : ''}>移除</button></header>
       <div class="form-row"><label for="tg-line-label-${i}">名称</label><input id="tg-line-label-${i}" maxlength="40" value="${esc(item.label || '')}" placeholder="例如 电信优选"></div>
       <div class="form-row"><label for="tg-line-url-${i}">地址</label><input id="tg-line-url-${i}" type="url" value="${esc(item.url || '')}" placeholder="https://play.example.com"></div>
       <div class="form-row"><label for="tg-line-hint-${i}">说明</label><input id="tg-line-hint-${i}" maxlength="80" value="${esc(item.hint || '')}" placeholder="可选，例如建议挂梯"></div>
       <div class="form-row"><label for="tg-line-whitelist-${i}">仅白名单可见</label><input id="tg-line-whitelist-${i}" type="checkbox" ${item.whitelist_only ? 'checked' : ''}></div>
-    </article>`).join('');
+    </article>`).join('') + '<p class="help line-order-status" role="status">拖动 ⋮⋮ 调整顺序，保存后生效。</p>';
+    bindPlaybackLineReorder(host, (from, to) => {
+      const [item] = lines.splice(from, 1); lines.splice(to, 0, item);
+      draw(); sync(); updateDirtyBadges();
+      host.querySelector(`[data-line-row="${to}"] .line-drag-handle`)?.focus({preventScroll: true});
+      host.querySelector('.line-order-status').textContent = `已移到第 ${to + 1} 条，保存后生效。`;
+    }, () => !!field.closest('.card')?.dataset.saving);
     host.querySelectorAll('[data-line-row]').forEach(row => {
       const index = Number(row.dataset.lineRow);
       row.oninput = () => {
@@ -204,9 +274,9 @@ function initPlaybackLinesEditor() {
     playback_lines_show_load: $('#tg-lines-load')?.checked !== false,
   }), result => {
     lines = result.playback_lines || [];
-    field.value = JSON.stringify(lines);
-    configBaselines.set(field, field.value);
     draw();
+    // Snapshot the editor's canonical JSON after draw (including optional fields).
+    configBaselines.set(field, field.value);
   });
   draw();
 }

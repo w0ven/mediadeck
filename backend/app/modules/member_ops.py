@@ -7,9 +7,9 @@ label, and a remote failure must never be reported as a local success.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
-from datetime import UTC, datetime
 from typing import Any
 
 from app.core.errors import ConfigError, ConflictError
@@ -22,18 +22,13 @@ _SECRET_RE = re.compile(
 )
 _ABSENT_RE = re.compile(r"\b(404|not\s*found|no such user|user not found)\b", re.IGNORECASE)
 
-def activity_timestamp(member: dict[str, Any]) -> int:
-    """Sort by the same Emby activity timestamp displayed in the member row."""
-    raw = member.get("last_activity")
-    if raw:
-        try:
-            stamp = datetime.fromisoformat(str(raw))
-            if stamp.tzinfo is None:
-                stamp = stamp.replace(tzinfo=UTC)
-            return int(stamp.timestamp())
-        except (ValueError, OverflowError):
-            pass
-    return int(member.get("last_activity_ts") or member.get("last_seen_at") or 0)
+def activity_timestamp(member: dict[str, Any]) -> float:
+    """Legacy last_seen sort now means verified last playback, with no fallback."""
+    try:
+        stamp = float(member.get('last_played_at'))
+        return stamp if math.isfinite(stamp) and stamp > 0 else 0
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 SORTS = {
@@ -47,6 +42,7 @@ SORTS = {
     "traffic": lambda m: int(m.get('measured_used_bytes') if m.get('measured_used_bytes') is not None else -1),
     "edge30": lambda m: int((m.get("edge") or {}).get("bytes_30d") or 0),
     "last_seen": activity_timestamp,
+    "last_played": activity_timestamp,
 }
 
 
@@ -207,8 +203,9 @@ def apply_list_filters(rows: list[dict[str, Any]], *,
                        expiring: str | None = None,
                        emby_status: str | None = None,
                        sync_status: str | None = None,
+                       activity: str | None = None,
                        now: int | None = None) -> list[dict[str, Any]]:
-    now = now or int(time.time())
+    now = int(time.time()) if now is None else now
     out = rows
     if tg == "bound":
         out = [r for r in out if r.get("tg_user_id")]
@@ -225,6 +222,8 @@ def apply_list_filters(rows: list[dict[str, Any]], *,
         out = [r for r in out if r.get("emby_status") == emby_status]
     if sync_status:
         out = [r for r in out if r.get("sync_status") == sync_status]
+    if activity:
+        out = [r for r in out if (r.get('playback_activity') or {}).get('status') == activity]
     return out
 
 

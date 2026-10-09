@@ -67,10 +67,20 @@ def test_read_api_io_does_not_stall_health(monkeypatch, route, service, method, 
     asyncio.run(check())
 
 
-def test_member_list_db_work_does_not_stall_other_pages(monkeypatch):
-    slow = SlowOperation([{"emby_user_id": "u1", "username": "viewer", "state": "active"}])
-    monkeypatch.setattr(main.app.state, "members", SimpleNamespace(list=slow, _db=SimpleNamespace(query=lambda *a: [{"emby_user_id": "u1"}])), raising=False)
-    monkeypatch.setattr(main.app.state, "stats", SimpleNamespace(hours_this_month=lambda: {"u1": 1.0}), raising=False)
+@pytest.mark.parametrize('slow_stage', ['members', 'activity'])
+def test_member_list_db_work_does_not_stall_other_pages(monkeypatch, slow_stage):
+    members = [{"emby_user_id": "u1", "username": "viewer", "state": "active"}]
+    activity = {'u1': {'last_played_at': None, 'last_played_available': True,
+                       'playback_activity': {'status': 'observing', 'score': None}}}
+    slow = SlowOperation(members if slow_stage == 'members' else activity)
+    monkeypatch.setattr(main.app.state, "members", SimpleNamespace(
+        list=slow if slow_stage == 'members' else lambda **kw: members,
+        _db=SimpleNamespace(query=lambda *a: [{"emby_user_id": "u1"}])), raising=False)
+    monkeypatch.setattr(main.app.state, "stats", SimpleNamespace(
+        hours_this_month=lambda: {"u1": 1.0},
+        member_activity=slow if slow_stage == 'activity' else lambda *a, **kw: activity),
+        raising=False)
+    monkeypatch.setattr(main.app.state, 'usage', SimpleNamespace(status=dict), raising=False)
     monkeypatch.setattr(main.app.state, "points", SimpleNamespace(balances=lambda: {"u1": 2}), raising=False)
     monkeypatch.setattr(main.app.state, "ledger", SimpleNamespace(summary_for_users=dict), raising=False)
     monkeypatch.setattr(main, "_member_emby_snapshot", AsyncMock(
@@ -83,6 +93,8 @@ def test_member_list_db_work_does_not_stall_other_pages(monkeypatch):
             assert response.status_code == 200
             row = response.json()["members"][0]
             assert row["emby_user_id"] == "u1" and row["watch_hours"] == 1.0 and row["points"] == 2
+            assert row['last_played_at'] is None
+            assert row['playback_activity']['status'] == 'observing'
     asyncio.run(check())
 
 
