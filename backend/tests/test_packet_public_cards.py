@@ -37,9 +37,13 @@ async def issue(e, *, total=100, parts=2, mode='random', sender=VIEWER, audience
     text = f'/红包 {"等额 " if mode == "equal" else ""}{total} {parts}' + audience
     message = msg(text, actor=sender, mid=700, thread=7)
     message.pop('reply_to_message')
+    message['is_topic_message']=True
     message['from']['first_name'] = 'admin' if sender == ADMIN else '发起<&😀>'
     await e.bot._dispatch_update({'message': message})
     row = e.db.one('SELECT * FROM red_packets WHERE command_message_id=700')
+    # Preserve the original expiring-card regression as a pre-upgrade snapshot.
+    e.db.execute('UPDATE red_packets SET permanent=0 WHERE nonce=?',(row['nonce'],))
+    row=e.db.one('SELECT * FROM red_packets WHERE nonce=?',(row['nonce'],))
     await callback(e, row)
     return row
 
@@ -78,7 +82,7 @@ def test_actual_claim_public_name_amount_original_edit_snapshot_no_private_field
         row = await issue(env, sender=sender, mode=mode)
         initial = text(env, row)
         assert ('等额红包' if mode == 'equal' else '拼手气红包') in initial
-        assert '0/2' in initial and '截止 ' in initial
+        assert '0/2' in initial and '截止 ' not in initial
         assert_public(initial)
         assert '发起&lt;&amp;😀&gt;' in initial if sender == VIEWER else 'admin' in initial
         name = '<小明&>"😀'

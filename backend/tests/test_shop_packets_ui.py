@@ -107,21 +107,33 @@ def test_actual_shop_custom_and_whitelist_editor_and_red_packets_plugin(monkeypa
             card = page.locator('[data-plugin="red_packets"]')
             expect(card.locator('#pl-red_packets-max_total')).to_have_value('5000')
             expect(card.locator('#pl-red_packets-max_parts')).to_have_value('50')
-            expect(card.locator('#pl-red_packets-ttl_hours')).to_have_value('24')
+            expect(card.locator('#pl-red_packets-ttl_hours')).to_have_count(0)
+            expect(card).to_contain_text('无截止时间')
             expect(card.locator('#pl-red_packets-enabled')).not_to_be_checked()
             card.locator('#pl-red_packets-enabled').check()
             card.locator('#pl-red_packets-max_total').fill('800')
             card.locator('#pl-red_packets-max_parts').fill('20')
-            card.locator('#pl-red_packets-ttl_hours').fill('12')
             with page.expect_response(lambda r: r.url.endswith('/api/plugins/red_packets') and r.request.method == 'POST') as configured:
                 card.locator('[data-act="save"]').click()
             assert configured.value.status == 200
             stored = client.get('/api/plugins/red_packets', auth=AUTH).json()
-            assert stored['enabled'] and stored['config']['max_total'] == 800 and stored['config']['max_parts'] == 20 and stored['config']['ttl_hours'] == 12
+            assert stored['enabled'] and stored['config']['max_total'] == 800 and stored['config']['max_parts'] == 20
             card.screenshot(path=str(artifacts / 'packets-plugin-mobile.png'))
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth + 2')
             assert client.post('/api/plugins/red_packets', auth=AUTH, json={'config': {'max_parts': 0}}).status_code == 400
             assert client.post('/api/plugins/red_packets', auth=AUTH, json={'config': {'max_total': 1.5}}).status_code == 400
+            assert client.post('/api/settings/telegram', auth=AUTH, json={'enabled': True, 'bot_token': '123:local-only', 'group_interaction_chats': ['-9000']}).status_code == 200
+            page.evaluate('go("tgbot")')
+            page.locator('[data-config-section="groups"]').click()
+            expect(page.locator('#tg-shop-notice')).not_to_be_checked()
+            for enabled in (True, False):
+                page.locator('#tg-shop-notice').set_checked(enabled)
+                with page.expect_response(lambda r: r.url.endswith('/api/settings/telegram') and r.request.method == 'POST') as broadcast_saved:
+                    page.locator('#tg-save-groups').click()
+                assert broadcast_saved.value.status == 200
+                actual = client.get('/api/settings/telegram', auth=AUTH).json()
+                assert actual['shop_purchase_broadcast'] is enabled and actual['group_interaction_chats'] == ['-9000']
+            assert not app.state.db.query('SELECT * FROM shop_notices')
             browser.close()
             assert not errors, errors
     finally:

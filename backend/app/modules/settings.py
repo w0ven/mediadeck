@@ -156,6 +156,7 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # list is not "every group", it is none. Numeric chat ids preferred;
     # @public handles are accepted for the same operator convenience.
     "group_interaction_chats": [],
+    "shop_purchase_broadcast": False,
     # Optional target for every committed registration. Empty keeps the
     # existing origin-group receipt for gifts issued inside a group.
     "registration_notify_chat_id": "",
@@ -712,6 +713,7 @@ class SettingsService:
         except ConfigError:
             cfg["playback_routing_rules"] = ""
         cfg["playback_lines_show_load"] = bool(cfg.get("playback_lines_show_load", True))
+        cfg['shop_purchase_broadcast'] = cfg.get('shop_purchase_broadcast') is True and cfg['enabled']
         try:
             cfg["group_interaction_chats"] = parse_group_interaction_chats(
                 cfg.get("group_interaction_chats"))
@@ -852,6 +854,7 @@ class SettingsService:
             "require_group": str(payload.get(
                 "require_group", current["require_group"]) or "").strip(),
             "group_interaction_chats": chats,
+            "shop_purchase_broadcast": _bool(payload.get('shop_purchase_broadcast', current['shop_purchase_broadcast'])),
             "registration_notify_chat_id": notify_chat,
             "registration_notify_thread_id": topic,
             "emby_public_url": emby_url,

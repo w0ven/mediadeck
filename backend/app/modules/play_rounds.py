@@ -49,11 +49,14 @@ class PlayAccess:
 
 
 class RoundCards(PlayAccess):
+    rounds_table = 'play_rounds'
+    players_table = 'play_players'
+
     def get(self, nonce):
-        return self.db.one('SELECT * FROM play_rounds WHERE nonce=?', (str(nonce),))
+        return self.db.one(f'SELECT * FROM {self.rounds_table} WHERE nonce=?', (str(nonce),))
 
     def players(self, nonce):
-        return self.db.query('SELECT * FROM play_players WHERE nonce=? ORDER BY id', (str(nonce),))
+        return self.db.query(f'SELECT * FROM {self.players_table} WHERE nonce=? ORDER BY id', (str(nonce),))
 
     def context(self, conn, row, message, data):
         chat, thread = self.group(message)
@@ -69,7 +72,7 @@ class RoundCards(PlayAccess):
             original = (message.get('reply_to_message') or {}).get('message_id')
             if row['card_send_state'] not in ('sending', 'unknown') or original != row['command_message_id']:
                 raise PlayError('原卡回执尚未确认')
-            conn.execute("UPDATE play_rounds SET card_message_id=?,card_send_state='sent',next_publish_at=0 WHERE nonce=? AND card_message_id IS NULL", (mid, row['nonce']))
+            conn.execute(f"UPDATE {self.rounds_table} SET card_message_id=?,card_send_state='sent',next_publish_at=0 WHERE nonce=? AND card_message_id IS NULL", (mid, row['nonce']))
         elif row['card_message_id'] != mid:
             raise PlayError('请使用原游戏消息')
 
@@ -83,7 +86,7 @@ class RoundCards(PlayAccess):
             if row['card_message_id'] is None and row['card_send_state'] != 'pending':
                 return None  # uncertain initial send must not create a second card
             token = secrets.token_hex(12)
-            conn.execute("UPDATE play_rounds SET publish_token=?,publish_lease=?,card_send_state=? WHERE nonce=?",
+            conn.execute(f"UPDATE {self.rounds_table} SET publish_token=?,publish_lease=?,card_send_state=? WHERE nonce=?",
                          (token, clock + 90, 'sending' if row['card_message_id'] is None else 'sent', nonce))
             return dict(row, publish_token=token, _players=self.players(nonce))
 
@@ -96,7 +99,7 @@ class RoundCards(PlayAccess):
                 return False
             if current['card_message_id'] not in (None, mid):
                 return False
-            conn.execute("UPDATE play_rounds SET card_message_id=?,card_send_state='sent',rendered_revision=MAX(rendered_revision,?),publish_token='',publish_lease=0,publish_error='',next_publish_at=0 WHERE nonce=? AND publish_token=?",
+            conn.execute(f"UPDATE {self.rounds_table} SET card_message_id=?,card_send_state='sent',rendered_revision=MAX(rendered_revision,?),publish_token='',publish_lease=0,publish_error='',next_publish_at=0 WHERE nonce=? AND publish_token=?",
                          (mid, row['revision'], row['nonce'], row['publish_token']))
             return True
 
@@ -108,12 +111,12 @@ class RoundCards(PlayAccess):
                 return
             # Bound-card edits are always retryable on exactly the same message.
             state = 'sent' if current['card_message_id'] is not None else ('pending' if failure.get('state') == 'retry' else 'unknown')
-            conn.execute("UPDATE play_rounds SET card_send_state=?,publish_token='',publish_lease=0,next_publish_at=?,publish_error=? WHERE nonce=? AND publish_token=?",
+            conn.execute(f"UPDATE {self.rounds_table} SET card_send_state=?,publish_token='',publish_lease=0,next_publish_at=?,publish_error=? WHERE nonce=? AND publish_token=?",
                          (state, clock + max(10, int(failure.get('retry_after') or 0)),
                           '群卡更新未确认，等待原卡重试' if current['card_message_id'] else '发卡回执未确认，未重复发卡', row['nonce'], row['publish_token']))
 
     def pending_cards(self, kind, *, now=None):
         clock = time.time() if now is None else now
-        self.db.execute("UPDATE play_rounds SET card_send_state='unknown',publish_token='',publish_lease=0,publish_error='重启后发卡结果不明，等待原卡确认' WHERE kind=? AND bot_id=? AND card_message_id IS NULL AND card_send_state='sending' AND publish_lease<=?", (kind, self.bot_id, clock))
-        return self.db.query("SELECT nonce FROM play_rounds WHERE kind=? AND bot_id=? AND revision>rendered_revision AND (card_message_id IS NOT NULL OR card_send_state='pending') AND next_publish_at<=? AND publish_lease<=? ORDER BY created_at LIMIT 50",
+        self.db.execute(f"UPDATE {self.rounds_table} SET card_send_state='unknown',publish_token='',publish_lease=0,publish_error='重启后发卡结果不明，等待原卡确认' WHERE kind=? AND bot_id=? AND card_message_id IS NULL AND card_send_state='sending' AND publish_lease<=?", (kind, self.bot_id, clock))
+        return self.db.query(f"SELECT nonce FROM {self.rounds_table} WHERE kind=? AND bot_id=? AND revision>rendered_revision AND (card_message_id IS NOT NULL OR card_send_state='pending') AND next_publish_at<=? AND publish_lease<=? ORDER BY created_at LIMIT 50",
                              (kind, self.bot_id, clock, clock))

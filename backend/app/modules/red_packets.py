@@ -18,7 +18,7 @@ from app.modules.groups import WHITELIST_GROUP_ID
 
 DEFAULT_PACKET_CONFIG = {'max_total': 5000, 'max_parts': 50, 'ttl_hours': 24,
                          'enabled_for_members': True}
-CALLBACKS = ('rpok:', 'rpcancel:', 'rpclaim:', 'rpedit:', 'rppage:')
+CALLBACKS = ('rpok:', 'rpcancel:', 'rpclaim:', 'rpedit:', 'rppage:', 'rpresult:')
 RESULTS_PER_PAGE = 10
 COMMANDS = {'/红包', '/redpacket', '/packet'}
 SQL_MAX = 2**63 - 1
@@ -105,6 +105,7 @@ class PacketService:
 
     def _context(self, row, message):
         cid, thread = self._group(message)
+        if row['permanent'] and not message.get('is_topic_message'):thread=0
         sender = message.get('from') or {}
         if (row['chat_id'] != cid or row['thread_id'] != thread
                 or type(message.get('message_id')) is not int
@@ -144,7 +145,7 @@ class PacketService:
             prior = conn.execute('SELECT * FROM red_packets WHERE chat_id=? AND command_message_id=?', (cid, mid)).fetchone()
             if prior:
                 if (prior['actor_tg_id'] != tg or prior['actor_user_id'] != member['emby_user_id']
-                        or prior['funding'] != funding or prior['thread_id'] != thread or prior['command_json'] != command):
+                        or prior['funding'] != funding or prior['thread_id'] != (thread if not prior['permanent'] or message.get('is_topic_message') else 0) or prior['command_json'] != command):
                     raise PacketError('原消息已用于其他红包意图，请发送新命令')
                 return dict(prior)
             if funding == 'user' and self.points.balance(member['emby_user_id']) < total:
@@ -154,7 +155,8 @@ class PacketService:
                    'actor_name': str(member.get('username') or '已绑定成员'), 'funding': funding,
                    'public_actor_name': public_name(message['from']),
                    'mode': mode, 'audience': audience, 'total': total, 'parts': parts,
-                   'config_json': encode(config), 'command_json': command, 'thread_id': thread,
+                   'config_json': encode(config), 'command_json': command, 'thread_id': thread if message.get('is_topic_message') else 0,
+                   'permanent': 1,
                    'created_at': now, 'confirm_by': now + 600}
             conn.execute(f"INSERT INTO red_packets({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
             return dict(conn.execute('SELECT * FROM red_packets WHERE nonce=?', (row['nonce'],)).fetchone())
@@ -230,9 +232,9 @@ class PacketService:
                     raise PacketError('积分不足，未扣费；余额请在本人私聊查看') from None
             values = allocations(row['total'], row['parts'], row['mode'])
             assert sum(values) == row['total'] and min(values) >= 1
-            conn.execute("UPDATE red_packets SET status='active',confirmed_at=?,expires_at=?,allocations_json=?,remaining=total,"
+            conn.execute("UPDATE red_packets SET status='active',confirmed_at=?,expires_at=?,allocations_json=?,remaining=total,pin_state=?,"
                          "render_version=render_version+1,next_publish_at=0 WHERE nonce=?",
-                         (now, now + config['ttl_hours'] * 3600, encode(values), nonce))
+                         (now, 0 if row['permanent'] else now + config['ttl_hours'] * 3600, encode(values), 'pending' if row['permanent'] else '', nonce))
             conn.execute('INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)',
                          (now, 'tg:' + row['actor_tg_id'], 'points.packet.' + row['funding'] + '.confirm',
                           row['actor_user_id'], encode({k: row[k] for k in ('nonce','chat_id','thread_id','actor_user_id','actor_tg_id','funding','mode','audience','total','parts')})))
@@ -264,7 +266,7 @@ class PacketService:
             prior = conn.execute('SELECT * FROM red_packet_claims WHERE nonce=? AND (user_id=? OR tg_user_id=?)', (nonce, uid, tg)).fetchone()
             if prior:
                 return {'ok': True, 'already': True, 'amount': prior['amount']}
-            if row['status'] != 'active' or row['expires_at'] <= now:
+            if row['status'] != 'active' or not row['permanent'] and row['expires_at'] <= now:
                 raise PacketError('红包已领完或已到期')
             values = json.loads(row['allocations_json'])
             slot = row['claimed_count']
@@ -276,6 +278,8 @@ class PacketService:
             exhausted = slot + 1 == row['parts']
             conn.execute('UPDATE red_packets SET remaining=remaining-?,claimed_count=claimed_count+1,status=?,result_page=?,render_version=render_version+1,next_publish_at=0 WHERE nonce=?',
                          (amount, 'exhausted' if exhausted else 'active', slot // RESULTS_PER_PAGE, nonce))
+            if exhausted and row['permanent']:
+                conn.execute("UPDATE red_packets SET receipt_state='pending',unpin_state='pending',receipt_page=0 WHERE nonce=?", (nonce,))
             conn.execute('INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)',
                          (now, 'tg:' + tg, 'points.packet.' + row['funding'] + '.claim', uid,
                           encode({'nonce': nonce, 'amount': amount, 'slot': slot, 'sender': row['actor_user_id'],
@@ -291,7 +295,7 @@ class PacketService:
             if row['status'] == 'draft' and row['confirm_by'] <= now:
                 conn.execute("UPDATE red_packets SET status='cancelled',render_version=render_version+1 WHERE nonce=?", (nonce,))
                 return self.get(nonce)
-            if row['status'] != 'active' or row['expires_at'] > now:
+            if row['status'] != 'active' or row['permanent'] or row['expires_at'] > now:
                 return row
             remaining = row['remaining']
             refunded, voided = (remaining, 0) if row['funding'] == 'user' else (0, remaining)
@@ -307,7 +311,7 @@ class PacketService:
     def expire_due(self):
         now = int(time.time())
         due = self.db.query("SELECT nonce FROM red_packets WHERE settlement_retry_at<=? AND "
-                            "((status='active' AND expires_at<=?) OR (status='draft' AND confirm_by<=?)) ORDER BY created_at LIMIT 100", (now, now, now))
+                            "((status='active' AND permanent=0 AND expires_at<=?) OR (status='draft' AND confirm_by<=?)) ORDER BY created_at LIMIT 100", (now, now, now))
         for row in due:
             try:
                 self.expire(row['nonce'], now=now)

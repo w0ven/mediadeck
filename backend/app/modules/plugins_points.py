@@ -483,23 +483,27 @@ class EconomyPlugin(Plugin):
 class RedPacketsPlugin(Plugin):
     spec = Spec(
         id='red_packets', name='群积分红包', category='points', icon='🧧', interval=0,
-        description='授权群内的拼手气/等额红包，须本人确认。关闭仅停止新建和确认；已有红包仍可领取、到期结算。普通包未领部分退回原账号，奖励包到期结束；后台审计分开记录。',
+        description='授权群内的拼手气/等额红包，须本人确认。新红包不自动过期，未领积分持续留包；自动尝试置顶原领取消息，领完独立结果卡。关闭仅停止新建和确认；已有红包可继续领取，旧包按原规则收尾。',
         fields=[
             Field('enabled_for_members', '开放普通成员发红包', kind='bool', default=True),
             Field('max_total', '每包总积分上限', kind='int', default=5000, min=1, max=1000000),
             Field('max_parts', '每包最多份数', kind='int', default=50, min=1, max=200),
-            Field('ttl_hours', '红包有效期（小时）', kind='int', default=24, min=1, max=168),
         ],
     )
 
-    async def run(self, config):
+    def readonly_status(self):
         db = self.ctx.db
         active = db.one("SELECT COUNT(*) AS n,COALESCE(SUM(remaining),0) AS remaining FROM red_packets WHERE status='active'") or {}
-        errors = db.one("SELECT COUNT(*) AS n FROM red_packets WHERE settlement_error<>'' OR publish_error<>'' OR (card_send_state='sending' AND card_message_id IS NULL)") or {}
+        errors = db.one("SELECT COUNT(*) AS n FROM red_packets WHERE settlement_error<>'' OR publish_error<>'' OR pin_error<>'' OR unpin_error<>'' OR receipt_error<>'' OR (card_send_state='sending' AND card_message_id IS NULL)") or {}
         reward = db.one("SELECT COALESCE(SUM(c.amount),0) AS n FROM red_packet_claims c JOIN red_packets r ON r.nonce=c.nonce WHERE r.funding='reward'") or {}
         return {'进行中红包': active.get('n', 0), '尚未领取积分': active.get('remaining', 0),
                 '奖励已入账积分': reward.get('n', 0), '待重试或核实': errors.get('n', 0),
-                '总额上限': config['max_total'], '最多份数': config['max_parts'], '有效小时': config['ttl_hours']}
+                '结果需核实': db.one("SELECT COUNT(*) n FROM red_packets WHERE receipt_state='unknown'")['n'],
+                '置顶未确认': db.one("SELECT COUNT(*) n FROM red_packets WHERE pin_state IN ('failed','unknown')")['n'],
+                '新红包': '无截止时间'}
+
+    async def run(self, config):
+        return {**self.readonly_status(),'总额上限':config['max_total'],'最多份数':config['max_parts']}
 
 
 POINTS_PLUGINS = (CheckinPlugin, PointsTransferPlugin, EconomyPlugin, RedPacketsPlugin)

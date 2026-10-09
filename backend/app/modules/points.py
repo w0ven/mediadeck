@@ -41,7 +41,6 @@ REASON_LABELS = {
     "play.reserve": "玩法资金冻结",
     "play.release": "未用资金退回",
     "play.payout": "游戏奖池结算",
-    "market.sell": "股票成交收入",
 }
 
 

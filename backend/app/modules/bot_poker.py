@@ -116,9 +116,7 @@ class PokerBotMixin:
             if chat.get('type') not in ('group', 'supergroup') or not self._group_chat_allowed(chat): return True
             if len(parts) > 3 or any(not re.fullmatch(r'[0-9]{1,6}', part) for part in parts[1:]):
                 raise PlayError('用法：/炸金花 或 /炸金花 10 30（底注、每人局预算）')
-            row = self._poker_service().create(message, int(parts[1]) if len(parts) >= 2 else None,
-                                                int(parts[2]) if len(parts) == 3 else None)
-            await self._poker_publish(row['nonce'])
+            await self.send_message(chat.get('id'), '🐂 新局已改为五张牛牛：用 /牛牛 或 /牛牛 100（每人投入）。', thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
         except (PlayError, GroupPointsError) as exc:
             await self.send_message(chat.get('id'), escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
         return True

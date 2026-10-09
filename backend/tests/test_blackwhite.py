@@ -110,15 +110,15 @@ def test_actual_full_table_secret_then_public_results_and_real_admin_debit(env, 
             assert all(env.services.points.balance(uid) == balances[uid] for uid in env.uids)
         else:
             assert sum(p['result_amount'] for p in env.bot._blackwhite_service().players(row['nonce'])) == 250
-            assert '未中奖' in body and '· 0 积分' not in body
+            assert '本局未获奖池' in body and '· 0 积分' not in body
         saved = env.services.points.ledger(env.uids[0])
         # Replay the original pre-settlement buttons cannot debit or switch choice.
         old = card(env, row)
         old['reply_markup'] = {'inline_keyboard': [[{'callback_data': f'bw:{row["nonce"]}:{colors[0]}'}]]}
         await choose(env, row, 0, colors[0], old)
         assert env.services.points.ledger(env.uids[0]) == saved
-        if os.environ.get('GAMES_MARKET_ARTIFACTS') and len(set(colors)) > 1:
-            p = Path(os.environ['GAMES_MARKET_ARTIFACTS']) / 'blackwhite-effect.json'
+        if os.environ.get('GAMES_ARTIFACTS') and len(set(colors)) > 1:
+            p = Path(os.environ['GAMES_ARTIFACTS']) / 'blackwhite-effect.json'
             p.write_text(json.dumps({'waiting': waiting_sample, 'settled': body, 'original_message_id_unchanged': True}, ensure_ascii=False, indent=2)+'\n')
     asyncio.run(run())
     assert total(env) == initial
@@ -191,7 +191,7 @@ def test_timeout_and_plugin_off_refund_without_revealing_choices(env, monkeypatc
         current = env.bot._blackwhite_service().get(row['nonce'])
         assert current['state'] == 'expired'
         body = env.tg.text(GROUP, row['card_message_id'])
-        assert '已过期' in body and '全额退回' in body
+        assert '等人时间到了' in body and '全额退回' in body
         assert '· 黑板 ·' not in body and '· 白板 ·' not in body
         row2 = await create(env, mid=602)
         await choose(env, row2, 0, 'black')

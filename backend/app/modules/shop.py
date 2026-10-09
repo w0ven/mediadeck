@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import time
 import uuid
 from typing import Any
@@ -115,10 +116,11 @@ def _decorate(row: dict[str, Any], *, include_private=False) -> dict[str, Any]:
 class ShopService:
     """Catalogue, orders, and the one method that spends points."""
 
-    def __init__(self, db: Any, members: Any, points: Any) -> None:
+    def __init__(self, db: Any, members: Any, points: Any, *, notice_config=None) -> None:
         self._db = db
         self._members = members
         self._points = points
+        self._notice_config = notice_config or (dict)
 
     # -- catalogue -----------------------------------------------------------
 
@@ -277,7 +279,7 @@ class ShopService:
         card_id = InventoryService.add(conn,user_id,item,"purchase",now)
         note = (f"购买后说明已存入背包（#{card_id}），保留{item['retention_days']}天"
                 if kind == "custom" else f"道具已入背包（#{card_id}），使用后生效")
-        conn.execute(
+        order = conn.execute(
             "INSERT INTO shop_orders"
             "(emby_user_id,item_id,item_name,cost,kind,amount,created_at,spec_json) "
             "VALUES(?,?,?,?,?,?,?,?)",
@@ -285,6 +287,15 @@ class ShopService:
         conn.execute(
             "INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)",
             (now, actor, 'shop.redeem', user_id, f'item={item_id} cost={cost} {note}'))
+        from app.modules.shop_notices import record
+        conn.execute('SAVEPOINT purchase_notice')
+        try:
+            record(conn, order.lastrowid, member, item, self._notice_config())
+        except Exception:  # noqa: BLE001 - optional public delivery must not undo a purchase
+            conn.execute('ROLLBACK TO purchase_notice')
+            logging.getLogger(__name__).warning('Purchase announcement scheduling failed')
+        finally:
+            conn.execute('RELEASE purchase_notice')
         return {
             "ok": True,
             "item": _decorate(item),

@@ -29,29 +29,29 @@ class BlackwhiteBotMixin:
         players = row.get('_players') if '_players' in row else service.players(row['nonce'])
         def name(value):
             return escape(public_name({'first_name': value})[:40])
-        text = f"⚫⚪ <b>黑白板</b>\n{name(row['actor_name'])} · {row['stake']} 积分/人"
+        text = f"⚫⚪ <b>黑白板 · 手心手背</b>\n每人 <b>{row['stake']}</b> 积分 · 5人桌"
         nonce = row['nonce']
         keyboard = []
         if row['state'] == 'lobby':
-            text += f"\n\n已选择 <b>{len(players)}/5</b>"
+            text += f"\n\n🪑 已选择 <b>{len(players)}/5</b> · 还等 {5-len(players)} 位"
             for p in players:
                 text += '\n' + name(p['display_name'])
-            text += '\n\n<i>截止 ' + datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M') + '</i>'
-            keyboard.append([{'text': '手心 · 白板', 'callback_data': f'bw:{nonce}:white'},
-                             {'text': '手背 · 黑板', 'callback_data': f'bw:{nonce}:black'}])
+            text += '\n\n<i>悄悄选一面，满桌就揭晓。</i>\n等到 ' + datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M')
+            keyboard.append([{'text': '🤍 手心 · 白板', 'callback_data': f'bw:{nonce}:white'},
+                             {'text': '🖤 手背 · 黑板', 'callback_data': f'bw:{nonce}:black'}])
         else:
             mode = results(row)['mode']
             if mode in ('timeout', 'disabled'):
-                text += '\n\n' + ('已过期' if mode == 'timeout' else '已取消') + ' · 全额退回'
+                text += '\n\n🍃 ' + ('等人时间到了' if mode == 'timeout' else '本局已结束') + ' · 全额退回'
                 for p in players:
                     text += f"\n{name(p['display_name'])} · 已退 {p['result_amount']} 积分"
             else:
-                text += '\n\n' + ('同面 · 全额退回' if mode == 'same' else ('黑板胜' if mode == 'black' else '白板胜'))
+                text += '\n\n' + ('🤝 大家同面 · 全额退回' if mode == 'same' else ('🖤 黑板胜 · 小队逆袭！' if mode == 'black' else '🤍 白板胜 · 小队逆袭！'))
                 for p in players:
                     color = '黑板' if p['choice'] == 'black' else '白板'
-                    amount = f"{'已退 ' if mode == 'same' else ''}{p['result_amount']} 积分" if p['result_amount'] else '未中奖'
+                    amount = f"{'已退 ' if mode == 'same' else ''}{p['result_amount']} 积分" if p['result_amount'] else '本局未获奖池'
                     text += f"\n{name(p['display_name'])} · {color} · {amount}"
-        keyboard.append([{'text': '玩法', 'callback_data': 'bwh:' + nonce}])
+        keyboard.append([{'text': '✨ 怎么玩？', 'callback_data': 'bwh:' + nonce}])
         return text, keyboard
 
     async def _blackwhite_command(self, message):
@@ -93,7 +93,7 @@ class BlackwhiteBotMixin:
                     service.context(conn, row, message, data)
                 ttl = json.loads(row['config_json'])['lobby_seconds']
                 timer = '10分钟' if ttl == 600 else f'{ttl}秒'
-                help_text = f'5人各押{row["stake"]}积分，秘密选黑或白，选后不可改。满5人少数方平分总池，余数随机公平分配；同面全退。{timer}未满全退。管理员同样扣本人积分。'
+                help_text = f'5人各{row["stake"]}积分，悄悄选黑或白，选后锁定。满桌揭晓，少数方分享奖池；大家同面全退。{timer}未满也全退。'
                 await self._answer_callback(callback_id, help_text)
                 return
             if len(parts) != 3:

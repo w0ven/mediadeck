@@ -61,8 +61,17 @@ def command(env, text='/炸金花 10', index=0, mid=710, thread=22, private=Fals
 
 
 async def create(env, **kw):
-    await env.bot._dispatch_update({'message': command(env, **kw)})
-    return env.db.one("SELECT r.*,s.turn FROM play_rounds r JOIN poker_state s ON s.nonce=r.nonce ORDER BY r.created_at DESC LIMIT 1")
+    # Seed a pre-upgrade snapshot. New user commands no longer create three-card games.
+    msg = command(env, **kw)
+    args = msg['text'].split()[1:]
+    try:
+        if len(args)>2:raise PlayError('旧局参数无效')
+        row = service(env).create(msg, int(args[0]) if args else None, int(args[1]) if len(args)>1 else None)
+    except ValueError as exc:
+        await env.bot.send_message(msg['chat']['id'],str(exc))
+        return None
+    await env.bot._poker_publish(row['nonce'])
+    return service(env).get(row['nonce'])
 
 
 def card(env, row):
@@ -173,8 +182,8 @@ def test_real_handlers_all_operators_secret_png_and_only_surviving_hand_public(e
         assert env.db.one('SELECT SUM(amount) n FROM play_escrows')['n'] == 0
         assert env.db.one("SELECT amount FROM play_funds WHERE kind='poker'")['amount'] == 0
         assert len([1 for method, _ in env.tg.calls if method == 'sendMessage']) == 1
-        if os.environ.get('GAMES_MARKET_ARTIFACTS'):
-            d = Path(os.environ['GAMES_MARKET_ARTIFACTS'])
+        if os.environ.get('GAMES_ARTIFACTS'):
+            d = Path(os.environ['GAMES_ARTIFACTS'])
             (d/'poker-private.png').write_bytes(private['png'])
             (d/'poker-result.png').write_bytes(group['png'])
             (d/'poker-effect.json').write_text(json.dumps({'result': env.tg.text(GROUP, mid), 'private_png_actual_multipart': True, 'folded_hands_excluded': True}, ensure_ascii=False, indent=2)+'\n')

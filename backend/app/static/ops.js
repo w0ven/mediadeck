@@ -1219,13 +1219,13 @@ async function runGroupAudit() {
    job to the panel means adding a file on the server, not editing this file. */
 
 const automation = { category: 'task', open: {}, busy: {} };
-const PLAY_PLUGINS = ['checkin_cleanup','blackwhite','poker','stock_market','points_ranking'];
+const PLAY_PLUGINS = ['checkin_cleanup','blackwhite','niuniu','points_ranking'];
 
 function pluginFeatureGroups(cards) {
   const grid = rows => `<div class="plugin-grid">${rows.map(pluginCard).join('')}</div>`;
   if (automation.category !== 'points') return grid(cards);
   const original = cards.filter(c => !PLAY_PLUGINS.includes(c.id));
-  const groups = [['群消息清理',['checkin_cleanup']],['群内游戏',['blackwhite','poker']],['股票与积分榜',['stock_market','points_ranking']]];
+  const groups = [['群消息清理',['checkin_cleanup']],['群内游戏',['blackwhite','niuniu']],['积分榜',['points_ranking']]];
   return (original.length ? grid(original) : '') + groups.map(([name, ids]) => {
     const rows = cards.filter(c => ids.includes(c.id));
     if (!rows.length) return '';
@@ -1263,7 +1263,7 @@ PAGES.automation = async (context = pageContext('automation')) => {
   $('#view').innerHTML = `
     <div class="help">${{
     points: `积分功能和定时任务共用同一套开关与配置。<b>签到和转账由成员在机器人里触发</b>，
-       这里的「立即运行」只统计不发放；<b>关掉签到/转账开关，机器人里对应的按钮就会消失；背包配置不改变商品上下架或已有权益</b>。游戏/股票关闭后不再接新风险，已有局结算、退款与撤单仍可进行。`,
+       这里的「立即运行」只统计不发放；<b>关掉签到/转账开关，机器人里对应的按钮就会消失；背包配置不改变商品上下架或已有权益</b>。游戏关闭后不再接受新局，已有资金安全退回。新红包不自动过期，已有红包仍可领取。`,
     request: `求片相关的定时任务。<b>每条求片在提交时就会推给上片员</b>，
        这里的摘要只是每天提醒一次还有多少没人接，避免没人接的求片一直没动静。`,
   }[automation.category]
@@ -1390,11 +1390,11 @@ function pluginFields(c) {
     checkin:[['基础与连签',['streak_tiers'],true],['周末与默认活动',['weekends','double_ppm','multiplier','drops'],true],['节日管理',['holidays'],true]],
     inventory:[['道具叠加限制',['bandwidth_cap_mbps','streams_cap'],true],['称号同步设置',['title_chat'],false]],
     points_transfer:[['转账额度与手续费',['enabled_for_members','daily_limit','min_amount','fee_percent'],true],['收款安全设置',['restrict_receivers'],false]],
-    red_packets:[['红包额度与有效期',['enabled_for_members','max_total','max_parts','ttl_hours'],true]],
+    red_packets:[['红包额度',['enabled_for_members','max_total','max_parts'],true]],
     checkin_cleanup:[['群消息保留',['delay_seconds'],true]],
     blackwhite:[['押注设置',['default_stake','min_stake','max_stake'],true],['高级设置',['lobby_seconds'],false]],
+    niuniu:[['每人固定投入',['default_stake','min_stake','max_stake'],true],['等人设置',['lobby_seconds'],false]],
     poker:[['底注与预算',['default_ante','min_ante','max_ante','default_budget','budget'],true],['高级设置',['lobby_seconds','step_seconds'],false]],
-    stock_market:[['市场与手续费',['ipo_enabled','trading_enabled','fee_bps','recommended_codes'],true],['资讯与群排期',['news_enabled','digest_enabled','digest_times'],true],['高级风控',['ipo_limit','holding_limit','order_quantity','max_price','max_notional','max_orders','order_hours','halted_codes'],false]],
     points_ranking:[['排行榜显示',['page_size'],true]]
   }[c.id];
   if (!groups) return (c.fields||[]).map(f=>pluginField(c.id,f,c.config?.[f.key])).join('');

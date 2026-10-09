@@ -314,7 +314,7 @@ class PokerService(RoundCards):
 
 
 class PokerPlugin(Plugin):
-    spec = Spec(id='poker', name='炸金花', icon='🃏', category='points', description='2～5人三张牌；冻结预算，不抽成。', fields=[
+    spec = Spec(id='poker', name='旧三张牌局收尾', icon='🃏', category='points', hidden=True, description='仅兼容升级前牌局，不能创建新局。', fields=[
         Field('default_ante', '默认底注', kind='int', default=10, min=10, max=50),
         Field('min_ante', '最低底注', kind='int', default=10, min=10, max=50),
         Field('max_ante', '最高底注', kind='int', default=50, min=10, max=50),

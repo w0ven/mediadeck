@@ -202,17 +202,16 @@ def test_cash_atomic_escrow_pool_sink_and_ledger_conservation(tmp_path):
         cash.release(tx, 'poker', 'g', 'u')
     assert points.balance('u') == 900 and points.balance('v') == 100
     with economy_write(db) as tx:
-        cash.reserve(tx, 'market', 'o', 'u', 105)
-        cash.consume(tx, 'market', 'o', 'u', 5, 'fee', 'o')
-        cash.transfer_held(tx, 'market', 'o', 'u', 'v', 90)
-        assert cash.release(tx, 'market', 'o', 'u') == 10
-        assert cash.release(tx, 'market', 'o', 'u') == 0
+        cash.reserve(tx, 'poker', 'o', 'u', 105)
+        cash.consume(tx, 'poker', 'o', 'u', 5, 'fee', 'o')
+        assert cash.release(tx, 'poker', 'o', 'u') == 100
+        assert cash.release(tx, 'poker', 'o', 'u') == 0
     total = sum(points.balances().values()) + db.one('SELECT SUM(amount) n FROM play_escrows')['n'] + db.one('SELECT SUM(amount) n FROM play_funds')['n']
     assert total == 1000
     with pytest.raises(RuntimeError), economy_write(db) as tx: cash.payout(tx, 'fee', 'o', 'u', 5)
     before = points.ledger('u')
     with pytest.raises(ValueError), economy_write(db) as tx:
-        cash.reserve(tx, 'market', 'bad', 'u', 500)
+        cash.reserve(tx, 'poker', 'bad', 'u', 500)
         raise ValueError('injected failure after reserve')
     assert points.ledger('u') == before
     assert not db.one("SELECT * FROM play_escrows WHERE ref='bad'")
