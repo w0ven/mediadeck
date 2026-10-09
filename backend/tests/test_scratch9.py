@@ -77,15 +77,16 @@ async def select(e, row, cell=1, index=0, request=None):
     return e.db.one('SELECT * FROM scratch9_intents WHERE source_request=?', (request,))
 
 
-def private(e, intent):
-    actor = int(intent['tg_id'])
-    m = copy.deepcopy(e.tg.message(actor, intent['message_id']))
-    m.update(message_id=intent['message_id'], chat={'id': actor, 'type': 'private'}, **{'from': {'id': 123, 'is_bot': True}})
-    return m
+def confirmation_card(e, intent):
+    return card(e, svc(e).get(intent['nonce']))
 
 
 async def confirm(e, intent, index=0, action='yes', original=None):
-    await e.bot._dispatch_update({'callback_query': {'id': 'confirm-'+intent['token'], 'data': f'ggc:{intent["token"]}:{action}', 'from': e.actors[index], 'message': original or private(e, intent)}})
+    message = original or confirmation_card(e, intent)
+    if action == 'no':
+        svc(e).confirm(intent['token'], e.actors[index], message, 'no', request='cancel-'+intent['token'])
+    else:
+        await e.bot._dispatch_update({'callback_query': {'id': 'confirm-'+intent['token'], 'data': f'gg:{intent["nonce"]}:{intent["cell"]}', 'from': e.actors[index], 'message': message}})
     return e.db.one('SELECT * FROM scratch9_intents WHERE token=?', (intent['token'],))
 
 
@@ -125,11 +126,11 @@ def test_actual_admin_pays_owner_confirm_cancel_repeat_original_public_card_and_
         mid = row['card_message_id']
         intent = await select(env, row)
         assert env.services.points.balance(env.uids[0]) == base
-        original = private(env, intent)
+        original = confirmation_card(env, intent)
         await confirm(env, intent, action='no')
         assert env.services.points.balance(env.uids[0]) == base
         intent = await select(env, row, request='again')
-        original = private(env, intent)
+        original = confirmation_card(env, intent)
         done = await confirm(env, intent, original=original)
         assert done['state'] == 'done' and json.loads(done['result_json'])['reward'] == amount
         assert env.services.points.balance(env.uids[0]) == base-30+amount
@@ -178,7 +179,7 @@ def test_hand_create_only_trusted_admin_one_scene_per_group_and_snapshot(env):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('fault', ['chat', 'topic', 'mid', 'sender', 'forward', 'botactor', 'balance', 'deadline', 'confirm_owner', 'confirm_mid', 'confirm_group', 'rebind', 'disabled'])
+@pytest.mark.parametrize('fault', ['chat', 'topic', 'mid', 'sender', 'forward', 'botactor', 'balance', 'deadline', 'confirm_owner', 'confirm_mid', 'confirm_private', 'rebind', 'disabled'])
 def test_forged_wrong_context_deadline_low_balance_all_no_debit(env, fault):
     async def run():
         row = await create(env)
@@ -203,7 +204,7 @@ def test_forged_wrong_context_deadline_low_balance_all_no_debit(env, fault):
                 service.select(row['nonce'], 1, actor, m, 'forged')
         else:
             intent = await select(env, row, index=1)
-            p = private(env, intent)
+            p = confirmation_card(env, intent)
             clock = time.time()
             if fault == 'balance':
                 env.services.points.add(env.uids[1], 29-env.services.points.balance(env.uids[1]), 'isolated.balance')
@@ -214,14 +215,14 @@ def test_forged_wrong_context_deadline_low_balance_all_no_debit(env, fault):
                 actor = env.actors[2]
             elif fault == 'confirm_mid':
                 p['message_id'] += 1
-            elif fault == 'confirm_group':
-                p['chat'] = {'type': 'supergroup', 'id': GROUP}
+            elif fault == 'confirm_private':
+                p['chat'] = {'type': 'private', 'id': actor['id']}
             elif fault == 'rebind':
                 env.members.bind_telegram(env.uids[1], '12000')
             elif fault == 'disabled':
                 env.services.registry.save('scratch9', enabled=False)
             with pytest.raises(PlayError):
-                service.confirm(intent['token'], actor, p, 'yes', now=clock)
+                service.confirm(intent['token'], actor, p, 'yes', request='second-click', now=clock)
         assert env.db.query('SELECT * FROM points_ledger') == base and not service.cells(row['nonce'])
     asyncio.run(run())
 
@@ -235,13 +236,13 @@ def test_two_db_writers_same_cell_or_same_person_other_cells_exact_one_claim(env
     async def prepare():
         row = await create(env)
         intents = [await select(env, row, 1, 1, 'r1'), await select(env, row, 2 if same_person else 1, 1 if same_person else 2, 'r2')]
-        return row, intents, [private(env, i) for i in intents]
+        return row, intents, [confirmation_card(env, i) for i in intents]
     row, intents, messages = asyncio.run(prepare())
     before = sum(env.services.points.balances().values())
     conns = [Database(env.db.path), Database(env.db.path)]
     def write(i):
         try:
-            return local(env, conns[i]).confirm(intents[i]['token'], env.actors[1 if same_person else i+1], messages[i], 'yes')
+            return local(env, conns[i]).confirm(intents[i]['token'], env.actors[1 if same_person else i+1], messages[i], 'yes', request=f'writer-{i}')
         except PlayError:
             return None
     try:
@@ -250,7 +251,7 @@ def test_two_db_writers_same_cell_or_same_person_other_cells_exact_one_claim(env
     finally:
         for db in conns:
             db.close()
-    assert sum(o is not None for o in outputs) == 1
+    assert sum(o is not None and not o.get('cancelled') for o in outputs) == 1
     assert len(svc(env).cells(row['nonce'])) == 1
     assert sum(env.services.points.balances().values()) == before-30+888
     assert env.db.one("SELECT COUNT(*) n FROM points_ledger WHERE reason='scratch9.cost'")['n'] == 1
@@ -275,8 +276,8 @@ def test_nine_complete_or_30minute_close_original_card_no_announcements_and_prev
         assert final['state'] == 'closed' and final['end_reason'] == ('complete' if mode == 'nine' else 'timeout')
         assert final['expires_at']-final['created_at'] == 1800
         assert final['card_message_id'] == row['card_message_id'] and final['revision'] == final['rendered_revision']
-        # All extra sendMessages are owner-only confirmations, never group award announcements.
-        assert all(str(p['chat_id']) != str(GROUP) for m, p in env.tg.calls if m == 'sendMessage')
+        # Neither group awards nor private fee confirmations send extra messages.
+        assert not any(m == 'sendMessage' for m, p in env.tg.calls)
         ledger = copy.deepcopy(env.db.query('SELECT * FROM points_ledger'))
         await select(env, row, 9, 1, 'late')
         service.expire_due(now=row['expires_at']+1)
@@ -309,7 +310,7 @@ def test_public_initial_delivery_recovery_never_charges_unconfirmed_or_blind_res
     asyncio.run(run())
 
 
-def test_confirmation_failed_or_unknown_no_charge_and_cannot_use_forged_private_mid(env):
+def test_no_private_confirmation_send_even_transport_unavailable_and_forged_private_no_charge(env):
     async def run():
         row = await create(env)
         original = env.bot._call
@@ -321,7 +322,8 @@ def test_confirmation_failed_or_unknown_no_charge_and_cannot_use_forged_private_
         env.bot._call = fail
         before = env.db.query('SELECT * FROM points_ledger')
         intent = await select(env, row, index=1)
-        assert intent['state'] == 'unknown' and intent['message_id'] is None
+        assert intent['state'] == 'group_pending' and intent['message_id'] is None
+        assert not any(m == 'sendMessage' for m, _ in env.tg.calls)
         p = {'message_id': 1888, 'chat': {'id': env.actors[1]['id'], 'type': 'private'}, 'from': {'id': 123, 'is_bot': True}, 'reply_markup': {'inline_keyboard': [[{'callback_data': f'ggc:{intent["token"]}:yes'}]]}}
         with pytest.raises(PlayError):
             svc(env).confirm(intent['token'], env.actors[1], p, 'yes')
@@ -333,10 +335,10 @@ def test_snapshot_render_lease_order_exact_card_retry_and_restarted_send_unknown
     async def run():
         row = await create(env)
         intent = await select(env, row, index=1)
-        svc(env).confirm(intent['token'], env.actors[1], private(env, intent), 'yes')
+        svc(env).confirm(intent['token'], env.actors[1], confirmation_card(env, intent), 'yes', request='second-click')
         older = svc(env).begin_publish(row['nonce'])
         second = await select(env, row, cell=2, index=2)
-        svc(env).confirm(second['token'], env.actors[2], private(env, second), 'yes')
+        svc(env).confirm(second['token'], env.actors[2], confirmation_card(env, second), 'yes', request='second-player-click')
         assert svc(env).begin_publish(row['nonce']) is None
         assert svc(env).published(older, row['card_message_id'])
         current = svc(env).get(row['nonce'])
@@ -387,14 +389,14 @@ def test_random_failure_rolls_back_fee_and_cell_and_confirmation_timeout(env, mo
         intent = await select(env, row, index=1)
         before = env.db.query('SELECT * FROM points_ledger')
         with pytest.raises(PlayError, match='超时'):
-            svc(env).confirm(intent['token'], env.actors[1], private(env, intent), 'yes', now=intent['expires_at']+1)
+            svc(env).confirm(intent['token'], env.actors[1], confirmation_card(env, intent), 'yes', request='late-click', now=intent['expires_at']+1)
         def broken(n):
             raise RuntimeError('isolated entropy failure')
         monkeypatch.setattr('secrets.randbelow', broken)
         with pytest.raises(RuntimeError):
-            svc(env).confirm(intent['token'], env.actors[1], private(env, intent), 'yes')
+            svc(env).confirm(intent['token'], env.actors[1], confirmation_card(env, intent), 'yes', request='second-click')
         assert env.db.query('SELECT * FROM points_ledger') == before and not svc(env).cells(row['nonce'])
-        assert env.db.one('SELECT state FROM scratch9_intents WHERE token=?', (intent['token'],))['state'] == 'pending'
+        assert env.db.one('SELECT state FROM scratch9_intents WHERE token=?', (intent['token'],))['state'] == 'group_pending'
     asyncio.run(run())
 
 

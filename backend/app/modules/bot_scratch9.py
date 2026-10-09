@@ -1,4 +1,4 @@
-"""One shared image message and owner-bound private fee confirmation. No group award spam."""
+"""One shared image message; owner confirms by clicking the same group cell twice."""
 from __future__ import annotations
 
 import asyncio
@@ -37,60 +37,66 @@ class Scratch9BotMixin:
             reliable_user(message)
             if len(parts) != 1:
                 raise PlayError('用法：/刮刮乐（由绑定管理员开场）')
-            row = self._scratch9_service().create(message)
+            service = self._scratch9_service()
+            row = service.create(message)
             await self._scratch9_publish(row['nonce'])
+            row = service.get(row['nonce'])  # initial/retried send may just have obtained its ID
             if row['command_message_id'] != message.get('message_id'):
-                text = '🎟 本群已有一场刮刮乐，请使用当前原卡。'
+                text = '🎟 本群已有一场刮刮乐，原卡发送尚未确认，不重复开场。'
                 if row['card_message_id'] is not None:
+                    text = '🎟 本群已有一场刮刮乐，请使用当前原卡，不重复开场。'
                     username = row['chat_username']
                     group = row['chat_id']
                     url = f'https://t.me/{username}/{row["card_message_id"]}' if username else f'https://t.me/c/{group[4:]}/{row["card_message_id"]}' if group.startswith('-100') else ''
                     if url:
                         text = '🎟 本群已有 <a href="'+escape(url, quote=True)+'">当前刮刮乐</a>，不重复开场。'
-                await self.send_message(chat['id'], text, thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
+                # An earlier command may already have been deleted. This notice
+                # stands alone in the requesting topic and links the original card.
+                await self.send_message(chat['id'], text, thread_id=self._thread_id(message))
         except (PlayError, GroupPointsError) as exc:
             await self.send_message(chat.get('id'), '🍃 '+escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - no database/network internals in group feedback
+            self._last_error = '刮刮乐开场未确认，请稍后重试'
+            await self.send_message(chat.get('id'), '🍃 开场暂未确认，请稍后重试，不会重复开场。', thread_id=self._thread_id(message))
         return True
 
     async def _scratch9_callback(self, data, message, actor, callback_id):
-        await self._answer_callback(callback_id)
+        result = None
         try:
             service = self._scratch9_service()
             parts = data.split(':')
             if len(parts) != 3:
                 raise PlayError('刮刮乐按钮无效')
-            if parts[0] == 'gg':
-                if not parts[2].isdigit():
-                    raise PlayError('格子无效')
-                intent = service.select(parts[1], int(parts[2]), actor, message, callback_id)
-                pending = service.begin_confirmation(intent['token'])
-                if pending is None:
-                    await self._answer_callback(callback_id, '确认已发本人私聊；取消或超时都不扣积分' if intent['state'] == 'pending' else '确认未送达或已失效，不会扣积分，请重新选格')
-                    return
-                row = service.get(intent['nonce'])
-                cfg = json.loads(row['config_json'])
-                text = f'🎟 <b>确认刮第{intent["cell"]}格？</b>\n将扣除 <b>{cfg["cost"]}</b> 积分。\n奖励可能为0或低于投入。\n\n<i>原格可能被抢先领取；只有成功刮开才扣费。</i>'
-                keys = [[{'text': f'确认扣{cfg["cost"]}分', 'callback_data': f'ggc:{intent["token"]}:yes'},
-                         {'text': '取消 · 不扣分', 'callback_data': f'ggc:{intent["token"]}:no'}]]
-                CALL_DELIVERY.set(None)
-                try:
-                    sent = await self._call('sendMessage', {'chat_id': int(intent['tg_id']), 'text': text, 'parse_mode': 'HTML', 'reply_markup': {'inline_keyboard': keys}})
-                except asyncio.CancelledError:
-                    raise
-                except Exception:  # noqa: BLE001 - confirmation never commits fees on network failure
-                    sent = None
-                state = service.confirmation_sent(intent['token'], sent, CALL_DELIVERY.get() or {})
-                await self._answer_callback(callback_id, '请在本人私聊确认扣费' if state == 'pending' else '私聊确认未送达，不会扣费；请先打开或解除屏蔽Bot')
-            elif parts[0] == 'ggc':
-                result = service.confirm(parts[1], actor, message, parts[2])
-                text = '🍃 已取消，未扣积分。' if result.get('cancelled') else f'🎟 第{result["cell"]}格已揭晓 · 获得 <b>{result["reward"]}积分</b>。'
-                await self._call('editMessageText', {'chat_id': (message.get('chat') or {}).get('id'), 'message_id': message.get('message_id'), 'text': text, 'parse_mode': 'HTML', 'reply_markup': {'inline_keyboard': []}})
-                if not result.get('cancelled'):
-                    await self._scratch9_publish(result['nonce'])
+            if parts[0] == 'ggc':
+                # Old private v0.40.5 cards cannot bypass the new group binding.
+                raise PlayError('确认方式已更新，请在原群原卡点击同一格两次确认；不会扣积分')
+            if parts[0] != 'gg' or not parts[2].isdigit():
+                raise PlayError('格子无效')
+            intent = service.select(parts[1], int(parts[2]), actor, message, callback_id)
+            if intent.get('_confirm'):
+                result = service.confirm(intent['token'], actor, message, 'yes', request=callback_id)
+                text = '🍃 确认已取消，未扣积分，请重新选格。' if result.get('cancelled') else f'🎟 第{result["cell"]}格已刮开，获得{result["reward"]}积分。'
             else:
-                raise PlayError('刮刮乐按钮无效')
+                if intent['state'] != 'group_pending':
+                    raise PlayError('确认已取消或失效，请重新选格；不会扣积分')
+                cfg = json.loads(service.get(intent['nonce'])['config_json'])
+                prefix = '上次确认已过期，未扣积分。\n' if intent.get('_expired') else ''
+                text = prefix+f'再次点击原卡第{intent["cell"]}格，确认扣除{cfg["cost"]}积分（120秒内）。\n不再点击即不扣费；奖励可能为0或低于投入。'
         except (PlayError, GroupPointsError) as exc:
-            await self._answer_callback(callback_id, '🍃 '+str(exc))
+            text = '🍃 '+str(exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - transaction rolls back; never expose internals
+            self._last_error = '刮刮乐操作未确认，请稍后重试'
+            text = '🍃 操作暂未完成，请稍后重试；不会重复扣费。'
+        # The FIRST and ONLY answer must contain the useful text: an early empty
+        # ACK consumes the callback and hides later feedback in real Telegram.
+        await self._call('answerCallbackQuery', {'callback_query_id': callback_id,
+                         'text': text, 'show_alert': True}, timeout=10)
+        if result is not None and not result.get('cancelled'):
+            await self._scratch9_publish(result['nonce'])
 
     async def _scratch9_publish(self, nonce):
         if not self.enabled:

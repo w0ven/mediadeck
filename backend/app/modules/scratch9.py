@@ -203,37 +203,36 @@ class Scratch9Service(PlayAccess):
             tg, member = self.actor(actor, now=clock)
             uid = member['emby_user_id']
             if conn.execute('SELECT 1 FROM scratch9_cells WHERE nonce=? AND cell=?', (nonce, cell)).fetchone():
-                raise PlayError('这格已领取，不会扣积分')
+                raise PlayError('这个格子已被刮开，不会扣积分')
             self._live(row, clock)
             cfg = json.loads(row['config_json'])
             if conn.execute('SELECT COUNT(*) FROM scratch9_cells WHERE nonce=? AND (user_id=? OR tg_id=?)', (nonce, uid, tg)).fetchone()[0] >= cfg['per_person']:
-                raise PlayError('你已达到本场次数上限')
+                raise PlayError('本场已参与，已达到本场次数上限')
             prior = conn.execute('SELECT * FROM scratch9_intents WHERE bot_id=? AND source_request=?', (self.bot_id, request)).fetchone()
             if prior:
                 if prior['nonce'] != nonce or prior['cell'] != cell or prior['tg_id'] != tg or prior['user_id'] != uid:
                     raise PlayError('重复请求与原操作不一致')
+                if prior['expires_at'] <= clock:
+                    raise PlayError('确认已过期，未扣积分，请重新点击选格')
                 return dict(prior)
+            if self.points.balance(uid) < cfg['cost']:
+                raise PlayError(f'积分不足，本次需要{cfg["cost"]}积分')
+            # A private v0.40.5 intent is never reused. A first click reserves
+            # neither a cell nor money; changing cells cancels only this actor's intent.
+            pending = conn.execute("SELECT * FROM scratch9_intents WHERE bot_id=? AND nonce=? AND (user_id=? OR tg_id=?) AND state='group_pending' ORDER BY created_at DESC LIMIT 1",
+                                   (self.bot_id, nonce, uid, tg)).fetchone()
+            if (pending and pending['user_id'] == uid and pending['tg_id'] == tg
+                    and pending['cell'] == cell and pending['expires_at'] > clock):
+                return dict(pending, _confirm=True)
+            conn.execute("UPDATE scratch9_intents SET state='cancelled' WHERE bot_id=? AND nonce=? AND (user_id=? OR tg_id=?) AND state='group_pending'",
+                         (self.bot_id, nonce, uid, tg))
             token = secrets.token_hex(12)
-            conn.execute('INSERT INTO scratch9_intents(token,nonce,cell,user_id,tg_id,bot_id,source_request,chat_id,thread_id,card_message_id,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',
+            conn.execute("INSERT INTO scratch9_intents(token,nonce,cell,user_id,tg_id,bot_id,source_request,chat_id,thread_id,card_message_id,created_at,expires_at,state) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'group_pending')",
                          (token, nonce, cell, uid, tg, self.bot_id, request, row['chat_id'], row['thread_id'], row['card_message_id'], clock, min(clock+120, row['expires_at'])))
-            return dict(conn.execute('SELECT * FROM scratch9_intents WHERE token=?', (token,)).fetchone())
+            return dict(conn.execute('SELECT * FROM scratch9_intents WHERE token=?', (token,)).fetchone(),
+                        _expired=bool(pending and pending['expires_at'] <= clock))
 
-    def begin_confirmation(self, token, *, now=None):
-        clock = time.time() if now is None else now
-        with economy_write(self.db) as conn:
-            row = conn.execute('SELECT * FROM scratch9_intents WHERE token=? AND bot_id=?', (token, self.bot_id)).fetchone()
-            if not row or row['state'] != 'created' or row['expires_at'] <= clock:
-                return None
-            conn.execute("UPDATE scratch9_intents SET state='sending',delivery_lease=? WHERE token=?", (clock+90, token))
-            return dict(row)
-
-    def confirmation_sent(self, token, response, failure):
-        mid = response.get('message_id') if isinstance(response, dict) else None
-        state = 'pending' if type(mid) is int and mid > 0 else 'failed' if failure.get('state') in ('failed', 'retry') else 'unknown'
-        self.db.execute("UPDATE scratch9_intents SET state=?,message_id=? WHERE token=? AND bot_id=? AND state='sending'", (state, mid if state == 'pending' else None, token, self.bot_id))
-        return state
-
-    def confirm(self, token, actor, message, action, *, now=None):
+    def confirm(self, token, actor, message, action, *, request=None, now=None):
         clock = time.time() if now is None else now
         if action not in ('yes', 'no'):
             raise PlayError('确认按钮无效')
@@ -243,42 +242,36 @@ class Scratch9Service(PlayAccess):
                 raise PlayError('确认已失效，请重新选格')
             intent = dict(raw)
             tg, member = self.actor(actor, now=clock)
-            sender, chat = message.get('from') or {}, message.get('chat') or {}
-            buttons = [b.get('callback_data') for line in (message.get('reply_markup') or {}).get('inline_keyboard', []) for b in line]
+            row = self.get(intent['nonce'])
+            self.context(row, message, f'gg:{intent["nonce"]}:{intent["cell"]}')
             if (intent['bot_id'] != self.bot_id or intent['tg_id'] != tg or intent['user_id'] != member['emby_user_id']
-                    or chat.get('type') != 'private' or str(chat.get('id')) != tg
-                    or type(message.get('message_id')) is not int or message['message_id'] != intent['message_id']
-                    or sender.get('is_bot') is not True or str(sender.get('id')) != self.bot_id
-                    or f'ggc:{token}:{action}' not in buttons
-                    or any(message.get(k) for k in ('sender_chat', 'forward_origin', 'forward_date', 'is_automatic_forward'))):
-                raise PlayError('仅本人可使用原Bot私聊确认卡')
+                    or (row['chat_id'], row['thread_id'], row['card_message_id']) != (intent['chat_id'], intent['thread_id'], intent['card_message_id'])
+                    or not request or len(request) > 120 or request == intent['source_request']):
+                raise PlayError('请由本人再次点击原群原卡的同一格确认')
             if intent['state'] == 'done':
                 return json.loads(intent['result_json'])
             if intent['state'] == 'cancelled':
                 return {'cancelled': True, 'nonce': intent['nonce']}
-            if intent['state'] != 'pending':
-                raise PlayError('确认发送未完成或已经失效，不会扣积分')
+            if intent['state'] != 'group_pending':
+                raise PlayError('确认已失效，请在原群原卡重新选格，不会扣积分')
             if action == 'no':
                 conn.execute("UPDATE scratch9_intents SET state='cancelled' WHERE token=?", (token,))
                 return {'cancelled': True, 'nonce': intent['nonce']}
             if clock >= intent['expires_at']:
                 raise PlayError('确认已超时，不会扣积分，请重新选格')
-            row = self.get(intent['nonce'])
             self._live(row, clock)
-            if (row['chat_id'], row['thread_id'], row['card_message_id']) != (intent['chat_id'], intent['thread_id'], intent['card_message_id']):
-                raise PlayError('原群话题卡片已变化，不会扣积分')
             if conn.execute('SELECT 1 FROM scratch9_cells WHERE nonce=? AND cell=?', (row['nonce'], intent['cell'])).fetchone():
-                raise PlayError('这格刚被别人抢先领取，不会扣积分')
+                raise PlayError('这个格子已被刮开，被别人抢先领取，不会扣积分')
             cfg = json.loads(row['config_json'])
             uid = member['emby_user_id']
             if conn.execute('SELECT COUNT(*) FROM scratch9_cells WHERE nonce=? AND (user_id=? OR tg_id=?)', (row['nonce'], uid, tg)).fetchone()[0] >= cfg['per_person']:
-                raise PlayError('你已达到本场次数上限，不会扣积分')
+                raise PlayError('本场已参与，已达到本场次数上限，不会扣积分')
             ref = row['nonce']+':'+str(intent['cell'])
             # Debit first validates balance. Any later failure rolls both writes back.
             try:
                 self.points._apply(conn, uid, -cfg['cost'], 'scratch9.cost', ref, 'scratch9', int(clock))
             except ValueError as exc:
-                raise PlayError(str(exc)) from None
+                raise PlayError(f'积分不足，本次需要{cfg["cost"]}积分') from exc
             cost_id = conn.execute('SELECT last_insert_rowid()').fetchone()[0]
             amount = reward(cfg, self.randbelow)
             reward_id = None
