@@ -24,7 +24,7 @@ def view(row, cells):
     if not cells:
         text += '\n九格同享，选一格揭晓你的好运。'
     if not ended:
-        text += '\n\n<i>确认后扣费，奖励可能为0或低于投入。</i>'
+        text += '\n\n<i>同一格点击两次确认扣费；不再点击不扣费。奖励可能为0或低于投入。</i>'
     keyboard = []
     for start in (1, 4, 7):
         line = []
@@ -46,7 +46,7 @@ def render(row, cells):
     d.text((72, 58), '九宫格刮刮乐', font=font(54), fill='#fff0c6')
     d.text((74, 139), f'每格 {cfg["cost"]} 积分   /   每人最多 {cfg["per_person"]} 格', font=font(27), fill='#becbdc')
     ended = row['state'] == 'closed'
-    phase = '本场已结束 · 好运留在这里' if ended else '截止 '+datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M')+' · 点选一格，确认后揭晓'
+    phase = '本场已结束 · 好运留在这里' if ended else '截止 '+datetime.fromtimestamp(row['expires_at'], BEIJING).strftime('%H:%M')+' · 同一格点两次，确认后揭晓'
     d.text((74, 185), phase, font=font(24), fill='#c9d3df')
     for cell in range(1, 10):
         col, line = (cell-1)%3, (cell-1)//3
