@@ -54,6 +54,9 @@ def migrate(db):
     # Empty by default: upgrading never schedules historical finished rooms.
     for key, declaration in (('state', "TEXT NOT NULL DEFAULT ''"), ('payload', "TEXT NOT NULL DEFAULT ''"), ('lease', 'REAL NOT NULL DEFAULT 0'), ('due', 'REAL NOT NULL DEFAULT 0'), ('attempts', 'INTEGER NOT NULL DEFAULT 0'), ('message_id', 'INTEGER'), ('error', "TEXT NOT NULL DEFAULT ''")):
         db._ensure_column('niuniu_rounds', 'result_'+key, declaration)
+    # Empty defaults never enroll already-finished cards in deletion.
+    for key, declaration in (('state', "TEXT NOT NULL DEFAULT ''"), ('lease', 'REAL NOT NULL DEFAULT 0'), ('due', 'REAL NOT NULL DEFAULT 0'), ('attempts', 'INTEGER NOT NULL DEFAULT 0')):
+        db._ensure_column('niuniu_rounds', 'card_delete_'+key, declaration)
     for key, declaration in (('photo_state', "TEXT NOT NULL DEFAULT 'pending'"), ('photo_lease', 'REAL NOT NULL DEFAULT 0'), ('photo_due', 'REAL NOT NULL DEFAULT 0'), ('photo_attempts', 'INTEGER NOT NULL DEFAULT 0'), ('photo_message_id', 'INTEGER'), ('photo_error', "TEXT NOT NULL DEFAULT ''")):
         db._ensure_column('niuniu_rounds', key, declaration)
     db._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS niuniu_one_active ON niuniu_rounds(bot_id,chat_id,thread_id) WHERE state IN ('lobby','running')")

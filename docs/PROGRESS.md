@@ -20,6 +20,25 @@ Newest entries first. Every working session appends one entry.
   3,724 passed, 56 environment-dependent skips and two subtests passed; lint passes.
   Next: formal release and bounded isolated validation of real direct resources.
 
+## 2026-10-10 — readable niuniu reports and exact old-card cleanup
+
+- Use the captured public nickname, escaped and linked to a stable Telegram ID,
+  in the result caption; keep the same bounded name in the picture. Split banker
+  and player sections with clear signed net points, neutral draws and refunds.
+- Make new result pictures compact dark-green/gold reports without redundant rule
+  subtitles. Keep intermediate cards and all money/game probabilities unchanged.
+- After a new result is confirmed sent, persist and perform deletion of only that
+  round's original card. Remove its buttons while waiting, without an end-placeholder.
+  Failed or unknown result sends keep the original card. Independent bounded delete
+  retries never resend the result or repeat money; expired delete ACKs resume the
+  same target. Empty migration defaults never enroll historical cards for deletion.
+- Direct real-handler tests cover send-before-delete, exact target/one successful
+  deletion, failures, lost delete ACK/restart, historical migration, nickname/HTML
+  escaping, picture-name width, caption limits, net points, draws and refunds.
+- Full local lint, all 180 test files (3,727 passed, 56 existing Caddy-dependent
+  skips, two subtests) and mock startup health pass. No production game or real-person
+  Telegram tests; no historical batch cleanup and no notification-sound guarantee.
+
 ## 2026-10-10 — public media artwork and native playback URL compatibility
 
 - Preserve Emby's public artwork semantics only for exact read-only Items media

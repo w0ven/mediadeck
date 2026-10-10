@@ -63,7 +63,7 @@ def test_niuniu_upload_does_not_hold_next_ack_and_old_image_cannot_overwrite_fin
         current = svc(e).get(row['nonce'])
         assert current['result_state'] == 'sent' and current['rendered_revision'] == current['revision']
         assert e.tg.actions(GROUP, current['card_message_id']) == []
-        assert '已结束' in e.tg.text(GROUP, current['card_message_id'])
+        assert current['card_delete_state'] == 'deleted'
         assert trace == ['old.start', 'old.done', 'result']
         assert e.db.query('SELECT * FROM points_ledger') == ledger
         print(f'NN ACK while upload gated: {elapsed*1000:.2f} ms')
@@ -259,7 +259,7 @@ def test_stop_after_external_accept_leaves_unknown_without_resend_or_redeal(nn_e
         accepted, never = asyncio.Event(), asyncio.Event()
         async def lost(method, fields, files, **kw):
             response = await transport(method, fields, files, **kw)
-            if method == 'sendPhoto' and '本局揭晓' in fields.get('caption', ''):
+            if method == 'sendPhoto' and '本局战报' in fields.get('caption', ''):
                 accepted.set();await never.wait()
             return response
         e.bot._call_multipart = lost
@@ -271,7 +271,7 @@ def test_stop_after_external_accept_leaves_unknown_without_resend_or_redeal(nn_e
         e.db.execute('UPDATE niuniu_rounds SET result_lease=0 WHERE nonce=?', (row['nonce'],))
         await e.bot._niuniu_tick()
         assert svc(e).get(row['nonce'])['result_state'] == 'unknown'
-        assert sum(m == 'sendPhoto' and '本局揭晓' in p.get('caption', '') for m, p in e.photos) == 1
+        assert sum(m == 'sendPhoto' and '本局战报' in p.get('caption', '') for m, p in e.photos) == 1
         assert e.db.query('SELECT * FROM points_ledger') == ledger
     asyncio.run(run())
 
@@ -296,7 +296,7 @@ def test_cancel_before_api_send_is_known_retry_not_unknown(nn_env, monkeypatch):
         ledger = copy.deepcopy(e.db.query('SELECT * FROM points_ledger'))
         await e.bot.stop()
         assert svc(e).get(row['nonce'])['result_state'] == 'retry'
-        assert not any(m == 'sendPhoto' and '本局揭晓' in p.get('caption', '') for m, p in e.photos)
+        assert not any(m == 'sendPhoto' and '本局战报' in p.get('caption', '') for m, p in e.photos)
         e.db.execute('UPDATE niuniu_rounds SET result_due=0 WHERE nonce=?', (row['nonce'],))
         await e.bot._niuniu_tick()
         assert svc(e).get(row['nonce'])['result_state'] == 'sent'
