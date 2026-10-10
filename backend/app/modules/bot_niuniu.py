@@ -99,7 +99,7 @@ class NiuniuBotMixin:
         return True
 
     async def _niuniu_callback(self, data, message, actor, callback_id):
-        await self._answer_callback(callback_id)
+        text, show_alert, publish_nonce = '', False, None
         try:
             service = self._niuniu_service()
             tokens = data.split(':')
@@ -111,14 +111,20 @@ class NiuniuBotMixin:
                     service.context(conn, row, message, data)
                 tg = reliable_user({'from': actor})
                 sent = await self.send_message(tg, help_text(json.loads(row['config_json'])))
-                await self._answer_callback(callback_id, '玩法已发私聊' if sent else '请先打开Bot，再点玩法')
-                return
-            if len(tokens) != 3 or tokens[0] != 'nn':
-                raise PlayError('牛牛按钮无效')
-            row = service.lobby(tokens[1], actor, message, tokens[2])
-            await self._niuniu_publish(row['nonce'])
+                text, show_alert = ('玩法已发私聊', False) if sent else ('请先打开Bot，再点玩法', True)
+            else:
+                if len(tokens) != 3 or tokens[0] != 'nn':
+                    raise PlayError('牛牛按钮无效')
+                row = service.lobby(tokens[1], actor, message, tokens[2])
+                publish_nonce = row['nonce']
         except (PlayError, GroupPointsError) as exc:
-            await self._answer_callback(callback_id, '🍃 '+str(exc))
+            text, show_alert = '🍃 '+str(exc), True
+        # First and only response carries the business result; a rejected join
+        # needs a visible alert, not a second toast after an empty acknowledgement.
+        await self._call('answerCallbackQuery', {'callback_query_id': callback_id,
+                         'text': text, 'show_alert': show_alert}, timeout=10)
+        if publish_nonce is not None:
+            await self._niuniu_publish(publish_nonce)
 
     async def _niuniu_publish(self, nonce):
         if not self.enabled:

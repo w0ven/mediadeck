@@ -353,3 +353,133 @@ def test_real_renderer_previews_and_edit_snapshot_order(env):
         assert not svc(env).published(old, row['card_message_id'])
         svc(env).publish_failed(newer, {'state': 'unknown'}, now=time.time())
     asyncio.run(run())
+
+
+async def feedback(e, row, op, *, index=1, data=None, original=None, actor=None):
+    offset = len(e.tg.calls)
+    callback_id = f'feedback-{offset}'
+    await e.bot._dispatch_update({'callback_query': {
+        'id': callback_id, 'data': data or f'nn:{row["nonce"]}:{op}',
+        'from': actor or e.actors[index], 'message': original or card(e, row)}})
+    calls = e.tg.calls[offset:]
+    replies = [p for method, p in calls if method == 'answerCallbackQuery' and p['callback_query_id'] == callback_id]
+    assert len(replies) == 1
+    assert not any(method in ('sendMessage', 'sendPhoto') for method, _ in calls)
+    return replies[0]
+
+
+@pytest.mark.parametrize('balance', [0, 9])
+@pytest.mark.parametrize('stake', [10, 100])
+def test_insufficient_join_first_only_visible_alert_no_debit_seat_or_card_change(env, balance, stake):
+    async def run():
+        row = await create(env, f'/牛牛 {stake}')
+        env.services.points.add(env.uids[1], balance-env.services.points.balance(env.uids[1]), 'isolated.balance')
+        ledger = env.db.query('SELECT * FROM points_ledger')
+        escrows = env.db.query('SELECT * FROM play_escrows')
+        players = svc(env).players(row['nonce'])
+        original = copy.deepcopy(env.tg.message(GROUP, row['card_message_id']))
+        photos = copy.deepcopy(env.photos)
+        reply = await feedback(env, row, 'join')
+        assert reply['show_alert'] is True and '积分不足，未加入' in reply['text']
+        assert f'需 {stake} 积分' in reply['text']
+        assert '余额' not in reply['text'] and str(env.uids[1]) not in reply['text']
+        assert env.services.points.balance(env.uids[1]) == balance
+        assert env.db.query('SELECT * FROM points_ledger') == ledger
+        assert env.db.query('SELECT * FROM play_escrows') == escrows
+        assert svc(env).players(row['nonce']) == players
+        assert env.tg.message(GROUP, row['card_message_id']) == original and env.photos == photos
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('case', ['start', 'leave', 'malformed', 'missing', 'wrong_card', 'bot_actor', 'missing_help'])
+def test_callback_rejections_once_alert_without_public_message(env, case):
+    async def run():
+        row = await create(env)
+        data = None
+        original = card(env, row)
+        actor = env.actors[1]
+        if case == 'malformed': data = 'nn:broken'
+        if case == 'missing': data = 'nn:missing:join'
+        if case == 'missing_help': data = 'nnh:missing'
+        if case == 'wrong_card': original['message_id'] += 1
+        if case == 'bot_actor': actor = {**actor, 'is_bot': True}
+        ledger = env.db.query('SELECT * FROM points_ledger')
+        reply = await feedback(env, row, case if case in ('start', 'leave') else 'join',
+                               index=0 if case == 'start' else 1, data=data, original=original,
+                               actor=env.actors[0] if case == 'start' else actor)
+        assert reply['show_alert'] is True and reply['text']
+        assert '余额' not in reply['text']
+        assert env.db.query('SELECT * FROM points_ledger') == ledger
+        assert len(svc(env).players(row['nonce'])) == 1
+    asyncio.run(run())
+
+
+def test_normal_join_duplicate_start_and_settled_replay_one_response_same_photo(env):
+    async def run():
+        row = await create(env)
+        mid = row['card_message_id']
+        origin = card(env, row)
+        initial = env.services.points.balance(env.uids[1])
+        for op, index in (('join', 1), ('join', 1), ('start', 0), ('start', 0), ('join', 1)):
+            reply = await feedback(env, row, op, index=index, original=origin)
+            assert reply['text'] == '' and reply['show_alert'] is False
+        current = svc(env).get(row['nonce'])
+        assert current['state'] == 'settled' and current['card_message_id'] == mid
+        assert len(svc(env).players(row['nonce'])) == 2
+        assert abs(env.services.points.balance(env.uids[1])-initial) == row['stake']
+        assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'editMessageMedia']
+        assert all(fields['message_id'] == mid for method, fields in env.photos if method == 'editMessageMedia')
+        assert '揭晓' in env.tg.text(GROUP, mid) and '余额' not in env.tg.text(GROUP, mid)
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('sent', [True, False])
+def test_help_response_once_preserves_existing_private_delivery_not_group(env, sent, monkeypatch):
+    async def run():
+        row = await create(env)
+        targets = []
+        async def private_help(chat, text, **kwargs):
+            targets.append(chat)
+            return 987 if sent else None
+        monkeypatch.setattr(env.bot, 'send_message', private_help)
+        ledger = env.db.query('SELECT * FROM points_ledger')
+        reply = await feedback(env, row, 'help', data=f'nnh:{row["nonce"]}')
+        assert targets == [str(env.actors[1]['id'])]
+        assert reply['text'] == ('玩法已发私聊' if sent else '请先打开Bot，再点玩法')
+        assert reply['show_alert'] is (not sent)
+        assert env.db.query('SELECT * FROM points_ledger') == ledger
+        assert len(env.photos) == 1
+    asyncio.run(run())
+
+
+def test_publish_failure_after_success_cannot_answer_same_callback_twice(env, monkeypatch):
+    async def run():
+        row = await create(env)
+        async def publish_failure(nonce):
+            raise PlayError('积分服务暂不可用')
+        monkeypatch.setattr(env.bot, '_niuniu_publish', publish_failure)
+        offset = len(env.tg.calls)
+        with pytest.raises(PlayError):
+            await env.bot._niuniu_callback(f'nn:{row["nonce"]}:join', card(env, row), env.actors[1], 'publish-failure')
+        replies = [p for method, p in env.tg.calls[offset:] if method == 'answerCallbackQuery']
+        assert replies == [{'callback_query_id': 'publish-failure', 'text': '', 'show_alert': False}]
+        assert len(svc(env).players(row['nonce'])) == 2
+    asyncio.run(run())
+
+
+def test_existing_disabled_room_refunds_banker_once_and_keeps_guest_unseated(env):
+    async def run():
+        banker_before = env.services.points.balance(env.uids[0])
+        row = await create(env)
+        origin = card(env, row)
+        guest_before = env.services.points.balance(env.uids[1])
+        env.services.registry.save('niuniu', enabled=False)
+        for _ in range(2):
+            reply = await feedback(env, row, 'join', original=origin)
+            assert reply == {'callback_query_id': reply['callback_query_id'], 'text': '', 'show_alert': False}
+        assert svc(env).get(row['nonce'])['state'] == 'cancelled'
+        assert env.services.points.balance(env.uids[0]) == banker_before
+        assert env.services.points.balance(env.uids[1]) == guest_before
+        assert len(svc(env).players(row['nonce'])) == 1
+        assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia']
+    asyncio.run(run())
