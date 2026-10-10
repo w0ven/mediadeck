@@ -1,4 +1,4 @@
-"""Banker rooms start as one picture and finish on that same message; old text stays text."""
+"""Original picture during play; close it and deliver one independent final result."""
 from __future__ import annotations
 
 import asyncio
@@ -8,11 +8,14 @@ import time
 from html import escape
 
 from app.modules.economy_rules import economy_write
+from app.modules.game_ui import defer_ui, render_image
 from app.modules.group_points import GroupPointsError, reliable_user
 from app.modules.niuniu import CATEGORIES, DEFAULTS, NiuniuService, card_text, strength
+from app.modules.niuniu_delivery import NiuniuDelivery
 from app.modules.niuniu_image import net_label, render_room
 from app.modules.play_money import PlayError
 from app.modules.report_delivery import CALL_DELIVERY
+from app.modules.report_delivery import failure as delivery_failure
 
 
 def help_text(cfg):
@@ -37,6 +40,8 @@ class NiuniuBotMixin:
                              lambda: self._plugin_on('niuniu'), self._group_chat_allowed, self._active_bot_id)
 
     def _niuniu_view(self, row, service):
+        if row['state'] in ('settled', 'cancelled') and row.get('result_state'):
+            return '🐂 <b>牛牛 · 本局已结束</b>\n结果另发一条消息', []
         players = row.get('_players') if '_players' in row else service.players(row['nonce'])
         n = row['nonce']
         bank_mode = json.loads(row['config_json']).get('game') == 'niuniu-banker-v1'
@@ -93,10 +98,16 @@ class NiuniuBotMixin:
             if len(parts) > 2 or len(parts) == 2 and not re.fullmatch('[0-9]{1,6}', parts[1]):
                 raise PlayError('用法：/牛牛 或 /牛牛 100（闲家底注，创建者坐庄担保4份）')
             row = self._niuniu_service().create(message, int(parts[1]) if len(parts) == 2 else None)
-            await self._niuniu_publish(row['nonce'])
+            defer_ui(self, ('niuniu', row['nonce']), lambda: self._niuniu_open(row['nonce'], message))
         except (PlayError, GroupPointsError) as exc:
             await self.send_message(chat.get('id'), '🍃 '+escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
         return True
+
+    async def _niuniu_open(self, nonce, message):
+        # Initial response is deferred too; retain trusted original-command cleanup.
+        with self._group_command_context(message):
+            await self._niuniu_publish(nonce)
+        await self._drain_group_commands()
 
     async def _niuniu_callback(self, data, message, actor, callback_id):
         text, show_alert, publish_nonce = '', False, None
@@ -124,7 +135,12 @@ class NiuniuBotMixin:
         await self._call('answerCallbackQuery', {'callback_query_id': callback_id,
                          'text': text, 'show_alert': show_alert}, timeout=10)
         if publish_nonce is not None:
-            await self._niuniu_publish(publish_nonce)
+            defer_ui(self, ('niuniu', publish_nonce), lambda: self._niuniu_publish(publish_nonce))
+
+    def _niuniu_transport_allowed(self, row):
+        self._check_bot_identity()
+        return (self.enabled and row['bot_id'] == self._active_bot_id
+                and self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}))
 
     async def _niuniu_publish(self, nonce):
         if not self.enabled:
@@ -135,6 +151,7 @@ class NiuniuBotMixin:
             service = self._niuniu_service()
             row = service.begin_publish(nonce)
             if not row:
+                await self._niuniu_result(nonce)
                 return
             text, keys = self._niuniu_view(row, service)
             initial = row['card_message_id'] is None
@@ -147,19 +164,31 @@ class NiuniuBotMixin:
             else:
                 payload['message_id'] = row['card_message_id']
             CALL_DELIVERY.set(None)
+            network_started = False
+            async def deliver(method, fields, files=None):
+                nonlocal network_started
+                if not self._niuniu_transport_allowed(row):
+                    CALL_DELIVERY.set({'state': 'failed'})
+                    return None
+                network_started = True
+                return await self._call_multipart(method, fields, files) if files else await self._call(method, fields)
             try:
-                if photo:
-                    image = render_room(row, row['_players'])
+                if photo and not initial and row.get('result_state'):
+                    payload.update(caption=text, parse_mode='HTML')
+                    result = await deliver('editMessageCaption', payload)
+                elif photo:
+                    image = await render_image(self, render_room, row, row['_players'])
                     if initial:
                         payload.update(caption=text, parse_mode='HTML')
                         payload['reply_parameters'] = json.dumps(payload['reply_parameters'])
                     else:
                         payload['media'] = json.dumps({'type': 'photo', 'media': 'attach://photo', 'caption': text, 'parse_mode': 'HTML'}, ensure_ascii=False)
-                    result = await self._call_multipart('sendPhoto' if initial else 'editMessageMedia', payload, {'photo': ('niuniu.png', image, 'image/png')})
+                    result = await deliver('sendPhoto' if initial else 'editMessageMedia', payload, {'photo': ('niuniu.png', image, 'image/png')})
                 else:
                     payload.update(text=text, parse_mode='HTML')
-                    result = await self._call('sendMessage' if initial else 'editMessageText', payload)
+                    result = await deliver('sendMessage' if initial else 'editMessageText', payload)
             except asyncio.CancelledError:
+                if not network_started:service.publish_failed(row, {'state': 'retry'})
                 raise
             except Exception:  # noqa: BLE001 - finance is already durable; no second result card
                 result = None
@@ -175,6 +204,40 @@ class NiuniuBotMixin:
                         current = service.get(nonce)
                         if current['card_message_id'] is None:
                             service._refund(conn, current, '原卡发送被拒绝', time.time())
+            await self._niuniu_result(nonce)
+
+    async def _niuniu_result(self, nonce):
+        if not self.enabled:return
+        delivery = NiuniuDelivery(self._niuniu_service())
+        row = delivery.claim(nonce)
+        if not row:return
+        if not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):
+            delivery.finish(row, None, {'state': 'failed'})
+            return
+        snapshot = json.loads(row['result_payload'])
+        CALL_DELIVERY.set(None)
+        try:
+            image = await render_image(self, render_room, snapshot['row'], snapshot['players'])
+        except asyncio.CancelledError:
+            delivery.finish(row, None, {'state': 'retry'})  # No API send was attempted.
+            raise
+        except Exception:  # noqa: BLE001 - known local failure, no send attempted
+            delivery.finish(row, None, {'state': 'retry'})
+            return
+        if not self._niuniu_transport_allowed(row):
+            delivery.finish(row, None, {'state': 'failed'})
+            return
+        payload = {'chat_id': int(row['chat_id']), 'caption': snapshot['caption'], 'parse_mode': 'HTML',
+                   'reply_parameters': json.dumps({'message_id': row['card_message_id'], 'allow_sending_without_reply': True})}
+        if row['thread_id']:payload['message_thread_id'] = row['thread_id']
+        try:
+            result = await self._call_multipart('sendPhoto', payload, {'photo': ('niuniu.png', image, 'image/png')})
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - never replay finance on transport errors
+            result = None
+            CALL_DELIVERY.set(delivery_failure(exc=exc))
+        delivery.finish(row, result, CALL_DELIVERY.get() or {})
 
     async def _niuniu_photos(self):
         # Historical sent/unknown receipts remain intact; unsent old picture jobs are
@@ -190,3 +253,5 @@ class NiuniuBotMixin:
             for row in service.pending_cards('niuniu'):
                 await self._niuniu_publish(row['nonce'])
             await self._niuniu_photos()
+            for row in self._db.query("SELECT nonce FROM niuniu_rounds WHERE bot_id=? AND result_state IN ('pending','retry','sending') ORDER BY created_at LIMIT 50", (self._active_bot_id,)):
+                await self._niuniu_result(row['nonce'])

@@ -22,6 +22,7 @@ from test_tg_interaction_context import ADMIN, GROUP, VIEWER
 
 from app.core.db import Database
 from app.modules.bot_packets import PacketBotMixin
+from app.modules.game_ui import drain_ui
 from app.modules.red_packets import public_name
 
 BANNED = ('每人一次', '发起人不可领', '结果仅本人可见', '北京时间', '领取范围',
@@ -53,6 +54,7 @@ async def press(e, row, data, actor, name='', *, message=None, bot=False):
         'id': f'public-{actor}', 'data': data,
         'from': {'id': actor, 'is_bot': bot, 'first_name': name},
         'message': message or card_message(e, row)}})
+    await drain_ui(e.bot)
 
 
 def add_members(e, count):
@@ -267,7 +269,7 @@ def test_legacy_migration_preserves_economic_rows_and_neutral_public_results(req
         service.claim(row['nonce'],{'id':1003,'is_bot':False,'first_name':'小王'},context(old,claim=True))
         final=service.get(row['nonce']);body,_=PacketBotMixin()._packet_view(final,service)
         assert '已领完' in body and '成员' in body and '小王' in body and '手气最佳' in body
-        assert service.claims(row['nonce'],1)==[{'amount':50,'slot':0,'display_name':''}]
+        assert service.claims(row['nonce'],1)==[{'amount':50,'slot':0,'display_name':'','tg_user_id':'1002','tg_username':''}]
         assert not migrated.query('PRAGMA foreign_key_check')
         again=Database(e.db.path);again.close()
         assert service.get(row['nonce'])==final

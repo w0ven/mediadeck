@@ -2,6 +2,29 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — complete game mentions and independent final results
+
+- Close the original niuniu card without action buttons or repeated final details;
+  send one independent result picture with every participant linked by Telegram ID.
+  Display a verified Telegram username when available, otherwise the public nickname.
+- Red-packet receipts mention all recipients, not only the first ten; oversized
+  lists use persisted per-part acknowledgements. Keep exact-envelope unpin and
+  no public balances. Never backfill historical results or replay money operations.
+- Register new niuniu result snapshots in the settlement/refund transaction. Preserve
+  sent records, distinguish known retry from unknown, and never blindly resend unknown.
+- Defer game-card transport and command-menu synchronization outside the chat lock;
+  keep per-game ordering, revision gates, authorization and menu cache. Render only
+  immutable pictures off-loop with two slots and thread-local cached fonts.
+- Real-handler isolated tests cover delayed uploads, final-card ordering, complete
+  identities, insufficient-funds alerts, bounded work, restart/ACK loss, unchanged
+  ledgers and original-command cleanup. With a synthetic 400 ms upload, the second
+  ACK changes from 511 ms in the serial-wait control to 1.54 ms after deferral;
+  local picture rendering median is 207 ms with 16 ms maximum heartbeat gap.
+- Full local test collection: 3,538 passed plus two subtests; 56 existing Caddy tests
+  skip where Caddy is unavailable. Lint and mock startup health pass. These are
+  isolated measurements, not production latency or real-person notification tests;
+  a mention does not guarantee audible notification or bypass mute settings.
+
 ## 2026-10-10 — keep last playback focused on elapsed time
 
 - Show only elapsed time since verified playback in the last-playback column.

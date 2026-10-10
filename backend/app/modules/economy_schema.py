@@ -122,6 +122,7 @@ def migrate(db):
     db._ensure_column('red_packets', 'public_actor_name', "TEXT NOT NULL DEFAULT ''")
     db._ensure_column('red_packets', 'result_page', 'INTEGER NOT NULL DEFAULT 0')
     db._ensure_column('red_packet_claims', 'display_name', "TEXT NOT NULL DEFAULT ''")
+    db._ensure_column('red_packet_claims', 'tg_username', "TEXT NOT NULL DEFAULT ''")
     db._ensure_column('red_packets', 'permanent', 'INTEGER NOT NULL DEFAULT 0')
     db._ensure_column('red_packets', 'receipt_message_id', 'INTEGER')
     db._ensure_column('red_packets', 'receipt_page', 'INTEGER NOT NULL DEFAULT 0')

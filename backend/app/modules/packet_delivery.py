@@ -1,10 +1,11 @@
 """Only envelope pin, exact-message unpin and one independent public receipt."""
 from __future__ import annotations
 
+import json
 import time
-from html import escape
 
 from app.modules.economy_rules import economy_write, encode
+from app.modules.game_mentions import result_mention, text_units
 from app.modules.red_packets import RESULTS_PER_PAGE, PacketError
 
 EFFECTS=('pin','unpin','receipt')
@@ -15,10 +16,10 @@ def receipt_view(row,claims,page=0):
     page=max(0,min(page,pages-1))
     body=f'🌸 <b>红包圆满收官</b>\n{row["total"]} 积分 · {row["parts"]} 份都找到主人啦'
     for c in claims[page*RESULTS_PER_PAGE:(page+1)*RESULTS_PER_PAGE]:
-        body+='\n'+escape(str(c['display_name'] or '成员')[:40])+f'  ·  <b>{c["amount"]}</b> 积分'
+        body+='\n'+result_mention(c.get('tg_user_id'), c['display_name'], c.get('tg_username'))+f'  ·  <b>{c["amount"]}</b> 积分'
     if row['mode']=='random' and claims:
         best=min(claims,key=lambda c:(-c['amount'],c['slot']))
-        body+='\n\n✨ 手气最佳 '+escape(best['display_name'][:40])+f' · {best["amount"]} 积分'
+        body+='\n\n✨ 手气最佳 '+result_mention(best.get('tg_user_id'), best['display_name'], best.get('tg_username'))+f' · {best["amount"]} 积分'
     body+='\n<i>愿好手气与你相伴。</i>'
     keys=[]
     if pages>1:
@@ -28,6 +29,30 @@ def receipt_view(row,claims,page=0):
         if page+1<pages:nav.append({'text':'下一页 ›','callback_data':f'rpresult:{row["nonce"]}:{page+1}'})
         keys=[nav]
     return {'text':body,'parse_mode':'HTML','reply_markup':{'inline_keyboard':keys}}
+
+
+def complete_receipt(row, claims):
+    """All recipients in new messages, not mentions hidden on edited pages.
+
+    Freeze once in the final claim transaction. Oversized configured envelopes
+    use as few messages as possible, with a durable cursor/ACK for every part.
+    """
+    header = f'🌸 <b>红包圆满收官</b>\n{row["total"]} 积分 · {row["parts"]} 份'
+    messages, body = [], header
+    lines = ['\n'+result_mention(c.get('tg_user_id'), c['display_name'], c.get('tg_username'))
+             +f' · {c["amount"]} 积分' for c in claims]
+    if row['mode'] == 'random' and claims:
+        best = min(claims, key=lambda c: (-c['amount'], c['slot']))
+        lines.append('\n\n✨ 手气最佳 '+result_mention(best.get('tg_user_id'), best['display_name'], best.get('tg_username'))+f' · {best["amount"]} 积分')
+    count = 0
+    for line in lines:
+        if text_units(body+line) > 3800 or count >= 90:
+            messages.append({'text': body, 'parse_mode': 'HTML', 'reply_markup': {'inline_keyboard': []}})
+            body, count = header, 0
+        body += line
+        count += 1
+    messages.append({'text': body, 'parse_mode': 'HTML', 'reply_markup': {'inline_keyboard': []}})
+    return {'messages': messages, 'cursor': 0, 'message_ids': []}
 
 
 class PacketDelivery:
@@ -47,12 +72,16 @@ class PacketDelivery:
             if row['status']!=required or row['rendered_version']<row['render_version']:return None
             if kind=='unpin' and row['pin_state']=='sending' and row['pin_lease']>clock:return None
             if kind=='receipt' and not row['receipt_payload']:
-                payload=receipt_view(row,self.service.claims(nonce,row['claimed_count']))
+                payload=complete_receipt(row,self.service.claims(nonce,row['claimed_count']))
                 conn.execute('UPDATE red_packets SET receipt_payload=? WHERE nonce=?',(encode(payload),nonce))
                 row=dict(row,receipt_payload=encode(payload))
             lease=clock+90
             conn.execute(f"UPDATE red_packets SET {kind}_state='sending',{kind}_lease=?,{kind}_attempts={kind}_attempts+1 WHERE nonce=?",(lease,nonce))
-            return dict(row,_effect=kind,_lease=lease,_attempts=row[kind+'_attempts']+1)
+            job = dict(row,_effect=kind,_lease=lease,_attempts=row[kind+'_attempts']+1)
+            if kind == 'receipt':
+                payload = json.loads(row['receipt_payload'])
+                job['_payload'] = payload['messages'][payload['cursor']] if 'messages' in payload else payload
+            return job
 
     def finish(self,row,response,failure,*,now=None):
         kind=row['_effect'];clock=time.time() if now is None else float(now)
@@ -60,9 +89,25 @@ class PacketDelivery:
         success=(type(mid) is int and mid>0) if kind=='receipt' else response is True
         state='sent' if success else 'retry' if failure.get('state')=='retry' and row['_attempts']<3 else 'failed' if failure.get('state') in ('failed','retry') else 'unknown'
         error='' if success else ('置顶未确认，仍可正常领取' if kind=='pin' else '仅本红包解除置顶未确认' if kind=='unpin' else '结果消息未确认；未知不自动重发')
-        extra=',receipt_message_id=?' if kind=='receipt' else ''
-        args=[state,error,clock+max(5,int(failure.get('retry_after') or 10))]
-        if kind=='receipt':args.append(mid if success else None)
+        extra = ''
+        due = clock+max(5,int(failure.get('retry_after') or 10))
+        receipt_id = row.get('receipt_message_id')
+        payload = row.get('receipt_payload')
+        if kind == 'receipt':
+            if success:
+                receipt_id = receipt_id or mid
+                snapshot = json.loads(payload)
+                if 'messages' in snapshot:
+                    snapshot['message_ids'].append(mid)
+                    snapshot['cursor'] += 1
+                    payload = encode(snapshot)
+                    if snapshot['cursor'] < len(snapshot['messages']):
+                        state, due = 'pending', 0
+            extra = ',receipt_message_id=?,receipt_payload=?'
+            if success:
+                extra += ',receipt_attempts=0'
+        args=[state,error,due]
+        if kind=='receipt':args.extend((receipt_id, payload))
         args.extend((row['nonce'],row['_lease']))
         self.db.execute(f"UPDATE red_packets SET {kind}_state=?,{kind}_error=?,{kind}_due=?{extra} WHERE nonce=? AND {kind}_state='sending' AND {kind}_lease=?",tuple(args))
         if kind=='pin' and success:
