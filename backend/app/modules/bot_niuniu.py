@@ -173,7 +173,11 @@ class NiuniuBotMixin:
                 network_started = True
                 return await self._call_multipart(method, fields, files) if files else await self._call(method, fields)
             try:
-                if photo and not initial and row.get('result_state'):
+                if not initial and row.get('card_delete_state') == 'waiting':
+                    # Keep the meaningful original card until the new result is ACKed;
+                    # only remove its buttons, never add an end-placeholder message.
+                    result = await deliver('editMessageReplyMarkup', payload)
+                elif photo and not initial and row.get('result_state'):
                     payload.update(caption=text, parse_mode='HTML')
                     result = await deliver('editMessageCaption', payload)
                 elif photo:
@@ -210,7 +214,9 @@ class NiuniuBotMixin:
         if not self.enabled:return
         delivery = NiuniuDelivery(self._niuniu_service())
         row = delivery.claim(nonce)
-        if not row:return
+        if not row:
+            await self._niuniu_delete_card(nonce)
+            return
         if not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):
             delivery.finish(row, None, {'state': 'failed'})
             return
@@ -238,6 +244,33 @@ class NiuniuBotMixin:
             result = None
             CALL_DELIVERY.set(delivery_failure(exc=exc))
         delivery.finish(row, result, CALL_DELIVERY.get() or {})
+        await self._niuniu_delete_card(nonce)
+
+    async def _niuniu_delete_card(self, nonce):
+        from app.modules.telegram import _CALL_ERROR, _QUIET_CALL
+        if not self.enabled:return
+        delivery = NiuniuDelivery(self._niuniu_service())
+        row = delivery.claim_delete(nonce)
+        if not row:return
+        if not self._niuniu_transport_allowed(row):
+            delivery.finish_delete(row, False, {'state': 'failed'})
+            return
+        quiet, error, receipt = _QUIET_CALL.set(True), _CALL_ERROR.set(None), CALL_DELIVERY.set(None)
+        try:
+            try:
+                result = await self._call('deleteMessage', {'chat_id': int(row['chat_id']), 'message_id': row['card_message_id']}, timeout=10)
+            except asyncio.CancelledError:
+                raise  # Exact-target deletion may safely resume after its lease.
+            except Exception as exc:  # noqa: BLE001 - never resend the result or money
+                result = None
+                CALL_DELIVERY.set(delivery_failure(exc=exc))
+            missing = str(_CALL_ERROR.get() or '').lower()
+            success = result is True or 'message to delete not found' in missing or 'message_id_invalid' in missing
+            delivery.finish_delete(row, success, CALL_DELIVERY.get() or {})
+        finally:
+            _QUIET_CALL.reset(quiet)
+            _CALL_ERROR.reset(error)
+            CALL_DELIVERY.reset(receipt)
 
     async def _niuniu_photos(self):
         # Historical sent/unknown receipts remain intact; unsent old picture jobs are
@@ -255,3 +288,5 @@ class NiuniuBotMixin:
             await self._niuniu_photos()
             for row in self._db.query("SELECT nonce FROM niuniu_rounds WHERE bot_id=? AND result_state IN ('pending','retry','sending') ORDER BY created_at LIMIT 50", (self._active_bot_id,)):
                 await self._niuniu_result(row['nonce'])
+            for row in self._db.query("SELECT nonce FROM niuniu_rounds WHERE bot_id=? AND card_delete_state IN ('pending','retry','deleting') ORDER BY created_at LIMIT 50", (self._active_bot_id,)):
+                await self._niuniu_delete_card(row['nonce'])

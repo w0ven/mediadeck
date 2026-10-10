@@ -38,18 +38,20 @@ def test_niuniu_all_players_new_result_original_closed_and_no_replay(nn_env):
     async def run():
         e = nn_env
         e.actors[0]['username'] = 'real_banker'
+        e.actors[0]['first_name'] = '测试庄家'
         row = await create(e)
         for i in range(1, 5):row = await click(e, row, 'join', i)
         assert row['state'] == 'settled' and row['result_state'] == 'sent'
         assert row['result_message_id'] != row['card_message_id']
         body = e.tg.text(GROUP, row['result_message_id'])
-        assert '@real_banker' in body and '&lt;小0&amp;&gt;' in body
+        assert '@real_banker' not in body and '&lt;小0&amp;&gt;' in body and '测试庄家' in body
         for p in svc(e).players(row['nonce']):assert f'tg://user?id={p["tg_id"]}' in body
         assert text_units(body) <= 1024
         for secret in ('余额', 'private-login', 'escrow', *e.uids):assert secret not in body
         original = e.tg.message(GROUP, row['card_message_id'])
         assert original['reply_markup']['inline_keyboard'] == []
-        assert '已结束' in e.tg.text(GROUP, row['card_message_id'])
+        assert row['card_delete_state'] == 'deleted'
+        assert [(p['chat_id'], p['message_id']) for m,p in e.tg.calls if m == 'deleteMessage'] == [(GROUP, row['card_message_id'])]
         assert '@real_banker' not in e.tg.text(GROUP, row['card_message_id'])
         ledger = copy.deepcopy(e.db.query('SELECT * FROM points_ledger'))
         old = card(e, row)
@@ -57,7 +59,7 @@ def test_niuniu_all_players_new_result_original_closed_and_no_replay(nn_env):
         await click(e, row, 'start', original=old)
         await e.bot._niuniu_tick()
         assert e.db.query('SELECT * FROM points_ledger') == ledger
-        assert sum(m == 'sendPhoto' and '本局揭晓' in p.get('caption', '') for m, p in e.photos) == 1
+        assert sum(m == 'sendPhoto' and '本局战报' in p.get('caption', '') for m, p in e.photos) == 1
     asyncio.run(run())
 
 
@@ -70,7 +72,7 @@ def test_niuniu_delivery_failure_reopen_no_financial_replay(nn_env, state):
         transport = e.bot._call_multipart
         attempts = []
         async def fail(method, payload, files, **kw):
-            if method == 'sendPhoto' and '本局揭晓' in payload.get('caption', ''):
+            if method == 'sendPhoto' and '本局战报' in payload.get('caption', ''):
                 attempts.append(copy.deepcopy(payload))
                 CALL_DELIVERY.set({'state': state})
                 return None
@@ -108,7 +110,7 @@ def test_niuniu_sending_restart_unknown_and_historical_no_backfill(nn_env):
         assert svc(e).get(row['nonce'])['result_state'] == 'unknown'
         e.bot._niuniu_result = deliver
         await e.bot._niuniu_tick()
-        assert sum(m == 'sendPhoto' and '本局揭晓' in p.get('caption', '') for m, p in e.photos) == 0
+        assert sum(m == 'sendPhoto' and '本局战报' in p.get('caption', '') for m, p in e.photos) == 0
         # An already finished pre-upgrade record has no new-result intent.
         e.db.execute("UPDATE niuniu_rounds SET result_state='',result_payload='',result_message_id=NULL WHERE nonce=?", (row['nonce'],))
         db = Database(e.db.path)
