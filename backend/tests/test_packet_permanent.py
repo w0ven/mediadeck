@@ -188,7 +188,7 @@ def test_receipt_pagination_all_two_hundred_names_bounded_and_exact_card_guard(e
     for page in range(20):
         result=receipt_view(row,claims,page)
         assert len(result['text'].encode('utf-16-le'))//2<4096
-        for c in claims[page*10:(page+1)*10]:assert c['display_name'][:40] in result['text']
+        for c in claims[page*10:(page+1)*10]:assert c['display_name'][:39]+'…' in result['text']
         found.extend(claims[page*10:(page+1)*10])
     assert len(found)==200
     # Single-page receipts have no free-form page action; context must bind known receipt ID.
