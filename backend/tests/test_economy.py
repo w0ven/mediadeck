@@ -33,6 +33,7 @@ from app.modules.member_rewards import grant_reward
 from app.modules.members import MemberService
 from app.modules.plugins import PluginRegistry
 from app.modules.plugins_builtin import PluginContext, register_builtin
+from app.modules.plugins_points import CHECKIN_BASE_SIZE, checkin_base
 from app.modules.points import PointsService
 from app.modules.shop import ShopError, ShopService
 from app.modules.titles import TitleService
@@ -282,7 +283,7 @@ def test_599_seconds_refused_then_exactly_600_permitted(env):
 
 def test_negative_base_not_multiplied_drop_independent_and_snapshot_stable(env):
     day = day_bounds(NOW)[0]
-    user = next(str(i) for i in range(1000) if draw(SECRET, str(i), day, "base", 41) == 0)
+    user = next(str(i) for i in range(100000) if checkin_base(draw(SECRET, str(i), day, "base", CHECKIN_BASE_SIZE)) == -10)
     env.members.upsert(user, user, {"group_id": "standard"})
     proof(env.db, user)
     env.registry.save(
@@ -313,7 +314,7 @@ def test_negative_base_not_multiplied_drop_independent_and_snapshot_stable(env):
 
 def test_positive_lucky_before_streak_and_one_drop(env):
     day = day_bounds(NOW)[0]
-    user = next(str(i) for i in range(1000) if draw(SECRET, str(i), day, "base", 41) > 10)
+    user = next(str(i) for i in range(1000) if checkin_base(draw(SECRET, str(i), day, "base", CHECKIN_BASE_SIZE)) > 0)
     env.members.upsert(user, user, {"group_id": "standard"})
     proof(env.db, user)
     env.registry.save(

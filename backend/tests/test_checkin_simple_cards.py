@@ -19,6 +19,7 @@ from test_economy import proof
 from test_tg_interaction_context import GROUP, VIEWER
 
 from app.modules.economy_rules import DEFAULT_CARDS, day_bounds, encode
+from app.modules.plugins_points import CHECKIN_BASE_SIZE, checkin_base
 
 
 @pytest.fixture
@@ -32,7 +33,7 @@ def core(body):
 
 @pytest.mark.parametrize('chat', [VIEWER,GROUP])
 @pytest.mark.parametrize('base,percent,multiplier,drop', [
-    (2,0,1,False), (2,15,1,False), (0,100,1,False), (-2,100,1,False),
+    (2,0,1,False), (2,15,1,False), (-2,100,1,False),
     (20,15,1,False), (20,15,2,False), (2,0,2,True),
 ])
 def test_real_service_private_group_only_actual_award_lines_history_and_balance(env,monkeypatch,chat,base,percent,multiplier,drop):
@@ -44,8 +45,9 @@ def test_real_service_private_group_only_actual_award_lines_history_and_balance(
         'drops':encode([{'ppm':1000000,'spec':spec}]) if drop else '[]',
         'holidays':encode([{'date':day_bounds(time.time())[0],'name':'隔离测试活动'}]),
     })
+    roll = next(r for r in range(CHECKIN_BASE_SIZE) if checkin_base(r) == base)
     monkeypatch.setattr('app.modules.plugins_points.draw',
-                        lambda secret,uid,day,domain,bound:base+10 if domain=='base' else 0)
+                        lambda secret,uid,day,domain,bound:roll if domain=='base' else 0)
     if base>=0:
         env.services.points.add('u1',-env.services.points.balance('u1'),'isolated.reset')
     before_balance=env.services.points.balance('u1')
@@ -97,9 +99,9 @@ def test_real_service_private_group_only_actual_award_lines_history_and_balance(
 
 
 @pytest.mark.parametrize('chat',[VIEWER,GROUP])
-@pytest.mark.parametrize('bonus',[None,0,5])
-def test_frozen_legacy_success_fields_render_without_recomputing_or_mutating_history(env,monkeypatch,chat,bonus):
-    saved={'ok':True,'points':15,'balance':115,'streak':30,'base':10,'multiplier':1}
+@pytest.mark.parametrize('points,base,bonus',[(15,10,None),(15,10,0),(15,10,5),(0,0,None),(0,0,0)])
+def test_frozen_legacy_success_fields_render_without_recomputing_or_mutating_history(env,monkeypatch,chat,points,base,bonus):
+    saved={'ok':True,'points':points,'balance':115,'streak':30,'base':base,'multiplier':1}
     if bonus is not None:saved['bonus']=bonus
     original=copy.deepcopy(saved)
     # Frozen old receipt need not have streak_percent/version/drop_spec.
@@ -107,7 +109,7 @@ def test_frozen_legacy_success_fields_render_without_recomputing_or_mutating_his
     before={table:env.db.query('SELECT * FROM '+table) for table in ('checkins','points_ledger','inventory')}
     asyncio.run(env.bot._dispatch_update({'message':message(chat=chat)}))
     body=core(posted(env)[-1]['text'])
-    assert '积分 <b>+15</b>' in body and '余额 <b>115</b>' in body
+    assert f'积分 <b>{points:+d}</b>' in body and '余额 <b>115</b>' in body
     assert ('连签奖励' in body)==bool(bonus)
     assert all(word not in body for word in ('连续签到','基础','×1','%','幸运','🎁'))
     assert saved==original

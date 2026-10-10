@@ -10,6 +10,7 @@ from test_economy import env as economy_env  # noqa: F401
 
 from app.main import app
 from app.modules.economy_rules import DEFAULT_CARDS, RULE_VERSION, day_bounds, draw, encode
+from app.modules.plugins_points import CHECKIN_BASE_SIZE, checkin_base
 
 
 @pytest.fixture
@@ -19,7 +20,7 @@ def env(request):
 
 def matching_user(e, base):
     day = day_bounds(NOW)[0]
-    uid = next(str(n) for n in range(10000) if draw(SECRET, str(n), day, 'base', 41) - 10 == base)
+    uid = next(str(n) for n in range(100000) if checkin_base(draw(SECRET, str(n), day, 'base', CHECKIN_BASE_SIZE)) == base)
     e.members.upsert(uid, uid, {'group_id': 'standard'})
     proof(e.db, uid)
     return uid
@@ -30,8 +31,8 @@ def configure(e, tiers):
                                       'multiplier': 2, 'drops': '[]', 'holidays': '[]'})
 
 
-@pytest.mark.parametrize('base', range(-10, 31))
-def test_all_41_real_hmac_bases_floor_only_positive_and_not_lucky_multiplied(env, base):
+@pytest.mark.parametrize('base', list(range(-10, 0)) + list(range(1, 31)))
+def test_all_40_real_hmac_bases_floor_only_positive_and_not_lucky_multiplied(env, base):
     uid = matching_user(env, base)
     configure(env, [{'days': 1, 'percent': 15}])
     result = env.checkin.checkin(uid)
@@ -45,7 +46,8 @@ def test_all_41_real_hmac_bases_floor_only_positive_and_not_lucky_multiplied(env
     if base <= 0:
         assert result['bonus'] == 0 and result['points'] == base
     day = day_bounds(NOW)[0]
-    assert result['rolls'] == {'lucky': draw(SECRET, uid, day, 'lucky', PPM),
+    assert result['rolls'] == {'base': draw(SECRET, uid, day, 'base', CHECKIN_BASE_SIZE),
+                               'lucky': draw(SECRET, uid, day, 'lucky', PPM),
                                'drop': draw(SECRET, uid, day, 'drop', PPM)}
     saved = env.db.one('SELECT * FROM checkins WHERE emby_user_id=?', (uid,))
     configure(env, [{'days': 1, 'percent': 10000}])
@@ -115,7 +117,7 @@ def test_actual_api_legacy_percent_normalization_and_bot_response_43(monkeypatch
     with TestClient(app) as client:
         auth = ('admin','change-me')
         clock = NOW
-        uid = next(str(i) for i in range(10000) if draw(SECRET,str(i),day_bounds(clock)[0],'base',41)-10 == 20)
+        uid = next(str(i) for i in range(100000) if checkin_base(draw(SECRET,str(i),day_bounds(clock)[0],'base',CHECKIN_BASE_SIZE)) == 20)
         app.state.members.upsert(uid,'isolated-percent',{'group_id':'standard'})
         app.state.members.bind_telegram(uid,'902')
         proof(app.state.db,uid,now=clock)
