@@ -143,10 +143,10 @@ def test_actual_bank4n_guestn_start_permissions_repeat_and_same_media(env, stake
         await click(env, row, 'join', 1, origin)
         await env.bot._niuniu_tick()
         assert env.db.query('SELECT * FROM points_ledger') == ledger and cash(env) == initial
-        assert '已结束' in env.tg.text(GROUP, mid)
+        assert row['card_delete_state'] == 'deleted'
         assert env.tg.actions(GROUP, mid) == []
         body = env.tg.text(GROUP, row['result_message_id'])
-        assert '揭晓' in body and '对庄' in body and '积分' in body
+        assert '本局战报' in body and '庄家' in body and '闲家' in body and '积分' in body
         for secret in ('余额', 'private-login', '总池'):
             assert secret not in body
         assert [m for m, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'sendPhoto']
@@ -373,7 +373,7 @@ async def feedback(e, row, op, *, index=1, data=None, original=None, actor=None)
     assert len(replies) == 1
     sends = [(method, payload) for method, payload in calls if method in ('sendMessage', 'sendPhoto')]
     assert len(sends) <= 1
-    assert all(method == 'sendPhoto' and ('本局揭晓' in payload.get('caption', '') or '本局结束' in payload.get('caption', '')) for method, payload in sends)
+    assert all(method == 'sendPhoto' and ('本局战报' in payload.get('caption', '')) for method, payload in sends)
     return replies[0]
 
 
@@ -438,8 +438,8 @@ def test_normal_join_duplicate_start_and_settled_replay_one_response_same_photo(
         assert abs(env.services.points.balance(env.uids[1])-initial) == row['stake']
         assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'sendPhoto']
         assert all(fields['message_id'] == mid for method, fields in env.photos if method == 'editMessageMedia')
-        assert '已结束' in env.tg.text(GROUP, mid) and env.tg.actions(GROUP, mid) == []
-        assert '揭晓' in env.tg.text(GROUP, current['result_message_id']) and '余额' not in env.tg.text(GROUP, current['result_message_id'])
+        assert current['card_delete_state'] == 'deleted' and env.tg.actions(GROUP, mid) == []
+        assert '本局战报' in env.tg.text(GROUP, current['result_message_id']) and '余额' not in env.tg.text(GROUP, current['result_message_id'])
     asyncio.run(run())
 
 

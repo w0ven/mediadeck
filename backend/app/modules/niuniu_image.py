@@ -7,6 +7,7 @@ from io import BytesIO
 from PIL import Image, ImageDraw
 
 from app.modules.niuniu import CATEGORIES, strength
+from app.modules.niuniu_delivery import result_amount, result_name
 from app.modules.poker_image import face, font
 
 
@@ -14,7 +15,44 @@ def net_label(value):
     return f'赢 {value}积分' if value > 0 else f'输 {-value}积分' if value < 0 else '本局持平'
 
 
+def render_result(row, players):
+    """A compact, readable report; lobby cards retain their existing layout."""
+    banker = json.loads(row['config_json']).get('game') == 'niuniu-banker-v1'
+    ordered = sorted(players, key=lambda p: p['user_id'] != row['actor_user_id']) if banker else players
+    refunded = row['state'] == 'cancelled'
+    height = 118 if refunded else 248
+    image = Image.new('RGB', (1100, 174+height*len(ordered)), '#10272d')
+    d = ImageDraw.Draw(image)
+    d.text((48, 39), '牛牛 · 本局战报', font=font(42), fill='#e6cca0')
+    for seat, p in enumerate(ordered):
+        y = 130+seat*height
+        bank = banker and p['user_id'] == row['actor_user_id']
+        d.rounded_rectangle((32, y, 1068, y+height-14), radius=20, fill='#19363b', outline='#a78b59' if bank else '#2b4a50', width=2 if bank else 1)
+        role = '庄家' if bank else '闲家' if banker else '玩家'
+        d.text((52, y+18), role, font=font(22), fill='#d4b77f' if bank else '#95b3b5')
+        name = result_name(p)
+        size = 30
+        while size > 14 and d.textlength(name, font=font(size)) > 574:size -= 1
+        d.text((126, y+13), name, font=font(size), fill='#edf3eb')
+        amount = result_amount(row, p)
+        color = '#a9cebb' if amount.startswith('+') else '#e0aba5' if amount.startswith('-') else '#d4b77f'
+        d.text((1036, y+16), amount, font=font(26), fill=color, anchor='ra')
+        cards = json.loads(p['cards_json'])
+        if refunded:
+            d.text((126, y+62), '本局退款', font=font(20), fill='#95b3b5')
+        elif cards:
+            d.text((1036, y+54), CATEGORIES[strength(cards)[0]], font=font(20), fill='#95b3b5', anchor='ra')
+            for index, card_id in enumerate(cards):
+                card = face(card_id)
+                card.thumbnail((120, 168))
+                image.paste(card, (92+index*184, y+59))
+    out = BytesIO()
+    image.save(out, format='PNG', optimize=True)
+    return out.getvalue()
+
+
 def render_room(row, players):
+    if row.get('result_layout') == 'war-report-v1':return render_result(row, players)
     banker = json.loads(row['config_json']).get('game') == 'niuniu-banker-v1'
     image = Image.new('RGB', (1100, 1510), '#102b35')
     d = ImageDraw.Draw(image)
