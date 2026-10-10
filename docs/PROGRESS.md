@@ -2,6 +2,16 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — keep last playback focused on elapsed time
+
+- Show only elapsed time since verified playback in the last-playback column.
+  Keep no-record and unavailable values honest; remove the attached observation,
+  score, candidate and formula block. Separate filters and backend policy stay intact.
+- Reproduce the unwanted extra row content in real Chromium, then verify the
+  time-only cell across all activity states, filtering, paging and live refresh.
+- Keep the retired metering warning absent. Root lint, JS syntax and 25 focused
+  member, activity, ordering and browser regression tests pass.
+
 ## 2026-10-10 — keep the retired collection warning out of member rows
 
 - Remove the member-list copy of the collection/recovery warning already retired
