@@ -1,4 +1,4 @@
-"""Actual handlers/SQLite: fixed 4N banker, pairwise ±N, same picture and legacy snapshots."""
+"""Actual handlers/SQLite: fixed 4N banker, pairwise ±N, final receipts and legacy snapshots."""
 import asyncio
 import copy
 import json
@@ -18,6 +18,7 @@ from test_tg_interaction_context import GROUP
 
 from app.core.db import Database
 from app.modules.economy_rules import economy_write, encode
+from app.modules.game_ui import drain_ui
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
 from app.modules.niuniu import CATEGORIES, NiuniuService, rank, strength
@@ -57,6 +58,7 @@ def message(e, text='/牛牛', index=0, mid=1001, topic=0):
 
 async def create(e, text='/牛牛', **kw):
     await e.bot._dispatch_update({'message': message(e, text, **kw)})
+    await drain_ui(e.bot)
     return e.db.one('SELECT * FROM niuniu_rounds ORDER BY created_at DESC LIMIT 1')
 
 
@@ -73,6 +75,7 @@ def card(e, row):
 
 async def click(e, row, op, index=0, original=None):
     await e.bot._dispatch_update({'callback_query': {'id': 'nn-'+op, 'data': f'nn:{row["nonce"]}:{op}', 'from': e.actors[index], 'message': original or card(e, row)}})
+    await drain_ui(e.bot)
     return svc(e).get(row['nonce'])
 
 
@@ -140,11 +143,13 @@ def test_actual_bank4n_guestn_start_permissions_repeat_and_same_media(env, stake
         await click(env, row, 'join', 1, origin)
         await env.bot._niuniu_tick()
         assert env.db.query('SELECT * FROM points_ledger') == ledger and cash(env) == initial
-        body = env.tg.text(GROUP, mid)
+        assert '已结束' in env.tg.text(GROUP, mid)
+        assert env.tg.actions(GROUP, mid) == []
+        body = env.tg.text(GROUP, row['result_message_id'])
         assert '揭晓' in body and '对庄' in body and '积分' in body
         for secret in ('余额', 'private-login', '总池'):
             assert secret not in body
-        assert [m for m, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'editMessageMedia']
+        assert [m for m, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'sendPhoto']
         assert all(p['message_id'] == mid for m, p in env.photos if m == 'editMessageMedia')
         assert row['revision'] == row['rendered_revision']
     asyncio.run(run())
@@ -270,11 +275,11 @@ def test_system_fault_or_restart_running_refunds_full_collateral_once(env, monke
         assert svc(env).get(row['nonce'])['state'] == 'cancelled'
         assert env.services.points.balances() == base
         assert all(p['cards_json'] == '[]' for p in svc(env).players(row['nonce']))
-        assert sum(m == 'sendPhoto' for m, _ in env.photos) == 1
+        assert sum(m == 'sendPhoto' for m, _ in env.photos) == (1 if fault == 'running' else 2)
     asyncio.run(run())
 
 
-def test_legacy_text_room_original_money_snapshot_no_new_result_photo(env):
+def test_legacy_text_room_original_money_snapshot_new_result_only_when_finishing(env):
     async def run():
         service = svc(env)
         base = env.services.points.balances()
@@ -296,7 +301,8 @@ def test_legacy_text_room_original_money_snapshot_no_new_result_photo(env):
         assert sum(p['result_amount'] for p in players) == 20
         assert sorted(env.services.points.balance(u)-base[u] for u in env.uids[:2]) == [-10, 10]
         await env.bot._niuniu_tick()
-        assert not env.photos and row['card_message_id'] == mid
+        assert len(env.photos) == 1 and env.photos[0][0] == 'sendPhoto' and row['card_message_id'] == mid
+        assert row['result_message_id'] != mid and env.tg.actions(GROUP, mid) == []
         assert any(m == 'editMessageText' and p['message_id'] == mid for m, p in env.tg.calls)
     asyncio.run(run())
 
@@ -361,10 +367,13 @@ async def feedback(e, row, op, *, index=1, data=None, original=None, actor=None)
     await e.bot._dispatch_update({'callback_query': {
         'id': callback_id, 'data': data or f'nn:{row["nonce"]}:{op}',
         'from': actor or e.actors[index], 'message': original or card(e, row)}})
+    await drain_ui(e.bot)
     calls = e.tg.calls[offset:]
     replies = [p for method, p in calls if method == 'answerCallbackQuery' and p['callback_query_id'] == callback_id]
     assert len(replies) == 1
-    assert not any(method in ('sendMessage', 'sendPhoto') for method, _ in calls)
+    sends = [(method, payload) for method, payload in calls if method in ('sendMessage', 'sendPhoto')]
+    assert len(sends) <= 1
+    assert all(method == 'sendPhoto' and ('本局揭晓' in payload.get('caption', '') or '本局结束' in payload.get('caption', '')) for method, payload in sends)
     return replies[0]
 
 
@@ -427,9 +436,10 @@ def test_normal_join_duplicate_start_and_settled_replay_one_response_same_photo(
         assert current['state'] == 'settled' and current['card_message_id'] == mid
         assert len(svc(env).players(row['nonce'])) == 2
         assert abs(env.services.points.balance(env.uids[1])-initial) == row['stake']
-        assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'editMessageMedia']
+        assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia', 'sendPhoto']
         assert all(fields['message_id'] == mid for method, fields in env.photos if method == 'editMessageMedia')
-        assert '揭晓' in env.tg.text(GROUP, mid) and '余额' not in env.tg.text(GROUP, mid)
+        assert '已结束' in env.tg.text(GROUP, mid) and env.tg.actions(GROUP, mid) == []
+        assert '揭晓' in env.tg.text(GROUP, current['result_message_id']) and '余额' not in env.tg.text(GROUP, current['result_message_id'])
     asyncio.run(run())
 
 
@@ -459,11 +469,13 @@ def test_publish_failure_after_success_cannot_answer_same_callback_twice(env, mo
             raise PlayError('积分服务暂不可用')
         monkeypatch.setattr(env.bot, '_niuniu_publish', publish_failure)
         offset = len(env.tg.calls)
-        with pytest.raises(PlayError):
-            await env.bot._niuniu_callback(f'nn:{row["nonce"]}:join', card(env, row), env.actors[1], 'publish-failure')
+        await env.bot._niuniu_callback(f'nn:{row["nonce"]}:join', card(env, row), env.actors[1], 'publish-failure')
+        await drain_ui(env.bot)
         replies = [p for method, p in env.tg.calls[offset:] if method == 'answerCallbackQuery']
         assert replies == [{'callback_query_id': 'publish-failure', 'text': '', 'show_alert': False}]
         assert len(svc(env).players(row['nonce'])) == 2
+        current = svc(env).get(row['nonce'])
+        assert current['revision'] > current['rendered_revision']
     asyncio.run(run())
 
 
@@ -481,5 +493,6 @@ def test_existing_disabled_room_refunds_banker_once_and_keeps_guest_unseated(env
         assert env.services.points.balance(env.uids[0]) == banker_before
         assert env.services.points.balance(env.uids[1]) == guest_before
         assert len(svc(env).players(row['nonce'])) == 1
-        assert [method for method, _ in env.photos] == ['sendPhoto', 'editMessageMedia']
+        assert [method for method, _ in env.photos] == ['sendPhoto', 'sendPhoto']
+        assert env.tg.actions(GROUP, row['card_message_id']) == []
     asyncio.run(run())

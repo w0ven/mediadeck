@@ -11,6 +11,7 @@ from test_checkin_interaction import economy_env, interaction_env  # noqa: F401
 from test_tg_interaction_context import ADMIN, GROUP
 
 from app.modules.command_cleanup import CommandCleanupService
+from app.modules.game_ui import drain_ui
 from app.modules.report_delivery import failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
 
@@ -62,6 +63,7 @@ def jobs(e):
 def test_native_actual_recognized_existing_entries_only_original_after_response(env, text):
     async def run():
         await env.bot._dispatch_update({'message': msg(env, text)})
+        await drain_ui(env.bot)
         rows = jobs(env)
         assert len(rows) == 1, (text, env.tg.calls, env.bot._last_error)
         target = json.loads(rows[0]['payload_json'])
@@ -71,6 +73,7 @@ def test_native_actual_recognized_existing_entries_only_original_after_response(
         index = next(i for i, (m, p) in enumerate(env.tg.calls) if m == 'deleteMessage' and p['message_id'] == 1901)
         assert any(m in ('sendMessage', 'sendPhoto') for m, p in env.tg.calls[:index])
         await env.bot._dispatch_update({'message': msg(env, text)})
+        await drain_ui(env.bot)
         assert len(jobs(env)) == 1
         assert sum(m == 'deleteMessage' and p['message_id'] == 1901 for m, p in env.tg.calls) == 1
     asyncio.run(run())
@@ -101,6 +104,7 @@ def test_native_no_delete_unprocessed_private_ordinary_unknown_reply_or_untruste
         elif case == 'denied_response':
             env.public_mode = 'denied'
         await env.bot._dispatch_update({'message': m})
+        await drain_ui(env.bot)
         assert not jobs(env)
         assert not any(method == 'deleteMessage' and p['message_id'] in (111, 1901) for method, p in env.tg.calls)
     asyncio.run(run())
@@ -111,6 +115,7 @@ def test_native_delete_permission_failure_quiet_and_exact_persistent_retry(env, 
     async def run():
         env.delete_mode = mode
         await env.bot._dispatch_update({'message': msg(env)})
+        await drain_ui(env.bot)
         row = env.db.one('SELECT * FROM niuniu_rounds')
         assert row['card_message_id'] is not None and row['state'] == 'lobby'
         assert env.services.points.balance(env.uids[0]) == 960

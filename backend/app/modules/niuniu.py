@@ -7,6 +7,7 @@ import time
 from itertools import combinations
 
 from app.modules.economy_rules import economy_write, encode
+from app.modules.game_mentions import telegram_username
 from app.modules.play_money import CashBook, PlayError, integer
 from app.modules.play_rounds import RoundCards
 from app.modules.plugins import Field, Plugin, Spec
@@ -49,6 +50,10 @@ def migrate(db):
     db._ensure_column('niuniu_players', 'cards_json', "TEXT NOT NULL DEFAULT '[]'")
     db._ensure_column('niuniu_players', 'escrow_ref', "TEXT NOT NULL DEFAULT ''")
     db._ensure_column('niuniu_rounds', 'card_format', "TEXT NOT NULL DEFAULT 'text'")
+    db._ensure_column('niuniu_players', 'tg_username', "TEXT NOT NULL DEFAULT ''")
+    # Empty by default: upgrading never schedules historical finished rooms.
+    for key, declaration in (('state', "TEXT NOT NULL DEFAULT ''"), ('payload', "TEXT NOT NULL DEFAULT ''"), ('lease', 'REAL NOT NULL DEFAULT 0'), ('due', 'REAL NOT NULL DEFAULT 0'), ('attempts', 'INTEGER NOT NULL DEFAULT 0'), ('message_id', 'INTEGER'), ('error', "TEXT NOT NULL DEFAULT ''")):
+        db._ensure_column('niuniu_rounds', 'result_'+key, declaration)
     for key, declaration in (('photo_state', "TEXT NOT NULL DEFAULT 'pending'"), ('photo_lease', 'REAL NOT NULL DEFAULT 0'), ('photo_due', 'REAL NOT NULL DEFAULT 0'), ('photo_attempts', 'INTEGER NOT NULL DEFAULT 0'), ('photo_message_id', 'INTEGER'), ('photo_error', "TEXT NOT NULL DEFAULT ''")):
         db._ensure_column('niuniu_rounds', key, declaration)
     db._conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS niuniu_one_active ON niuniu_rounds(bot_id,chat_id,thread_id) WHERE state IN ('lobby','running')")
@@ -77,7 +82,7 @@ class NiuniuService(RoundCards):
             self.cash.reserve(conn, 'niuniu', ref, uid, amount, now=clock)
         except ValueError:
             raise PlayError(f'{"坐庄担保" if banker else "加入本局"}需 {amount} 积分，积分不足，未加入') from None
-        conn.execute('INSERT INTO niuniu_players(nonce,user_id,tg_id,display_name,joined_at,escrow_ref) VALUES(?,?,?,?,?,?)', (row['nonce'],uid,tg,public_name(actor),clock,ref))
+        conn.execute('INSERT INTO niuniu_players(nonce,user_id,tg_id,display_name,joined_at,escrow_ref,tg_username) VALUES(?,?,?,?,?,?,?)', (row['nonce'],uid,tg,public_name(actor),clock,ref,telegram_username(actor.get('username'))))
 
     def create(self, message, stake=None, *, now=None):
         clock = time.time() if now is None else float(now)
@@ -112,6 +117,8 @@ class NiuniuService(RoundCards):
             conn.execute('UPDATE niuniu_players SET result_amount=? WHERE id=?',(amount,p['id']))
         conn.execute("UPDATE niuniu_rounds SET state='cancelled',result_json=? WHERE nonce=?",(encode({'mode':'refund','reason':reason}),row['nonce']))
         self._bump(conn,row['nonce'])
+        from app.modules.niuniu_delivery import queue_result
+        queue_result(conn, self, row['nonce'])
 
     def _finish(self, conn, row, clock):
         players=self.players(row['nonce'])
@@ -172,6 +179,8 @@ class NiuniuService(RoundCards):
             result = {'mode':'win','pot':pot,'winner':winner['id']}
         conn.execute("UPDATE niuniu_rounds SET state='settled',result_json=? WHERE nonce=?",(encode(result),row['nonce']))
         self._bump(conn,row['nonce'])
+        from app.modules.niuniu_delivery import queue_result
+        queue_result(conn, self, row['nonce'])
 
     def lobby(self, nonce, actor, message, op, *, now=None):
         clock=time.time() if now is None else float(now)

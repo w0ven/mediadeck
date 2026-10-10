@@ -10,6 +10,7 @@ from test_checkin_interaction import economy_env, interaction_env  # noqa: F401
 from test_tg_interaction_context import GROUP
 
 from app.core.db import Database
+from app.modules.game_ui import drain_ui
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
 from app.modules.packet_delivery import PacketDelivery, receipt_view
@@ -42,6 +43,7 @@ def card(e,row,*,receipt=False):
 
 async def press(e,row,verb='rpok',index=1,original=None,suffix=''):
     await e.bot._dispatch_update({'callback_query':{'id':'permanent-'+verb,'data':verb+':'+row['nonce']+suffix,'from':e.actors[index],'message':original or card(e,row)}})
+    await drain_ui(e.bot)
     return svc(e).get(row['nonce'])
 
 

@@ -1,6 +1,8 @@
 """Original vector-drawn real 52-card faces; no external assets or emoji cards."""
 from __future__ import annotations
 
+import threading
+from functools import lru_cache
 from io import BytesIO
 from pathlib import Path
 
@@ -11,8 +13,14 @@ from app.modules.poker import CATEGORIES, strength
 FONT = Path(__file__).parent / 'rank_assets/font/PingFang-Bold.ttf'
 
 
-def font(size):
+@lru_cache(maxsize=64)
+def _font(size, thread_id):
+    # FreeType objects are reused within, not shared between, rendering threads.
     return ImageFont.truetype(str(FONT), size)
+
+
+def font(size):
+    return _font(size, threading.get_ident())
 
 
 def suit(draw, x, y, s, kind, color):

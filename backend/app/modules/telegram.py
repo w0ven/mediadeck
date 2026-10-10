@@ -54,6 +54,7 @@ from app.modules.bot_views import (
     watch_rank_mention,
 )
 from app.modules.command_cleanup import GroupCommandCleanupMixin, capture_response
+from app.modules.game_ui import defer_ui, sync_game_commands
 from app.modules.gift_receipts import GiftReceipts
 from app.modules.group_membership import GroupMembership, GroupMembershipPlugin
 from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
@@ -5012,10 +5013,14 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                     group = not self._private_chat(message)
                     if group and not self._group_chat_allowed(chat):
                         return
-                    await self._sync_chat_commands(
-                        chat["id"], str(sender.get("id") or ""),
-                        str(sender.get("language_code") or ""),
-                        group=group)
+                    args = (chat['id'], str(sender.get('id') or ''), str(sender.get('language_code') or ''), group)
+                    callback_data = str((update.get('callback_query') or {}).get('data') or '')
+                    words = str(message.get('text') or '').strip().split()
+                    verb = words[0].lower().split('@', 1)[0] if words else ''
+                    if callback_data.startswith(('nn:', 'nnh:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/红包', '/redpacket', '/packet'):
+                        defer_ui(self, ('commands', str(chat['id'])+':'+args[1]), lambda: sync_game_commands(self, *args))
+                    else:
+                        await self._sync_chat_commands(*args[:3], group=group)
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
@@ -5093,6 +5098,9 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             await asyncio.gather(*pending, return_exceptions=True)
         self._in_flight.clear()
         self._chat_locks.clear()
+        if getattr(self, '_game_ui', None):
+            self._game_ui['pending'].clear()
+            self._game_ui['menu_locks'].clear()
         await self._close_http()
 
     # -- outbound notifications ----------------------------------------------

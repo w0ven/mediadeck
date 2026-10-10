@@ -8,6 +8,7 @@ from test_group_points import msg
 from test_tg_interaction_context import ADMIN, GROUP, VIEWER
 from test_tg_interaction_context import env as interaction_env  # noqa: F401
 
+from app.modules.game_ui import drain_ui
 from app.modules.report_delivery import CALL_DELIVERY, failure
 
 
@@ -25,6 +26,7 @@ async def dispatch(e, text='/红包 100 10', actor=VIEWER, mid=20, thread=7):
     if thread:message['is_topic_message']=True
     assert 'entities' not in message
     await e.bot._dispatch_update({'message': message})
+    await drain_ui(e.bot)
     row=e.db.one('SELECT * FROM red_packets WHERE command_message_id=?', (mid,))
     if row:
         # Existing expiring envelope snapshot; new semantics use test_packet_permanent.
@@ -45,6 +47,7 @@ async def callback(e, row, kind='rpok', actor=None, suffix='', message=None):
         'id': 'packetcb', 'data': kind + ':' + row['nonce'] + suffix,
         'from': {'id': int(row['actor_tg_id']) if actor is None else actor, 'is_bot': False},
         'message': message or card_message(e, row)}})
+    await drain_ui(e.bot)
 
 
 def alert(e):
