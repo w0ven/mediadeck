@@ -6,9 +6,16 @@ import time
 
 from app.modules.economy_rules import economy_write, encode
 from app.modules.game_mentions import result_mention, text_units
-from app.modules.red_packets import RESULTS_PER_PAGE, PacketError
+from app.modules.red_packets import RESULTS_PER_PAGE, PacketError, public_name
 
 EFFECTS=('pin','unpin','receipt')
+
+
+def receipt_mention(claim):
+    # Captured Telegram nickname only; do not prefer handles or account logins.
+    name = public_name({'first_name': claim.get('display_name')})
+    name = name[:39]+'…' if len(name) > 40 else name
+    return result_mention(claim.get('tg_user_id'), name)
 
 
 def receipt_view(row,claims,page=0):
@@ -16,10 +23,10 @@ def receipt_view(row,claims,page=0):
     page=max(0,min(page,pages-1))
     body=f'🌸 <b>红包圆满收官</b>\n{row["total"]} 积分 · {row["parts"]} 份都找到主人啦'
     for c in claims[page*RESULTS_PER_PAGE:(page+1)*RESULTS_PER_PAGE]:
-        body+='\n'+result_mention(c.get('tg_user_id'), c['display_name'], c.get('tg_username'))+f'  ·  <b>{c["amount"]}</b> 积分'
+        body+='\n'+receipt_mention(c)+f'  ·  <b>{c["amount"]}</b> 积分'
     if row['mode']=='random' and claims:
         best=min(claims,key=lambda c:(-c['amount'],c['slot']))
-        body+='\n\n✨ 手气最佳 '+result_mention(best.get('tg_user_id'), best['display_name'], best.get('tg_username'))+f' · {best["amount"]} 积分'
+        body+='\n\n✨ 手气最佳 '+receipt_mention(best)+f' · {best["amount"]} 积分'
     body+='\n<i>愿好手气与你相伴。</i>'
     keys=[]
     if pages>1:
@@ -39,11 +46,11 @@ def complete_receipt(row, claims):
     """
     header = f'🌸 <b>红包圆满收官</b>\n{row["total"]} 积分 · {row["parts"]} 份'
     messages, body = [], header
-    lines = ['\n'+result_mention(c.get('tg_user_id'), c['display_name'], c.get('tg_username'))
+    lines = ['\n'+receipt_mention(c)
              +f' · {c["amount"]} 积分' for c in claims]
     if row['mode'] == 'random' and claims:
         best = min(claims, key=lambda c: (-c['amount'], c['slot']))
-        lines.append('\n\n✨ 手气最佳 '+result_mention(best.get('tg_user_id'), best['display_name'], best.get('tg_username'))+f' · {best["amount"]} 积分')
+        lines.append('\n\n✨ 手气最佳 '+receipt_mention(best)+f' · {best["amount"]} 积分')
     count = 0
     for line in lines:
         if text_units(body+line) > 3800 or count >= 90:

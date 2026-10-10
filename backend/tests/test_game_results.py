@@ -137,7 +137,7 @@ def test_packet_first_result_mentions_complete_more_than_ten(packet_env):
         assert row['receipt_state'] == 'sent'
         body = e.tg.text(GROUP, row['receipt_message_id'])
         assert all(f'tg://user?id={a["id"]}' in body for a in actors)
-        assert '@real_user_14' in body and '&lt;玩家13&amp;&gt;' in body
+        assert '@real_user_14' not in body and '&lt;玩家14&amp;&gt;' in body and '&lt;玩家13&amp;&gt;' in body
         assert '余额' not in body and 'private-login' not in body
         assert e.tg.actions(GROUP, row['receipt_message_id']) == []
         payload = json.loads(row['receipt_payload'])

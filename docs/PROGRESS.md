@@ -2,6 +2,23 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — red-packet result nickname labels
+
+- Correct packet-only public result labels: use the captured Telegram display name,
+  not a preferred @handle, as the stable Telegram-ID mention label in both the
+  complete recipient list and the best-luck line. Reuse public-name cleaning,
+  bounded 40-character ellipsis, HTML escaping and neutral missing-name fallback.
+- Keep complete-list splitting, claim order, amounts, exact-envelope unpin,
+  independent receipts, frozen snapshots and durable send acknowledgements unchanged.
+  Do not touch niuniu, account logins, money, dispatch or historical messages.
+- Direct and relevant regressions: 71 passed, including actual random-packet handlers,
+  fifteen public nicknames/best luck, 200 long-name segments and frozen sent/unknown
+  legacy handle payloads across restart without receipt or money replay.
+- Exercise every one of 182 test files in bounded batches. An unchanged network-
+  namespace timing check and browser socket/UI timing failures pass in isolated
+  reruns; preserve those failures in local evidence rather than modifying tests.
+  Formal full CI remains the publication gate. No production claims or group tests.
+
 ## 2026-10-10 — preserve relative direct URLs for next-episode playback
 
 - Correct the previous credential-carrying patch's direct-URL shape regression:
