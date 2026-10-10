@@ -29,6 +29,11 @@ PLAYBACK = re.compile(r"^(?:stream|original|master|main|manifest|live|hls[0-9]*|
 ID = re.compile(r"[A-Za-z0-9_-]{1,128}\Z")
 CAP_ARG = "md_route"
 CAP_TTL = 21600
+PUBLIC_MEDIA_IMAGE = re.compile(
+    r"^/(?:emby/)?Items/[A-Za-z0-9_-]{1,128}/Images/"
+    r"(?:Primary|Backdrop|Thumb|Logo|Banner|Art|Disc)(?:/[0-9]{1,10})?$",
+    re.IGNORECASE,
+)
 
 
 def refuse(code: int = 403, message: str = "restricted route refused") -> None:
@@ -73,6 +78,11 @@ def public_bootstrap(path: str, method: str) -> bool:
         return False
     lower = path.lower()
     if lower in ("/", "/web/", "/web/index.html", "/system/info/public", "/emby/system/info/public"):
+        return True
+    # Emby media artwork is public, and native image loaders do not necessarily
+    # inherit API authentication. This runs only after the trusted entry gate;
+    # user portraits, metadata and every media stream retain personal admission.
+    if PUBLIC_MEDIA_IMAGE.fullmatch(path):
         return True
     return bool(re.fullmatch(r"/web/[A-Za-z0-9_./-]+\.(?:js|css|woff2?|ttf|svg|png|ico|html)", path, re.IGNORECASE))
 
@@ -223,7 +233,7 @@ class WhitelistRoute:
         return {"uid": fields[3], "item": fields[4], "source": fields[5], "play": fields[6], "kind": fields[7]}
 
     def decorate(self, entry: PlaybackEntry, uid: str, item: str,
-                 data: dict[str, Any]) -> dict[str, Any]:
+                 data: dict[str, Any], token: str = "") -> dict[str, Any]:
         output = json.loads(json.dumps(data))
         official = self.state.settings_service.integration_config()["emby_public_url"].rstrip("/")
         if not official:
@@ -243,8 +253,29 @@ class WhitelistRoute:
                 match = MEDIA.fullmatch(path)
                 if not match or match[1] != item:
                     refuse(503, "media URL unavailable")
+                if token:
+                    # Native players fetch the returned URL independently of
+                    # the authenticated metadata request. Carry only that
+                    # caller's existing credential, never the operator key.
+                    configured = self.state.settings_service.emby_config().get("api_key")
+                    values = [v for k, v in query.items() if k.lower() in
+                              ("api_key", "apikey", "x-emby-token", "x-mediabrowser-token")]
+                    for k, value in query.items():
+                        if k.lower() in ("authorization", "x-emby-authorization",
+                                         "x-mediabrowser-authorization"):
+                            found = re.findall(r'token\s*=\s*"?([^",\s]+)"?', value, re.IGNORECASE)
+                            if len(found) > 1:
+                                refuse(503, "conflicting media credential")
+                            values.extend(found)
+                    if ((configured and hmac.compare_digest(token.encode(), str(configured).encode()))
+                            or any(v and v != token for v in values)):
+                        refuse(503, "conflicting media credential")
+                    query = {k: v for k, v in query.items() if k.lower() not in
+                             ("api_key", "apikey", "x-emby-token", "x-mediabrowser-token")}
+                    query["api_key"] = token
+                encoded_query = urlencode(query) if token else parsed.query
                 if kind == "mobile":
-                    source[field] = urlunsplit((*urlsplit(official)[:2], parsed.path, parsed.query, ""))
+                    source[field] = urlunsplit((*urlsplit(official)[:2], parsed.path, encoded_query, ""))
                 elif is_transcode_request(path, query):
                     play = str(data.get("PlaySessionId") or query_value(query, "PlaySessionId"))
                     sid = str(source.get("Id") or "")
@@ -252,8 +283,8 @@ class WhitelistRoute:
                         refuse(503, "unbound media URL")
                     query[CAP_ARG] = self.mint(entry, uid, item, sid, play, kind)
                     source[field] = urlunsplit((*urlsplit(entry.origin)[:2], parsed.path, urlencode(query), ""))
-                elif parsed.netloc:
-                    source[field] = urlunsplit((*urlsplit(entry.origin)[:2], parsed.path, parsed.query, ""))
+                elif parsed.netloc or token:
+                    source[field] = urlunsplit((*urlsplit(entry.origin)[:2], parsed.path, encoded_query, ""))
         return output
 
     def rewrite_playlist(self, entry: PlaybackEntry, uid: str, original: str,
