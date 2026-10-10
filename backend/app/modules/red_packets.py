@@ -13,6 +13,7 @@ import time
 import unicodedata
 
 from app.modules.economy_rules import economy_write, encode
+from app.modules.game_mentions import telegram_username
 from app.modules.group_points import GroupPointsError, reliable_user
 from app.modules.groups import WHITELIST_GROUP_ID
 
@@ -273,13 +274,15 @@ class PacketService:
             amount = values[slot]
             reason = 'packet.claim' if row['funding'] == 'user' else 'packet.reward'
             self._credit(conn, uid, amount, reason, nonce, 'packet:' + row['actor_user_id'], now)
-            conn.execute('INSERT INTO red_packet_claims(nonce,user_id,tg_user_id,amount,slot,claimed_at,display_name) VALUES(?,?,?,?,?,?,?)',
-                         (nonce, uid, tg, amount, slot, now, public_name(actor)))
+            conn.execute('INSERT INTO red_packet_claims(nonce,user_id,tg_user_id,amount,slot,claimed_at,display_name,tg_username) VALUES(?,?,?,?,?,?,?,?)',
+                         (nonce, uid, tg, amount, slot, now, public_name(actor), telegram_username(actor.get('username'))))
             exhausted = slot + 1 == row['parts']
             conn.execute('UPDATE red_packets SET remaining=remaining-?,claimed_count=claimed_count+1,status=?,result_page=?,render_version=render_version+1,next_publish_at=0 WHERE nonce=?',
                          (amount, 'exhausted' if exhausted else 'active', slot // RESULTS_PER_PAGE, nonce))
             if exhausted and row['permanent']:
-                conn.execute("UPDATE red_packets SET receipt_state='pending',unpin_state='pending',receipt_page=0 WHERE nonce=?", (nonce,))
+                from app.modules.packet_delivery import complete_receipt
+                payload = complete_receipt(self.get(nonce), self.claims(nonce, slot+1))
+                conn.execute("UPDATE red_packets SET receipt_state='pending',unpin_state='pending',receipt_page=0,receipt_payload=? WHERE nonce=?", (encode(payload), nonce))
             conn.execute('INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)',
                          (now, 'tg:' + tg, 'points.packet.' + row['funding'] + '.claim', uid,
                           encode({'nonce': nonce, 'amount': amount, 'slot': slot, 'sender': row['actor_user_id'],
@@ -330,7 +333,7 @@ class PacketService:
 
     def claims(self, nonce, count):
         # Bound to the rendered row's committed progress, not a later claim.
-        return self.db.query('SELECT amount,slot,display_name FROM red_packet_claims '
+        return self.db.query('SELECT amount,slot,display_name,tg_user_id,tg_username FROM red_packet_claims '
                              'WHERE nonce=? AND slot<? ORDER BY slot', (nonce, count))
 
     def page(self, nonce, actor, message, page):
@@ -354,5 +357,5 @@ class PacketService:
             return self.get(nonce)
 
     def best(self, nonce):
-        return self.db.one('SELECT amount,slot,display_name FROM red_packet_claims '
+        return self.db.one('SELECT amount,slot,display_name,tg_user_id,tg_username FROM red_packet_claims '
                            'WHERE nonce=? ORDER BY amount DESC,slot ASC LIMIT 1', (nonce,))

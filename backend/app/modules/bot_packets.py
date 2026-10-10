@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import sqlite3
 import time
 from html import escape
 
-from app.modules.packet_delivery import EFFECTS, PacketDelivery
+from app.modules.game_ui import defer_ui
+from app.modules.packet_delivery import EFFECTS, PacketDelivery, receipt_view
 from app.modules.red_packets import (
     COMMANDS,
     RESULTS_PER_PAGE,
@@ -153,6 +153,10 @@ class PacketBotMixin:
             row = service.get(nonce)
             if not row or not row['card_message_id']:
                 return
+            if not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):return
+            if row['rendered_version'] >= row['render_version']:
+                await self._packet_effects(nonce)
+                return
             body, keys = self._packet_view(row, service)
             CALL_DELIVERY.set(None)
             result = await self._call('editMessageText', {'chat_id': int(row['chat_id']),
@@ -171,9 +175,9 @@ class PacketBotMixin:
             tokens = data.split(':')
             nonce = tokens[1]
             if tokens[0] == 'rpresult' and len(tokens)==3:
-                row,payload=PacketDelivery(service).page(nonce,actor,message,int(tokens[2]))
-                await self._call('editMessageText',dict(payload,chat_id=int(row['chat_id']),message_id=row['receipt_message_id']))
+                PacketDelivery(service).page(nonce,actor,message,int(tokens[2]))
                 await self._call('answerCallbackQuery',{'callback_query_id':callback_id,'text':'领取结果'})
+                defer_ui(self, ('packet', nonce), lambda: self._packet_receipt_render(nonce))
                 return
             if tokens[0] == 'rpclaim' and len(tokens) == 2:
                 result = service.claim(nonce, actor, message)
@@ -198,7 +202,18 @@ class PacketBotMixin:
                              'text': '积分数据库暂不可用，请稍后重试原卡片', 'show_alert': True})
             return
         await self._call('answerCallbackQuery', {'callback_query_id': callback_id, 'text': text, 'show_alert': True})
-        await self._packet_render(nonce)
+        defer_ui(self, ('packet', nonce), lambda: self._packet_render(nonce))
+
+    async def _packet_receipt_render(self, nonce):
+        if not self.enabled:return
+        if not hasattr(self, '_packet_render_locks'):self._packet_render_locks = {}
+        async with self._packet_render_locks.setdefault(nonce, asyncio.Lock()):
+            service = self._packet_service()
+            row = service.get(nonce)
+            if not row or row['receipt_state'] != 'sent' or not row['receipt_message_id']:return
+            if not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):return
+            payload = receipt_view(row, service.claims(nonce, row['claimed_count']), row['receipt_page'])
+            await self._call('editMessageText', dict(payload, chat_id=int(row['chat_id']), message_id=row['receipt_message_id']))
 
     async def _packet_tick(self):
         service = self._packet_service()
@@ -213,22 +228,24 @@ class PacketBotMixin:
         if not self.enabled:return
         delivery=PacketDelivery(self._packet_service())
         for kind in EFFECTS:
-            row=delivery.claim(nonce,kind)
-            if not row:continue
-            CALL_DELIVERY.set(None)
-            if not self._group_chat_allowed({'id':int(row['chat_id']),'type':'supergroup'}):
-                delivery.finish(row,None,{'state':'failed','reason':'群授权已变化'})
-                continue
-            if kind=='receipt':
-                payload=dict(json.loads(row['receipt_payload']),chat_id=int(row['chat_id']))
-                payload['reply_parameters']={'message_id':row['card_message_id'],'allow_sending_without_reply':True}
-                if row['thread_id']:payload['message_thread_id']=row['thread_id']
-                result=await self._call('sendMessage',payload)
-            else:
-                payload={'chat_id':int(row['chat_id']),'message_id':row['card_message_id']}
-                if kind=='pin':payload['disable_notification']=True
-                result=await self._call('pinChatMessage' if kind=='pin' else 'unpinChatMessage',payload)
-            delivery.finish(row,result,CALL_DELIVERY.get() or {})
+            while True:
+                row=delivery.claim(nonce,kind)
+                if not row:break
+                CALL_DELIVERY.set(None)
+                if not self._group_chat_allowed({'id':int(row['chat_id']),'type':'supergroup'}):
+                    delivery.finish(row,None,{'state':'failed','reason':'群授权已变化'})
+                    break
+                if kind=='receipt':
+                    payload=dict(row['_payload'],chat_id=int(row['chat_id']))
+                    payload['reply_parameters']={'message_id':row['card_message_id'],'allow_sending_without_reply':True}
+                    if row['thread_id']:payload['message_thread_id']=row['thread_id']
+                    result=await self._call('sendMessage',payload)
+                else:
+                    payload={'chat_id':int(row['chat_id']),'message_id':row['card_message_id']}
+                    if kind=='pin':payload['disable_notification']=True
+                    result=await self._call('pinChatMessage' if kind=='pin' else 'unpinChatMessage',payload)
+                delivery.finish(row,result,CALL_DELIVERY.get() or {})
+                if kind!='receipt' or not isinstance(result,dict) or not result.get('message_id'):break
 
     async def _packet_worker(self):
         while True:
