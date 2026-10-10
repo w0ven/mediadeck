@@ -6,8 +6,13 @@ it take effect immediately — no restart, no shell access.
 """
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import re
+import sqlite3
+import uuid
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
@@ -65,8 +70,11 @@ async def probe_emby(
 class LiveEmby:
     """Emby adapter bound to a settings provider rather than frozen env vars."""
 
-    def __init__(self, config_provider: ConfigProvider) -> None:
+    def __init__(self, config_provider: ConfigProvider, *,
+                 identity_data_dir: str = "", identity_url: str = "") -> None:
         self._config = config_provider
+        self._identity_data_dir = identity_data_dir
+        self._identity_url = normalize_base_url(identity_url)
 
     # -- connection ----------------------------------------------------------
     def _conn(self) -> tuple[str, dict[str, str], float, bool]:
@@ -336,13 +344,64 @@ class LiveEmby:
             return uids.pop()
         return None
 
+    def _local_personal_owner(self, token: str) -> str | None:
+        """Read Emby's current credential authority; never infer from Sessions.
+
+        Tokens_2.UserId is an internal integer, not the public user GUID.
+        Both databases are operator-configured and opened read-only. No owner
+        cache: revocation/member changes must be effective on the next call.
+        """
+        root = Path(self._identity_data_dir).expanduser().resolve()
+        try:
+            with contextlib.closing(sqlite3.connect(
+                    (root / "authentication.db").as_uri() + "?mode=ro",
+                    uri=True, timeout=1)) as auth:
+                auth.execute("PRAGMA query_only=ON")
+                rows = auth.execute(
+                    "SELECT UserId, IsActive FROM Tokens_2 WHERE AccessToken=? LIMIT 2",
+                    (token,)).fetchall()
+            if (len(rows) != 1 or rows[0][1] != 1
+                    or type(rows[0][0]) is not int or rows[0][0] <= 0):
+                return None
+            owner = rows[0][0]
+            with contextlib.closing(sqlite3.connect(
+                    (root / "users.db").as_uri() + "?mode=ro",
+                    uri=True, timeout=1)) as users:
+                users.execute("PRAGMA query_only=ON")
+                rows = users.execute(
+                    "SELECT guid FROM LocalUsersv2 WHERE Id=? LIMIT 2", (owner,)).fetchall()
+                if len(rows) != 1:
+                    return None
+                raw_guid = rows[0][0]
+                if isinstance(raw_guid, bytes) and len(raw_guid) == 16:
+                    # Emby persists System.Guid.ToByteArray() (.NET endian).
+                    identity = uuid.UUID(bytes_le=raw_guid)
+                elif (isinstance(raw_guid, str) and re.fullmatch(
+                        r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", raw_guid)):
+                    identity = uuid.UUID(raw_guid)
+                else:
+                    return None
+                guid = identity.hex
+                if identity.int == 0:
+                    return None
+                matches = users.execute(
+                    "SELECT Id FROM LocalUsersv2 WHERE guid=? OR "
+                    "lower(replace(CAST(guid AS TEXT), '-', ''))=? LIMIT 2",
+                    (identity.bytes_le, guid)).fetchall()
+                return guid if matches == [(owner,)] else None
+        except (sqlite3.Error, OSError, ValueError):
+            # Neither paths nor credential-bearing sqlite errors leave here.
+            raise RuntimeError("local personal identity authority unavailable") from None
+
     async def personal_user_for_token(self, token: str) -> str | None:
         """Restricted routes never select an owner by a caller's DeviceId.
 
         Auth/Keys is an Emby API-key authority: ordinary personal credentials
         get 403; management credentials can list keys. Refuse any matching API
-        key even when only one user's sessions happen to exist. Admin personal
-        tokens still need an unambiguous scoped owner; no role exemption.
+        key even when only one user's sessions happen to exist. A configured
+        local authority binds active personal tokens to their exact owner,
+        including admins who can see global Sessions; no role exemption.
+        Without it the existing scoped-session check remains fail-closed.
         """
         token = (token or "").strip()
         if not token or len(token) > 2048:
@@ -362,6 +421,11 @@ class LiveEmby:
                     return None
             elif key_reply.status_code != 403:
                 raise RuntimeError("credential authority unavailable")
+            if self._identity_data_dir or self._identity_url:
+                if (not self._identity_data_dir or not self._identity_url
+                        or normalize_base_url(base) != self._identity_url):
+                    raise RuntimeError("local personal identity authority URL mismatch")
+                return await asyncio.to_thread(self._local_personal_owner, token)
             reply = await client.get(f"{base}/emby/Sessions", headers=headers)
             if reply.status_code in (401, 403):
                 return None

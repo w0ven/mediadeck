@@ -138,6 +138,10 @@ class Settings(BaseSettings):
     # Local CMCC source authority for restricted-entry source classification.
     # Never inferred from client URLs or shipped as a production path.
     mediadeck_route_mobile_registry: str = ""
+    # Optional read-only local Emby personal-token authority. Both values must
+    # be configured, and the URL must match the current Emby integration.
+    mediadeck_emby_identity_data_dir: str = ""
+    mediadeck_emby_identity_url: str = ""
 
     rclone_binary: str = "rclone"
     rclone_config_path: str = ""
