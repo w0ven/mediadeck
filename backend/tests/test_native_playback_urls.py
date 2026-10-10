@@ -41,7 +41,10 @@ def test_existing_caller_credential_carried_without_metadata_header_inheritance(
     parsed = urlsplit(out["MediaSources"][0][field])
     path, q = target(parsed.path + "?" + parsed.query)
     assert q["api_key"] == CALLER
-    assert parsed.hostname == ("emby.example.com" if source is MOBILE else "vip.example.com")
+    expected_host = "emby.example.com" if source is MOBILE else (
+        None if field == "DirectStreamUrl" else "vip.example.com"
+    )
+    assert parsed.hostname == expected_host
     assert asyncio.run(guard.user(Headers(), q)) == "u-vip"
     if source is GD and field == "TranscodingUrl":
         assert guard.claims(entry(), "u-vip", path, q)["kind"] == "gd"
@@ -120,7 +123,8 @@ def test_header_only_actual_PlaybackInfo_handler_produces_native_URL(
     assert r.status_code == 200
     url = r.json()["MediaSources"][0]["DirectStreamUrl"]
     parsed = urlsplit(url)
-    assert parsed.hostname == "vip.example.com" and parse_qs(parsed.query)["api_key"] == [CALLER]
+    assert not parsed.netloc and parsed.path == "/Videos/item42/stream.mkv"
+    assert parse_qs(parsed.query)["api_key"] == [CALLER]
     # No token header on the subsequent native-player admission subrequest.
     h = {
         **entry_headers,
