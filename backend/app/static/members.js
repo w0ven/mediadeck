@@ -265,15 +265,7 @@
     const known = Number.isFinite(a.days_since_played);
     const played = m.last_played_available !== true ? '数据不可用'
       : (m.last_played_at && known ? (a.days_since_played < 1 / 1440 ? '刚刚' : fmtAge(a.days_since_played * 86400) + '前') : '暂无播放记录');
-    const score = Number.isFinite(a.score) ? a.score + '分' : '未知';
-    const labels = {inactive: '候选 · ' + score, observing: '观察中', pending: '未开通', ready: score, unavailable: '数据不可用'};
-    const observed = Number.isFinite(a.observed_days) ? Math.floor(a.observed_days) + '天' : '未知';
-    const summary = (labels[a.status] || '数据不可用') + (a.status === 'observing' ? ' · ' + observed : '');
-    const days = Number.isFinite(a.watch_days_30d) ? a.watch_days_30d + '天' : '未知';
-    const hours = Number.isFinite(a.watch_hours_30d) ? a.watch_hours_30d.toFixed(2) + '小时' : '未知';
-    const detail = `仅核验播放进度；距最后播放 D=${known ? a.days_since_played.toFixed(1) + '天' : '未知'}；近30天观看 ${days} / ${hours}（滚动窗口，按北京自然日，日累计≥5分钟）；已观察 ${observed}。` +
-      `参考分=round(60×2^(-D/7)+25×min(观看天数/8,1)+15×min(观看小时/10,1))；${a.observation_complete ? '' : '未满30天不判长期不活跃；'}完整观察且（至少14天未播放或观察内无有效播放）、低于30分才为候选，仅供筛选。${a.reason || ''}`;
-    return `<span class="last-played">${esc(played)}</span><div class="muted s playback-activity" tabindex="0" title="${esc(detail)}" aria-label="${esc(summary + '。' + detail)}">${esc(summary)}</div>`;
+    return `<span class="last-played">${esc(played)}</span>`;
   }
 
   function rowHtml(m) {

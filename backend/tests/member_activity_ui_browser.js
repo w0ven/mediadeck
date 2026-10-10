@@ -20,7 +20,7 @@
   const rows = window.__ACTIVITY_ROWS;
   const names = () => [...document.querySelectorAll('#members-tbody tr')].map(el => el.dataset.id);
   const row = id => document.querySelector(`#members-tbody tr[data-id="${id}"]`);
-  const activity = id => row(id)?.querySelector('.playback-activity');
+  const playbackCell = id => row(id)?.querySelector('.last-played').parentElement;
   const play = id => row(id)?.querySelector('.last-played').textContent;
   const params = () => new URLSearchParams(location.hash.split('?')[1] || '');
   const set = (id, value) => {
@@ -75,18 +75,17 @@
     assert(document.querySelector('#m-activity option[value="pending"]').textContent === '\u672a\u5f00\u901a', 'pending activity option must be 未开通, without replacement characters');
     assert(play('alpha') === '40.0 天前', 'new access must not replace old playback: ' + play('alpha'));
     assert(play('zeta') === '暂无播放记录', 'no record must not assert never played');
-    assert(activity('delta').textContent === '观察中 · 4天', 'short observation');
-    assert(activity('epsilon').textContent === '未开通', 'pending not dormant');
-    assert(play('eta') === '数据不可用' && activity('eta').textContent === '数据不可用', 'failed source must not show zero');
-    const explanation = activity('alpha').title;
-    assert(explanation.includes('D=40.0天') && explanation.includes('北京自然日') && explanation.includes('round(60'), 'formula explanation');
-    assert(explanation.includes('至少14天') && explanation.includes('低于30分') && explanation.includes('仅供筛选'), 'candidate explanation');
-    assert(!activity('eta').title.includes('观看 0天'), 'unknown is not zero days');
+    assert(play('eta') === '数据不可用', 'failed playback source remains unavailable');
+    for (const id of names()) {
+      const cell = playbackCell(id);
+      assert(cell.textContent.trim() === play(id), 'last playback cell contains only elapsed time or the missing-data label: ' + id);
+      assert(cell.children.length === 1 && !cell.querySelector('[title],.playback-activity'), 'no observation/score/formula attached to last playback: ' + id);
+    }
     set('m-activity', 'inactive');
     await waitFor(() => names().join() === 'alpha,beta,zeta', 'activity filter');
     assert(params().get('activity') === 'inactive' && params().get('page') === '1', 'filter hash/page reset');
     assert(requests.at(-1).path.includes('activity=inactive') || requests.some(r => r.path.includes('activity=inactive')), 'API query forwarding');
-    assert(activity('beta').textContent.startsWith('候选 · '), 'short candidate/score label');
+    assert(playbackCell('beta').textContent.trim() === play('beta'), 'candidate filter does not add scores to playback time');
     set('m-sort', 'last_seen');
     await waitFor(() => params().get('sort') === 'last_seen' && names().join() === 'zeta,alpha,beta', 'ascending playback sort');
     set('m-order', 'desc');
@@ -130,7 +129,7 @@
     await waitFor(bulkHidden, 'completed bulk clears selection');
     set('m-activity', 'observing');
     await waitFor(() => names().join() === 'delta', 'observing filter');
-    assert(activity('delta').title.includes('未满30天不判长期不活跃'), 'insufficient history explanation');
+    assert(playbackCell('delta').textContent.trim() === play('delta'), 'observation filter does not alter playback-only column');
     document.getElementById('m-reset').click();
     await waitFor(() => names().length === 7, 'reset before unavailable');
     set('m-activity', 'unavailable');
