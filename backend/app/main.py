@@ -265,7 +265,10 @@ async def _startup() -> None:
         app.state.emby = MockEmby()
         probe = MockProbe()
     else:
-        app.state.emby = LiveEmby(app.state.settings_service.emby_config)
+        app.state.emby = LiveEmby(
+            app.state.settings_service.emby_config,
+            identity_data_dir=cfg.mediadeck_emby_identity_data_dir,
+            identity_url=cfg.mediadeck_emby_identity_url)
         probe = LiveProbe()
     app.state.pipeline = (
         MockPipeline() if cfg.mediadeck_mock else PipelineReader(cfg.pipeline_snapshot_path)
