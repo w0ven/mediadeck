@@ -405,7 +405,7 @@ def test_account_actually_merges_usage_fields_permissions_note_and_unknowns(bot)
     member.update(allow_download=True, allow_transcode=False, note='<合成备注>')
     card = plain(local._account_card(member))
     usage = plain(local._usage_text(member))
-    for label in ('已用：', '剩余：', '带宽：', '同时播放：', '已登记设备：', '近24小时：', '近30天：', '累计观看：'):
+    for label in ('已用：', '剩余：', '带宽：', '同时播放：', '设备分组：', '近24小时：', '近30天：', '累计观看：'):
         value = next(line for line in usage.splitlines() if line.startswith(label))
         assert value in card and card.count(label) == 1
     assert '下载权限：允许' in card and '转码权限：不允许' in card and '备注：<合成备注>' in card
@@ -413,7 +413,7 @@ def test_account_actually_merges_usage_fields_permissions_note_and_unknowns(bot)
     assert '统计口径' not in card and '历史未核验' not in card
     local._stats = None
     unknown = plain(local._account_card({'emby_user_id':'demo'}))
-    for label in ('同时播放：', '已登记设备：', '累计观看：'):
+    for label in ('同时播放：', '设备分组：', '累计观看：'):
         assert label + '暂不可用' in unknown
     assert '累计观看：0秒' not in unknown and '同时播放：不限' not in unknown
     member['max_streams'] = 0

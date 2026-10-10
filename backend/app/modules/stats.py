@@ -23,6 +23,7 @@ from typing import Any
 
 from app.core.db import Database
 from app.modules.activity import member_activity
+from app.modules.device_groups import count_device_groups
 from app.modules.members import MemberService, merge_effective, parse_overrides
 
 MAX_DAYS = 366
@@ -270,8 +271,7 @@ class StatsService:
                 "direct_ratio": round((plays - transcodes) / plays * 100, 1) if plays else None,
             },
             "expiring_7d": sorted(expiring_7d, key=lambda x: x["expires_at"])[:20],
-            "devices": self._db.one(
-                "SELECT COUNT(*) AS n FROM devices WHERE blocked=0")["n"],
+            "devices": count_device_groups(self._db),
         }
 
     # -- trends --------------------------------------------------------------

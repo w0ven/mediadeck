@@ -161,9 +161,11 @@
   function detailOf(id) {
     const member = DB.find((m) => m.emby_user_id === id);
     if (!member) return null;
+    const devices = id === 'u-alice' ? [{ device_id: 'd1', device_name: 'TV', client: 'Emby', blocked: false }] : [];
     return {
       member,
-      devices: id === 'u-alice' ? [{ device_id: 'd1', device_name: 'TV', client: 'Emby', blocked: false }] : [],
+      devices,
+      device_groups: devices.map(x => ({device_name:x.device_name, grouping:'name', record_count:1, unblocked_count:1, devices:[x]})),
       plays: id === 'u-alice' ? [{ item_name: 'Demo Movie' }] : [],
       audit: [{ ts: now - 60, action: 'renew', detail: '30d', ok: true }],
       points: 12,
@@ -503,7 +505,13 @@
         assert(saved.max_streams === 3 && saved.expires_at_override === null, 'override save lost explicit unlimited meaning');
         await tick();
       }
-      if (tab === 'devices') assert(document.querySelector('[data-forget-device]'), 'device removal entry was removed');
+      if (tab === 'devices') {
+        const group = document.querySelector('.member-device-group');
+        assert(group && !group.open, 'device ID records must start collapsed');
+        group.querySelector('summary').click();
+        assert(group.open && document.querySelector('.member-device-id').textContent === 'd1', 'original ID not expandable');
+        assert(document.querySelector('[data-forget-device]'), 'device removal entry was removed');
+      }
       if (tab === 'invites') assert(document.getElementById('md-points-save'), 'points adjustment entry was removed');
     }
     document.querySelector('#member-detail [data-tab="overview"]').click();

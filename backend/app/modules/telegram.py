@@ -1880,15 +1880,21 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 f"累计观看：{duration(s.get('recorded_seconds'))}"
                 + ("\n当前观看计时暂不可用。" if s.get('unverified_playback_now') else ''))
 
+    @staticmethod
+    def _device_count_text(member: dict[str, Any]) -> str:
+        count = member.get('device_count')
+        value = f'{count} 组' if count is not None else '暂不可用'
+        return (f'设备分组：{value}\n'
+                '按设备名称归并（同账号跨播放器）\n'
+                '非硬件唯一识别；空/未知按ID单计')
+
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = [self._whitelist_decoration(member) + "📊 <b>用量与观看</b>", '',
                  *quota_lines(member, public=_GROUP.get()), *bandwidth_lines(member)]
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
-        devices = member.get('device_count')
-        lines.extend([f"同时播放：{stream_text}",
-                      f"已登记设备：{devices if devices is not None else '暂不可用'}"])
+        lines.extend([f"同时播放：{stream_text}", self._device_count_text(member)])
         lines.extend([f"有效期：{_member_expiry_label(member)}", "", self._watch_text(member)])
         return '\n'.join(lines)
 
@@ -2641,7 +2647,8 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             f"注册渠道：{escape(str(target.get('register_via') or 'legacy'))}\n"
             f"邀请人：{escape(str(inviter.get('username') or '—'))} · 下级：{invitee_count} 人\n"
             f"Telegram：{escape(str(target.get('tg_user_id') or '未关联'))}\n"
-            f"设备标识：{devices}\n"
+            + self._device_count_text(target) + "\n"
+            f"原始登录标识记录：{devices} 条\n"
             f"最近活跃："
             f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}\n"
             f"求片剩余：{self._remaining_text(left)}\n\n"
@@ -3131,9 +3138,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
-        devices = member.get('device_count')
-        lines.extend(['同时播放：' + stream_text,
-                      '已登记设备：' + (str(devices) if devices is not None else '暂不可用')])
+        lines.extend(['同时播放：' + stream_text, self._device_count_text(member)])
         for field, label in (('allow_download', '下载权限'), ('allow_transcode', '转码权限')):
             if field in member:
                 value = member[field]
@@ -4942,12 +4947,15 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             return
         if data == "devices":
             devices = self._members.devices(str(member.get("emby_user_id")))
+            text = "📺 <b>设备分组与登录标识</b>\n\n" + self._device_count_text(member)
+            text += f"\n原始登录标识记录：{len(devices)} 条\n\n"
             if not devices:
-                text = "📺 <b>我的设备</b>\n\n还没有记录到设备。"
+                text += "还没有原始登录标识记录。"
             else:
                 rows = [device_display_row(device) for device in devices[:8]]
-                text = ("📺 <b>我的设备</b>\n\n" + "\n\n".join(rows)
-                        + "\n\n<i>按客户端上报的设备标识统计；重装或重置客户端可能生成新标识。</i>")
+                text += ("\n\n".join(rows)
+                         + "\n\n<i>仅展示最近 8 条原始标识记录，不是实体设备台数；"
+                         "重装或重置客户端可能生成新标识。</i>")
             await self._edit(chat_id, message_id, text, self.info_menu())
             return
         if data == "usage":

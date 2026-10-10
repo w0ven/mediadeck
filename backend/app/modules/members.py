@@ -27,6 +27,7 @@ from typing import Any
 
 from app.core.db import Database
 from app.core.errors import ConfigError
+from app.modules.device_groups import count_device_groups, group_device_records
 from app.modules.groups import GroupService, needs_duration, needs_traffic
 
 # active    : normal
@@ -432,9 +433,7 @@ class MemberService:
         expires = effective.get("expires_at")
         out["days_remaining"] = (
             max(0, int((expires - time.time()) // 86400)) if expires else None)
-        out["device_count"] = self._db.one(
-            "SELECT COUNT(*) AS n FROM devices WHERE emby_user_id=? AND blocked=0",
-            (out["emby_user_id"],))["n"]
+        out["device_count"] = count_device_groups(self._db, out["emby_user_id"])
         out["register_via"] = str(out.get("register_via") or "legacy")
         out["inviter_id"] = str(out.get("inviter_id") or "")
         out["invite_quota"] = int(out.get("invite_quota") or 0)
@@ -456,9 +455,11 @@ class MemberService:
         member = self.get(user_id)
         if not member:
             return None
+        devices = self.devices(user_id)
         return {
             "member": member,
-            "devices": self.devices(user_id),
+            "devices": devices,
+            "device_groups": group_device_records(devices),
             "audit": self.audit_log(audit_limit, subject=user_id),
         }
 
