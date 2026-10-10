@@ -1511,8 +1511,9 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
     assert "带宽：<b>20.0 Mbps</b>" in text
     assert "同时播放：2" in text
-    assert "已登记设备：1" in text
-    assert "已登记设备：1 /" not in text
+    assert "设备分组：1 组" in text
+    assert "按设备名称归并" in text and "非硬件唯一识别" in text
+    assert "设备分组：1 /" not in text
 
 
 def test_device_rows_show_client_version_and_safe_distinguishing_marker() -> None:

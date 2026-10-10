@@ -273,7 +273,7 @@
     const checked = ms.selected.has(id) ? 'checked' : '';
     return `<tr data-live-key="member:${esc(id)}" data-id="${esc(id)}" tabindex="0">
       <td><input type="checkbox" class="m-pick" data-id="${esc(id)}" ${checked} aria-label="选择 ${esc(m.username)}"></td>
-      <td>${accountCell(m)}</td>
+      <td>${accountCell(m)}<div class="muted member-device-count">设备分组：${esc(m.device_count == null ? '暂不可用' : m.device_count + ' 组')} · 按设备名称归并</div></td>
       <td>${groupBadge(m.group_id,m.group_name || '—')}</td>
       <td>${expiryCell(m)}</td>
       <td>${embySyncCell(m)}</td>
@@ -637,6 +637,7 @@
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')} ${esc((m.remaining_restrictions || []).join('、'))}</dd>
           <dt>Emby / 同步</dt><dd id="md-emby-status">${embySyncCell(m)}</dd>
           <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
+          <dt>设备分组</dt><dd>${esc(m.device_count == null ? '暂不可用' : m.device_count + ' 组')}（按设备名称归并，非硬件唯一识别）</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
         </dl>
@@ -674,13 +675,19 @@
       } else if (tab === 'devices') {
         const devices = d.devices || [];
         const plays = d.plays || d.recent_plays || [];
-        body = devices.length
-          ? `<table><thead><tr><th>设备</th><th>客户端</th><th></th></tr></thead><tbody>${devices.map((x) => `<tr>
-              <td>${esc(x.device_name || x.device_id)}</td><td>${esc(x.client || '')}</td>
-              <td><button class="btn sm" type="button" data-dev="${esc(x.device_id)}" data-block="${x.blocked ? '0' : '1'}">${x.blocked ? '解禁' : '封锁'}</button>
-              <button class="btn sm" type="button" data-forget-device="${esc(x.device_id)}">移除设备记录</button></td>
-            </tr>`).join('')}</tbody></table>`
-          : '<div class="empty">无设备记录</div>';
+        body = `<p class="member-device-summary">设备分组：${esc(m.device_count == null ? '暂不可用' : m.device_count + ' 组')} · 按设备名称归并 · ${devices.length} 条原始登录标识记录（DeviceId）</p>
+          <p class="help">同一账号同名跨播放器合并，非硬件唯一识别；两台设备同名也会合并。名称仅去除首尾空白后精确匹配；空名称、Unknown、Unknown device、未知、未知设备按 DeviceId 单独计。组内至少一个 ID 未封禁才计入；封禁及移除仍仅作用于指定原始 ID，不影响同组其他 ID。</p>`;
+        body += devices.length
+          ? (d.device_groups || []).map((group) => `<details class="member-device-group">
+              <summary>${esc(group.device_name || '空名称')}${group.grouping === 'device_id' ? '（按 ID 单计）' : ''} · ${group.record_count} 条原始记录 · ${group.unblocked_count ? group.unblocked_count + ' 个 ID 未封禁' : '全部已封禁，不计入'}</summary>
+              <table><thead><tr><th>原始 DeviceId / 名称</th><th>播放器 / 版本</th><th>状态 / 操作（仅此 ID）</th></tr></thead><tbody>${group.devices.map((x) => `<tr>
+                <td><code class="member-device-id">${esc(x.device_id)}</code><div class="muted">${esc(x.device_name || '空名称')}</div></td>
+                <td>${esc(x.client || '—')}<div class="muted">${esc(x.app_version || '')}</div></td>
+                <td>${x.blocked ? '已封禁' : '未封禁'} <button class="btn sm" type="button" data-dev="${esc(x.device_id)}" data-block="${x.blocked ? '0' : '1'}">${x.blocked ? '解禁此 ID' : '封锁此 ID'}</button>
+                <button class="btn sm" type="button" data-forget-device="${esc(x.device_id)}">移除记录</button></td>
+              </tr>`).join('')}</tbody></table>
+            </details>`).join('')
+          : '<div class="empty">无原始登录标识记录</div>';
         body += `<h4>最近播放</h4>` + (plays.length
           ? `<ul>${plays.map((p) => `<li>${esc(p.item_name || p.Name || p.item || '—')}</li>`).join('')}</ul>`
           : '<div class="empty">暂无播放</div>');
@@ -727,7 +734,7 @@
       host.querySelectorAll('[data-dev]').forEach((b) => {
         b.onclick = () => runMemberAction(b, async current => {
           const blocked = b.dataset.block === '1';
-          if (!(await deckConfirm(`${blocked ? '封锁' : '解封'}这个设备？`))) return;
+          if (!(await deckConfirm(`${blocked ? '封锁' : '解封'}原始登录标识 ${b.dataset.dev}？仅作用于此 ID，不影响同组其他 ID。`))) return;
           const path = blocked ? 'block' : 'unblock';
           const r = await api(`/api/members/${encodeURIComponent(id)}/devices/${encodeURIComponent(b.dataset.dev)}/${path}`, { method: 'POST' });
           assertRemoteResult(r);
@@ -858,7 +865,7 @@
     });
     host.querySelectorAll('[data-forget-device]').forEach((button) => {
       button.onclick = () => runMemberAction(button, async current => {
-        if (!(await deckConfirm('移除这个设备的面板记录？不会删除其它设备。'))) return;
+        if (!(await deckConfirm(`移除原始登录标识 ${button.dataset.forgetDevice} 的面板记录？不会移除同组其他 ID。`))) return;
         assertRemoteResult(await api(endpoint + '/devices/' + encodeURIComponent(button.dataset.forgetDevice), {method:'DELETE'}));
         await refreshActionDetail(id, 'devices', current);
       });
