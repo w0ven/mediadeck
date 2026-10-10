@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — preserve relative direct URLs for next-episode playback
+
+- Correct the previous credential-carrying patch's direct-URL shape regression:
+  API-prefix consumers concatenate relative media paths, so turning them into
+  absolute HTTPS text produces a nonexistent prefixed route. Keep relative direct
+  paths relative while retaining only the authenticated caller's credential.
+- Preserve existing absolute URL routing, HLS capabilities, mobile bypass, public
+  artwork boundaries, personal admission, concurrency and metering policies.
+- Reproduce the original failure with actual metadata handlers, a one-seat limit,
+  two complete short Matroska streams, signed redirects and a native decoder:
+  an already-issued first episode fully decodes 45 frames and stops; the next
+  receives 404 and zero frames before correction. Both fully decode 45 frames
+  after correction, with Stop/next binding and stale-Stop isolation unchanged.
+- Relevant preserved-overlay regressions: 355 passed plus 29 verified-watch and
+  metering tests. Full local collection in five bounded file-level shards:
+  3,724 passed, 56 environment-dependent skips and two subtests passed; lint passes.
+  Next: formal release and bounded isolated validation of real direct resources.
+
 ## 2026-10-10 — readable niuniu reports and exact old-card cleanup
 
 - Use the captured public nickname, escaped and linked to a stable Telegram ID,

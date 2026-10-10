@@ -283,8 +283,13 @@ class WhitelistRoute:
                         refuse(503, "unbound media URL")
                     query[CAP_ARG] = self.mint(entry, uid, item, sid, play, kind)
                     source[field] = urlunsplit((*urlsplit(entry.origin)[:2], parsed.path, urlencode(query), ""))
-                elif parsed.netloc or token:
+                elif parsed.netloc:
                     source[field] = urlunsplit((*urlsplit(entry.origin)[:2], parsed.path, encoded_query, ""))
+                elif token:
+                    # Keep the upstream relative shape: API-prefix clients
+                    # concatenate it rather than resolving an absolute URL.
+                    # The caller credential still travels in the URL itself.
+                    source[field] = urlunsplit(("", "", parsed.path, encoded_query, ""))
         return output
 
     def rewrite_playlist(self, entry: PlaybackEntry, uid: str, original: str,
