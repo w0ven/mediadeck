@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-10 — public media artwork and native playback URL compatibility
+
+- Preserve Emby's public artwork semantics only for exact read-only Items media
+  image types after the trusted-entry gate. User portraits, metadata, downloads,
+  subtitles and playback still require the existing personal admission.
+- Carry only the already authenticated caller's existing credential in restricted
+  PlaybackInfo media URLs for native URL-only fetches. Reject conflicting upstream
+  credentials and operator keys; retain source routing, capabilities and policy.
+- Verify public-artwork boundaries and actual PlaybackInfo-to-native admission;
+  isolated HTTP redirects and signed-node media decode 45 frames after correction
+  versus zero frames without the caller credential. This is a reproduced protocol
+  compatibility defect, not a claim about a proprietary client's only root cause.
+- Relevant regression passes on both repository and preserved deployment-overlay
+  source (347 tests each). Full local validation in five bounded file-level shards:
+  3,698 passed, 56 environment-dependent skips and two subtests passed; repository
+  lint and actual isolated mock startup/health pass. Next: formal release and
+  isolated production validation.
+
 ## 2026-10-10 — keep last playback focused on elapsed time
 
 - Show only elapsed time since verified playback in the last-playback column.

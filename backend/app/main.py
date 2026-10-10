@@ -1623,7 +1623,8 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
                                                            dict(request.headers), query, payload)
         entry = app.state.whitelist_route.entry(request.headers)
         if entry and entry.whitelist_only and 200 <= code < 300:
-            data = app.state.whitelist_route.decorate(entry, uid, item_id, data)
+            data = app.state.whitelist_route.decorate(
+                entry, uid, item_id, data, caller_token(request.headers, query))
         if 200 <= code < 300 and request.method != "HEAD":
             data = await app.state.short_drama.decorate_info(
                 app.state.playback, item_id, data, payload, query,
