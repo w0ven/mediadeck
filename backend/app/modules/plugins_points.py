@@ -54,11 +54,30 @@ def _yesterday(now: float | None = None) -> str:
     return _today((time.time() if now is None else now) - 86400)
 
 
+CHECKIN_BASE_SIZE = 1000
+CHECKIN_BASE_RULE = 'checkin-weighted-base-v1'
+# Per-integer slots: 10*1 + 10*60 + 10*30 + 10*9 = 1000.
+CHECKIN_BASE_BANDS = ((-10, -1, 1), (1, 10, 60), (11, 20, 30), (21, 30, 9))
+
+
+def checkin_base(roll: int) -> int:
+    """Map one unbiased HMAC draw to the confirmed fixed base distribution."""
+    if type(roll) is not int or not 0 <= roll < CHECKIN_BASE_SIZE:
+        raise ValueError('签到基础抽样范围无效')
+    for low, high, slots in CHECKIN_BASE_BANDS:
+        width = (high - low + 1) * slots
+        if roll < width:
+            return low + roll // slots
+        roll -= width
+    raise ValueError('签到基础权重无效')
+
+
 class CheckinPlugin(Plugin):
     """Daily check-in. One payout per member per calendar day.
 
     Beijing-day verified watch evidence gates admission. The base draw is
-    fixed at -10..30; lucky positive base is multiplied before the configured
+    weighted at 1/60/30/9 percent over -10..-1/1..10/11..20/21..30, with no
+    zero or guaranteed loss; lucky positive base is multiplied before the configured
     highest qualifying streak tier is added. The last tier remains in force.
 
     A missed day resets the streak to 1 rather than to 0: the member did check
@@ -69,7 +88,7 @@ class CheckinPlugin(Plugin):
     spec = Spec(
         id="checkin",
         name="每日签到",
-        description="北京当日有效观影满600秒可签到，基础-10..30等概率（可为负）。连签按阶梯，断签重算。"
+        description="北京当日有效观影满600秒可签到；基础-10～-1占1%、1～10占60%、11～20占30%、21～30占9%，各区间整数等概率、0不抽取，无保底。连签按阶梯，断签重算。"
         "签到动作由成员触发，这里的「立即运行」只统计不发放。",
         category="points",
         icon="✅",
@@ -87,7 +106,7 @@ class CheckinPlugin(Plugin):
                         {"days": 30, "percent": 50},
                     ]
                 ),
-                help="仅最高达标档：基础正积分×百分比，向下取整；0/负积分不加成，加成不参与幸运翻倍。断签回第1天，基础-10..30等概率。",
+                help="仅最高达标档：基础正积分×百分比，向下取整；负积分不加成，加成不参与幸运翻倍。断签回第1天，基础扣分总概率1%，无保底。",
             ),
             Field("weekends", "周末活动", kind="bool", default=True),
             Field(
@@ -172,7 +191,8 @@ class CheckinPlugin(Plugin):
             return {"ok": False, "reason": "账号不存在"}
         validate_checkin(config)
         secret = settings().mediadeck_checkin_secret
-        base = draw(secret, user_id, day, "base", 41) - 10
+        base_roll = draw(secret, user_id, day, "base", CHECKIN_BASE_SIZE)
+        base = checkin_base(base_roll)
         tiers = json.loads(config["streak_tiers"])
         percent = max((t for t in tiers if t["days"] <= streak), key=lambda t: t["days"])["percent"]
         bonus = max(base, 0) * percent // 100
@@ -203,12 +223,13 @@ class CheckinPlugin(Plugin):
             "bonus": bonus,
             "streak_percent": percent,
             "calculation_version": "base-percent-v2",
+            "base_rule_version": CHECKIN_BASE_RULE,
             "streak": streak,
             "multiplier": multiplier,
             "watched_seconds": watched,
             "activity": activity["name"],
             "rule_version": RULE_VERSION,
-            "rolls": {"lucky": lucky_roll, "drop": drop_roll},
+            "rolls": {"base": base_roll, "lucky": lucky_roll, "drop": drop_roll},
             "rule_snapshot": config,
             "drop_spec": drop,
         }
