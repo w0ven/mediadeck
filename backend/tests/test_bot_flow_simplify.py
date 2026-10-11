@@ -48,8 +48,8 @@ def test_six_home_entries_role_boundary_and_compact_secondary_menus(bot, roles):
     assert all(len(r) == 2 for r in rows[:3])
     assert len(rows) == (4 if 'admin' in roles else 3)
     assert 'request_uploader' not in callbacks(rows)
-    assert callbacks(bot.info_menu()) == {'devices', 'resetpw', 'rebind', 'me', 'home'}
-    assert len(bot.info_menu()) == 3
+    assert callbacks(bot.info_menu()) == {'devices', 'resetpw', 'delete_account', 'rebind', 'me', 'home'}
+    assert len(bot.info_menu()) == 4
     assert len(bot.bag_menu()) <= 3
     assert callbacks(bot.help_menu()) == {'rules', 'home'}
     message(bot, '/requests')

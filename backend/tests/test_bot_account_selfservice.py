@@ -7,9 +7,10 @@ import pytest
 from test_bot_password_choices import begin_reset, choose, tap, text
 from test_bot_password_choices import bot as password_bot  # noqa: F401
 from test_request_bot import bot as request_bot  # noqa: F401
-from test_request_bot import message
+from test_request_bot import message, run
 
 from app.adapters.live import LiveEmby
+from app.adapters.mock import MockEmby
 from app.modules.play_money import CashBook
 from app.modules.play_schema import migrate
 from app.modules.points import PointsService
@@ -49,6 +50,15 @@ def remote(bot, monkeypatch):
         transport=httpx.MockTransport(upstream)))
     bot._emby = adapter
     return state
+
+
+def test_mock_adapter_self_delete_guards():
+    adapter = MockEmby()
+    assert not run(adapter.delete_selfservice_user("admin", authorize=lambda: True))
+    assert not run(adapter.delete_selfservice_user("u1", authorize=lambda: False))
+    assert run(adapter.delete_selfservice_user("u1", authorize=lambda: True))
+    assert not run(adapter.delete_selfservice_user("u1", authorize=lambda: True))
+    assert {u["Id"] for u in run(adapter.list_users())} == {"u2", "admin"}
 
 
 def test_account_button_navigation(bot, remote):
