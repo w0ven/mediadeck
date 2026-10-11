@@ -101,9 +101,9 @@ class GroupDiceService:
         totals = self.db.query("SELECT b.option,SUM(b.amount) amount,COUNT(DISTINCT b.user_id) people FROM dice_bets b WHERE b.nonce=? AND b.pool='size' GROUP BY b.option", (nonce,))
         count = self.db.one('SELECT COUNT(*) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
         pages = max(1, (count+PAGE_SIZE-1)//PAGE_SIZE)
-        page = pages-1 if row['group_page'] < 0 else min(row['group_page'], pages-1)
+        page = 0 if row['group_page'] < 0 else min(row['group_page'], pages-1)
         latest = self.db.query('SELECT rowid seq,* FROM dice_tickets WHERE nonce=? ORDER BY rowid DESC LIMIT ?', (nonce, LATEST_SIZE))
-        ledger = self.db.query('SELECT rowid seq,* FROM dice_tickets WHERE nonce=? ORDER BY rowid LIMIT ? OFFSET ?', (nonce, PAGE_SIZE, page*PAGE_SIZE))
+        ledger = self.db.query('SELECT rowid seq,* FROM dice_tickets WHERE nonce=? ORDER BY rowid DESC LIMIT ? OFFSET ?', (nonce, PAGE_SIZE, page*PAGE_SIZE))
         return row, {'totals': totals, 'count': count, 'page': page, 'pages': pages, 'latest': latest, 'ledger': ledger}
 
     def group_context(self, conn, row, message, actor, data):

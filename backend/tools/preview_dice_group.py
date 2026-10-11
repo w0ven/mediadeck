@@ -34,13 +34,13 @@ def samples():
 
     def snapshot(items, page=-1):
         pages = max(1, (len(items)+PAGE_SIZE-1)//PAGE_SIZE)
-        page = pages-1 if page < 0 else page
+        page = 0 if page < 0 else page
         totals = []
         for side in ('大', '小'):
             selected = [t for t in items if json.loads(t['items'])[0]['option'] == side]
             totals.append({'option': side, 'amount': sum(t['amount'] for t in selected), 'people': len({t['user_id'] for t in selected})})
         return {'count': len(items), 'page': page, 'pages': pages, 'totals': totals,
-                'latest': items[-LATEST_SIZE:][::-1], 'ledger': items[page*PAGE_SIZE:(page+1)*PAGE_SIZE]}
+                'latest': items[-LATEST_SIZE:][::-1], 'ledger': items[::-1][page*PAGE_SIZE:(page+1)*PAGE_SIZE]}
 
     views = []
     def add(title, r, s, report_body=None):
@@ -49,7 +49,7 @@ def samples():
     add('01 · 开局 / 等待入场', row, snapshot([]))
     add('02 · 单边入场 / 等待对手', row, snapshot(tickets[:1]))
     add('03 · 热局 / 默认最新页', row, snapshot(tickets))
-    add('04 · 历史第1页 / 顶部仍是最新投注', dict(row, group_page=0), snapshot(tickets, 0))
+    add('04 · 历史第2页 / 顶部仍是最新投注', dict(row, group_page=1), snapshot(tickets, 1))
     add('05 · 封盘 / 盘口固定', dict(row, state='locked'), snapshot(tickets))
     bets = [dict(json.loads(t['items'])[0], amount=t['amount'], user_id=t['user_id']) for t in tickets]
     done = dict(row, state='settled', dice='[4,5,6]', seed='cd'*32,
