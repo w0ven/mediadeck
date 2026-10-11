@@ -1,0 +1,101 @@
+{
+  "open": {
+    "body": "🎲 <b>骰局 · 等待封盘</b>\n封盘 00:58:07 · 已下注 0 人\n玩家对赌 · 确认后不可撤注\n\n<code>08d470f00e20011a381377f8</code>\ndrand #6543563 · 最多等待10分钟\n承诺 <code>756caf0752697dc54174706f09305df7775c4eb0f22923ca822336867294ab41</code>",
+    "keyboard": [
+      {
+        "text": "进入私聊下注",
+        "url": "https://t.me/MediaDeckDemoBot?start=dice_08d470f00e20011a381377f8"
+      },
+      {
+        "callback_data": "dcg:08d470f00e20011a381377f8",
+        "text": "核对开局"
+      }
+    ]
+  },
+  "private": {
+    "body": "🎲 <b>骰局 · 08d470f0</b>\n00:58:07封盘 · 已投 0 分\n可用积分 1000\n\n七池独立 · 0抽成 · 最低1整数积分，仅限站内。\n命中先退本金，再按中奖权重分本池落败本金；无固定赔率，收益到封盘才确定。\n无人命中或无落败投注，本池全退。\n可多项、追加及反向投注，均是新增扣款。\n<b>确认后不可撤注、减额或移动旧注。</b>",
+    "keyboard": [
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:size",
+        "text": "大小"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:parity",
+        "text": "单双"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:single",
+        "text": "单点"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:double",
+        "text": "对子"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:combo",
+        "text": "组合"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:triple",
+        "text": "豹子"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:pool:total",
+        "text": "总点数"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:draft:0",
+        "text": "查看草稿"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:mine:size",
+        "text": "我的投注"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:rules:0",
+        "text": "规则"
+      },
+      {
+        "callback_data": "dc:8650d4ab78b159be8851:0:proof:0",
+        "text": "开奖验真"
+      }
+    ]
+  },
+  "draft": {
+    "body": "🎲 <b>骰局 · 08d470f0</b>\n00:58:07封盘 · 已投 0 分\n\n<b>确认草稿</b>\n大小 · 大=10\n单双 · 单=10\n单点 · 1=10\n对子 · 11=10\n组合 · 1+2=10\n豹子 · 无豹子=10\n总点数 · 3=10\n合计 <b>70</b> 分\n\n大小：小4–10，大11–17；豹子全退。按中奖金额分红。\n单双：按三骰总和判单双；豹子全退。按中奖金额分红。\n单点：出现即命中；本金只退一次，分红权重=金额×出现次数。\n对子：指定点数出现至少两次即命中，含豹子；按中奖金额分红。\n组合：两个不同点数同时出现即命中；多项可同中，按中奖金额分红。\n豹子：非豹子命中无豹子；豹子命中任意及对应指定项，共同按金额分红，指定无额外倍率。\n总点数：三骰总和3–18精确命中；按中奖金额分红。\n\n七池独立 · 0抽成 · 最低1整数积分，仅限站内。\n命中先退本金，再按中奖权重分本池落败本金；无固定赔率，收益到封盘才确定。\n无人命中或无落败投注，本池全退。\n可多项、追加及反向投注，均是新增扣款。\n<b>确认后不可撤注、减额或移动旧注。</b>",
+    "keyboard": [
+      {
+        "text": "确认全部",
+        "callback_data": "dc:8650d4ab78b159be8851:29:confirm:0"
+      },
+      {
+        "text": "继续加项",
+        "callback_data": "dc:8650d4ab78b159be8851:29:home:0"
+      },
+      {
+        "text": "清空草稿（不动旧注）",
+        "callback_data": "dc:8650d4ab78b159be8851:29:clear:0"
+      },
+      {
+        "text": "返回",
+        "callback_data": "dc:8650d4ab78b159be8851:29:home:0"
+      },
+      {
+        "text": "规则",
+        "callback_data": "dc:8650d4ab78b159be8851:29:rules:0"
+      },
+      {
+        "text": "开奖验真",
+        "callback_data": "dc:8650d4ab78b159be8851:29:proof:0"
+      }
+    ]
+  },
+  "result": {
+    "body": "🎲 <b>骰局 · 已揭晓</b>\n⚄ ⚅ ⚄　16点 · 大 · 双\n\n<a href=\"tg://user?id=901\">admin</a>　-10\n<a href=\"tg://user?id=910\">&lt;小0&amp;&gt;</a>　+10\n\n<a href=\"https://t.me/MediaDeckDemoBot?start=dice_08d470f00e20011a381377f8\">本人明细 · 开奖验真</a>",
+    "keyboard": []
+  },
+  "personal_result": {
+    "body": "🎲 <b>骰局 · 本人结算</b>\n<code>08d470f00e20011a381377f8</code>\n\n大小 · 投入 10\n命中本金 10 · 奖金 10 · 退款 0\n返还 20 · 净盈亏 +10\n\n单双 · 投入 10\n命中本金 0 · 奖金 0 · 退款 0\n返还 0 · 净盈亏 -10\n\n单点 · 投入 10\n命中本金 0 · 奖金 0 · 退款 0\n返还 0 · 净盈亏 -10\n\n对子 · 投入 10\n命中本金 0 · 奖金 0 · 退款 10\n返还 10 · 净盈亏 +0\n\n组合 · 投入 10\n命中本金 0 · 奖金 0 · 退款 0\n返还 0 · 净盈亏 -10\n\n豹子 · 投入 10\n命中本金 10 · 奖金 10 · 退款 0\n返还 20 · 净盈亏 +10\n\n总点数 · 投入 10\n命中本金 0 · 奖金 0 · 退款 10\n返还 10 · 净盈亏 +0\n\n<a href=\"https://t.me/MediaDeckDemoBot?start=dice_08d470f00e20011a381377f8\">投注明细 · 开奖验真</a>",
+    "keyboard": []
+  }
+}

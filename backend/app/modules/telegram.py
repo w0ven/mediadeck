@@ -536,6 +536,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 {"command": "games", "description": "一起玩一局 · 玩法"},
                 {"command": "blackwhite", "description": "黑白板 · 五人同注"},
                 {"command": "niuniu", "description": "牛牛 · 五张定胜负"},
+                {"command": "dice", "description": "骰局 · 七池玩家对赌"},
                 {"command": "pointsrank", "description": "积分榜 · 当前可用"},
                 {"command": "rules", "description": "行为准则"},
                 {"command": "help", "description": "使用说明"},
@@ -1112,7 +1113,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
              {"text": "帮助", "callback_data": "help"}],
         ]
         play = []
-        if self._plugin_on('blackwhite') or self._plugin_on('niuniu'):
+        if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice'):
             play.append({'text': '🎲 游戏玩法', 'callback_data': 'play_hub'})
         if self._plugin_on('points_ranking'):
             play.append({'text': '🏆 积分榜', 'callback_data': 'points_board'})
