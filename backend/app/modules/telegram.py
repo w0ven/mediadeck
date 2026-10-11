@@ -1879,7 +1879,8 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 f"近24小时：{duration(s.get('seconds_24h'))}\n"
                 f"近30天：{duration(s.get('seconds_30d'))}\n"
                 f"累计观看：{duration(s.get('recorded_seconds'))}"
-                + ("\n当前观看计时暂不可用。" if s.get('unverified_playback_now') else ''))
+                + ('\n' + escape(str(s.get('coverage_note'))) if s.get('coverage_note') else '')
+                + ("\n当前播放待核验，暂不计时。" if s.get('unverified_playback_now') else ''))
 
     @staticmethod
     def _device_count_text(member: dict[str, Any]) -> str:
@@ -3158,8 +3159,10 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                       '近24小时：<b>' + duration((summary or {}).get('seconds_24h')) + '</b>',
                       '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>',
                       '累计观看：<b>' + duration((summary or {}).get('recorded_seconds')) + '</b>'])
+        if (summary or {}).get('coverage_note'):
+            lines.append(escape(str(summary['coverage_note'])))
         if (summary or {}).get('unverified_playback_now'):
-            lines.append('当前观看计时暂不可用。')
+            lines.append('当前播放待核验，暂不计时。')
         lines += ['', '<b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         return '\n'.join(lines)
 

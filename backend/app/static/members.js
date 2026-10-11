@@ -4,7 +4,7 @@
    exists. Live updates use registerLiveUpdater(topic,payload,context) or a
    dedicated EventSource on the members topic (never renderPage). */
 (function () {
-  const COLS = ['<input type="checkbox" id="m-pick-page" aria-label="选择当前页全部用户">', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '最后播放', ''];
+  const COLS = ['<input type="checkbox" id="m-pick-page" aria-label="选择当前页全部用户">', '账号 / TG', '用户组', '有效期', 'Emby / 同步', '用量', '最近播放记录', ''];
   const TABS = [
     ['overview', '概况'],
     ['entitlements', '权益权限'],
@@ -260,12 +260,30 @@
     return `${entitlementTag(m)} <span>${esc(label)}</span>${extra}`;
   }
 
+  function timingDiagnostic(watch) {
+    const d = watch?.diagnostic;
+    if (!d) return '';
+    const labels = {verified:'进度正常，已计时',baseline:'建立基线，尚未计时',paused:'已暂停',
+      pause_unknown:'缺少暂停状态',progress_missing:'缺少播放位置',progress_invalid:'位置超出片长',
+      rate_unknown:'缺少有效倍速信息',rate_changed:'倍速变化，重新观察',seek_or_buffering:'跳转或缓冲，片段未计时',
+      stalled_or_rewound:'位置停滞或回退',heartbeat_missing:'缺少心跳时间',heartbeat_stale:'证据时间已过期',
+      observation_gap:'观察间隔过长',identity_changed:'播放身份变化',session_unresolved:'上报未匹配唯一播放会话',
+      duplicate_progress:'重复上报，不重复计时',out_of_order_progress:'迟到上报，不回补计时',stopped:'播放已停止',
+      already_recorded:'该片段已记录',before_verification:'观察范围之前',idle:'当前无播放'};
+    return `<p class="help playback-diagnostic">最近计时观测：${esc(d.source === 'progress' ? '客户端上报' : '会话采样')} · ${esc(labels[d.reason] || '证据不足')} · ${esc(d.observed_at ? new Date(d.observed_at*1000).toLocaleString() : '时间未知')}</p>`;
+  }
+
   function playbackCell(m) {
     const a = m.playback_activity || {};
-    const known = Number.isFinite(a.days_since_played);
-    const played = m.last_played_available !== true ? '数据不可用'
-      : (m.last_played_at && known ? (a.days_since_played < 1 / 1440 ? '刚刚' : fmtAge(a.days_since_played * 86400) + '前') : '暂无播放记录');
-    return `<span class="last-played">${esc(played)}</span>`;
+    const recent = m.recent_playback || {at:m.last_played_at, available:m.last_played_available, as_of:a.as_of, sources:['Deck进度记录']};
+    const known = recent.available === true && Number.isFinite(recent.at) && recent.at > 0;
+    const age = known ? Math.max(0, (recent.as_of || Date.now()/1000) - recent.at) : null;
+    const played = known ? (age < 60 ? '刚刚' : fmtAge(age) + '前') : '最近播放未知';
+    const sources = known ? (recent.sources || []).join('、') : '缺少可用记录，不代表未播放';
+    const fresh = m.created_at && a.as_of && a.as_of-m.created_at < 30*86400;
+    const observation = [fresh ? '新账号' : '', a.reason || '', Number.isFinite(a.observed_days) ? `观察 ${Math.floor(a.observed_days)} 天` : ''].filter(Boolean).join(' · ');
+    const history = ['unavailable','partial'].includes(recent.history_status) ? '<div class="s muted">历史来源暂不可用</div>' : '';
+    return `<span class="last-played">${esc(played)}</span><div class="s muted playback-source">${esc(sources)}</div><div class="s muted playback-observation">${esc(observation)}</div>${history}`;
   }
 
   function rowHtml(m) {
@@ -331,7 +349,7 @@
       </select></label>
       <label>用户组 <select id="m-group" aria-label="用户组"><option value="">全部</option>${gopts}</select></label>
       ${pick('m-activity','activity','活跃度',[['','全部'],['inactive','不活跃候选'],['observing','观察中'],['unavailable','数据不可用'],['pending','未开通']])}
-      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最后播放']], 'username')}
+      ${pick('m-sort','sort','排序',[['username','账号'],['group','用户组'],['expires','有效期'],['traffic','本月流量'],['last_seen','最近播放记录']], 'username')}
       <details class="hg-advanced-filters" ${['emby_status','sync_status','tg','expiring','role','register_via','order'].some(k=>params.get(k))?'open':''}><summary>${workspaceIcon('filter')}更多筛选</summary><div class="toolbar">
       <label>Emby <select id="m-emby" aria-label="Emby 状态">
         <option value="">全部</option>
@@ -641,8 +659,8 @@
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
         </dl>
-        <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计核验观看</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
-        ${d.watch?`<p class="help">历史未核验参考：${esc(fmtWatchSeconds(d.watch.historical_unverified_seconds||0))}（不计累计与榜单） · 核验起点：${esc(d.watch.verification_since?new Date(d.watch.verification_since*1000).toLocaleString():'尚无记录')}。仅计进度正常前进的播放，暂停、卡住、跳转和缺失证据不计。${d.watch.unverified_playback_now?'当前客户端缺少有效进度或心跳，暂不计时。':''}</p>`:''}
+        <h4 class="hg-section-title">用量与观看</h4><div class="hg-watch-grid"><div><span>近24小时观看</span><b>${watchWindowLabel(d.watch,'24h')}</b></div><div><span>近30天观看</span><b>${watchWindowLabel(d.watch,'30d')}</b></div><div><span>累计观看</span><b>${d.watch?esc(fmtWatchSeconds(d.watch.recorded_seconds)):'暂无统计'}</b></div></div>
+        ${d.watch?`<p class="help">${esc(d.watch.coverage_note || '累计保留已记录观看；时段和影片仅统计可定位的记录。')} 记录起点：${esc(d.watch.first_at?new Date(d.watch.first_at*1000).toLocaleString():'未知')}；当前进度计时观察自 ${esc(d.watch.verification_since?new Date(d.watch.verification_since*1000).toLocaleString():'未知')}。暂停、跳转、卡住或证据缺失不补时。${d.watch.unverified_playback_now?'当前播放待核验，暂不计时。':''}</p>`:''}${timingDiagnostic(d.watch)}
         <h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
           <button class="btn sm danger" type="button" data-member-action="actions/disable">禁用账号</button>

@@ -10,7 +10,7 @@ function fmtWatchSeconds(value) {
 function watchWindowLabel(watch, window) {
   if (!watch) return '暂无统计';
   const n = watch['seconds_' + window];
-  return esc(fmtWatchSeconds(n));
+  return esc(fmtWatchSeconds(n)) + (watch['incomplete_' + window] ? '（可定位部分）' : '');
 }
 function actualBytes(n) { return n == null ? '暂无实测记录' : fmtBytes(n); }
 function controlValue(el) { return el.type === 'checkbox' ? el.checked : el.value; }

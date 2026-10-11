@@ -56,21 +56,24 @@ def ids(payload):
 def test_lastplay_filter_sort_pages_offsets_totals_and_combined_filters(panel, sort):
     query = {'activity': 'inactive', 'sort': sort, 'order': 'desc', 'page_size': 1}
     pages = [listing(panel, page=p, **query) for p in (1, 2, 3)]
-    assert [ids(p) for p in pages] == [['beta'], ['alpha'], ['zeta']]
-    assert all(p['total'] == p['counts']['total'] == 3 for p in pages)
+    assert [ids(p) for p in pages] == [['beta'], ['alpha'], []]
+    assert all(p['total'] == p['counts']['total'] == 2 for p in pages)
     assert all(m['playback_activity']['as_of'] == NOW for p in pages for m in p['members'])
     assert ids(listing(panel, offset=1, **query)) == ['alpha']
     combined = listing(panel, page=1, activity='inactive', group_id='standard', status='active',
                        role='admin', tg='bound', emby_status='present', search='a', sort=sort, order='desc')
     assert ids(combined) == ['beta', 'alpha'] and combined['total'] == 2
-    assert ids(listing(panel, page=1, activity='inactive', group_id='vip', tg='unbound')) == ['zeta']
-    assert ids(listing(panel, page=1, activity='observing')) == ['delta']
+    assert ids(listing(panel, page=1, activity='inactive', group_id='vip', tg='unbound')) == []
+    assert ids(listing(panel, page=1, activity='observing')) == ['delta', 'zeta']
+    unknown = next(m for m in listing(panel, page=1)['members'] if m['emby_user_id'] == 'zeta')
+    assert unknown['recent_playback']['at'] is None
+    assert unknown['playback_activity']['score'] == 0  # score unchanged, unsupported label suppressed
     assert ids(listing(panel, page=1, activity='pending')) == ['epsilon']
     assert len(ids(listing(panel, page=1))) == 6
     assert not ids(listing(panel, page=9, **query))
     # The unpaged compatibility limit also comes after activity filtering/sorting.
     limited = listing(panel, limit=1, activity='inactive', sort=sort, order='desc')
-    assert ids(limited) == ['beta'] and limited['total'] == 3 and limited['truncated']
+    assert ids(limited) == ['beta'] and limited['total'] == 2 and limited['truncated']
 
 
 def test_four_day_realistic_global_coverage_has_no_long_term_candidates(panel):

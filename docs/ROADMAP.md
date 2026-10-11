@@ -3,6 +3,16 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Confirmed unified viewing statistics and progress collection
+- Restore one cumulative viewing value from existing non-duplicated ledgers; do
+  not invent missing history, dated/title allocations, or change money/traffic.
+- Personal weekly reports use the previous complete Beijing Monday-to-Monday
+  week, with seconds, session counts and detail from one snapshot and window.
+- Feed authenticated, upstream-accepted progress into the existing strict proof
+  gate; preserve pause/seek/rate/identity checks and report/poll idempotency.
+- Show sourced recent playback and observation/unknown states; keep verified
+  activity and ranking rules unchanged. Ship through normal PR/CI/tag gates.
+
 ## Confirmed shared scratch card and group interaction package
 - Shared nine cells, owner fee confirmation, independent system rewards, immutable
   configuration and future-only scheduled rooms; probability configuration is Web-only.

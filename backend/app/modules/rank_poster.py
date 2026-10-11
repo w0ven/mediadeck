@@ -377,12 +377,13 @@ def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
                           plays: int, traffic: str,
                           titles: list[dict[str, Any]] | None = None,
                           covers: dict[str, bytes] | None = None,
-                          whitelist: bool = False,
+                          whitelist: bool = False, window_label: str = '',
                           backdrops: dict[str, bytes] | None = None) -> bytes:
     titles, covers, backdrops = list((titles or [])[:5]), covers or {}, backdrops or {}
     height = max(1440, 1270 + len(titles) * 166) if titles else 1500
     poster = _Poster((1200, height))
-    poster.header('我的观影' + label, _clip(_visible_label(name) or '会员', 920, 32), f'近 {int(days)} 天 · 你的私人片单',
+    poster.header('我的观影' + label, _clip(_visible_label(name) or '会员', 920, 32),
+                  window_label or f'近 {int(days)} 天 · 你的私人片单',
                   _heroes(titles, covers, backdrops))
     if whitelist:
         poster.badge(998, 54)

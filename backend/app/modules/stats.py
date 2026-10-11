@@ -15,6 +15,7 @@ after a few months of playback history.
 """
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import time
@@ -22,9 +23,11 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from app.core.db import Database
+from app.modules import viewing
 from app.modules.activity import member_activity
 from app.modules.device_groups import count_device_groups
 from app.modules.members import MemberService, merge_effective, parse_overrides
+from app.modules.recent_playback import recent_playback
 
 MAX_DAYS = 366
 
@@ -79,8 +82,10 @@ def legacy_watch_fingerprint(rows: list[dict[str, Any]]) -> str:
 
 
 class StatsService:
-    def __init__(self, db: Database, measured_cutover: Any = None) -> None:
+    def __init__(self, db: Database, measured_cutover: Any = None, *,
+                 history_path: str = '', history_timezone: str = 'Asia/Shanghai') -> None:
         self._db = db
+        self._history_path, self._history_timezone = history_path, history_timezone
         self._live_watch = list
         self._measured_cutover = measured_cutover
         epoch = db.one("SELECT value FROM meta WHERE key='watch_verified_since'") or {}
@@ -96,8 +101,28 @@ class StatsService:
             failed = False
         except Exception:  # noqa: BLE001 - Optional provider failures suppress scoring as unknown.
             live, failed = [], True
-        return member_activity(self._db, members, now=now, live_watch=live,
-                               sampling_status=sampling_status, source_failed=failed)
+        result = member_activity(self._db, members, now=now, live_watch=live,
+                                 sampling_status=sampling_status, source_failed=failed)
+        recent = recent_playback(self._db, set(result), now=now, live=live,
+                                 history_path=self._history_path, history_timezone=self._history_timezone)
+        for uid, row in result.items():
+            evidence = recent[uid]
+            verified_at = row['last_played_at']
+            row['last_verified_played_at'] = verified_at
+            if verified_at and (not evidence['at'] or verified_at >= evidence['at']):
+                evidence.update(at=verified_at, sources=['Deck进度记录'], available=True)
+            row.update(recent_playback=evidence, last_played_at=evidence['at'],
+                       last_played_available=evidence['available'])
+            activity = row['playback_activity']
+            # Do not rewrite the verified score. Suppress only an unsupported
+            # dormant label when another source proves recent use or is unknown.
+            if activity['status'] == 'inactive' and (
+                    not evidence['at'] or now-evidence['at'] < 14*86400 or
+                    evidence['history_status'] in ('unavailable', 'partial')):
+                activity.update(status='observing', reason='最近有播放记录，继续观察'
+                                if evidence['at'] and now-evidence['at'] < 14*86400
+                                else '最近播放未知，继续观察')
+        return result
 
     def watch_windows(self, since: float, until: float, user_id: str | None = None) -> dict[str, dict]:
         """One verified interval ledger for profiles, user charts and daily series."""
@@ -118,24 +143,35 @@ class StatsService:
                 'uncertain_records': uncertain}
 
     def watch_summary(self, user_id: str, now: float | None = None) -> dict[str, Any]:
-        now = time.time() if now is None else now
-        total = self._db.one('SELECT seconds,first_at FROM watch_totals WHERE emby_user_id=?', (user_id,)) or {}
+        with self._db.snapshot():
+            return self._watch_summary(user_id, time.time() if now is None else now)
+
+    def _watch_summary(self, user_id: str, now: float) -> dict[str, Any]:
         legacy = self._db.one('SELECT seconds,first_at FROM watch_legacy_baselines WHERE emby_user_id=?', (user_id,)) or {}
-        sampled = self._db.one('SELECT seconds,first_at FROM watch_sample_totals WHERE emby_user_id=?', (user_id,)) or {}
         verified = self._db.one('SELECT seconds,first_at FROM watch_verified_totals WHERE emby_user_id=?', (user_id,)) or {}
         recorded = float(verified.get('seconds') or 0)
-        reference = max(0, sum(float(r.get('seconds') or 0) for r in (total, legacy, sampled)) - recorded)
-        unverified_now = any(row.get('user_id') == user_id and row.get('watch_reason') in
-                             ('progress_missing', 'progress_invalid', 'pause_unknown', 'rate_unknown', 'heartbeat_missing', 'heartbeat_stale')
+        cumulative = viewing.lifetime(self._db, user_id)
+        reference = max(0, cumulative['seconds'] - recorded)
+        unverified_now = any(row.get('user_id') == user_id and row.get('watch_reason') not in
+                             ('', None, 'idle', 'paused', 'stopped')
                              for row in self._live_watch() or [])
-        day, month = self.watch_window(now-86400, now, user_id), self.watch_window(now-30*86400, now, user_id)
+        rows = viewing.records(self._db, user_id, now-30*86400, now)
+        day, month = viewing.window(rows, now-86400, now), viewing.window(rows, now-30*86400, now)
+        diagnostic = None
+        with contextlib.suppress(Exception):
+            row = self._db.one('SELECT observed_at,summary_json FROM watch_diagnostics WHERE emby_user_id=?', (user_id,))
+            if row:
+                diagnostic = {**json.loads(row['summary_json']), 'observed_at': row['observed_at']}
         return {'seconds_24h': day['seconds'], 'seconds_30d': month['seconds'],
                 'incomplete_24h': day['incomplete'], 'incomplete_30d': month['incomplete'],
-                'recorded_seconds': int(recorded), 'first_at': verified.get('first_at'),
+                'recorded_seconds': int(cumulative['seconds']), 'first_at': cumulative['first_at'],
+                'verified_recorded_seconds': int(recorded),
                 'legacy_seconds': int(legacy.get('seconds') or 0),
-                'historical_unverified_seconds': int(reference), 'history_excluded': True,
+                'historical_unverified_seconds': int(reference), 'history_excluded': False,
                 'verification_since': self._verification_since, 'unverified_playback_now': unverified_now,
-                'window_basis': 'sample_intervals', 'source': 'verified_playback_progress'}
+                'window_basis': 'recorded_intervals', 'source': 'recorded_viewing',
+                'diagnostic': diagnostic,
+                'coverage_note': '累计保留已记录观看；时段和影片仅统计可定位的记录，缺失片段不补算。'}
 
     def recent_watches(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._db.query(
@@ -522,38 +558,37 @@ class StatsService:
 
     def member_detail(self, user_id: str, days: int = 30) -> dict[str, Any]:
         days = max(1, min(days, MAX_DAYS))
-        since_day = _day_list(days)[0]
-        since_ts = int(time.time()) - days * 86400
-        series = {
-            r["day"]: r for r in self._db.query(
-                "SELECT day, bytes, seconds, plays FROM usage_daily"
-                " WHERE emby_user_id=? AND day >= ?", (user_id, since_day))
-        }
-        return {
-            "series": [{
-                "day": d,
-                "bytes": int((series.get(d) or {}).get("bytes") or 0),
-                "hours": round(self.watch_window(datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp(),
-                                                datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()+86400,
-                                                user_id)['seconds'] / 3600, 2),
-                "plays": int((series.get(d) or {}).get("plays") or 0),
-            } for d in _day_list(days)],
-            "watch": self.watch_summary(user_id),
-            "recent_plays": self._db.query(
-                "SELECT v.item_id,v.item_name,v.series_name,v.client,v.play_method,"
-                "COALESCE(e.node,'') AS node,SUM(v.seconds) AS seconds,"
-                "COALESCE(e.bytes,0) AS bytes,MIN(v.started_at) AS started_at "
-                "FROM watch_verified_samples v LEFT JOIN play_events e ON e.watch_key=v.run_key AND e.watch_key<>'' "
-                "WHERE v.emby_user_id=? AND v.started_at >= ? "
-                "GROUP BY v.run_key ORDER BY MAX(v.ended_at) DESC LIMIT 50", (user_id, since_ts)),
-            "historical_recent_plays": self._db.query(
-                "SELECT item_id,item_name,series_name,seconds,started_at FROM play_events "
-                "WHERE emby_user_id=? AND started_at>=? AND watch_key='' "
-                "ORDER BY started_at DESC LIMIT 50", (user_id, since_ts)),
-            "devices": self._db.query(
-                "SELECT * FROM devices WHERE emby_user_id=?"
-                " ORDER BY last_seen_at DESC LIMIT 50", (user_id,)),
-        }
+        now = time.time()
+        since = datetime.fromisoformat(_day_list(days, datetime.fromtimestamp(now, UTC))[0]).replace(tzinfo=UTC).timestamp()
+        return self.viewing_detail(user_id, since, now, now=now)
+
+    def report_detail(self, user_id: str, *, now: float) -> dict[str, Any]:
+        bounds = viewing.previous_week(now)
+        result = self.viewing_detail(user_id, bounds['since'], bounds['until'],
+                                     now=now, tz=viewing.BEIJING)
+        result['viewing'].update(bounds)
+        return result
+
+    def viewing_detail(self, user_id: str, since: float, until: float, *,
+                       now: float, tz: timezone = UTC) -> dict[str, Any]:
+        with self._db.snapshot():
+            rows = viewing.records(self._db, user_id, since, until)
+            data = viewing.window(rows, since, until, tz=tz)
+            since_day = datetime.fromtimestamp(since, UTC).strftime('%Y-%m-%d')
+            until_day = datetime.fromtimestamp(until, UTC).strftime('%Y-%m-%d')
+            traffic = {r['day']: r for r in self._db.query(
+                'SELECT day,bytes FROM usage_daily WHERE emby_user_id=? AND day>=? AND day<=?',
+                (user_id, since_day, until_day))}
+            # The original traffic ledger has UTC daily buckets, not intervals.
+            # A Beijing week cuts those buckets: do not invent an hourly split.
+            for point in data['series']:
+                point['bytes'] = (int((traffic.get(point['day']) or {}).get('bytes') or 0)
+                                  if tz == UTC else None)
+            return {'series': data['series'], 'watch': self._watch_summary(user_id, now),
+                    'viewing': {k: v for k, v in data.items() if k not in ('series', 'recent_plays')},
+                    'recent_plays': data['recent_plays'][:50],
+                    'devices': self._db.query('SELECT * FROM devices WHERE emby_user_id=? '
+                                              'ORDER BY last_seen_at DESC LIMIT 50', (user_id,))}
 
     # -- retention -----------------------------------------------------------
     def prune(self, keep_days: int = 400) -> dict[str, int]:
