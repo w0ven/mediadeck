@@ -52,6 +52,7 @@ def group_bot(request):
 
     b._call = call
     b.send = TelegramBot.send.__get__(b, TelegramBot)
+    b.send_message = TelegramBot.send_message.__get__(b, TelegramBot)
     b._edit = TelegramBot._edit.__get__(b, TelegramBot)
     return b
 
@@ -205,7 +206,7 @@ def test_private_rank_and_myinfo_aliases_still_work(bot):
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)
     assert "本月流量" in last_text(bot) and "观看记录" in last_text(bot)
-    assert "resetpw" in str(bot.calls[-1][1].get('reply_markup'))
+    assert not bot.calls[-1][1].get('reply_markup')
 
 
 def test_reply_kk_opens_admin_card_in_the_group(bot):

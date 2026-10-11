@@ -31,6 +31,7 @@ import re
 import secrets
 import string
 import time
+import unicodedata
 from collections.abc import Awaitable, Callable
 from html import escape
 from typing import Any
@@ -3140,7 +3141,8 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
-        lines.extend(['同时播放：' + stream_text, self._device_count_text(member)])
+        device = self._device_count_text(member)
+        lines.extend(['同时播放：' + stream_text, device if managing else device.split('\n')[0]])
         for field, label in (('allow_download', '下载权限'), ('allow_transcode', '转码权限')):
             if field in member:
                 value = member[field]
@@ -3159,11 +3161,24 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                       '近24小时：<b>' + duration((summary or {}).get('seconds_24h')) + '</b>',
                       '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>',
                       '累计观看：<b>' + duration((summary or {}).get('recorded_seconds')) + '</b>'])
-        if (summary or {}).get('coverage_note'):
+        if managing and (summary or {}).get('coverage_note'):
             lines.append(escape(str(summary['coverage_note'])))
-        if (summary or {}).get('unverified_playback_now'):
+        if managing and (summary or {}).get('unverified_playback_now'):
             lines.append('当前播放待核验，暂不计时。')
         lines += ['', '<b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
+        if not managing:
+            lines = [line.replace('本周期暂无播放记录', '暂无记录') for line in lines]
+            # Compact pairs retain known/unknown values and their original units.
+            for left, right in (('已用：', '剩余：'), ('同时播放：', '设备分组：'),
+                                ('近24小时：', '近30天：')):
+                for i in range(len(lines) - 1):
+                    if lines[i].startswith(left) and lines[i + 1].startswith(right):
+                        pair = lines[i] + ' · ' + lines[i + 1]
+                        width = sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
+                                    for c in re.sub(r'<[^>]*>', '', pair))
+                        if width <= 32:
+                            lines[i:i + 2] = [pair]
+                        break
         return '\n'.join(lines)
 
     def _brief_card(self, member: dict[str, Any]) -> str:
@@ -3173,6 +3188,28 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         return [[{'text': '刷新', 'callback_data': 'me'},
                  {'text': '关闭', 'callback_data': 'panel_close'}],
                 *self._private_button('account', '私聊账号')]
+
+    def _queue_account_cleanup(self, chat_id, mid):
+        from app.modules.checkin_cleanup import AccountCardCleanup
+        if self._db is not None and _GROUP.get() and type(mid) is int and mid > 0:
+            self._check_bot_identity()
+            AccountCardCleanup(self._db).enqueue(self._active_bot_id, int(chat_id), _THREAD.get() or 0,
+                                                 mid, 'feedback', _ACTOR.get())
+
+    async def _show_account_card(self, chat_id, member):
+        if _GROUP.get():
+            shown = await self._show(chat_id, self._brief_card(member))
+            if shown:
+                self._queue_account_cleanup(chat_id, self._panel.get(self._pkey(chat_id)))
+            return shown
+        mid = self._panel.get(self._pkey(chat_id))
+        if mid:
+            return await self._edit(chat_id, mid, self._account_card(member))
+        mid = await self.send_message(chat_id, self._account_card(member))
+        if mid:
+            self._touch_panel(chat_id, mid)
+            self._menu_panel[self._pkey(chat_id)] = mid
+        return bool(mid)
 
     def _usage_brief(self, member: dict[str, Any]) -> str:
         return '\n'.join([*quota_lines(member), *bandwidth_lines(member)])
@@ -3393,7 +3430,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 return await self._group_start(chat_id, payload)
             if not in_group and payload == 'account':
                 await self._show(chat_id, self._account_card(member) if member else self._guest_home(display),
-                                 self.info_menu() if member else self.guest_menu())
+                                 None if member else self.guest_menu())
                 return
             if not in_group and (payload == 'manage' or payload.startswith(('manage_', 'person_'))):
                 if not self.is_admin(member):
@@ -3478,9 +3515,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 await self._show(chat_id, "这个 Telegram 还没有账号。",
                                  self.guest_menu())
                 return
-            if in_group:
-                return await self._show(chat_id, self._brief_card(member), self._group_account_menu())
-            return await self._show(chat_id, self._account_card(member), self.info_menu())
+            return await self._show_account_card(chat_id, member)
         if not self.is_admin(member):
             if in_group:
                 return
@@ -4382,7 +4417,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             shown = await self._handle_command(
                 chat_id, tg_user_id, tg_username, text, display_name=tg_name)
             command = text.split()[0].lower().split('@', 1)[0]
-            if shown and in_group and command in GROUP_TEMP_COMMANDS:
+            if shown and in_group and command in GROUP_TEMP_COMMANDS and command not in ('/me', '/myinfo'):
                 self._schedule_brief_cleanup(chat_id)
             return
 
@@ -4623,7 +4658,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             if in_group and data in ('me', 'me_status', 'usage', 'home'):
                 member = self._member_for_chat(tg_user_id)
                 if member:
-                    await self._edit(chat_id, int(message_id), self._brief_card(member), self._group_account_menu())
+                    await self._edit(chat_id, int(message_id), self._brief_card(member))
                 return
             if in_group and data in ('help', 'rules'):
                 body = RULES_TEXT if data == 'rules' else self._group_help_text(self._member_for_chat(tg_user_id))
@@ -4837,8 +4872,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         if data == "me":
             await self._edit(
                 chat_id, message_id,
-                self._account_card(member),
-                self.info_menu())
+                self._account_card(member))
             return
         if data == "me_status":
             await self._edit(

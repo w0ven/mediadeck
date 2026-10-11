@@ -150,19 +150,21 @@ def test_old_target_card_never_acts_on_last_queried_target(env):
 
 def test_group_me_has_useful_public_data_and_no_private_fields(env):
     env.members.upsert('u1', 'ViewerA', {'group_id': 'whitelist', 'note': 'private-note', 'contact': 'private-contact'})
-    mid = asyncio.run(command(env, '/me', user=VIEWER))
+    asyncio.run(command(env, '/me', user=VIEWER))
+    mid = next(mid for (chat, mid), p in reversed(list(env.tg.messages.items())) if chat == str(GROUP) and 'ViewerA' in p.get('text', ''))
     text = env.tg.text(GROUP, mid)
     for expected in ('ViewerA', '白名单', '永久', '积分', '50', '近24小时', '本月流量', '带宽'):
         assert expected in text
     for forbidden in ('private-note', 'private-contact', '邀请码', '密码：', 'device_id', 'token', '来源', '采集', '《'):
         assert forbidden not in text
-    assert any(b.get('url', '').startswith('https://t.me/') for b in env.tg.actions(GROUP, mid))
+    assert env.tg.actions(GROUP, mid) == []
 
 
 def test_group_personal_subpage_cannot_leak_private_note(env):
     env.members.upsert('u1', 'ViewerA', {'note': 'private-note'})
     async def run():
-        mid = await command(env, '/me', user=VIEWER)
+        await command(env, '/me', user=VIEWER)
+        mid = next(mid for (chat, mid), p in reversed(list(env.tg.messages.items())) if chat == str(GROUP) and 'ViewerA' in p.get('text', ''))
         await click(env, 'me_status', mid, user=VIEWER)
         assert 'private-note' not in env.tg.text(GROUP, mid)
     asyncio.run(run())

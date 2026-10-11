@@ -280,7 +280,7 @@ def render_flow_previews(bot):
         page(title, text, rows)
     demo, member, _ = demo_bot()
     member.update(allow_download=True, allow_transcode=False, note='请遵守套餐播放限制')
-    page('我的账号 · 状态与用量合并', demo._account_card(member), demo.info_menu())
+    page('我的账号 · 状态与用量合并', demo._account_card(member), [])
     page('帮助', bot._help_text(bot.members.get('u1')), bot.help_menu())
     page('使用准则', RULES_TEXT, [[{'text':'◀ 帮助'}]])
     bot.cfg.update(playback_lines=[{'label':'演示线路','url':'https://play.invalid'}], playback_lines_show_load=False)

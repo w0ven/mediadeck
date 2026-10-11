@@ -409,7 +409,7 @@ def test_real_snapshot_none_is_presented_without_mutating_usage(env, health, cha
         mid = await command(env, '/me', chat=chat, user=VIEWER)
         text = env.tg.text(chat, mid)
         if health == 'healthy':
-            assert '本周期暂无播放记录' in text and '剩余：<b>1.0 TiB</b>' in text
+            assert '暂无记录' in text and '剩余：<b>1.0 TiB</b>' in text
             assert '0 B' not in text
         else:
             assert '计量暂不可用' in text and '剩余：<b>暂无法确认</b>' in text
@@ -430,7 +430,7 @@ def test_unlimited_and_numeric_measurement_text_remain_truthful(env, used):
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
     assert '剩余：<b>不限</b>' in text
-    assert ('本周期暂无播放记录' if used is None else '0 B' if used == 0 else '1.0 KiB') in text
+    assert ('暂无记录' if used is None else '0 B' if used == 0 else '1.0 KiB') in text
 
 
 def test_receipt_label_uses_registration_handle(env):

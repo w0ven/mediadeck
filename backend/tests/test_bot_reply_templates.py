@@ -138,9 +138,10 @@ def test_checked_in_previews_are_rendered_by_current_templates():
         assert all(sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
                        for c in row) <= 32 for row in rows)
         for label in ('已用：', '剩余：', '近24小时：', '近30天：'):
-            matching = [row for row in rows if row.startswith(label)]
+            matching = [row for row in rows if label in row]
             assert len(matching) == 1
-            assert ' · ' not in matching[0]
+            if name != '账号卡':
+                assert ' · ' not in matching[0]
     for text in cards.values():
         for forbidden in ('历史未核验', '核验起点', '统计口径', '进度正常前进', '采样'):
             assert forbidden not in text

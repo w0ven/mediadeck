@@ -44,7 +44,11 @@ def test_addressed_group_command_cleans_trigger_and_schedules_reply(bot, monkeyp
     asyncio.run(bot._handle_message(message(command + '@cola_embybot')))
     assert any(m == 'sendMessage' and p.get('message_thread_id') == 12 for m, p in bot.calls)
     assert 42 in deletions(bot)
-    schedule.assert_called_once_with(GROUP)
+    if command in ('/me', '/myinfo'):
+        schedule.assert_not_called()
+        assert bot._db.one("SELECT 1 FROM play_jobs WHERE kind='account.card.delete'")
+    else:
+        schedule.assert_called_once_with(GROUP)
 
 
 @pytest.mark.parametrize('failure', [None, False, True])
@@ -192,7 +196,7 @@ def test_failed_edit_keeps_deadline_and_foreign_actor_cannot_refresh(bot):
 
 def test_old_timer_cannot_delete_new_admin_target_or_confirmation(bot):
     async def scenario():
-        await bot._handle_message(message('/me', user=ADMIN))
+        await bot._handle_message(message('/usage', user=ADMIN))
         key = bot._session_key(GROUP, ADMIN, group=True, thread_id=12)
         old_mid = bot._panel[key]
         generation, _ = bot._brief_cleanups[(str(GROUP), old_mid)]
@@ -209,7 +213,7 @@ def test_old_timer_cannot_delete_new_admin_target_or_confirmation(bot):
 
 def test_expired_or_missing_message_replacement_gets_its_own_timer(bot):
     async def scenario():
-        await bot._handle_message(message('/me'))
+        await bot._handle_message(message('/usage'))
         key = bot._session_key(GROUP, ALICE, group=True, thread_id=12)
         old_mid = bot._panel[key]
         original = bot._call
@@ -246,7 +250,7 @@ def test_announcements_and_broadcasts_never_get_ttl(bot, monkeypatch):
 
 def test_refresh_serializes_against_expiry_in_same_chat(bot):
     async def scenario():
-        await bot._dispatch_update({'message': message('/me')})
+        await bot._dispatch_update({'message': message('/usage')})
         key = bot._session_key(GROUP, ALICE, group=True, thread_id=12)
         mid = bot._panel[key]
         generation, _ = bot._brief_cleanups[(str(GROUP), mid)]
@@ -278,7 +282,7 @@ def test_refresh_serializes_against_expiry_in_same_chat(bot):
 
 def test_not_modified_edit_refreshes_existing_timer_without_new_send(bot):
     async def scenario():
-        await bot._handle_message(message('/me'))
+        await bot._handle_message(message('/usage'))
         key = bot._session_key(GROUP, ALICE, group=True, thread_id=12)
         mid = bot._panel[key]
         old = bot._brief_cleanups[(str(GROUP), mid)][0]

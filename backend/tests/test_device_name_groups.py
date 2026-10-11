@@ -138,13 +138,14 @@ def test_member_list_detail_bot_and_global_api_share_count_with_raw_api_unchange
         assert client.get("/api/members/viewer-a/devices", auth=AUTH).json() == before
         assert client.get("/api/stats/overview", auth=AUTH).json()["devices"] == 2
         bot = TelegramBot(dict, app.state.members, stats=app.state.stats)
-        for text in (bot._usage_text(member), bot._account_card(member),
-                     bot._account_card(member, public=True),
-                     bot._account_card(member, managing=True), bot._admin_details(member)):
+        for text in (bot._usage_text(member), bot._account_card(member, managing=True), bot._admin_details(member)):
             assert "设备分组：2 组" in text
             assert "按设备名称归并" in text and "非硬件唯一识别" in text
             assert "空/未知按ID单计" in text
             assert "已登记设备" not in text
+        for text in (bot._account_card(member), bot._account_card(member, public=True)):
+            assert "设备分组：2 组" in text
+            assert "按设备名称归并" not in text and "非硬件唯一识别" not in text
         target = next(row for row in before if row["device_name"] == "iPhone")
         response = client.post(f'/api/members/viewer-a/devices/{target["device_id"]}/block',
                                auth=AUTH)
