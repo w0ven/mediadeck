@@ -18,7 +18,7 @@ from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
 from app.modules.shop_notices import ShopNoticeBotMixin
 
-PLAY_CALLBACKS = ('dcg:', 'dc:', 'bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'nn:', 'nnh:', 'pp:', 'gg:', 'ggc:')
+PLAY_CALLBACKS = ('dg:', 'dcg:', 'dc:', 'bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'nn:', 'nnh:', 'pp:', 'gg:', 'ggc:')
 
 
 class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9BotMixin, PlayPanelsBotMixin, PointsRankingBotMixin, PlayHubBotMixin, ShopNoticeBotMixin):
@@ -33,7 +33,9 @@ class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMix
 
     async def _play_callback(self, data, message, actor, callback_id):
         self._play_remember(message,actor)
-        if data.startswith('dcg:'):
+        if data.startswith('dg:'):
+            await self._dice_size_callback(data, message, actor, callback_id)
+        elif data.startswith('dcg:'):
             await self._dice_group_callback(data, message, actor, callback_id)
         elif data.startswith('dc:'):
             await self._dice_callback(data, message, actor, callback_id)

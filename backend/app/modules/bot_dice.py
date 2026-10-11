@@ -9,10 +9,13 @@ import time
 from html import escape
 
 from app.modules import dice_beacon as beacon
+from app.modules import dice_group_view
+from app.modules.bot_dice_group import GroupDiceBotMixin
 from app.modules.checkin_cleanup import CleanupService
 from app.modules.dice import DiceService
+from app.modules.dice_group import GROUP_VERSION, is_group
 from app.modules.dice_rules import POOLS, normalize, validate
-from app.modules.dice_view import HELP, group_card, private_card, report_pages
+from app.modules.dice_view import group_card, private_card, report_pages
 from app.modules.economy_rules import economy_write, encode
 from app.modules.game_ui import defer_ui
 from app.modules.group_points import GroupPointsError
@@ -42,7 +45,7 @@ class DiceCleanup(CleanupService):
                          (str(bot_id), key, self.kind, encode(data), clock, clock+60 if due is None else due, clock+48*3600))
 
 
-class DiceBotMixin:
+class DiceBotMixin(GroupDiceBotMixin):
     def _dice_service(self):
         if self._db is None or self._points is None:
             raise PlayError('积分服务暂不可用')
@@ -68,6 +71,8 @@ class DiceBotMixin:
             self._dice_cleanup(message, mid)
 
     async def _dice_command(self, message):
+        if await self._dice_group_bet(message):
+            return True
         text = str(message.get('text') or '').strip()
         parts = text.split()
         verb = parts[0].lower() if parts else ''
@@ -93,10 +98,10 @@ class DiceBotMixin:
                 session = service.new_session(parts[1][5:], message['from'])
                 await self._dice_draw(session)
             elif verb.split('@')[0] == '/骰局帮助':
-                await self._dice_feedback(message, HELP)
+                await self._dice_feedback(message, dice_group_view.HELP)
             else:
                 if len(parts) != 1:
-                    raise PlayError('用法：/骰局，金额在本人私聊确认')
+                    raise PlayError('用法：/骰局；开局后回复群卡发送 /大 金额 或 /小 金额')
                 if chat['type'] == 'private':
                     raise PlayError('请在现有授权群发送 /骰局')
                 row = service.create(message)
@@ -285,7 +290,12 @@ class DiceBotMixin:
     async def _dice_publish_open(self, row):
         if not self._bot_username:
             raise PlayError('Bot用户名尚未确认，未开放下注')
-        body, keys = group_card(row, 0, self._bot_username)
+        if is_group(row):
+            with economy_write(self._db):
+                row, snapshot = self._dice_service().group_snapshot(row['nonce'])
+                body, keys = dice_group_view.group_card(row, snapshot)
+        else:
+            body, keys = group_card(row, 0, self._bot_username)
         with economy_write(self._db) as conn:
             self._dice_service().queue_message(conn, row['nonce'], 'open', row['chat_id'], body, keys, row['thread_id'])
         await self._dice_deliver(row['nonce'])
@@ -367,9 +377,11 @@ class DiceBotMixin:
                 if initial['state'] == 'opening' and time.time() < initial['deadline']:
                     await self._dice_publish_open(initial)
                 row = service.close(nonce)
+                if is_group(row) and row['state'] == 'locked':
+                    await self._dice_group_refresh(nonce)
                 if row['state'] == 'locked':
                     row = service.settle(nonce)
-                    if row['state'] == 'locked' and row['card_mid']:
+                    if row['state'] == 'locked' and row['card_mid'] and not is_group(row):
                         n = self._db.one('SELECT COUNT(DISTINCT user_id) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
                         body, keys = group_card(row, n, self._bot_username)
                         defer_ui(self, ('dice', nonce), lambda chat=int(row['chat_id']), mid=row['card_mid'], body=body, keys=keys: self._dice_edit(chat, mid, body, keys))
@@ -380,6 +392,12 @@ class DiceBotMixin:
                         except (ValueError, PlayError, TimeoutError):
                             pass
                 row = service.settle(nonce)
+                if is_group(row):
+                    if row['state'] in ('settled', 'refunded', 'empty'):
+                        self._dice_group_reports(row)
+                    await self._dice_deliver(nonce)
+                    await self._dice_group_refresh(nonce)
+                    continue
                 if row['state'] in ('settled', 'refunded', 'empty'):
                     tickets = self._db.query('SELECT * FROM dice_tickets WHERE nonce=? ORDER BY created,token', (nonce,))
                     with economy_write(self._db) as conn:
@@ -402,6 +420,8 @@ class DiceBotMixin:
                 await self._dice_deliver(nonce)
             except Exception:  # noqa: BLE001 - retain funds; do not block other fixed-result recovery
                 self._db.execute("UPDATE dice_rounds SET error='恢复异常，保留资金及固定结果，待核对' WHERE nonce=?", (nonce,))
+        for dirty in self._db.query("SELECT nonce FROM dice_rounds WHERE bot_id=? AND json_extract(rules,'$.version')=? AND group_rendered<group_revision AND group_due<=? AND group_lease<=? AND group_retry<=? LIMIT 50", (self._active_bot_id, GROUP_VERSION, time.time(), time.time(), time.time())):
+            await self._dice_group_refresh(dirty['nonce'])
         for session in self._db.query("SELECT * FROM dice_sessions WHERE bot_id=? AND state='active' AND mid IS NOT NULL AND expires>? AND rendered_revision<revision LIMIT 50", (self._active_bot_id, time.time())):
             member = self._members.find_by_telegram(session['tg_id'])
             if member and member['emby_user_id'] == session['user_id']:
