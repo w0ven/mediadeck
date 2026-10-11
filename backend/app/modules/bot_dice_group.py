@@ -7,6 +7,7 @@ import secrets
 import time
 from html import escape
 
+from app.modules import dice_caption_view
 from app.modules.dice_group import TERMINAL, is_group
 from app.modules.dice_group_view import buttons, group_card, report_pages
 from app.modules.economy_rules import economy_write
@@ -75,12 +76,15 @@ class GroupDiceBotMixin:
                 return
             token = secrets.token_hex(12)
             row, snapshot = service.group_snapshot(nonce)
-            body, keys = group_card(row, snapshot, report_body=job['body'] if job else None)
+            if dice_caption_view.is_caption(row):
+                body, keys = dice_caption_view.card(row, snapshot)
+            else:
+                body, keys = group_card(row, snapshot, report_body=job['body'] if job else None)
             conn.execute('UPDATE dice_rounds SET group_token=?,group_lease=? WHERE nonce=?', (token, clock+90, nonce))
         from app.modules.report_delivery import CALL_DELIVERY
         context = CALL_DELIVERY.set(None)
         try:
-            good = await self._dice_edit(int(row['chat_id']), mid, body, keys)
+            good = await self._dice_edit(int(row['chat_id']), mid, body, keys, caption=True) if dice_caption_view.is_caption(row) else await self._dice_edit(int(row['chat_id']), mid, body, keys)
             problem = CALL_DELIVERY.get() or {}
             with economy_write(self._db) as conn:
                 if good:
@@ -107,7 +111,12 @@ class GroupDiceBotMixin:
                 elif re.fullmatch(r'page[0-9]{1,9}', op):
                     page, view = int(op[4:]), 'ledger'
                     count = conn.execute('SELECT COUNT(*) FROM dice_tickets WHERE nonce=?', (nonce,)).fetchone()[0]
-                    if page >= max(1, (count+7)//8):
+                    if dice_caption_view.is_caption(row):
+                        _, snapshot = service.group_snapshot(nonce)
+                        pages = len(dice_caption_view.pages(row, snapshot))
+                    else:
+                        pages = max(1, (count+7)//8)
+                    if page >= pages:
                         raise PlayError('流水页码无效')
                 elif op in ('details', 'rules', 'proof', 'summary'):
                     page, view = row['group_page'], op
@@ -121,6 +130,14 @@ class GroupDiceBotMixin:
             await self._answer_callback(callback_id, str(exc))
 
     def _dice_group_reports(self, row):
+        if dice_caption_view.is_caption(row):
+            with economy_write(self._db) as conn:
+                if not conn.execute("SELECT 1 FROM dice_messages WHERE nonce=? AND purpose='report:0'", (row['nonce'],)).fetchone():
+                    conn.execute('UPDATE dice_rounds SET group_page=-1 WHERE nonce=?', (row['nonce'],))
+                row, snapshot = self._dice_service().group_snapshot(row['nonce'])
+                body, keys = dice_caption_view.card(row, snapshot, first=True)
+                self._dice_service().queue_message(conn, row['nonce'], 'report:0', row['chat_id'], body, keys, row['thread_id'])
+            return
         tickets = self._db.query('SELECT * FROM dice_tickets WHERE nonce=? ORDER BY rowid', (row['nonce'],))
         from app.modules.dice_art import art_name
         with economy_write(self._db) as conn:

@@ -20,10 +20,20 @@ from app.modules.play_money import PlayError
 
 
 @pytest.fixture
-def env(request):
+def env(request, monkeypatch):
     e = request.getfixturevalue('bw_env')
     e.services.registry.save('dice', enabled=True)
     e.services.registry.get('dice').ctx.telegram = e.bot
+    # Existing split photo/text rounds retain their persisted transport after upgrade.
+    from app.modules.dice import DiceService
+    original = DiceService.create
+    def split_create(service, message, *, now=None):
+        row = original(service, message, now=now)
+        rules = json.loads(row['rules'])
+        rules.pop('presentation', None)
+        service.db.execute('UPDATE dice_rounds SET rules=? WHERE nonce=?', (json.dumps(rules), row['nonce']))
+        return service.get(row['nonce'])
+    monkeypatch.setattr(DiceService, 'create', split_create)
     return e
 
 
