@@ -7,6 +7,7 @@ import re
 import time
 from html import escape
 
+from app.modules.checkin_cleanup import NiuniuFeedbackCleanup
 from app.modules.economy_rules import economy_write
 from app.modules.game_ui import defer_ui, render_image
 from app.modules.group_points import GroupPointsError, reliable_user
@@ -109,8 +110,20 @@ class NiuniuBotMixin:
         except ActiveNiuniu as exc:
             await self._niuniu_guide(exc.row, message)
         except (PlayError, GroupPointsError) as exc:
-            await self.send_message(chat.get('id'), '🍃 '+escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
+            mid = await self.send_message(chat.get('id'), '🍃 '+escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
+            if (self._db is not None and type(mid) is int and mid > 0 and chat.get('type') in ('group', 'supergroup')
+                    and self._group_chat_allowed(chat)):
+                try:
+                    actor = reliable_user(message)
+                except GroupPointsError:
+                    pass
+                else:
+                    NiuniuFeedbackCleanup(self._db).enqueue(self._active_bot_id, chat['id'], self._thread_id(message) or 0, mid, 'feedback', actor)
         return True
+
+    async def _drain_niuniu_feedback(self, *, now=None):
+        if self._db is None or not self.enabled:return
+        return await self._drain_checkin_deletes(now=now, service=NiuniuFeedbackCleanup(self._db))
 
     async def _niuniu_guide(self, row, message):
         # Use only the validated same-bot/chat/topic active round, never user links.

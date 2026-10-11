@@ -72,13 +72,13 @@ class PlayBotMixin(BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9Bo
             CleanupService(self._db).enqueue(target['bot_id'], target['chat_id'], target['thread_id'],
                                              result['message_id'], 'feedback', target['actor_tg_id'])
 
-    async def _drain_checkin_deletes(self, *, now=None, limit=50):
+    async def _drain_checkin_deletes(self, *, now=None, limit=50, service=None):
         if self._db is None or not self.enabled:
             return 0
         # Access the native task-local error at runtime, avoiding an import cycle.
         from app.modules.telegram import _CALL_ERROR
         self._check_bot_identity()
-        service = CleanupService(self._db)
+        service = service or CleanupService(self._db)
         processed = 0
         for _ in range(limit):
             clock = time.time() if now is None else float(now)
@@ -115,7 +115,7 @@ class PlayBotMixin(BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9Bo
             else:
                 delay = max(int(failure.get('retry_after') or 0), min(300, 5 * 2 ** min(job['attempts'], 6)))
                 service.finish(job, 'queued', '删除未确认，等待重试', retry_after=delay, now=finished)
-        if processed and self._plugins and self._plugins.get('checkin_cleanup'):
+        if processed and service.kind == 'checkin.delete' and self._plugins and self._plugins.get('checkin_cleanup'):
             summary = service.summary()
             ok = not (summary['权限或归属待处理'] or summary['失败或超期未删'])
             self._plugins._record('checkin_cleanup', ok, summary, time.time(), 'worker')
@@ -123,7 +123,7 @@ class PlayBotMixin(BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9Bo
 
     async def _play_worker(self):
         while True:
-            for work in (self._drain_checkin_deletes, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
+            for work in (self._drain_checkin_deletes, self._drain_niuniu_feedback, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
                 try:
                     await work()
                 except asyncio.CancelledError:

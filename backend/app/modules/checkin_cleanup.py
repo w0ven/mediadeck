@@ -13,6 +13,9 @@ CHECKIN_TARGET: ContextVar[dict | None] = ContextVar('checkin_cleanup_target', d
 
 
 class CleanupService:
+    kind = 'checkin.delete'
+    key_prefix = 'checkin'
+
     def __init__(self, db):
         self.db = db
 
@@ -24,21 +27,21 @@ class CleanupService:
         clock = time.time() if now is None else float(now)
         payload = {'chat_id': chat, 'thread_id': thread, 'message_id': mid,
                    'source': source, 'actor_tg_id': str(actor)}
-        key = f'checkin:{chat}:{mid}'
+        key = f'{self.key_prefix}:{chat}:{mid}'
         with economy_write(self.db) as conn:
             row = conn.execute('SELECT * FROM play_jobs WHERE bot_id=? AND job_key=?', (str(bot_id), key)).fetchone()
             if row:
                 if row['payload_json'] != encode(payload):
                     raise ValueError('message already belongs to a different cleanup target')
                 return dict(row)
-            conn.execute("INSERT INTO play_jobs(bot_id,job_key,kind,payload_json,created_at,due_at,expires_at) VALUES(?,?,'checkin.delete',?,?,?,?)",
-                         (str(bot_id), key, encode(payload), clock, clock + 60, clock + 48 * 3600))
+            conn.execute("INSERT INTO play_jobs(bot_id,job_key,kind,payload_json,created_at,due_at,expires_at) VALUES(?,?,?,?,?,?,?)",
+                         (str(bot_id), key, self.kind, encode(payload), clock, clock + 60, clock + 48 * 3600))
             return dict(conn.execute('SELECT * FROM play_jobs WHERE bot_id=? AND job_key=?', (str(bot_id), key)).fetchone())
 
     def claim(self, bot_id, *, now=None):
         clock = time.time() if now is None else float(now)
         with economy_write(self.db) as conn:
-            row = conn.execute("SELECT * FROM play_jobs WHERE kind='checkin.delete' AND due_at<=? AND (state='queued' OR (state='running' AND lease_until<=?)) ORDER BY due_at,id LIMIT 1", (clock, clock)).fetchone()
+            row = conn.execute("SELECT * FROM play_jobs WHERE kind=? AND due_at<=? AND (state='queued' OR (state='running' AND lease_until<=?)) ORDER BY due_at,id LIMIT 1", (self.kind, clock, clock)).fetchone()
             if not row:
                 return None
             if row['bot_id'] != str(bot_id):
@@ -63,7 +66,7 @@ class CleanupService:
                          (state, error, clock + retry_after, '', job['id'], 'running', job['lease_token']))
 
     def summary(self):
-        rows = self.db.query("SELECT state,COUNT(*) AS n FROM play_jobs WHERE kind='checkin.delete' GROUP BY state")
+        rows = self.db.query("SELECT state,COUNT(*) AS n FROM play_jobs WHERE kind=? GROUP BY state", (self.kind,))
         states = {r['state']: r['n'] for r in rows}
         return {'待清理': sum(states.get(s, 0) for s in ('queued', 'running')),
                 '已删除': states.get('deleted', 0), '已不存在': states.get('gone', 0),
@@ -71,8 +74,14 @@ class CleanupService:
                 '失败或超期未删': states.get('failed', 0) + states.get('expired', 0)}
 
     def retry_blocked(self, bot_id):
-        self.db.execute("UPDATE play_jobs SET state='queued',due_at=?,last_error='' WHERE kind='checkin.delete' AND state IN ('blocked','failed') AND bot_id=? AND expires_at>?",
-                        (time.time(), str(bot_id), time.time()))
+        self.db.execute("UPDATE play_jobs SET state='queued',due_at=?,last_error='' WHERE kind=? AND state IN ('blocked','failed') AND bot_id=? AND expires_at>?",
+                        (time.time(), self.kind, str(bot_id), time.time()))
+
+
+class NiuniuFeedbackCleanup(CleanupService):
+    """Same durable exact-message deletion, independent of check-in settings/jobs."""
+    kind = 'niuniu.feedback.delete'
+    key_prefix = 'niuniu-feedback'
 
 
 class CheckinCleanupPlugin(Plugin):
