@@ -37,9 +37,12 @@ def group_card(row, participants, username):
     opened = row['state'] in ('opening', 'open')
     title = '等待封盘' if opened else '已封盘 · 开奖中' if row['state'] == 'locked' else '结果送达中'
     body = f'🎲 <b>骰局 · {title}</b>\n封盘 {clock(row["deadline"])} · 已下注 {participants} 人\n玩家对赌 · 确认后不可撤注'
-    body += f'\n\n<code>{row["nonce"]}</code>\ndrand #{row["round_number"]} · 最多等待10分钟\n承诺 <code>{row["commitment"]}</code>'
-    keys = [[{'text': '进入私聊下注' if opened else '我的投注 · 验真', 'url': f'https://t.me/{username}?start=dice_{row["nonce"]}'}],
-            [{'text': '核对开局', 'callback_data': f'dcg:{row["nonce"]}'}]]
+    body += ('\n\n<blockquote expandable>开奖凭证\n公开锁定 · 不重摇\n展开查看完整承诺'
+             f'\n局号 <code>{row["nonce"]}</code>\n固定信标 drand #{row["round_number"]}'
+             f'\n承诺 <code>{row["commitment"]}</code>'
+             '\n封盘后最多等待10分钟；无有效开奖数据则全局退款，已有结果按原结果结算。</blockquote>')
+    keys = [[{'text': '进入私聊下注' if opened else '我的投注 · 验真', 'url': f'https://t.me/{username}?start=dice_{row["nonce"]}'},
+             {'text': '查看本局', 'callback_data': f'dcg:{row["nonce"]}'}]]
     return body, keys
 
 

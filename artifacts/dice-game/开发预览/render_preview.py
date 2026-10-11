@@ -1,5 +1,6 @@
 """Render the real source templates locally; no Telegram requests."""
 import json
+import re
 from html import escape
 from pathlib import Path
 
@@ -14,15 +15,25 @@ uid = next(iter(json.loads(record['result'])['size']['users']))
 session = {'token':'preview0123456789abcd', 'revision':3, 'user_id':uid,
            'tg_id':'901', 'payload':encode({'view':'home','draft':[]})}
 private, keys = private_card(session,row,1000,[],{})
-sections = [('群内开局', *group_card(row,2,'MediaDeckDemoBot')), ('私聊首页',private,keys)]
+group_body, group_keys = group_card(row,2,'MediaDeckDemoBot')
+(ROOT/'group-card-telegram.json').write_text(json.dumps({'text':group_body, 'parse_mode':'HTML', 'reply_markup':{'inline_keyboard':group_keys}},ensure_ascii=False,indent=2))
+sections = [('群内开局', group_body, group_keys), ('私聊首页',private,keys)]
 draft = [{'pool':'size','option':'大','amount':100}, {'pool':'single','option':'2','amount':20}, {'pool':'triple','option':'任意豹子','amount':10}]
 session['payload'] = encode({'view':'draft','draft':draft})
 sections.append(('多项确认',*private_card(session,row,1000,[],{})))
 sections.append(('最终群战报 · 真实信标模拟局',live['result']['body'],[]))
 sections.append(('本人结算 · 真实信标模拟局',live['personal_result']['body'],[]))
 css = '''body{margin:0;background:#111a24;color:#e6eef6;font:16px/1.65 system-ui,"Noto Sans CJK SC",sans-serif}header{padding:30px 38px;border-bottom:1px solid #263749}h1{font-size:24px;margin:0}header p{font-size:13px;color:#8da5b9;margin:5px 0 0}.grid{display:grid;grid-template-columns:repeat(3,410px);gap:26px;padding:28px;align-items:start}.section h2{font-size:14px;color:#89a4b9;font-weight:500;margin:0 0 10px}.bubble{background:#203346;border:1px solid #31475c;border-radius:16px;padding:21px 22px;white-space:pre-wrap;overflow-wrap:anywhere;box-shadow:0 8px 30px #0002}code{font-size:12px;color:#9fc4df}a{color:#8bcaff;text-decoration:none;pointer-events:none}b{color:#fff;font-weight:650}.keys{margin-top:7px;display:grid;gap:5px}.keyrow{display:flex;gap:5px}.key{flex:1;background:#294258;border:1px solid #36536a;border-radius:7px;padding:9px 4px;text-align:center;color:#bedbef;font-size:13px}small{color:#829bae;font-size:11px}'''
-html = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>骰局 · 本地开发预览</title><style>'+css+'</style><header><h1>🎲 骰局 · 玩家对赌</h1><p>当前源码模板 · 本地预览，未向Telegram发送。真实信标模拟局：drand #'+str(record['round_number'])+'</p></header><main class="grid">'
+css += 'details{border-left:3px solid #72a5c9;background:#1b2f40;padding:8px 12px;border-radius:5px;font-size:13px;line-height:1.55}summary{cursor:pointer;color:#b8d4e8}details[open] summary{margin-bottom:10px}'
+
+def browser_quote(match):
+    # Browser-only analogue: Telegram expandable quotes show a short collapsed prefix.
+    lines = match.group(1).split('\n',3)
+    return '<details><summary>'+'\n'.join(lines[:3])+'</summary>'+lines[3]+'</details>'
+
+html = '<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>骰局 · 本地开发预览</title><style>'+css+'</style><header><h1>🎲 骰局 · 玩家对赌</h1><p>当前源码模板 · 本地预览，未向Telegram发送。折叠引用以浏览器详情控件模拟，实际样式依Telegram客户端。真实信标模拟局：drand #'+str(record['round_number'])+'</p></header><main class="grid">'
 for label,body,keyboard in sections:
+    body = re.sub(r'<blockquote expandable>(.*?)</blockquote>',browser_quote,body,flags=re.DOTALL)
     html += '<section class="section"><h2>'+escape(label)+'</h2><div class="bubble">'+body+'</div><div class="keys">'
     for line in keyboard:
         html += '<div class="keyrow">'+''.join('<div class="key">'+escape(b['text'])+'</div>' for b in line)+'</div>'
@@ -38,4 +49,11 @@ if __name__ == '__main__':
         page.screenshot(path=str(ROOT/'preview.png'),full_page=True)
         for i, element in enumerate(page.locator('.section').all(),1):
             element.screenshot(path=str(ROOT/f'card-{i}.png'))
+        quote = page.locator('details').first
+        assert not quote.evaluate('(el)=>el.open')
+        assert record['commitment'] not in page.locator('.section').first.inner_text()
+        quote.locator('summary').click()
+        assert record['commitment'] in page.locator('.section').first.inner_text()
+        assert page.locator('.bubble').evaluate_all('(xs)=>xs.every(x=>x.scrollWidth<=x.clientWidth)')
+        page.locator('.section').first.screenshot(path=str(ROOT/'card-1-expanded.png'))
         browser.close()
