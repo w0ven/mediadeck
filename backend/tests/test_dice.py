@@ -33,11 +33,24 @@ SIGNED = {'round': 6543504, 'randomness': '58d987b634f331bfee0a5146e4cefa19c6c01
 
 
 @pytest.fixture
-def env(request):
+def env(request, monkeypatch):
     e = request.getfixturevalue('bw_env')
     assert not e.services.registry.enabled('dice')
     e.services.registry.save('dice', enabled=True)
     e.services.registry.get('dice').ctx.telegram = e.bot
+    # Existing suite is the legacy seven-pool compatibility contract. Seed the
+    # persisted pre-upgrade format, rather than changing new production rules.
+    original = DiceService.create
+    def legacy_create(service, message, *, now=None):
+        row = original(service, message, now=now)
+        if json.loads(row['rules'])['version'] != beacon.VERSION:
+            deadline = row['created']+90
+            service.db.execute('UPDATE dice_rounds SET rules=?,deadline=?,timeout=?,round_number=? WHERE nonce=?',
+                (encode({'version': beacon.VERSION, 'chain': beacon.CHAIN, 'window': 90, 'wait': 600, 'fee': 0}), deadline, deadline+600, beacon.future_round(deadline), row['nonce']))
+            for pool in POOLS:
+                service.db.execute('INSERT OR IGNORE INTO dice_pools(nonce,pool) VALUES(?,?)', (row['nonce'], pool))
+        return service.get(row['nonce'])
+    monkeypatch.setattr(DiceService, 'create', legacy_create)
     return e
 
 
@@ -580,7 +593,7 @@ def test_dice_only_menu_and_full_help_are_reachable(env):
         assert any('骰局玩法' in p.get('text','') or any(b.get('text')=='骰局玩法' for line in p.get('reply_markup',{}).get('inline_keyboard',[]) for b in line) for method,p in env.tg.calls if method=='sendMessage')
         await env.bot._dispatch_update({'message':message(env,'/骰局帮助',private=True,mid=8998)})
         text=next(p['text'] for method,p in reversed(env.tg.calls) if method=='sendMessage')
-        assert '金额×出现次数' in text and '指定无额外倍率' in text and '90秒' in text
+        assert '/大 2000' in text and '指令即确认' in text and '180秒' in text
         assert env.db.one("SELECT 1 FROM play_jobs WHERE job_key=?", (f'dice:{env.actors[0]["id"]}:8998',))
     asyncio.run(run())
 
@@ -600,3 +613,35 @@ def test_trusted_invalid_amount_feedback_is_cleaned_without_debit(env,raw):
         assert env.db.one('SELECT 1 FROM play_jobs WHERE job_key=?',(f'dice:{s["tg_id"]}:8500',))
         assert '整数' in env.tg.text(int(s['tg_id']),s['mid'])
     asyncio.run(run())
+
+
+def test_upgrade_retains_seven_pool_escrow_rules_and_history(env):
+    """An already funded v0.42 record is reopened/migrated, never reinterpreted."""
+    from app.modules.dice import migrate
+    original_total = cash(env)
+    row = open_service(env)
+    for index in range(2):
+        s = draft(env, row, index, [{'pool': pool, 'option': options[index], 'amount': 11+index}
+                                   for pool, (_, options) in POOLS.items()])
+        svc(env).confirm(s, env.actors[index])
+    before = {name: env.db.query('SELECT * FROM '+name) for name in ('dice_tickets', 'dice_bets', 'dice_pools', 'play_escrows')}
+    rules = svc(env).get(row['nonce'])['rules']
+    migrate(env.db)
+    assert all(env.db.query('SELECT * FROM '+name) == records for name, records in before.items())
+    assert svc(env).get(row['nonce'])['rules'] == rules
+    assert json.loads(rules)['window'] == 90
+    db2 = Database(env.db.one('PRAGMA database_list')['file'])
+    try:
+        service = DiceService(db2, MemberService(db2, GroupService(db2)), PointsService(db2), lambda: True, lambda c: True, '123')
+        service.close(row['nonce'], now=row['deadline'])
+        db2.execute("UPDATE dice_rounds SET state='fixed',seed=?,dice=? WHERE nonce=?", ('ab'*32, '[4,5,6]', row['nonce']))
+        done = service.settle(row['nonce'], now=row['deadline'])
+        assert set(json.loads(done['result'])) == set(POOLS)
+        assert service.get(row['nonce'])['rules'] == rules
+        assert db2.query('SELECT * FROM dice_tickets') == before['dice_tickets']
+        assert db2.query('SELECT * FROM dice_bets') == before['dice_bets']
+        assert sum(PointsService(db2).balances().values()) == original_total
+        session = service.new_session(row['nonce'], env.actors[0])
+        assert json.loads(session['payload'])['view'] == 'mine'
+    finally:
+        db2.close()

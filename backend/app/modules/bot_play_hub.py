@@ -29,9 +29,9 @@ class PlayHubBotMixin:
                 if not private:choices.insert(0,button('创建牛牛','launch','niuniu'))
                 rows.append(choices)
             if self._plugin_on('dice'):
-                body+='\n🎲 骰局 · 七池对赌 · 90秒封盘'
+                body+='\n🎲 骰局 · 群内大小 · 180秒封盘'
                 rows.append([button('骰局玩法','gamehelp','dice')])
-                body+='\n授权群发送 /骰局 开局'
+                body+='\n授权群 /骰局 开局，回复本局卡 /大 金额 或 /小 金额即确认'
             if self._plugin_on('points_ranking'):rows.append([button('积分榜','view','leaderboard')])
             if private and (self._plugin_on('niuniu') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /牛牛 创建牌局。'
             if not rows:body+='\n\n暂未开放玩法'
@@ -43,7 +43,7 @@ class PlayHubBotMixin:
                       f'每人最低 {cfg["min_stake"]} 积分，不设投注上限（须余额充足），默认 {cfg["default_stake"]}；{cfg["lobby_seconds"]} 秒未满5人全退。选好就锁定，等人未满全退。\n'
                       '开奖公开展示名、选择与本局所得，不公开余额。已创建的局按原参数执行。\n\n<code>/黑白板 10</code> 在授权群创建，然后点手心白板或手背黑板。')
             elif which=='dice':
-                from app.modules.dice_view import HELP
+                from app.modules.dice_group_view import HELP
                 body=HELP
             elif which=='niuniu':body=niuniu_help({**NIUNIU_DEFAULTS,**self._plugins.config('niuniu')})
             else:raise PlayError('玩法页面不存在')

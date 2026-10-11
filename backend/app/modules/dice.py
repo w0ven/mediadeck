@@ -7,6 +7,8 @@ import secrets
 import time
 
 from app.modules import dice_beacon as beacon
+from app.modules.dice_group import GROUP_VERSION, GroupDiceService, is_group
+from app.modules.dice_group import migrate as migrate_group
 from app.modules.dice_rules import MAX_INT, POOLS, settle_pool, validate
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import CashBook, PlayError, integer
@@ -59,9 +61,10 @@ def migrate(db):
       attempts INTEGER NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
       UNIQUE(nonce,purpose,recipient));
     """)
+    migrate_group(db)
 
 
-class DiceService(PlayAccess):
+class DiceService(GroupDiceService, PlayAccess):
     def __init__(self, db, members, points, enabled, allowed, bot_id):
         super().__init__(db, members, allowed, bot_id)
         self.points, self.cash, self.enabled = points, CashBook(points), enabled
@@ -93,14 +96,14 @@ class DiceService(PlayAccess):
             if conn.execute('SELECT 1 FROM dice_rounds WHERE bot_id=? AND actor_uid=? AND created>?', (self.bot_id, member['emby_user_id'], clock-15)).fetchone():
                 raise PlayError('请稍后再开局')
             nonce, secret = secrets.token_hex(12), secrets.token_hex(32)
-            deadline = clock + 90
+            deadline = clock + 180
             row = {'nonce': nonce, 'bot_id': self.bot_id, 'chat_id': chat, 'thread_id': thread,
                    'command_mid': mid, 'actor_uid': member['emby_user_id'], 'created': clock,
                    'deadline': deadline, 'timeout': deadline+600, 'round_number': beacon.future_round(deadline),
-                   'rules': encode({'version': beacon.VERSION, 'chain': beacon.CHAIN, 'window': 90, 'wait': 600, 'fee': 0}),
+                   'rules': encode({'version': GROUP_VERSION, 'draw_version': beacon.VERSION, 'chain': beacon.CHAIN, 'window': 180, 'wait': 600, 'fee': 0}),
                    'secret': secret, 'commitment': hashlib.sha256(bytes.fromhex(secret)).hexdigest()}
             conn.execute(f"INSERT INTO dice_rounds({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
-            for pool in POOLS:
+            for pool in ('size',):
                 conn.execute('INSERT INTO dice_pools(nonce,pool) VALUES(?,?)', (nonce, pool))
             return self.get(nonce)
 
@@ -118,6 +121,8 @@ class DiceService(PlayAccess):
         with economy_write(self.db) as conn:
             clock = time.time() if now is None else now
             row = self.get(nonce)
+            if is_group(row):
+                raise PlayError('本局为群内大小局，请回复群游戏卡下注；规则和验真也在群卡查看')
             tg, member = self.actor(actor, now=clock)
             uid = member['emby_user_id']
             # A rebound identity never acquires another account's betting history.
@@ -181,6 +186,8 @@ class DiceService(PlayAccess):
             if prior:
                 return dict(prior)
             row = self.get(session['nonce'])
+            if is_group(row):
+                raise PlayError('本局只接受回复群游戏卡下注')
             if not self.enabled() or row['state'] != 'open' or clock >= row['deadline'] or not row['card_mid']:
                 raise PlayError('本次未下注：已封盘或停用，已确认投注不变')
             items = validate(payload['draft'])
@@ -226,7 +233,7 @@ class DiceService(PlayAccess):
             clock = time.time() if now is None else now
             row = self.get(nonce)
             if row['state'] in ('opening', 'open') and clock >= row['deadline']:
-                conn.execute("UPDATE dice_rounds SET state='locked' WHERE nonce=?", (nonce,))
+                conn.execute("UPDATE dice_rounds SET state='locked',group_revision=group_revision+1,group_due=0 WHERE nonce=?", (nonce,))
             return self.get(nonce)
 
     def fix(self, nonce, raw, *, now=None):
@@ -242,7 +249,7 @@ class DiceService(PlayAccess):
             if clock >= row['timeout']:
                 raise PlayError('开奖等待已超时')
             seed, dice = beacon.derive(row['secret'], nonce, verified)
-            conn.execute("UPDATE dice_rounds SET state='fixed',evidence=?,seed=?,dice=? WHERE nonce=?", (encode(verified), seed, encode(dice), nonce))
+            conn.execute("UPDATE dice_rounds SET state='fixed',evidence=?,seed=?,dice=?,group_revision=group_revision+1,group_due=0 WHERE nonce=?", (encode(verified), seed, encode(dice), nonce))
             return self.get(nonce)
 
     def settle(self, nonce, *, now=None):
@@ -255,12 +262,16 @@ class DiceService(PlayAccess):
             timeout = row['state'] == 'locked' and clock >= row['timeout']
             if row['state'] != 'fixed' and not (row['state'] == 'locked' and (timeout or not total)):
                 return row
-            if json.loads(row['rules'])['version'] != beacon.VERSION:
+            if json.loads(row['rules'])['version'] not in (beacon.VERSION, GROUP_VERSION):
                 raise RuntimeError('unsupported immutable dice rules')
             result = {}
-            for pool in POOLS:
+            for pool in (('size',) if is_group(row) else POOLS):
                 bets = [dict(b) for b in conn.execute('SELECT * FROM dice_bets WHERE nonce=? AND pool=?', (nonce, pool))]
                 allocation = settle_pool(pool, bets, json.loads(row['dice']), row['seed'], force_refund=timeout)
+                if is_group(row) and not allocation['reason'] and len(allocation['users']) < 2:
+                    allocation['reason'] = 'no_opponent'
+                    for outcome in allocation['users'].values():
+                        outcome.update(returned=outcome['invested'], net=0, refund=outcome['invested'], bonus=0, extra=0)
                 record = conn.execute('SELECT * FROM dice_pools WHERE nonce=? AND pool=?', (nonce, pool)).fetchone()
                 if record['held'] != allocation['total'] or record['accepted'] != allocation['total']:
                     raise RuntimeError('dice pool reconciliation failed')
@@ -281,12 +292,12 @@ class DiceService(PlayAccess):
                 conn.execute('UPDATE dice_pools SET held=0,result=? WHERE nonce=? AND pool=?', (encode(allocation), nonce, pool))
                 result[pool] = allocation
             state = 'empty' if not total else 'refunded' if timeout else 'settled'
-            conn.execute('UPDATE dice_rounds SET state=?,result=?,error=? WHERE nonce=?', (state, encode(result), '固定信标等待超时，全局退款' if timeout else '', nonce))
+            conn.execute("UPDATE dice_rounds SET state=?,result=?,error=?,group_view='summary',group_revision=group_revision+1,group_due=0 WHERE nonce=?", (state, encode(result), '固定信标等待超时，全局退款' if timeout else '', nonce))
             return self.get(nonce)
 
 
 class DicePlugin(Plugin):
-    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='七池玩家对赌 · 90秒封盘 · 0抽成 · 签名验证开奖；确认后不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
+    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='群内大小对赌 · 180秒封盘 · 0抽成；回复本局卡 /大 金额 或 /小 金额即确认，不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
         Field('receipt_job', '待核实消息任务ID（0不操作）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_mid', '人工核实已送达的消息ID（原聊天内）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_retry', '未填消息ID时允许重发（可能重复送达）', kind='bool', default=False)])
@@ -298,7 +309,7 @@ class DicePlugin(Plugin):
         jobs = [{**j, 'purpose': j['purpose'].split(':')[0]} for j in jobs]
         from app.modules.bot_dice import DiceCleanup
         issues = self.ctx.db.query("SELECT nonce,state,error FROM dice_rounds WHERE error<>'' AND state IN ('opening','open','locked','fixed') ORDER BY created DESC LIMIT 20")
-        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '规则': beacon.VERSION, '封盘秒数': 90, '开奖最长等待秒数': 600}
+        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '新局规则': GROUP_VERSION, '旧局规则': beacon.VERSION, '封盘秒数': 180, '开奖最长等待秒数': 600}
 
     async def run(self, config):
         if self.ctx.telegram:
