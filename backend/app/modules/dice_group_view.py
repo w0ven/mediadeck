@@ -17,7 +17,7 @@ HELP = ('🎲 <b>骰局 · 大小对决</b>\n\n'
         '命中者拿回本金，按金额分享对方本金；没有有效对手则全退。\n'
         '允许不同金额、追加及反向追加，每条新指令是新扣款。<b>确认后不可撤注、减额或移动旧注。</b>\n'
         '返还倍数含本金，随投注变化，以封盘为准；整数余分按用户聚合后最大余数法分配。\n'
-        '最新投注固定在卡片上方；完整流水按确认顺序分页，共享同一张群卡。\n'
+        '最新投注固定在卡片上方；完整流水按最新在前倒序分页，共享同一张群卡。\n'
         '固定未来drand轮次并验签，不重摇。封盘后最多等10分钟，无有效数据全局退款；已有结果只按原结果结算。\n'
         '仅站内积分。旧七池局仍按原90秒、七池规则收尾。')
 
@@ -119,8 +119,8 @@ def group_card(row, snapshot, *, report_body=None):
         body += '\n推导：SHA256(紧凑ASCII JSON[draw_version,chain,round,secret,nonce,randomness])；SHA256(seed字节＋8字节大端计数器)，从0开始，拒绝252–255，%6＋1取前三个。承诺=SHA256(secret字节)。BLS G2Basic验签消息=SHA256(previous_signature字节＋8字节大端轮次)。'
     else:
         body += f'\n\n📜 <b>完整流水</b>　{snapshot["page"]+1}/{snapshot["pages"]} · 共{snapshot["count"]}笔'
-        body += '\n'+'\n'.join(bet_line(t, snapshot['page']*PAGE_SIZE+i+1) for i, t in enumerate(snapshot['ledger'])) if snapshot['ledger'] else '\n暂无投注'
-        if row.get('group_page', -1) >= 0 and not terminal:
+        body += '\n'+'\n'.join(bet_line(t, snapshot['count']-snapshot['page']*PAGE_SIZE-i) for i, t in enumerate(snapshot['ledger'])) if snapshot['ledger'] else '\n暂无投注'
+        if snapshot['page'] > 0 and not terminal:
             body += '\n<i>正在查看历史页 · 上方最新区持续更新</i>'
     keys = buttons(row['nonce'], page=snapshot['page'], pages=snapshot['pages'], terminal=terminal)
     assert text_units(body) <= 4096

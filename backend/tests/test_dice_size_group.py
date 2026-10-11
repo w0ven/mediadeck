@@ -68,20 +68,31 @@ def test_dispatch_full_ledger_append_reverse_and_shared_page(env):
         assert cash(env) == start
         await refresh(env, row)
         body = env.tg.text(GROUP, row['card_mid'])
-        assert '3/3' in body and '共19笔' in body and '#19' in body
+        assert '1/3' in body and '共19笔' in body and '#19' in body
+        import re
+        def numbers(text):
+            return [int(n) for n in re.findall(r'#(\d+)</code>', text.split('完整流水</b>')[1])]
+        assert numbers(body) == list(range(19, 11, -1))
+        assert '正在查看历史页' not in body
         assert body.index('#19') < body.index('#18') < body.index('总池')
         assert 'tg://user?id=' in body
         await click(env, row, 'page1')
         await refresh(env, row)
         body = env.tg.text(GROUP, row['card_mid'])
-        assert '#9' in body and '#16' in body and '2/3' in body
+        assert '2/3' in body and numbers(body) == list(range(11, 3, -1))
+        await click(env, row, 'page2')
+        await refresh(env, row)
+        assert numbers(env.tg.text(GROUP, row['card_mid'])) == [3, 2, 1]
+        await click(env, row, 'page1')
         await send(env, bet(env, row, '/小 7', index=1, mid=8400))
         await refresh(env, row)
         body = env.tg.text(GROUP, row['card_mid'])
-        assert '#20' in body and '#9' in body and '2/3' in body
+        assert '#20' in body and '2/3' in body
+        assert numbers(body) == list(range(12, 4, -1))
         await click(env, row, 'latest')
         await refresh(env, row)
-        assert '3/3' in env.tg.text(GROUP, row['card_mid'])
+        body = env.tg.text(GROUP, row['card_mid'])
+        assert '1/3' in body and numbers(body) == list(range(20, 12, -1))
         assert not env.db.query('SELECT * FROM dice_sessions')
         assert len([p for method, p in env.tg.calls if method == 'sendMessage' and p['chat_id'] == GROUP]) == 1
         await env.bot._drain_checkin_deletes(now=time.time()+70, service=DiceCleanup(env.db))
