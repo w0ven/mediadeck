@@ -1,0 +1,20 @@
+{
+  "nonce": "08d470f00e20011a381377f8",
+  "created": 1791737797.565767,
+  "deadline": 1791737887.565767,
+  "timeout": 1791738487.565767,
+  "round_number": 6543563,
+  "commitment": "756caf0752697dc54174706f09305df7775c4eb0f22923ca822336867294ab41",
+  "secret": "bd76f14b7e07406ee697ad7c9dbea9a317c1c6a20c9f0ffae93ed6ed0b1e967c",
+  "seed": "77fc781b16dbc44cfcc0e7f5d9adc2bb5b9e1caa9ae52e87f7df3e04dc847048",
+  "dice": "[5,6,5]",
+  "evidence": "{\"previous_signature\":\"8385407eca4569aa70ffb57177c717330f36899e9c661a4e359a52d2acff50cbb0539c2ee6eeab93a399e9f82b5f8cea0e6140b739ed04008667e7805542cb326856461517ffbf6f7bce72a2829345af146f915b9a23d42c979c843c2a13d847\",\"randomness\":\"2f5dc914c552e3b33d82a86f4a0948d034548bee521dc7d0cce7f1e6f4a7f4cf\",\"round\":6543563,\"signature\":\"a565ea53143c798fd155feed6480813356294e57f71572786f65e1c3346c6a7bab11ea5a207057b064fe41f3b3b0ccd20bae789df2691b15bc53c82dde1c580441b92040d338b3b7a7ca0995789161700899a59b367e1fb9bebfffda583cfb71\"}",
+  "state": "settled",
+  "result": "{\"combo\":{\"reason\":\"\",\"total\":20,\"users\":{\"admin\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":-10,\"refund\":0,\"returned\":0,\"weight\":0,\"winning\":0},\"bw-user-0\":{\"bonus\":10,\"extra\":0,\"invested\":10,\"net\":10,\"refund\":0,\"returned\":20,\"weight\":10,\"winning\":10}}},\"double\":{\"reason\":\"no_hit\",\"total\":20,\"users\":{\"admin\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":0,\"refund\":10,\"returned\":10,\"weight\":0,\"winning\":0},\"bw-user-0\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":0,\"refund\":10,\"returned\":10,\"weight\":0,\"winning\":0}}},\"parity\":{\"reason\":\"\",\"total\":20,\"users\":{\"admin\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":-10,\"refund\":0,\"returned\":0,\"weight\":0,\"winning\":0},\"bw-user-0\":{\"bonus\":10,\"extra\":0,\"invested\":10,\"net\":10,\"refund\":0,\"returned\":20,\"weight\":10,\"winning\":10}}},\"single\":{\"reason\":\"\",\"total\":20,\"users\":{\"admin\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":-10,\"refund\":0,\"returned\":0,\"weight\":0,\"winning\":0},\"bw-user-0\":{\"bonus\":10,\"extra\":0,\"invested\":10,\"net\":10,\"refund\":0,\"returned\":20,\"weight\":10,\"winning\":10}}},\"size\":{\"reason\":\"\",\"total\":20,\"users\":{\"admin\":{\"bonus\":10,\"extra\":0,\"invested\":10,\"net\":10,\"refund\":0,\"returned\":20,\"weight\":10,\"winning\":10},\"bw-user-0\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":-10,\"refund\":0,\"returned\":0,\"weight\":0,\"winning\":0}}},\"total\":{\"reason\":\"no_hit\",\"total\":20,\"users\":{\"admin\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":0,\"refund\":10,\"returned\":10,\"weight\":0,\"winning\":0},\"bw-user-0\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":0,\"refund\":10,\"returned\":10,\"weight\":0,\"winning\":0}}},\"triple\":{\"reason\":\"\",\"total\":20,\"users\":{\"admin\":{\"bonus\":10,\"extra\":0,\"invested\":10,\"net\":10,\"refund\":0,\"returned\":20,\"weight\":10,\"winning\":10},\"bw-user-0\":{\"bonus\":0,\"extra\":0,\"invested\":10,\"net\":-10,\"refund\":0,\"returned\":0,\"weight\":0,\"winning\":0}}}}",
+  "chain": "8990e7a9aaed2ffed73dbd7092123d6f289930540d7651336225dc172e51b2ce",
+  "public_key": "868f005eb8e6e4ca0a47c8a77ceaa5309a47978a7c71bc5cce96366b5d7a569937c529eeda66c7293784a9402801af31",
+  "scheme": "pedersen-bls-chained",
+  "version": "dice-pools-v2-drand-v1",
+  "verified_at": 1791737913.7425966,
+  "total_conserved": 7050
+}

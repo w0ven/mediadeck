@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings>=2.2",
     "httpx>=0.27",
     "pillow>=10",
+    "py-ecc==8.0.0",
 ]
 
 [project.optional-dependencies]
