@@ -394,3 +394,25 @@ def test_shared_history_callbacks_require_authentic_context(env, case):
         assert svc(env).get(row['nonce'])['group_view'] == 'ledger'
         assert not env.db.query('SELECT * FROM dice_tickets')
     asyncio.run(run())
+
+
+def test_group_bet_and_account_deletion_share_guard(env):
+    from app.core.errors import ConfigError
+    from app.modules.account_deletion import self_deletion_guard
+
+    row = asyncio.run(create(env))
+    service = svc(env)
+    msg = bet(env, row)
+    before = cash(env)
+    with self_deletion_guard(env.db, env.uids[0]), pytest.raises(PlayError, match='注销'):
+        service.group_bet(msg, '大', 100)
+    assert not env.db.query('SELECT * FROM dice_tickets')
+    assert cash(env) == before
+    service.group_bet(msg, '大', 100)
+    with pytest.raises(ConfigError, match='未结算'), self_deletion_guard(env.db, env.uids[0]):
+        pytest.fail('accepted group wager must block deletion')
+    env.db.execute("UPDATE dice_rounds SET state='locked' WHERE nonce=?", (row['nonce'],))
+    service.settle(row['nonce'], now=row['timeout'])
+    with self_deletion_guard(env.db, env.uids[0]):
+        pass
+    assert cash(env) == before

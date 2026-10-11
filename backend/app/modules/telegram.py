@@ -40,6 +40,7 @@ import httpx
 
 from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
+from app.modules.bot_accounts import AccountBotMixin
 from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_play import PLAY_CALLBACKS, PlayBotMixin
@@ -264,7 +265,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
+class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -1130,9 +1131,10 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
     def info_menu() -> list[list[dict[str, str]]]:
         return [
             [{"text": "📺 设备", "callback_data": "devices"},
-             {"text": "🔑 重置密码", "callback_data": "resetpw"}],
+             {"text": "🔑 修改密码", "callback_data": "resetpw"}],
             [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
              {"text": "刷新", "callback_data": "me"}],
+            [{"text": "🗑 删除账号", "callback_data": "delete_account"}],
             [{"text": "◀ 功能首页", "callback_data": "home"}],
         ]
 
@@ -3205,8 +3207,8 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             return shown
         mid = self._panel.get(self._pkey(chat_id))
         if mid:
-            return await self._edit(chat_id, mid, self._account_card(member))
-        mid = await self.send_message(chat_id, self._account_card(member))
+            return await self._edit(chat_id, mid, self._account_card(member), self.info_menu())
+        mid = await self.send_message(chat_id, self._account_card(member), self.info_menu())
         if mid:
             self._touch_panel(chat_id, mid)
             self._menu_panel[self._pkey(chat_id)] = mid
@@ -4688,7 +4690,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes", "me_routing",
                                  "req_new", "request_center", "watch_recent", "transfer", "shop", "invites"):
             return
-        if in_group and data.startswith("resetpw"):
+        if in_group and (data.startswith(("resetpw", "delself:")) or data == "delete_account"):
             return
         self._touch_panel(chat_id, message_id)
         if message.get('photo'):
@@ -4710,8 +4712,13 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
             self._rq_abandon(chat_id)
             waiting = None
         if (waiting and ((waiting[0].startswith("password_") and not data.startswith("pw:"))
+                         or (waiting[0] == 'account_delete' and not data.startswith('delself:'))
                          or (waiting[0] == 'shop_confirm' and not data.startswith('buyok:')))):
             self._pending.pop(self._pkey(chat_id), None)
+        if data == "delete_account" or data.startswith("delself:"):
+            if not in_group:
+                await self._account_delete_callback(data, chat_id, message_id, tg_user_id)
+            return
         if data.startswith("pw:"):
             if not in_group:
                 await self._password_flow_callback(data, chat_id, message_id, tg_user_id)
@@ -4873,7 +4880,7 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
         if data == "me":
             await self._edit(
                 chat_id, message_id,
-                self._account_card(member))
+                self._account_card(member), self.info_menu())
             return
         if data == "me_status":
             await self._edit(

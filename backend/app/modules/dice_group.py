@@ -5,6 +5,7 @@ import hashlib
 import json
 import time
 
+from app.modules.account_deletion import deletion_in_progress
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import PlayError, integer
 from app.modules.red_packets import public_name
@@ -71,6 +72,8 @@ class GroupDiceService:
                 if (prior['nonce'], prior['user_id'], prior['tg_id'], prior['option'], prior['amount']) != (row['nonce'], uid, tg, option, amount):
                     raise PlayError('原消息已处理，不能修改旧注')
                 return row
+            if deletion_in_progress(conn, uid):
+                raise PlayError('账号正在注销或结果待核查，本次未下注')
             if not self.enabled() or row['state'] != 'open' or clock >= row['deadline']:
                 raise PlayError('已封盘或暂停，本次未下注')
             if conn.execute('SELECT 1 FROM dice_tickets WHERE nonce=? AND (user_id=? OR tg_id=?) AND NOT(user_id=? AND tg_id=?)', (row['nonce'], uid, tg, uid, tg)).fetchone():

@@ -142,6 +142,25 @@ class LiveEmby:
             )
             return r.status_code in (200, 204)
 
+    async def delete_selfservice_user(self, user_id: str, *, authorize: Any) -> bool:
+        """Fail closed on unknown/admin policy; recheck binding after remote I/O."""
+        base, headers, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            r = self._check(await client.get(f"{base}/emby/Users/{user_id}", headers=headers))
+            if r.status_code != 200:
+                return False
+            body = r.json()
+            if not isinstance(body, dict) or str(body.get("Id") or "") != str(user_id):
+                return False
+            policy = body.get("Policy")
+            if not isinstance(policy, dict) or policy.get("IsAdministrator") is not False:
+                return False
+            if not authorize():
+                return False
+            r = self._check(await client.post(
+                f"{base}/emby/Users/{user_id}/Delete", headers=headers))
+            return r.status_code in (200, 204)
+
     async def set_user_disabled(self, user_id: str, disabled: bool) -> bool:
         return await self.apply_policy(user_id, {"IsDisabled": disabled})
 
