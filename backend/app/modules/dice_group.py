@@ -51,27 +51,39 @@ class GroupDiceService:
         if option not in ('大', '小'):
             raise PlayError('请使用 /大 金额 或 /小 金额')
         reply = message.get('reply_to_message') or {}
-        if not reply:
-            raise PlayError('请回复本局游戏卡发送 /大 金额 或 /小 金额')
-        reply_chat, reply_thread = self.group(reply)
-        sender = reply.get('from') or {}
-        if (reply_chat != chat or reply_thread != thread or sender.get('is_bot') is not True
-                or str(sender.get('id')) != self.bot_id
-                or type(reply.get('message_id')) is not int or reply['message_id'] <= 0):
-            raise PlayError('请回复原群、原话题中的本Bot游戏卡')
+        if reply:
+            reply_chat, reply_thread = self.group(reply)
+            sender = reply.get('from') or {}
+            if (reply_chat != chat or reply_thread != thread or sender.get('is_bot') is not True
+                    or str(sender.get('id')) != self.bot_id
+                    or type(reply.get('message_id')) is not int or reply['message_id'] <= 0):
+                raise PlayError('请回复原群、原话题中的本Bot游戏卡')
         with economy_write(self.db) as conn:
             clock = time.time() if now is None else now
             tg, member = self.actor(message.get('from') or {}, now=clock)
             uid = member['emby_user_id']
-            raw = conn.execute('SELECT * FROM dice_rounds WHERE bot_id=? AND chat_id=? AND thread_id=? AND card_mid=?', (self.bot_id, chat, thread, reply['message_id'])).fetchone()
-            if not raw or not is_group(raw):
-                raise PlayError('这不是当前群内大小局的开局卡')
-            row = dict(raw)
+            # Replay resolution precedes active-round selection, including after restart.
             prior = conn.execute('SELECT * FROM dice_group_receipts WHERE bot_id=? AND chat_id=? AND message_id=?', (self.bot_id, chat, mid)).fetchone()
             if prior:
-                if (prior['nonce'], prior['user_id'], prior['tg_id'], prior['option'], prior['amount']) != (row['nonce'], uid, tg, option, amount):
+                if (prior['user_id'], prior['tg_id'], prior['option'], prior['amount']) != (uid, tg, option, amount):
                     raise PlayError('原消息已处理，不能修改旧注')
-                return row
+                original = self.get(prior['nonce'])
+                if original['thread_id'] != thread:
+                    raise PlayError('原消息已处理，不能修改旧注')
+                return original
+            if reply:
+                raw = conn.execute("""SELECT * FROM dice_rounds WHERE bot_id=? AND chat_id=? AND thread_id=?
+                    AND (card_mid=? OR nonce IN (SELECT nonce FROM dice_messages
+                    WHERE purpose='art:open' AND state='sent' AND mid=?))""",
+                    (self.bot_id, chat, thread, reply['message_id'], reply['message_id'])).fetchone()
+            else:
+                raw = conn.execute("SELECT * FROM dice_rounds WHERE bot_id=? AND chat_id=? AND thread_id=? AND state IN ('opening','open','locked','fixed')",
+                                   (self.bot_id, chat, thread)).fetchone()
+            if not raw or not is_group(raw):
+                raise PlayError('当前没有可下注的群内大小局')
+            row = dict(raw)
+            if not reply and mid <= row['command_mid']:
+                raise PlayError('这条指令早于本局，本次未下注')
             if deletion_in_progress(conn, uid):
                 raise PlayError('账号正在注销或结果待核查，本次未下注')
             if not self.enabled() or row['state'] != 'open' or clock >= row['deadline']:
@@ -116,6 +128,19 @@ class GroupDiceService:
                 or sender.get('is_bot') is not True or str(sender.get('id')) != self.bot_id
                 or type(mid) is not int or mid <= 0 or data not in actions):
             raise PlayError('请使用本局原群话题中的Bot卡')
+        op = data.rsplit(':', 1)[-1]
+        if op in ('artopen', 'artresult'):
+            purpose = 'art:open' if op == 'artopen' else 'art:result'
+            job = conn.execute('SELECT * FROM dice_messages WHERE nonce=? AND purpose=?', (row['nonce'], purpose)).fetchone()
+            if (not job or job['state'] not in ('sent', 'unknown', 'sending')
+                    or (job['mid'] is not None and job['mid'] != mid)
+                    or data not in [b.get('callback_data') for line in json.loads(job['keyboard']) for b in line]):
+                raise PlayError('请使用本局原图片')
+            if job['state'] != 'sent':
+                conn.execute("UPDATE dice_messages SET state='sent',mid=?,lease=0 WHERE id=?", (mid, job['id']))
+                conn.execute('UPDATE dice_rounds SET cleanup_queued=0 WHERE nonce=?', (row['nonce'],))
+                conn.execute("INSERT INTO dice_delivery_audit(job_id,action,mid,created) VALUES(?,'callback',?,?)", (job['id'], mid, time.time()))
+            return
         report = conn.execute("SELECT * FROM dice_messages WHERE nonce=? AND purpose='report:0'", (row['nonce'],)).fetchone()
         if report and report['state'] == 'sent':
             if mid != report['mid']:

@@ -300,7 +300,7 @@ class DiceService(GroupDiceService, PlayAccess):
 
 
 class DicePlugin(Plugin):
-    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='群内大小对赌 · 180秒封盘 · 0抽成；回复本局卡 /大 金额 或 /小 金额即确认，不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
+    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='群内大小对赌 · 180秒封盘 · 0抽成；直接发送 /大 金额 或 /小 金额即确认，不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
         Field('receipt_job', '待核实消息任务ID（0不操作）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_mid', '人工核实已送达的消息ID（原聊天内）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_retry', '未填消息ID时允许重发（可能重复送达）', kind='bool', default=False)])

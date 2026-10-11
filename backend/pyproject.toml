@@ -19,5 +19,8 @@ dev = ["pytest>=8", "pytest-asyncio>=0.23", "ruff==0.16.6", "playwright>=1.49"]
 [tool.setuptools.packages.find]
 include = ["app*"]
 
+[tool.setuptools.package-data]
+app = ["assets/dice/*.jpg"]
+
 [tool.ruff]
 line-length = 100

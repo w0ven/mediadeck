@@ -13,6 +13,7 @@ from app.modules import dice_group_view
 from app.modules.bot_dice_group import GroupDiceBotMixin
 from app.modules.checkin_cleanup import CleanupService
 from app.modules.dice import DiceService
+from app.modules.dice_art import art_bytes, art_name
 from app.modules.dice_group import GROUP_VERSION, is_group
 from app.modules.dice_rules import POOLS, normalize, validate
 from app.modules.dice_view import group_card, private_card, report_pages
@@ -77,7 +78,7 @@ class DiceBotMixin(GroupDiceBotMixin):
         parts = text.split()
         verb = parts[0].lower() if parts else ''
         start = len(parts) == 2 and verb.split('@')[0] == '/start' and parts[1].startswith('dice_')
-        command = verb.split('@')[0] in ('/骰局', '/dice', '/骰局帮助')
+        command = verb.split('@')[0] in ('/猜大小', '/猜大小帮助')
         if not command and not start:
             return await self._dice_amount_input(message)
         self._check_bot_identity()
@@ -97,13 +98,13 @@ class DiceBotMixin(GroupDiceBotMixin):
                     raise PlayError('请从本局群卡进入本人私聊')
                 session = service.new_session(parts[1][5:], message['from'])
                 await self._dice_draw(session)
-            elif verb.split('@')[0] == '/骰局帮助':
+            elif verb.split('@')[0] == '/猜大小帮助':
                 await self._dice_feedback(message, dice_group_view.HELP)
             else:
                 if len(parts) != 1:
-                    raise PlayError('用法：/骰局；开局后回复群卡发送 /大 金额 或 /小 金额')
+                    raise PlayError('用法：/猜大小；开局后直接发送 /大 金额 或 /小 金额')
                 if chat['type'] == 'private':
-                    raise PlayError('请在现有授权群发送 /骰局')
+                    raise PlayError('请在现有授权群发送 /猜大小')
                 row = service.create(message)
                 await self._dice_publish_open(row)
                 row = service.get(row['nonce'])
@@ -297,6 +298,8 @@ class DiceBotMixin(GroupDiceBotMixin):
         else:
             body, keys = group_card(row, 0, self._bot_username)
         with economy_write(self._db) as conn:
+            if is_group(row):
+                self._dice_service().queue_message(conn, row['nonce'], 'art:open', row['chat_id'], art_name(row, opening=True), [[{'text': '查看本局', 'callback_data': f'dg:{row["nonce"]}:artopen'}]], thread=row['thread_id'])
             self._dice_service().queue_message(conn, row['nonce'], 'open', row['chat_id'], body, keys, row['thread_id'])
         await self._dice_deliver(row['nonce'])
 
@@ -313,7 +316,7 @@ class DiceBotMixin(GroupDiceBotMixin):
                 if not job:
                     break
                 job = dict(job)
-                if job['purpose'] == 'open' and row['state'] not in ('opening', 'open'):
+                if job['purpose'] in ('open', 'art:open') and row['state'] not in ('opening', 'open'):
                     conn.execute("UPDATE dice_messages SET state='obsolete' WHERE id=?", (job['id'],))
                     continue
                 if job['purpose'].startswith('detail:'):
@@ -326,7 +329,16 @@ class DiceBotMixin(GroupDiceBotMixin):
             token = CALL_DELIVERY.set(None)
             try:
                 try:
-                    mid = await self._dice_send(int(job['recipient']), job['body'], json.loads(job['keyboard']), thread_id=job['thread'] or None)
+                    if job['purpose'].startswith('art:'):
+                        payload = {'chat_id': int(job['recipient']), 'caption': '🎲 大小对决' if job['purpose'] == 'art:open' else dice_group_view.result_heading(row), 'parse_mode': 'HTML'}
+                        payload['reply_markup'] = {'inline_keyboard': json.loads(job['keyboard'])}
+                        if job['thread']:
+                            payload['message_thread_id'] = job['thread']
+                        result = await self._call_multipart('sendPhoto', payload,
+                            {'photo': (job['body']+'.jpg', art_bytes(job['body']), 'image/jpeg')})
+                        mid = result.get('message_id') if isinstance(result, dict) else None
+                    else:
+                        mid = await self._dice_send(int(job['recipient']), job['body'], json.loads(job['keyboard']), thread_id=job['thread'] or None)
                     problem = CALL_DELIVERY.get() or failure()
                 except asyncio.CancelledError:
                     raise
@@ -357,14 +369,16 @@ class DiceBotMixin(GroupDiceBotMixin):
             finally:
                 CALL_DELIVERY.reset(token)
         row = service.get(nonce)
-        if row['state'] in ('settled', 'refunded', 'empty') and row['card_mid']:
+        if row['state'] in ('settled', 'refunded', 'empty'):
             pending = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%' AND state!='sent'", (nonce,))['n']
             count = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%'", (nonce,))['n']
-            if count and not pending:
-                DiceCleanup(self._db).enqueue(self._active_bot_id, int(row['chat_id']), row['thread_id'], row['card_mid'], 'feedback', self._active_bot_id, due=time.time())
+            art = self._db.one("SELECT state FROM dice_messages WHERE nonce=? AND purpose='art:result'", (nonce,))
+            if count and not pending and (not art or art['state'] == 'sent'):
+                if row['card_mid']:
+                    DiceCleanup(self._db).enqueue(self._active_bot_id, int(row['chat_id']), row['thread_id'], row['card_mid'], 'feedback', self._active_bot_id, due=time.time())
+                for photo in self._db.query("SELECT mid FROM dice_messages WHERE nonce=? AND purpose='art:open' AND state='sent'", (nonce,)):
+                    DiceCleanup(self._db).enqueue(self._active_bot_id, int(row['chat_id']), row['thread_id'], photo['mid'], 'feedback', self._active_bot_id, due=time.time())
                 self._db.execute('UPDATE dice_rounds SET cleanup_queued=1 WHERE nonce=?', (nonce,))
-        elif row['state'] in ('settled', 'refunded', 'empty'):
-            self._db.execute('UPDATE dice_rounds SET cleanup_queued=1 WHERE nonce=?', (nonce,))
 
     async def _dice_tick(self):
         if self._db is None or self._points is None or not self.enabled:

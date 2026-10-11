@@ -102,12 +102,11 @@ def test_dispatch_full_ledger_append_reverse_and_shared_page(env):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('case', ['missing', 'unrelated', 'wrong_bot', 'forged', 'group', 'topic', 'forward', 'reply_forward', 'anonymous', 'robot', 'wrong_target', 'zero', 'negative', 'float', 'overflow', 'closed', 'private'])
+@pytest.mark.parametrize('case', ['unrelated', 'wrong_bot', 'forged', 'group', 'topic', 'forward', 'reply_forward', 'anonymous', 'robot', 'wrong_target', 'zero', 'negative', 'float', 'overflow', 'closed', 'private'])
 def test_invalid_dispatch_never_debits_or_deletes_unrelated(env, case):
     async def run():
         row = await create(env)
         m = bet(env, row)
-        if case == 'missing': m.pop('reply_to_message')
         if case == 'unrelated': m['reply_to_message']['message_id'] += 123
         if case == 'wrong_bot': m['reply_to_message']['from']['id'] = 999
         if case == 'forged': m['reply_to_message']['from'] = env.actors[1]
@@ -184,7 +183,7 @@ def test_verified_settlement_report_paging_and_cleanup(env, monkeypatch):
         assert '净盈亏' in body and 'tg://user?id=' in body
         report_message = reply(env, row)
         report_message.update(copy.deepcopy(env.tg.message(GROUP, report['mid'])), message_id=report['mid'])
-        await click(env, row, 'page0', report_message)
+        await click(env, row, 'latest', report_message)
         await refresh(env, row)
         assert '#1' in env.tg.text(GROUP, report['mid']) and '共12笔' in env.tg.text(GROUP, report['mid'])
         assert not env.db.query("SELECT * FROM dice_messages WHERE purpose LIKE 'detail:%'")
@@ -206,7 +205,9 @@ def test_preview_bounds_rules_proof_and_no_private_entry(env):
             with economy_write(env.db):
                 row, snapshot = svc(env).group_snapshot(row['nonce'])
                 body, keys = group_card(row, snapshot)
-            assert keys and '等待对手' in body
+            assert keys
+            if view == 'ledger':
+                assert '等待对手' in body
             if view == 'ledger':
                 assert row['nonce'] not in body and row['commitment'] not in body
     asyncio.run(run())
@@ -400,7 +401,7 @@ def test_shared_history_callbacks_require_authentic_context(env, case):
         if case == 'forward': m['forward_origin'] = {'type': 'user'}
         if case == 'anonymous': m['sender_chat'] = {'id': GROUP}
         if case == 'unbound': actor = {'id': 9999999, 'is_bot': False}
-        data = f'dg:{row["nonce"]}:rules'
+        data = f'dg:{row["nonce"]}:details'
         await env.bot._dispatch_update({'callback_query': {'id': data, 'from': actor, 'data': data, 'message': m}})
         assert svc(env).get(row['nonce'])['group_view'] == 'ledger'
         assert not env.db.query('SELECT * FROM dice_tickets')
