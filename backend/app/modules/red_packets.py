@@ -260,8 +260,6 @@ class PacketService:
                 raise PacketError('请使用原Bot红包卡的领取按钮')
             tg, member = self._actor(actor)
             uid = member['emby_user_id']
-            if uid == row['actor_user_id'] or tg == row['actor_tg_id']:
-                raise PacketError('发起人不能领取自己发出的红包')
             if row['audience'] == 'whitelist' and member.get('group_id') != WHITELIST_GROUP_ID:
                 raise PacketError('此红包仅当前有效白名单成员可领')
             prior = conn.execute('SELECT * FROM red_packet_claims WHERE nonce=? AND (user_id=? OR tg_user_id=?)', (nonce, uid, tg)).fetchone()

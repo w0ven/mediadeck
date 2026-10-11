@@ -66,7 +66,7 @@ class BlackwhiteBotMixin:
         if chat.get('type') not in ('group', 'supergroup') or not self._group_chat_allowed(chat):
             return True
         try:
-            if len(parts) > 2 or (len(parts) == 2 and not re.fullmatch(r'[0-9]{1,6}', parts[1])):
+            if len(parts) > 2 or (len(parts) == 2 and not re.fullmatch(r'[0-9]{1,19}', parts[1])):
                 raise PlayError('用法：/黑白板 或 /黑白板 10')
             stake = int(parts[1]) if len(parts) == 2 else None
             row = self._blackwhite_service().create(message, stake)

@@ -10,7 +10,14 @@ from html import escape
 from app.modules.economy_rules import economy_write
 from app.modules.game_ui import defer_ui, render_image
 from app.modules.group_points import GroupPointsError, reliable_user
-from app.modules.niuniu import CATEGORIES, DEFAULTS, NiuniuService, card_text, strength
+from app.modules.niuniu import (
+    CATEGORIES,
+    DEFAULTS,
+    ActiveNiuniu,
+    NiuniuService,
+    card_text,
+    strength,
+)
 from app.modules.niuniu_delivery import NiuniuDelivery
 from app.modules.niuniu_image import net_label, render_room
 from app.modules.play_money import PlayError
@@ -95,13 +102,68 @@ class NiuniuBotMixin:
                 return True
             if chat.get('type') not in ('group', 'supergroup') or not self._group_chat_allowed(chat):
                 return True
-            if len(parts) > 2 or len(parts) == 2 and not re.fullmatch('[0-9]{1,6}', parts[1]):
+            if len(parts) > 2 or len(parts) == 2 and not re.fullmatch('[0-9]{1,19}', parts[1]):
                 raise PlayError('用法：/牛牛 或 /牛牛 100（闲家底注，创建者坐庄担保4份）')
             row = self._niuniu_service().create(message, int(parts[1]) if len(parts) == 2 else None)
             defer_ui(self, ('niuniu', row['nonce']), lambda: self._niuniu_open(row['nonce'], message))
+        except ActiveNiuniu as exc:
+            await self._niuniu_guide(exc.row, message)
         except (PlayError, GroupPointsError) as exc:
             await self.send_message(chat.get('id'), '🍃 '+escape(str(exc)), thread_id=self._thread_id(message), reply_to_message_id=message.get('message_id'))
         return True
+
+    async def _niuniu_guide(self, row, message):
+        # Use only the validated same-bot/chat/topic active round, never user links.
+        if not row['card_message_id']:
+            await self._niuniu_publish(row['nonce'])
+        row = self._niuniu_service().get(row['nonce'])
+        if not row or row['state'] not in ('lobby', 'running') or not row['card_message_id']:
+            return
+        group, mid = str(row['chat_id']), row['card_message_id']
+        username = str((message.get('chat') or {}).get('username') or '')
+        path = f'{row["thread_id"]}/{mid}' if row['thread_id'] else str(mid)
+        url = (f'https://t.me/{username}/{path}' if re.fullmatch(r'[A-Za-z0-9_]+', username)
+               else f'https://t.me/c/{group[4:]}/{path}' if group.startswith('-100') else '')
+        keys = [[{'text': '🐂 前往正在进行的牌局', 'url': url}]] if url else None
+        guide = await self.send_message(int(group), '🍃 已有牛牛在等人，点击前往本局。' if url else '🍃 已有牛牛在等人，请使用这张原卡。',
+                                        keys, thread_id=row['thread_id'] or None, reply_to_message_id=mid)
+        if type(guide) is int and guide > 0 and guide != mid:
+            self._db.execute('INSERT OR IGNORE INTO niuniu_guides(nonce,message_id) VALUES(?,?)', (row['nonce'], guide))
+            # The round may finish while Telegram is sending the guide.
+            await self._niuniu_delete_guides(row['nonce'])
+
+    async def _niuniu_delete_guides(self, nonce):
+        from app.modules.telegram import _CALL_ERROR, _QUIET_CALL
+        if not self.enabled:return
+        row = self._niuniu_service().get(nonce)
+        if not row or row['state'] in ('lobby', 'running') or not self._niuniu_transport_allowed(row):return
+        for _ in range(30):
+            clock = time.time()
+            with economy_write(self._db) as conn:
+                job = conn.execute("SELECT * FROM niuniu_guides WHERE nonce=? AND state IN ('pending','deleting') AND due<=? ORDER BY message_id LIMIT 1", (nonce, clock)).fetchone()
+                if not job:break
+                job = dict(job)
+                lease = clock+45
+                conn.execute("UPDATE niuniu_guides SET state='deleting',due=?,attempts=attempts+1 WHERE nonce=? AND message_id=?", (lease, nonce, job['message_id']))
+            quiet, error, receipt = _QUIET_CALL.set(True), _CALL_ERROR.set(None), CALL_DELIVERY.set(None)
+            try:
+                try:
+                    result = await self._call('deleteMessage', {'chat_id': int(row['chat_id']), 'message_id': job['message_id']}, timeout=10)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - exact-target housekeeping never repeats money
+                    result = None
+                missing = str(_CALL_ERROR.get() or '').lower()
+                failure = CALL_DELIVERY.get() or {}
+                success = result is True or 'message to delete not found' in missing or 'message_id_invalid' in missing
+                state = 'deleted' if success else 'failed' if failure.get('state') == 'failed' or job['attempts'] >= 7 else 'pending'
+                due = clock+max(int(failure.get('retry_after') or 0), min(300, 5*2**job['attempts']))
+                self._db.execute("UPDATE niuniu_guides SET state=?,due=? WHERE nonce=? AND message_id=? AND state='deleting' AND due=?",
+                                 (state, due, nonce, job['message_id'], lease))
+            finally:
+                _QUIET_CALL.reset(quiet)
+                _CALL_ERROR.reset(error)
+                CALL_DELIVERY.reset(receipt)
 
     async def _niuniu_open(self, nonce, message):
         # Initial response is deferred too; retain trusted original-command cleanup.
@@ -212,6 +274,8 @@ class NiuniuBotMixin:
 
     async def _niuniu_result(self, nonce):
         if not self.enabled:return
+        # Housekeeping must not delay the result picture or business callbacks.
+        defer_ui(self, ('niuniu-guides', nonce), lambda: self._niuniu_delete_guides(nonce))
         delivery = NiuniuDelivery(self._niuniu_service())
         row = delivery.claim(nonce)
         if not row:
@@ -290,3 +354,5 @@ class NiuniuBotMixin:
                 await self._niuniu_result(row['nonce'])
             for row in self._db.query("SELECT nonce FROM niuniu_rounds WHERE bot_id=? AND card_delete_state IN ('pending','retry','deleting') ORDER BY created_at LIMIT 50", (self._active_bot_id,)):
                 await self._niuniu_delete_card(row['nonce'])
+            for row in self._db.query("SELECT DISTINCT g.nonce FROM niuniu_guides g JOIN niuniu_rounds r ON r.nonce=g.nonce WHERE r.bot_id=? AND r.state NOT IN ('lobby','running') AND g.state IN ('pending','deleting') AND g.due<=? LIMIT 30", (self._active_bot_id, time.time())):
+                await self._niuniu_delete_guides(row['nonce'])

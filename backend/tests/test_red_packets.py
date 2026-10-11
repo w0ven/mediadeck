@@ -95,8 +95,9 @@ def test_confirm_and_claim_cross_connection_atomic_idempotency_conservation(env,
     if mode == 'equal':
         assert values == [10] * 10
     card = context(row, claim=True)
-    with pytest.raises(PacketError, match='发起人不能'):
-        env.service.claim(row['nonce'], actor(), card)
+    own = multi(env, 8, lambda s, _: s.claim(row['nonce'], actor(), card))
+    assert sum(not r['already'] for r in own) == 1
+    assert env.points.balance('u1') == 900 + own[0]['amount']
     first = multi(env, 8, lambda s, _: s.claim(row['nonce'], actor(2), card))
     assert len({r['amount'] for r in first}) == 1 and sum(not r['already'] for r in first) == 1
     def claim(s, i):
@@ -105,7 +106,7 @@ def test_confirm_and_claim_cross_connection_atomic_idempotency_conservation(env,
         except PacketError:
             return {'ok': False}
     taken = multi(env, 14, claim)
-    assert sum(r['ok'] for r in taken) == 9
+    assert sum(r['ok'] for r in taken) == 8
     end = env.service.get(row['nonce'])
     assert end['status'] == 'exhausted' and end['remaining'] == 0 and end['claimed_count'] == 10
     assert sum(r['amount'] for r in env.db.query('SELECT * FROM red_packet_claims')) == 100
