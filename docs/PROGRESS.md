@@ -2639,3 +2639,10 @@ three only appear at production scale or during a routine operation.
 - Show sourced recent playback and observation limits, including new accounts, pending proof and unknown timestamps placed last in either recent-play sort direction. Optional read-only history failures do not block the list.
 - Feed authenticated, upstream-accepted Progress through the original proof gate with bound identity, separate source baselines, report/poll deduplication and bounded credential-free diagnostics. Keep strict pause, seek, rate, stale and restart protections and traffic accounting unchanged.
 - Integrated protected-main gates: 3770 tests passed, 56 environment-dependent skips and 2 subtests; repository lint, isolated mock health and actual Chromium UI passed. Source-faithful route/client fixtures are not claims of live client recovery. Unknown daily historical allocation stays an explicit remainder. Standard PR/CI/tag deployment remains mandatory.
+
+
+## 2026-10-11 — Native Sessions missing playback identity
+- Live native Sessions omit PlaySessionId; reuse only their existing issued and observed admission lease after current user/device/session/item matching. Explicit Sessions conflicts still fail. Recheck the binding in the same interval commit transaction, without seat writes or looser proof thresholds.
+- Protect replacement leases from old Stop reports, retain report/poll priority and restart baselines, and distinguish progress verification in bounded credential-free counters.
+- Add actual route and source-faithful missing-identity regressions, including wrong/absent/unobserved/guarded bindings, ambiguity, replacements, deletion, commit races, stop and restart. Original proof and traffic functions stay identical. Ship only through the standard PR/CI/tag workflow; no live playback or Bot test sends.
+- Final local integrated gates: 3785 passed, 56 environment skips and 2 subtests; full lint, isolated mock health and Chromium passed. Natural live Progress acceptance is checked separately after the official tag deployment.
