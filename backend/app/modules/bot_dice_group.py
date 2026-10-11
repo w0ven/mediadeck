@@ -30,7 +30,7 @@ class GroupDiceBotMixin:
             return True
         try:
             if len(parts) != 2 or not re.fullmatch(r'[0-9]{1,16}', parts[1]):
-                raise PlayError('回复本局卡：/大 金额 或 /小 金额，金额须为正整数')
+                raise PlayError('群内发送：/大 金额 或 /小 金额，金额须为正整数')
             row = self._dice_service().group_bet(message, verb.split('@')[0][1:], int(parts[1]))
             self._dice_group_schedule(row['nonce'])
         except (PlayError, GroupPointsError) as exc:
@@ -100,14 +100,16 @@ class GroupDiceBotMixin:
             with economy_write(self._db) as conn:
                 row = service.get(nonce)
                 service.group_context(conn, row, message, actor, data)
-                if op == 'latest':
+                if op in ('artopen', 'artresult'):
+                    page, view = row['group_page'], row['group_view']
+                elif op == 'latest':
                     page, view = -1, 'ledger'
                 elif re.fullmatch(r'page[0-9]{1,9}', op):
                     page, view = int(op[4:]), 'ledger'
                     count = conn.execute('SELECT COUNT(*) FROM dice_tickets WHERE nonce=?', (nonce,)).fetchone()[0]
                     if page >= max(1, (count+7)//8):
                         raise PlayError('流水页码无效')
-                elif op in ('rules', 'proof', 'summary'):
+                elif op in ('details', 'rules', 'proof', 'summary'):
                     page, view = row['group_page'], op
                 else:
                     raise PlayError('按钮无效')
@@ -120,7 +122,9 @@ class GroupDiceBotMixin:
 
     def _dice_group_reports(self, row):
         tickets = self._db.query('SELECT * FROM dice_tickets WHERE nonce=? ORDER BY rowid', (row['nonce'],))
+        from app.modules.dice_art import art_name
         with economy_write(self._db) as conn:
+            self._dice_service().queue_message(conn, row['nonce'], 'art:result', row['chat_id'], art_name(row), [[{'text': '查看战报', 'callback_data': f'dg:{row["nonce"]}:artresult'}]], thread=row['thread_id'])
             for i, body in enumerate(report_pages(row, tickets)):
                 # Only first report is the shared interactive history anchor.
                 keys = buttons(row['nonce'], terminal=True, pages=max(1, (len(tickets)+7)//8)) if i == 0 else ()

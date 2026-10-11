@@ -10,8 +10,8 @@ from app.modules.dice_group import PAGE_SIZE, TERMINAL
 from app.modules.game_mentions import result_mention, text_units
 
 HELP = ('🎲 <b>骰局 · 大小对决</b>\n\n'
-        '在授权群发 /骰局，180秒封盘。\n'
-        '<b>回复本局Bot卡</b>发送 <code>/大 2000</code> 或 <code>/小 500</code>，指令即确认扣款。\n'
+        '在授权群发 /猜大小，180秒封盘。\n'
+        '<b>直接在本群发送</b> <code>/大 2000</code> 或 <code>/小 500</code>，指令即确认扣款。\n'
         '小：4–10点；大：11–17点。三骰相同为豹子，全部退款。\n'
         '0抽成，最低1整数积分，不设人为金额上限，须余额及安全整数范围允许。'
         '命中者拿回本金，按金额分享对方本金；没有有效对手则全退。\n'
@@ -76,17 +76,19 @@ def bet_line(ticket, number):
     return f'{"🔴" if side == "大" else "🔵"} {mention}　{side} <b>{ticket["amount"]:,}</b>　<code>#{number}</code>'
 
 
-def buttons(nonce, *, page=0, pages=1, terminal=False):
+def buttons(nonce, *, page=0, pages=1, terminal=False, view="ledger"):
     def key(label, op):
         return {'text': label, 'callback_data': f'dg:{nonce}:{op}'}
     pager = []
     if page > 0:
         pager.append(key('‹ 上页', f'page{page-1}'))
-    pager.append(key(f'流水 {page+1}/{pages}', f'page{page}'))
+    pager.append(key(f'流水 {page+1}/{pages} · 最新', 'latest'))
     if page+1 < pages:
         pager.append(key('下页 ›', f'page{page+1}'))
-    return [pager, [key('↻ 回最新', 'latest'), key('🏁 战报' if terminal else '🎲 盘口', 'summary' if terminal else 'latest')],
-            [key('📖 规则', 'rules'), key('🔐 验真', 'proof')]]
+    if view in ('details', 'rules', 'proof'):
+        return [[key('‹ 返回', 'summary' if terminal else 'latest'), key('规则', 'rules'), key('验真', 'proof')]]
+    return [pager, [key('详情', 'details')]]
+
 
 
 def group_card(row, snapshot, *, report_body=None):
@@ -100,29 +102,29 @@ def group_card(row, snapshot, *, report_body=None):
     body += '\n'+'\n'.join(bet_line(t, snapshot['count']-i) for i, t in enumerate(snapshot['latest'])) if snapshot['latest'] else '\n第一笔，等你落子 ✨'
     body += '\n\n'+markets(snapshot['totals'], row=row)
     if not terminal:
-        body += '\n\n↳ 回复本卡 <code>/大 2000</code> 或 <code>/小 500</code>\n<b>发送即确认，不可撤注</b>\n<i>参考返还含本金，随投注变动，以封盘为准。</i>'
-    else:
-        body += '\n<i>最终返还含本金；整数余分按用户分配。</i>'
+        body += '\n\n↳ 群内直接发 <code>/大 2000</code> 或 <code>/小 500</code>\n<b>发送即确认，不可撤注</b>'
     view = row.get('group_view', 'ledger')
     if view == 'summary' and report_body and terminal:
         # The immutable report remains the source of truth when returning from history.
         body = report_body
+    elif view == 'details':
+        body = head+'\n\n180秒 · 0抽成 · 不可撤注\n玩法规则与开奖验真，请使用下方入口。'
     elif view == 'rules':
-        body += '\n\n'+HELP
+        body = HELP
     elif view == 'proof':
         evidence = {'rules': json.loads(row['rules']), 'chain': beacon.CHAIN, 'public_key': beacon.PUBLIC_KEY,
                     'scheme': beacon.SCHEME, 'nonce': row['nonce'], 'round': row['round_number'],
                     'commitment': row['commitment'], 'deadline': row['deadline'], 'timeout': row['timeout']}
         if row['state'] not in ('opening', 'open'):
             evidence.update(secret=row['secret'], seed=row['seed'], dice=json.loads(row['dice']), beacon=json.loads(row['evidence']))
-        body += '\n\n🔐 <b>开奖证据</b>\n<pre>'+escape(json.dumps(evidence, ensure_ascii=False, separators=(',', ':')))+'</pre>'
+        body = '🔐 <b>开奖证据</b>\n<pre>'+escape(json.dumps(evidence, ensure_ascii=False, separators=(',', ':')))+'</pre>'
         body += '\n推导：SHA256(紧凑ASCII JSON[draw_version,chain,round,secret,nonce,randomness])；SHA256(seed字节＋8字节大端计数器)，从0开始，拒绝252–255，%6＋1取前三个。承诺=SHA256(secret字节)。BLS G2Basic验签消息=SHA256(previous_signature字节＋8字节大端轮次)。'
     else:
         body += f'\n\n📜 <b>完整流水</b>　{snapshot["page"]+1}/{snapshot["pages"]} · 共{snapshot["count"]}笔'
         body += '\n'+'\n'.join(bet_line(t, snapshot['count']-snapshot['page']*PAGE_SIZE-i) for i, t in enumerate(snapshot['ledger'])) if snapshot['ledger'] else '\n暂无投注'
         if snapshot['page'] > 0 and not terminal:
             body += '\n<i>正在查看历史页 · 上方最新区持续更新</i>'
-    keys = buttons(row['nonce'], page=snapshot['page'], pages=snapshot['pages'], terminal=terminal)
+    keys = buttons(row['nonce'], page=snapshot['page'], pages=snapshot['pages'], terminal=terminal, view=view)
     assert text_units(body) <= 4096
     assert all(len(b['callback_data'].encode()) <= 64 for line in keys for b in line)
     return body, keys
