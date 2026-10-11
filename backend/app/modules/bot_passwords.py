@@ -259,6 +259,13 @@ class PasswordBotMixin:
         p = waiting[2]
         if str(chat) != str(tg_id) or p.get("tg_id") != str(tg_id):
             return
+        # Best effort even for invalid / wrong-card input. Never log the secret.
+        if message.get("message_id"):
+            with contextlib.suppress(Exception):
+                await self._call("deleteMessage", {"chat_id": chat,
+                                                  "message_id": message["message_id"]})
+        if self._pending.get(self._pkey(chat)) is not waiting or waiting[1] <= time.time():
+            return
         mid = p["message_id"]
         reply = (message.get("reply_to_message") or {}).get("message_id")
         if reply and reply != mid:
@@ -299,11 +306,19 @@ class PasswordBotMixin:
         with contextlib.suppress(Exception):
             ok = await self._emby.set_user_password(user_id, password)
         cache_notice = ""
+        if ok:
+            unlocked = False
+            with contextlib.suppress(Exception):
+                unlocked = await self._emby.apply_policy(
+                    user_id, {"InvalidLoginAttemptCount": 0, "LockedOutDate": None}
+                )
+            if not unlocked:
+                cache_notice = "\n⚠ 密码已更改，但解除登录锁定未确认，请联系管理员；不要继续尝试旧密码。"
         if ok and self._on_password_changed is not None:
             try:
                 self._on_password_changed()
             except Exception:  # noqa: BLE001 - never pretend a remote password change rolled back
-                cache_notice = "\n⚠ 密码已更改，旧面板登录失效尚未确认，请联系管理员。"
+                cache_notice += "\n⚠ 密码已更改，旧面板登录失效尚未确认，请联系管理员。"
         if hasattr(self._members, "audit"):
             self._members.audit(
                 f"tg:{chat}",

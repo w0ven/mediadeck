@@ -206,7 +206,8 @@ def test_private_rank_and_myinfo_aliases_still_work(bot):
     run(bot._handle_command("901", ALICE, "alice_tg", "/myinfo"))
     assert "alice" in last_text(bot)
     assert "本月流量" in last_text(bot) and "观看记录" in last_text(bot)
-    assert not bot.calls[-1][1].get('reply_markup')
+    keyboard = bot.calls[-1][1]['reply_markup']['inline_keyboard']
+    assert {'resetpw', 'delete_account'} <= {b['callback_data'] for row in keyboard for b in row}
 
 
 def test_reply_kk_opens_admin_card_in_the_group(bot):

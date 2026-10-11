@@ -2,6 +2,34 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-12 — private account password change and self deletion
+
+- Restore reachable password-change and account-deletion buttons on private
+  account cards without changing group cards or their cleanup behavior.
+- Reuse password choices and confirmation, remove private password inputs on a
+  best-effort basis, and clear login lockout fields through a full-policy merge.
+  Report password-change/unlock partial failures without retaining plaintext.
+- Require an irreversible-loss warning and a short-lived, one-shot deletion
+  confirmation bound to the actor, account, binding revision and card. Recheck
+  ownership and non-admin policy before deleting through existing member logic.
+- Preserve media files, inviter accounts, ledger, orders and game history; do
+  not introduce balance transfers or destructive settlement cleanup.
+- Cover the protected deletion operation in both live and mock adapters.
+- Local full suite: 3,837 passed, 56 environment-dependent skips and two
+  subtests passed; full lint and isolated mock startup health passed. Updated
+  the prior compact-menu assertions to include the newly requested button.
+- Integrate the newer dice release without rewriting its history. Refuse
+  self-deletion while the member has unsettled dice bets; atomically record a
+  deletion-in-progress marker with the same SQLite write boundary used by bet
+  confirmation. New bets are refused during remote deletion I/O. Normal exit
+  releases the marker; process interruption fails closed for operator review.
+  Do not change settlement, refunds or historical balances.
+- Integrated account/Bot/dice regressions: 483 passed, one optional live-beacon
+  check skipped; full lint passed. The prior full local suite remains recorded
+  above, and updated PR CI is the final integration gate.
+- Formal CI and tagged deployment remain publication gates; no real account
+  deletion or password change is used for acceptance.
+
 ## 2026-10-11 — preserve the retired online-short integration baseline
 
 - Record the existing backend removal of the retired online-short catalogue,

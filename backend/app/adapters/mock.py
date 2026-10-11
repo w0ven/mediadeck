@@ -51,6 +51,14 @@ class MockEmby:
     async def delete_user(self, user_id: str) -> bool:
         return self._users.pop(user_id, None) is not None
 
+    async def delete_selfservice_user(self, user_id: str, *, authorize: Any) -> bool:
+        user = self._users.get(user_id)
+        if not user or user.get("Policy", {}).get("IsAdministrator") is not False:
+            return False
+        if not authorize():
+            return False
+        return await self.delete_user(user_id)
+
     async def set_user_disabled(self, user_id: str, disabled: bool) -> bool:
         user = self._users.get(user_id)
         if not user:

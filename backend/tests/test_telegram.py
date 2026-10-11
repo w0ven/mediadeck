@@ -274,7 +274,7 @@ def test_guest_and_member_see_different_menus() -> None:
     assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
-    assert {"devices", "rebind", "resetpw", "me", "home"} == info_actions
+    assert {"devices", "rebind", "resetpw", "delete_account", "me", "home"} == info_actions
     assert "me_nodes" not in info_actions
 
     assert "没有账号" in guest_body
@@ -982,7 +982,7 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
-        "devices", "resetpw", "home", "rebind", "me"}
+        "devices", "resetpw", "delete_account", "home", "rebind", "me"}
     assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "checkin", "transfer", "inventory", "titles"}
 
 
