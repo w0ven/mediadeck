@@ -2,6 +2,18 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-11 — preserve the retired online-short integration baseline
+
+- Record the existing backend removal of the retired online-short catalogue,
+  capability route and ancillary lease bindings so later tagged deployments do
+  not restore the obsolete integration.
+- Preserve ordinary PlaybackInfo forwarding and shared admission; replace tests
+  of the removed feature with retirement and normal-playback regressions.
+- Leave the separately operated gateway unchanged and outside this commit.
+- Relevant retirement/admission/native-URL regressions: 48 passed; lint passed.
+  The first full local run reached 55% without failures before its command time
+  budget expired; the complete run and CI remain required publication gates.
+
 ## 2026-10-10 — red-packet result nickname labels
 
 - Correct packet-only public result labels: use the captured Telegram display name,
