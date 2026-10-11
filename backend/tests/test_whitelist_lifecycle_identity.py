@@ -174,13 +174,16 @@ def test_nonrestricted_reports_retain_legacy_lookup_and_behavior(pipeline, scope
     personal.assert_not_awaited()
 
 
-def test_same_device_discovery_full_45_second_verified_watch_and_stop(pipeline):
+def test_same_device_discovery_full_45_second_verified_watch_and_stop(pipeline, monkeypatch):
     p = pipeline
+    monkeypatch.setattr('app.main.time.time', lambda: p.state.clock)
     p.state.rows.append({"Id": "discovery", "DeviceId": DEVICE})
     p.lease()
     assert p.client.post("/api/playback/started", headers=p.headers(), json=PAYLOAD).status_code == 204
     app.state.usage._sample(copy.deepcopy(p.state.rows), p.state.clock, None)
     base = p.state.clock
+    # The report clock starts its own baseline; never bridge poll/receipt clocks.
+    assert p.client.post('/api/playback/progress', headers=p.headers(), json=PAYLOAD).status_code == 204
     for second in (30, 45):
         p.state.clock = base + second
         response = p.client.post("/api/playback/progress", headers=p.headers(),
@@ -195,4 +198,4 @@ def test_same_device_discovery_full_45_second_verified_watch_and_stop(pipeline):
     assert app.state.db.one("SELECT 1 FROM stream_leases WHERE user_id=?", (UID,)) is None
     app.state.usage._sample(copy.deepcopy(p.state.rows), p.state.clock + 15, None)
     assert app.state.stats.watch_summary(UID, now=p.state.clock + 15)["recorded_seconds"] == 45
-    assert len(p.state.posts) == 4
+    assert len(p.state.posts) == 5

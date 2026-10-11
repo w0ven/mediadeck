@@ -223,6 +223,9 @@ class UsageSampler:
             value['was_playing'] = False
             value['speed_bps'] = 0
             value['watch_observation'] = None
+            value['watch_source'] = ''
+            value['report_received_at'] = 0
+            value['report_signature'] = None
             value.setdefault('verified_seconds', 0.0)
             self._live[row['session_id']] = value
         self._last_tick = 0.0
@@ -265,12 +268,108 @@ class UsageSampler:
                 continue  # no identity evidence: do not stop unrelated streams
             state['stopped_by_report'] = bool(stopped)
             state['watch_observation'] = None
+            state['watch_source'] = ''
+            state['report_received_at'] = 0
+            state['report_signature'] = None
+            if not stopped and payload.get('ItemId') == state.get('item_id'):
+                state['playback_attempt_at'] = time.time()
             if stopped:
                 state['was_playing'] = False
                 state['watch_reason'] = 'stopped'
             with self._db.write() as conn:
                 conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
                              (current_sid, json.dumps(state)))
+        self._publish_live()
+
+    async def playback_progress(self, user_id: str, device: str, payload: dict, *,
+                                received_at: float | None = None) -> None:
+        """Only called after caller authentication AND upstream acceptance."""
+        received_at = time.time() if received_at is None else received_at
+        async with self._tick_lock:
+            await run_usage_io(self._progress, user_id, device, payload, received_at)
+
+    def _diagnose(self, uid: str, observation: dict, now: float, source: str,
+                  reason: str, credited: float = 0, attempt_at: float = 0) -> None:
+        prior = self._db.one('SELECT summary_json FROM watch_diagnostics WHERE emby_user_id=?', (uid,)) or {}
+        previous = json.loads(prior.get('summary_json') or '{}')
+        counts = previous.get('counts') or {}
+        key = reason or 'verified'
+        counts[key] = min(1_000_000_000, int(counts.get(key) or 0)+1)
+        summary = {'source': source, 'reason': key, 'position': observation.get('position'),
+                   'rate': observation.get('rate'), 'credited_seconds': credited,
+                   'attempt_at': max(attempt_at, float(previous.get('attempt_at') or 0)),
+                   'counts': counts}
+        with self._db.write() as conn:
+            conn.execute('INSERT INTO watch_diagnostics VALUES(?,?,?) ON CONFLICT(emby_user_id) '
+                         'DO UPDATE SET observed_at=excluded.observed_at,summary_json=excluded.summary_json',
+                         (uid, now, json.dumps(summary)))
+            conn.execute('DELETE FROM watch_diagnostics WHERE observed_at<?', (now-14*86400,))
+            conn.execute('DELETE FROM watch_diagnostics WHERE emby_user_id IN '
+                         '(SELECT emby_user_id FROM watch_diagnostics ORDER BY observed_at DESC LIMIT -1 OFFSET 5000)')
+
+    def _proof(self, state: dict, observation: dict, gap: float, source: str) -> tuple[float, float, str]:
+        before = state.get('watch_observation') if state.get('watch_source', 'poll') == source else None
+        start, end, reason = verified_watch_interval(before, observation, gap, self._verified_since)
+        if end > start:
+            start = max(start, float(state.get('last_verified_end') or 0))
+            if end <= start:
+                start, end, reason = 0, 0, 'already_recorded'
+            else:
+                state['last_verified_end'] = end
+                observation['anchor_floor'] = observation['activity']
+        state.update(watch_observation=observation, watch_source=source, watch_reason=reason)
+        return start, end, reason
+
+    def _progress(self, uid: str, device: str, payload: dict, received_at: float) -> None:
+        now = time.time()
+        sid, play, item = (str(payload.get(k) or '') for k in ('SessionId','PlaySessionId','ItemId'))
+        matches = [(key, state) for key, state in self._live.items()
+                   if state['user_id'] == uid and (not sid or key == sid)
+                   and play and state.get('play_id') == play
+                   and item and state.get('item_id') == item
+                   and device and state.get('device_id') == device]
+        if len(matches) != 1:
+            if item and play and self._members.get(uid):
+                self._diagnose(uid, {}, now, 'progress', 'session_unresolved', attempt_at=received_at)
+            return
+        sid, state = matches[0]
+        if state.get('stopped_by_report'):
+            self._diagnose(uid, {}, now, 'progress', 'stopped')
+            return
+        if received_at <= float(state.get('report_received_at') or 0):
+            self._diagnose(uid, {}, now, 'progress', 'out_of_order_progress')
+            return
+        reported = payload.get('PlayState') if isinstance(payload.get('PlayState'), dict) else {}
+        position = payload.get('PositionTicks', reported.get('PositionTicks'))
+        paused = payload.get('IsPaused', reported.get('IsPaused'))
+        rate = payload.get('PlaybackRate', reported.get('PlaybackRate'))
+        if ('PlaybackRate' not in payload and 'PlaybackRate' not in reported and
+                0 <= now-float(state.get('reported_rate_at') or 0) <= WATCH_HEARTBEAT_MAX_AGE):
+            # Reuse only an explicit fresh rate from this exact bound session.
+            # Missing payload AND missing/stale session rate remains unknown.
+            rate = state.get('reported_rate')
+        observation = watch_observation({
+            'DeviceId': device, 'PlaySessionId': play,
+            'NowPlayingItem': {'Id': item, 'RunTimeTicks': state.get('runtime_ticks')},
+            'PlayState': {'PositionTicks': position, 'IsPaused': paused, 'PlaybackRate': rate},
+            'LastActivityDate': datetime.fromtimestamp(received_at, UTC).isoformat()}, now)
+        signature = [observation['position'], paused, observation['rate']]
+        if signature == state.get('report_signature'):
+            self._diagnose(uid, observation, now, 'progress', 'duplicate_progress', attempt_at=received_at)
+            return
+        before = state.get('watch_observation')
+        gap = received_at-float(state.get('report_received_at') or received_at)
+        updated = dict(state)
+        start, end, reason = self._proof(updated, observation, gap, 'progress')
+        delta = end-start
+        updated.update(report_received_at=received_at, report_signature=signature,
+                       playback_attempt_at=received_at, seconds=float(state['seconds'])+delta,
+                       verified_seconds=float(state.get('verified_seconds') or 0)+delta)
+        # Reporting changes viewing only. It must not bill bytes, traffic or points.
+        self._record_watch(sid, updated, start if delta else now, end if delta else now,
+                           evidence=(before, observation) if delta else None)
+        state.update(updated)
+        self._diagnose(uid, observation, now, 'progress', reason, delta, received_at)
         self._publish_live()
 
     # -- main loop -----------------------------------------------------------
@@ -342,6 +441,14 @@ class UsageSampler:
                     "sampled": True,
                     "verified_seconds": 0.0,
                     "watch_observation": observation,
+                    "watch_source": 'poll',
+                    "report_received_at": 0,
+                    "report_signature": None,
+                    "last_verified_end": 0,
+                    "runtime_ticks": item.get('RunTimeTicks'),
+                    "reported_rate": _number((session.get('PlayState') or {}).get('PlaybackRate', session.get('PlaybackRate'))),
+                    "reported_rate_at": observation.get('activity') or 0,
+                    "playback_attempt_at": 0,
                     "watch_reason": observation['reason'] or 'baseline',
                     "play_id": observation['play_id'],
                     "last_ts": now,
@@ -353,7 +460,12 @@ class UsageSampler:
                 continue
 
             # A session that switched title is two plays, not one.
-            current_item = str(item.get("Id") or "")
+            report_fresh = (state.get('watch_source') == 'progress' and
+                            0 <= now-float(state.get('report_received_at') or 0) <= WATCH_HEARTBEAT_MAX_AGE and
+                            str(session.get('DeviceId') or '') == state.get('device_id'))
+            # A fresh accepted report may be more current than a cached idle row.
+            # This retains viewing identity only; `playing`/traffic stay unchanged.
+            current_item = str(item.get("Id") or (state['item_id'] if report_fresh else ''))
             if (user_id != state['user_id'] or current_item != state['item_id']
                     or (state.get('play_id') and observation['play_id']
                         and state['play_id'] != observation['play_id'])):
@@ -378,6 +490,14 @@ class UsageSampler:
                     "sampled": True,
                     "verified_seconds": 0.0,
                     "watch_observation": observation,
+                    "watch_source": 'poll',
+                    "report_received_at": 0,
+                    "report_signature": None,
+                    "last_verified_end": 0,
+                    "runtime_ticks": item.get('RunTimeTicks'),
+                    "reported_rate": _number((session.get('PlayState') or {}).get('PlaybackRate', session.get('PlaybackRate'))),
+                    "reported_rate_at": observation.get('activity') or 0,
+                    "playback_attempt_at": 0,
                     "watch_reason": observation['reason'] or 'baseline',
                     "play_id": observation['play_id'],
                     "stopped_by_report": False,
@@ -398,18 +518,23 @@ class UsageSampler:
                 "device_id": session.get("DeviceId") or "",
                 "client": session.get("Client") or "",
                 "play_method": (session.get("PlayState") or {}).get("PlayMethod") or "",
+                "runtime_ticks": item.get('RunTimeTicks') or state.get('runtime_ticks'),
+                "reported_rate": _number((session.get('PlayState') or {}).get('PlaybackRate', session.get('PlaybackRate'))),
+                "reported_rate_at": observation.get('activity') or 0,
             })
             delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
             if state.get('stopped_by_report'):
                 observation['reason'] = 'stopped'
             before = state.get('watch_observation')
-            start, end, reason = verified_watch_interval(before, observation, delta, self._verified_since)
+            proof_state = dict(state)
+            if report_fresh:
+                start, end, reason = 0, 0, state.get('watch_reason') or ''
+            else:
+                start, end, reason = self._proof(proof_state, observation, delta, 'poll')
+                state.update({key: proof_state.get(key) for key in
+                              ('watch_observation', 'watch_reason', 'watch_source')})
             watch_delta = end - start
-            if not reason:
-                observation['anchor_floor'] = observation['activity']
-            state['watch_observation'] = observation
-            state['watch_reason'] = reason
-            state['play_id'] = observation['play_id']
+            state['play_id'] = observation['play_id'] or state.get('play_id') or ''
             state["last_ts"] = now
             state['was_playing'] = playing
             if not playing:
@@ -425,12 +550,22 @@ class UsageSampler:
             chunk = int(rate / 8 * delta)
             # Sample and resumable state commit together: a crash cannot leave
             # totals newer than the corresponding session history.
-            updated = {**state, 'seconds': float(state['seconds']) + watch_delta,
+            updated = {**state, 'last_verified_end': proof_state.get('last_verified_end') or 0,
+                       'seconds': float(state['seconds']) + watch_delta,
                        'verified_seconds': float(state.get('verified_seconds') or 0) + watch_delta,
                        'bytes': int(state['bytes']) + chunk}
             self._record_watch(sid, updated, start if watch_delta else now, end if watch_delta else now,
                                evidence=(before, observation) if watch_delta else None)
             state.update(updated)
+            if not report_fresh:
+                advanced = (before and before.get('position') is not None and observation['position'] is not None
+                            and observation['position'] > before['position'] and observation['activity'] is not None
+                            and not observation['reason'] and before.get('play_id') == observation['play_id']
+                            and before.get('device_id') == observation['device_id'])
+                if advanced:
+                    state['playback_attempt_at'] = observation['activity']
+                self._diagnose(user_id, observation, now, 'poll', reason, watch_delta,
+                               observation['activity'] if advanced else 0)
             # Bytes/second over the last sampled window: what the dashboard
             # shows as the session's live bandwidth.
             state["speed_bps"] = int(chunk / delta) if delta else 0
@@ -446,7 +581,12 @@ class UsageSampler:
 
         # Sessions that vanished have ended.
         for sid in [s for s in self._live if s not in seen]:
-            self._finish(sid, self._live[sid], now)
+            state = self._live[sid]
+            if (state.get('watch_source') == 'progress' and not state.get('stopped_by_report')
+                    and 0 <= now-float(state.get('report_received_at') or 0) <= WATCH_HEARTBEAT_MAX_AGE):
+                state.update(speed_bps=0, was_playing=False)  # no inferred traffic or time
+                continue
+            self._finish(sid, state, now)
             self._live.pop(sid)
 
         if billed_users:
@@ -536,7 +676,7 @@ class UsageSampler:
         # Readers must never iterate the worker's mutable session dictionary
         # or wait on a mutex held during slow disk I/O.
         self._watch_view = tuple(
-            {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled', 'verified_seconds', 'watch_reason')}
+            {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled', 'verified_seconds', 'watch_reason', 'watch_source', 'playback_attempt_at')}
             for state in self._live.values())
         self._speed_view = {sid: int(s.get("speed_bps") or 0) for sid, s in self._live.items()}
 

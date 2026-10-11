@@ -28,9 +28,10 @@ import html
 import json
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 
-from app.modules import report_delivery
+from app.modules import report_delivery, viewing
 from app.modules.blackwhite import BlackwhitePlugin
 from app.modules.checkin_cleanup import CheckinCleanupPlugin
 from app.modules.command_cleanup import GroupCommandCleanupPlugin
@@ -381,7 +382,7 @@ class ViewingReportPlugin(Plugin):
             return report_delivery.is_due(state, now)
         local = time.localtime(now)
         scheduled = (local.tm_mday == 1 if config.get("period") == "monthly"
-                     else local.tm_wday == 0)
+                     else datetime.fromtimestamp(now, viewing.BEIJING).weekday() == 0)
         return scheduled or report_delivery.is_due(state, now)
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -442,7 +443,12 @@ class ViewingReportPlugin(Plugin):
                 continue
             row["attempts"] += 1
             try:
-                detail = self.ctx.stats.member_detail(uid, days=days) or {}
+                report_detail = getattr(self.ctx.stats, 'report_detail', None)
+                if days == 7 and callable(report_detail):
+                    # Retries retain this batch's original complete week.
+                    detail = report_detail(uid, now=delivery['created_at']) or {}
+                else:
+                    detail = self.ctx.stats.member_detail(uid, days=days) or {}
                 hours, plays, total_bytes = _summarise(detail)
                 caption = self._text(label, days, hours, plays, total_bytes, detail)
                 photo = await self._poster(member, label, days, hours, plays, total_bytes, detail)
@@ -493,9 +499,15 @@ class ViewingReportPlugin(Plugin):
     @staticmethod
     def _text(label: str, days: int, hours: float, plays: int,
               total_bytes: int | None, detail: dict[str, Any]) -> str:
-        lines = [f"📊 <b>你的{label}</b>（近 {days} 天）\n",
+        stamp = (detail.get('viewing') or {}).get('label') or f'近 {days} 天'
+        lines = [f"📊 <b>你的{label}</b>（{stamp}）\n",
                  f"观看：{hours:.1f} 小时 · 播放：{plays} 次",
                  f"消耗流量：{_fmt_bytes(total_bytes)}"]
+        watch = detail.get('watch') or {}
+        if watch.get('recorded_seconds') is not None:
+            lines.append(f"累计观看：{float(watch['recorded_seconds'])/3600:.1f} 小时")
+        if (detail.get('viewing') or {}).get('incomplete'):
+            lines.append('部分记录无法精确定位到本期，时长未补算。')
         titles = _top_titles(detail)
         if titles:
             lines.append("\n<b>看得最多</b>")
@@ -503,6 +515,9 @@ class ViewingReportPlugin(Plugin):
                          for i, item in enumerate(titles, 1))
         else:
             lines.append("\n暂无影片明细。" if plays or hours else "\n这段时间还没有观看记录。")
+        unknown = int((detail.get('viewing') or {}).get('unlocated_title_plays') or 0)
+        if unknown:
+            lines.append(f'其中 {unknown} 次未保留影片信息。')
         return "\n".join(lines)
 
     async def _poster(self, member: dict[str, Any], label: str, days: int,
@@ -521,6 +536,7 @@ class ViewingReportPlugin(Plugin):
             return await asyncio.to_thread(render_viewing_poster,
                 name=name, label=label, days=days, hours=hours, plays=plays,
                 traffic=_fmt_bytes(total_bytes), titles=titles, covers=covers, backdrops=backdrops,
+                window_label=(detail.get('viewing') or {}).get('label', ''),
                 whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID)
         except Exception:  # noqa: BLE001 - caption still goes out
             return None
@@ -535,10 +551,16 @@ def _summarise(detail: dict[str, Any]) -> tuple[float, int, int | None]:
         hours += float(point.get("hours") or 0)
         plays += int(point.get("plays") or 0)
         total_bytes += int(point.get("bytes") or 0)
+    recorded = detail.get('viewing')
+    if recorded is not None:
+        hours = float(recorded.get('seconds') or 0) / 3600
+        plays = int(recorded.get('plays') or 0)
     return round(hours, 1), int(plays), total_bytes if measured else None
 
 
 def _top_titles(detail: dict[str, Any], limit: int = 3) -> list[dict[str, Any]]:
+    if detail.get('viewing') is not None:
+        return list(detail['viewing'].get('titles') or [])[:limit]
     counts: dict[tuple[str, str], dict[str, Any]] = {}
     for play in detail.get("recent_plays") or []:
         kind = str(play.get('item_type') or '').lower()

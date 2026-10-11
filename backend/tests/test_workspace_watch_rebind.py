@@ -56,13 +56,13 @@ def test_crossing_old_session_is_reference_only(rb):
                   ('u1', 1200, now-86400-600, now-86400+1800))
     summary = rb._stats.watch_summary('u1', now)
     assert summary['seconds_24h'] == 0
-    assert not summary['incomplete_24h']
-    assert summary['seconds_30d'] == summary['recorded_seconds'] == 0
+    assert summary['incomplete_24h']
+    assert summary['seconds_30d'] == summary['recorded_seconds'] == 1200
     assert summary['historical_unverified_seconds'] == 1200
     text = rb._watch_text(rb.members.get('u1'))
     assert '跨界' not in text
     assert '历史未核验参考' not in text
-    assert '累计观看：0秒' in text
+    assert '累计观看：20分' in text
     assert rb._stats.watch_summary('u1', now)['historical_unverified_seconds'] == 1200
 
 
@@ -227,4 +227,4 @@ def test_web_review_removed_and_member_watch_exposed():
         assert client.post('/api/telegram/requests/1/review',auth=auth,json={'approve':True}).status_code == 410
         app.state.members.upsert('test','viewer',{'group_id':'standard'})
         data = client.get('/api/members/test',auth=auth).json()
-        assert data['watch']['window_basis']=='sample_intervals'
+        assert data['watch']['window_basis']=='recorded_intervals'

@@ -357,7 +357,8 @@ async def _startup() -> None:
     app.state.enforcement = EnforcementService(
         app.state.db, app.state.members, app.state.emby)
     app.state.stats = StatsService(
-        app.state.db,
+        app.state.db, history_path='' if cfg.mediadeck_mock else cfg.mediadeck_playback_history_db,
+        history_timezone=cfg.mediadeck_playback_history_timezone,
         measured_cutover=lambda: bool(
             app.state.settings_service.metering_config().get("cutover")),
     )
@@ -1782,6 +1783,7 @@ async def _playback_report_user(request: Request, token: str, device: str) -> st
 @app.post("/api/playback/progress", include_in_schema=False)
 async def playback_activity(request: Request) -> Response:
     payload = await _playback_report_payload(request)
+    received_at = time.time()
     query = dict(request.query_params)
     token = caller_token(request.headers, query)
     device = caller_device(request.headers, query)
@@ -1793,8 +1795,11 @@ async def playback_activity(request: Request) -> Response:
         async def issue():
             return await app.state.emby.report_playback(event, dict(request.headers), query, payload)
         code = await app.state.streams.report_activity(uid, payload, issue)
-        if event == 'started' and 200 <= code < 300:
-            await app.state.usage.playback_report(uid, device, payload, stopped=False)
+        if 200 <= code < 300:
+            if event == 'started':
+                await app.state.usage.playback_report(uid, device, payload, stopped=False)
+            else:
+                await app.state.usage.playback_progress(uid, device, payload, received_at=received_at)
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001 - failed delivery cannot observe a play
@@ -2413,8 +2418,8 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
     usage = {
         "days": days,
         "bytes": sum(int(p.get("bytes") or 0) for p in series),
-        "hours": round(sum(float(p.get("hours") or 0) for p in series), 2),
-        "plays": sum(int(p.get("plays") or 0) for p in series),
+        "hours": round(float((stats.get('viewing') or {}).get('seconds') or 0) / 3600, 2),
+        "plays": int((stats.get('viewing') or {}).get('plays') or 0),
         "series": series,
     }
     plays = list(stats.get("recent_plays") or [])[:20]
@@ -2433,6 +2438,7 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
         "request_remaining": app.state.requests.remaining(user_id),
         "usage": usage,
         "watch": stats.get('watch'),
+        "viewing": stats.get('viewing'),
         "plays": plays,
         "series": series,
         "recent_plays": plays,

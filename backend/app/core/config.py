@@ -142,6 +142,9 @@ class Settings(BaseSettings):
     # be configured, and the URL must match the current Emby integration.
     mediadeck_emby_identity_data_dir: str = ""
     mediadeck_emby_identity_url: str = ""
+    # Optional local Reporting database: playback existence only, never seconds.
+    mediadeck_playback_history_db: str = ""
+    mediadeck_playback_history_timezone: str = "Asia/Shanghai"
 
     rclone_binary: str = "rclone"
     rclone_config_path: str = ""

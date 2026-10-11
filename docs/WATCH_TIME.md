@@ -1,34 +1,58 @@
-# Verified viewing time
+# Recorded viewing and strict progress evidence
 
-Profiles, user charts, movie/series charts, overview, daily series and recent
-viewing all read `watch_verified_samples`. Lifetime totals are durable in
-`watch_verified_totals`; finishing a session does not add those seconds again.
+Member profiles, account cards and personal reports use one recorded viewing
+read model. The cumulative value retains the bounded legacy import and old
+non-sampled total, then the sampled umbrella total. Verified increments also
+exist in that umbrella: they are not added a second time. Completed sampled
+session events likewise are metadata, not another addition. Pruning detail does
+not reset durable totals. Existing rows are never rewritten to invent history.
 
-An interval needs two observations of the same title, user, device and playback
-identity, explicitly unpaused, with finite advancing `PositionTicks`, fresh
-`LastActivityDate`, and unchanged positive playback rate. Position advance must
-match the heartbeat elapsed time at that rate (bounded subsecond/5% jitter).
-Credit is no greater than elapsed time or content advance divided by the rate.
-Thus 2x playback does not count double. Positions beyond a known runtime fail
-verification. Polling a cached session does not become a new heartbeat.
+Timestamp-backed windows prefer verified intervals over their identical sample
+mirror, then retain other recorded samples and non-sampled completed records.
+Different concurrent sessions still add; they are not unioned per account.
+A scalar without date/title detail contributes only to cumulative viewing.
+An old completed record that straddles a window and contains unlocated pauses
+cannot be split by wall-clock proportion; the window marks that uncertainty.
+Unknown title counts are stated, not assigned to invented movies.
 
-Pause, resume baseline, stalled/zero/missing position, rewind, seek, buffering,
-missing/stale heartbeat, changed identity/rate and gaps beyond 120 seconds are
-not backfilled. A process restart restores recorded totals but discards the
-previous observation baseline; downtime cannot be credited. First observations
-and ambiguous transition intervals may omit some genuine viewing time. This
-is conservative verified client-reported playback, not proof of human attention
-or a reconstruction of intervals without usable client evidence.
+Personal weekly reports cover the previous complete Beijing week: Monday 00:00
+to the following Monday 00:00. The batch's creation time fixes this week for
+retries. Seconds, unique recorded session counts and title detail come from one
+read snapshot and window; formatting happens after summing raw seconds. The
+existing UTC daily traffic ledger cannot be precisely split at Beijing's eight
+hour boundary, so such a report does not fabricate a weekly traffic value.
+Monthly scheduling and the underlying traffic accounting are unchanged.
 
-The first schema upgrade records `watch_verified_since`. No old sample, finished
-session, live checkpoint or legacy import is converted into verified time. Old
-rows remain intact; `historical_unverified_seconds` exposes the old lifetime
-reference separately, excluding new verified increments. Web/Bot explain this
-cutover. Pre-cutover calendar charts are empty rather than fabricated. Calendar
-and rolling windows clip verified intervals at their exact boundaries, including
-plays still in progress.
+New effective viewing still requires two same-title/user/device/play observations,
+explicitly unpaused, finite advancing position, fresh evidence and unchanged
+positive rate. Position advance must match elapsed time at that rate within the
+existing subsecond/5% jitter. Credit cannot exceed elapsed time or position
+advance divided by rate; 2x playback does not count double. Known runtime limits,
+pause/resume baselines, seeks, buffering, rewinds, gaps over 120 seconds and
+restart downtime are not bypassed or backfilled.
 
-Intervals, lifetime totals and resumable state commit together. `(run_key,
-ended_at)` deduplicates replays; pruning detail retains lifetime totals. Existing
-traffic-byte estimates, measured accounting, enforcement and concurrent-stream
-admission are unchanged by this viewing-time correction.
+Authenticated, upstream-accepted Progress now supplies its actual position and
+receipt time to that same gate. It must match one existing bound playback. An
+omitted rate can use only an explicitly reported, fresh rate from that same
+session; a missing/stale/invalid rate remains unknown. Report and polling clocks
+are not bridged: switching source establishes a new baseline. Fresh reports take
+priority over cached Sessions rows. Per-play credited endpoints and transactional
+interval/total/checkpoint writes prevent report/poll or replay double counting.
+Stopped reports close proof immediately. A briefly missing Sessions row may keep
+fresh report state, but missing time/traffic is never inferred.
+
+Playback attempts and optional local Reporting timestamps provide only sourced
+recent-use evidence, never plugin duration, points or bytes. Missing sources stay
+unknown. One credential-free diagnostic summary per viewer is retained for at
+most 14 idle days, with a 5,000-row cap and bounded counters; no raw body, token
+or headers are retained. Detail shows the last observation's source and reason.
+
+Historical records are not converted into `watch_verified_samples`. Existing
+verified activity days/scores and rankings keep their original proof-only rules;
+recent independent playback evidence can suppress an unsupported dormant label
+without changing the score. Traffic, points, enforcement and stream admission
+remain outside this display/read-model correction.
+
+This is conservative client-reported progress, not proof of human attention or
+reconstruction of intervals that were never collected. First observations,
+unsupported client fields and ambiguous transitions may omit real viewing.

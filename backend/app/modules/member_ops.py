@@ -23,7 +23,7 @@ _SECRET_RE = re.compile(
 _ABSENT_RE = re.compile(r"\b(404|not\s*found|no such user|user not found)\b", re.IGNORECASE)
 
 def activity_timestamp(member: dict[str, Any]) -> float:
-    """Legacy last_seen sort now means verified last playback, with no fallback."""
+    """Legacy last_seen key means sourced playback, never login or heartbeat."""
     try:
         stamp = float(member.get('last_played_at'))
         return stamp if math.isfinite(stamp) and stamp > 0 else 0
@@ -231,6 +231,10 @@ def sort_rows(rows: list[dict[str, Any]], sort: str | None,
               order: str | None) -> list[dict[str, Any]]:
     key = SORTS.get(str(sort or "username"), SORTS["username"])
     reverse = str(order or "asc").lower() == "desc"
+    if sort in ('last_seen', 'last_played'):
+        known = [row for row in rows if activity_timestamp(row)]
+        unknown = [row for row in rows if not activity_timestamp(row)]
+        return sorted(known, key=key, reverse=reverse) + unknown
     return sorted(rows, key=key, reverse=reverse)
 
 

@@ -343,6 +343,13 @@ CREATE TABLE IF NOT EXISTS watch_verified_totals (
     first_at REAL NOT NULL, last_at REAL NOT NULL
 );
 
+-- One bounded, credential-free observation summary per existing viewer.
+CREATE TABLE IF NOT EXISTS watch_diagnostics (
+    emby_user_id TEXT PRIMARY KEY, observed_at REAL NOT NULL,
+    summary_json TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_watch_diagnostic_time ON watch_diagnostics(observed_at);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     ts          INTEGER NOT NULL,
@@ -905,6 +912,17 @@ class Database:
             except BaseException:
                 self._conn.rollback()
                 raise
+
+    @contextmanager
+    def snapshot(self) -> Iterator[Database]:
+        """One read snapshot for a report's totals, windows and detail."""
+        with self._lock:
+            self._conn.execute('SAVEPOINT viewing_snapshot')
+            try:
+                yield self
+            finally:
+                self._conn.execute('ROLLBACK TO viewing_snapshot')
+                self._conn.execute('RELEASE viewing_snapshot')
 
     def query(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         with self._lock:

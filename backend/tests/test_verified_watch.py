@@ -135,7 +135,7 @@ def test_restart_finish_prune_and_duplicate_are_exactly_once(env, monkeypatch):
     assert stats.watch_summary('u')['recorded_seconds'] == 60
 
 
-def test_old_checkpoint_and_history_are_preserved_but_excluded(env):
+def test_old_history_is_retained_in_display_but_not_verified_ranking(env):
     db, members, _, stats = env
     db.execute("INSERT INTO play_events(emby_user_id,seconds,started_at,ended_at) VALUES('u',43200,?,?)",
                (BASE-43200, BASE))
@@ -147,7 +147,9 @@ def test_old_checkpoint_and_history_are_preserved_but_excluded(env):
     feed(sampler, BASE, 0)
     feed(sampler, BASE+30, 30)
     summary = stats.watch_summary('u')
-    assert summary['recorded_seconds'] == summary['seconds_24h'] == 30
+    assert summary['recorded_seconds'] == 44230
+    assert summary['seconds_24h'] == 43230  # scalar 1000 has no dated detail
+    assert summary['verified_recorded_seconds'] == 30
     assert summary['historical_unverified_seconds'] == 44200
     assert db.one('SELECT seconds FROM play_events')['seconds'] == 43200
     assert stats.top_watchers()[0]['seconds'] == stats.top_titles()[0]['seconds'] == 30
