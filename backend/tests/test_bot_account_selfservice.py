@@ -11,6 +11,7 @@ from test_request_bot import message, run
 
 from app.adapters.live import LiveEmby
 from app.adapters.mock import MockEmby
+from app.modules.account_deletion import deletion_in_progress
 from app.modules.play_money import CashBook
 from app.modules.play_schema import migrate
 from app.modules.points import PointsService
@@ -103,7 +104,11 @@ def test_delete_real_remote_and_local_once_keeps_inviter_history_and_settlement(
     bot.members.register_device("u1", "device-one")
     callback, mid = begin_delete(bot)
     assert not remote["calls"]
+    protected = []
+    remote["on_get"] = lambda: protected.append(deletion_in_progress(bot.db._conn, "u1"))
     tap(bot, callback, mid=mid)
+    assert protected == [True]
+    assert not deletion_in_progress(bot.db._conn, "u1")
     tap(bot, callback, mid=mid)
     assert len(deleted_calls(remote)) == 1
     assert not bot.members.get("u1") and bot.members.get("u2")
@@ -198,6 +203,7 @@ def test_delete_backend_guards_and_partial_failure(bot, remote, monkeypatch, cas
         monkeypatch.setattr(bot.members, "delete", fail)
     tap(bot, callback, mid=mid)
     assert bot.members.get("u1") and "已永久删除" not in text(bot)
+    assert not deletion_in_progress(bot.db._conn, "u1")
     assert "未" in text(bot)
     assert len(deleted_calls(remote)) == (1 if case in ("delete_503", "delete_false", "local_failure") else 0)
     before = len(remote["calls"])

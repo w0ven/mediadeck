@@ -7,6 +7,7 @@ import secrets
 import time
 
 from app.modules import dice_beacon as beacon
+from app.modules.account_deletion import deletion_in_progress
 from app.modules.dice_rules import MAX_INT, POOLS, settle_pool, validate
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import CashBook, PlayError, integer
@@ -174,6 +175,8 @@ class DiceService(PlayAccess):
             payload = json.loads(session['payload'])
             tg, member = self.actor(actor, now=clock)
             uid = member['emby_user_id']
+            if deletion_in_progress(conn, uid):
+                raise PlayError('账号正在注销或结果待核查，本次未下注')
             if (tg, uid) != (session['tg_id'], session['user_id']) or session['state'] != 'active' or session['expires'] <= clock:
                 raise PlayError('确认单归属或期限无效')
             ticket = payload['ticket']

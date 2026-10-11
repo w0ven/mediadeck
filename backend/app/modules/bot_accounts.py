@@ -5,6 +5,8 @@ import secrets
 import time
 from html import escape
 
+from app.core.errors import ConfigError
+from app.modules.account_deletion import self_deletion_guard
 from app.modules.member_ops import execute_delete
 
 
@@ -61,7 +63,7 @@ class AccountBotMixin:
                 + "</code>\n\n这不是解绑：将实际删除 Emby 账号及会员、设备记录。"
                 "登录、会员权益、个人播放记录和收藏将无法恢复。"
                 "原账号的积分、订单和玩法历史按现有规范保留，但不能通过新账号继承；"
-                "未完成玩法按既有规则结算或取消，资金仍记在原账号，不转移到新账号。"
+                "有未结算骰局下注时不能注销，请先等待结算；其他玩法按既有规则处理，资金不转移到新账号。"
                 "不会删除媒体文件，也不会删除邀请人。\n\n"
                 "<b>不可恢复，确定永久注销吗？</b>（确认 2 分钟内有效）",
                 [[{"text": "确认永久删除本人账号", "callback_data": f"delself:{nonce}:confirm"}],
@@ -100,11 +102,15 @@ class AccountBotMixin:
             await self._edit(chat, mid, "绑定或权限已变化，未执行删除。", self.info_menu())
             return
         try:
-            result = await execute_delete(
-                self._members, _SelfDeleteAdapter(self._emby, authorized), p["user_id"],
-                actor=f"tg:{tg_id}", cascade=False, delete_emby=True,
-                confirm_ids=[p["user_id"]], authorize=authorized,
-            )
+            with self_deletion_guard(self._db, p["user_id"]):
+                result = await execute_delete(
+                    self._members, _SelfDeleteAdapter(self._emby, authorized), p["user_id"],
+                    actor=f"tg:{tg_id}", cascade=False, delete_emby=True,
+                    confirm_ids=[p["user_id"]], authorize=authorized,
+                )
+        except ConfigError as exc:
+            await self._edit(chat, mid, escape(str(exc)), self.info_menu())
+            return
         except Exception:  # noqa: BLE001 - remote deletion may have happened; no rollback claim
             await self._edit(chat, mid, "❌ 删除未确认全部完成，可能已删除远端账号。请联系管理员核查，勿重复操作。")
             return
