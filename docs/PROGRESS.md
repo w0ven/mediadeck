@@ -11,8 +11,10 @@ Newest entries first. Every working session appends one entry.
   of the removed feature with retirement and normal-playback regressions.
 - Leave the separately operated gateway unchanged and outside this commit.
 - Relevant retirement/admission/native-URL regressions: 48 passed; lint passed.
-  The first full local run reached 55% without failures before its command time
-  budget expired; the complete run and CI remain required publication gates.
+  Complete local suite: 3,732 passed, 56 environment-dependent skips and two
+  subtests passed. The initial 300-second run was incomplete; the subsequent
+  complete run finished with no failures. Isolated mock startup returned healthy.
+  Formal CI remains the merge gate; no production deployment in this step.
 
 ## 2026-10-10 — red-packet result nickname labels
 
