@@ -55,7 +55,9 @@ def test_private_and_failed_send_not_queued(env):
     async def run():
         await env.bot._dispatch_update({'message':msg(env, '/me', private=True)})
         assert not env.db.query("SELECT * FROM play_jobs WHERE kind='account.card.delete'")
-        assert not [p for m,p in env.tg.calls if m=='sendMessage'][-1].get('reply_markup')
+        keyboard = [p for m,p in env.tg.calls if m=='sendMessage'][-1]['reply_markup']
+        assert {'resetpw', 'delete_account'} <= {
+            b['callback_data'] for row in keyboard['inline_keyboard'] for b in row}
         env.public_mode='denied'
         await env.bot._dispatch_update({'message':msg(env, '/me', mid=1902)})
         assert not env.db.query("SELECT * FROM play_jobs WHERE kind='account.card.delete'")
