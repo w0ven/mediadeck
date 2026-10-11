@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 from fastapi.testclient import TestClient
-from test_verified_watch import BASE, feed
+from test_verified_watch import BASE, feed, session
 from test_verified_watch import env as env  # noqa: PLC0414 - shared fixture
 
 from app.main import app
@@ -248,3 +248,129 @@ def test_real_http_route_authenticates_and_requires_upstream_acceptance(monkeypa
         assert client.post('/api/playback/progress',headers=headers,json=payload(65)).status_code == 503
         assert seconds(app.state.db) == 30
         assert accepted.await_count == 2
+
+
+@pytest.fixture
+def native_progress(progress):
+    db, _, sampler, _, _ = progress
+    sampler._live.clear()
+    raw = session(BASE, 0)
+    raw.pop('PlaySessionId')  # actual native Sessions structure observed on site
+    sampler._sample([raw], BASE, None)
+    db.execute('CREATE TABLE stream_leases(user_id TEXT,session_id TEXT,play_id TEXT,observed INTEGER,'
+               'snapshot_guard INTEGER,PRIMARY KEY(user_id,session_id))')
+    db.execute("INSERT INTO stream_leases VALUES('u','s','run',1,0)")
+    return progress
+
+
+def test_native_missing_play_id_uses_only_existing_observed_lease(native_progress):
+    db, _, sampler, _, clock = native_progress
+    before = db.query('SELECT * FROM stream_leases')
+    send(sampler, clock, 5, 5)
+    send(sampler, clock, 35, 35)
+    assert seconds(db) == 30
+    assert diagnosis(db)['binding'] == 'lease'
+    assert diagnosis(db)['counts']['progress_verified'] == 1
+    feed(sampler, BASE+45, 45, play='')
+    assert seconds(db) == 30  # report source retains priority, never poll double count
+    send(sampler, clock, 65, 65)
+    assert seconds(db) == 60
+    assert db.query('SELECT * FROM stream_leases') == before
+    db.execute('DELETE FROM stream_leases')  # real route removes lease before Stop callback
+    sampler._playback_report('u','device',payload(65),True)
+    feed(sampler, BASE+80, 80, play='')
+    send(sampler, clock, 95, 95)
+    assert seconds(db) == 60
+    assert sampler._live['s']['stopped_by_report']
+
+
+@pytest.mark.parametrize('variant', ['missing','wrong_play','wrong_user','wrong_sid','not_observed',
+                                     'guarded','wrong_device','wrong_item','raw_conflict','ambiguous'])
+def test_native_binding_never_trusts_self_report_or_wrong_identity(native_progress, variant):
+    db, _, sampler, _, clock = native_progress
+    changes = {}
+    if variant == 'missing': db.execute('DELETE FROM stream_leases')
+    if variant == 'wrong_play': db.execute("UPDATE stream_leases SET play_id='other'")
+    if variant == 'wrong_user': db.execute("UPDATE stream_leases SET user_id='other'")
+    if variant == 'wrong_sid': db.execute("UPDATE stream_leases SET session_id='other'")
+    if variant == 'not_observed': db.execute('UPDATE stream_leases SET observed=0')
+    if variant == 'guarded': db.execute('UPDATE stream_leases SET snapshot_guard=1')
+    if variant == 'wrong_device': sampler._live['s']['device_id'] = 'other'
+    if variant == 'wrong_item': changes['ItemId'] = 'other'
+    if variant == 'raw_conflict':
+        sampler._live['s']['play_id'] = 'explicit-other'
+        sampler._live['s']['play_id_source'] = 'sessions'
+    if variant == 'ambiguous':
+        sampler._live['other'] = dict(sampler._live['s'])
+        db.execute("INSERT INTO stream_leases VALUES('u','other','run',1,0)")
+        changes['SessionId'] = ''
+    before = db.query('SELECT * FROM stream_leases')
+    send(sampler, clock, 5, 5, **changes)
+    send(sampler, clock, 35, 35, **changes)
+    assert seconds(db) == 0 and diagnosis(db)['reason'] == 'session_unresolved'
+    assert db.query('SELECT * FROM stream_leases') == before
+
+
+def test_native_replaced_lease_old_stop_report_and_deleted_binding_do_not_credit(native_progress):
+    db, _, sampler, _, clock = native_progress
+    send(sampler, clock, 5, 5)
+    send(sampler, clock, 35, 35)
+    db.execute("UPDATE stream_leases SET play_id='new-run'")
+    sampler._playback_report('u','device',payload(35),True)
+    assert not sampler._live['s'].get('stopped_by_report')
+    send(sampler, clock, 65, 65)
+    assert seconds(db) == 30 and diagnosis(db)['reason'] == 'session_unresolved'
+    send(sampler, clock, 66, 66, PlaySessionId='new-run')
+    assert seconds(db) == 30 and diagnosis(db)['reason'] == 'identity_changed'
+    send(sampler, clock, 96, 96, PlaySessionId='new-run')
+    assert seconds(db) == 60
+    db.execute('DELETE FROM stream_leases')
+    send(sampler, clock, 126, 126, PlaySessionId='new-run')
+    assert seconds(db) == 60 and diagnosis(db)['reason'] == 'session_unresolved'
+
+
+def test_native_lease_replacement_between_match_and_commit_is_atomic(native_progress, monkeypatch):
+    db, _, sampler, _, clock = native_progress
+    send(sampler, clock, 5, 5)
+    original = sampler._record_watch
+    def race(*args, **kwargs):
+        db.execute("UPDATE stream_leases SET play_id='replacement'")
+        return original(*args, **kwargs)
+    monkeypatch.setattr(sampler, '_record_watch', race)
+    send(sampler, clock, 35, 35)
+    assert seconds(db) == 0
+    assert sampler._live['s']['report_received_at'] == BASE+5
+    assert diagnosis(db)['reason'] == 'session_unresolved'
+
+
+def test_native_restart_and_missing_rate_keep_original_proof_gate(native_progress):
+    db, members, sampler, _, clock = native_progress
+    send(sampler, clock, 5, 5)
+    send(sampler, clock, 35, 35)
+    restored = UsageSampler(db, members, sampler._emby)
+    send(restored, clock, 65, 65)
+    assert seconds(db) == 30  # first post-restart report is a new baseline
+    send(restored, clock, 95, 95)
+    assert seconds(db) == 60
+    send(restored, clock, 125, 125, PlaybackRate=None)
+    assert seconds(db) == 60 and diagnosis(db)['reason'] == 'rate_unknown'
+
+
+def test_real_native_http_route_uses_issuance_lease_without_creating_one(monkeypatch):
+    clock = [BASE]
+    with TestClient(app) as client:
+        monkeypatch.setattr(app.state.usage,'tick',AsyncMock(return_value={'ok':True}))
+        monkeypatch.setattr('app.main.time.time',lambda:clock[0])
+        app.state.members.upsert('u','viewer',{'group_id':'standard'})
+        raw = session(BASE,0);raw.pop('PlaySessionId')
+        app.state.usage._sample([raw],BASE,None)
+        app.state.db.execute("INSERT INTO stream_leases(user_id,session_id,play_id,observed,pending_at) VALUES('u','s','run',0,?)",(BASE,))
+        monkeypatch.setattr(app.state.emby,'user_for_token',AsyncMock(return_value='u'))
+        monkeypatch.setattr(app.state.emby,'report_playback',AsyncMock(return_value=204))
+        headers = {'X-Emby-Token':'caller-placeholder','X-Emby-Device-Id':'device'}
+        for off in (5,35):
+            clock[0] = BASE+off
+            assert client.post('/api/playback/progress',headers=headers,json=payload(off)).status_code == 204
+        assert seconds(app.state.db) == 30
+        assert app.state.db.one('SELECT COUNT(*) n FROM stream_leases')['n'] == 1
+        assert diagnosis(app.state.db)['binding'] == 'lease'

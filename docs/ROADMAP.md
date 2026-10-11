@@ -10,6 +10,9 @@ top-down without asking. Every item ships as its own PR + release tag.
   week, with seconds, session counts and detail from one snapshot and window.
 - Feed authenticated, upstream-accepted progress into the existing strict proof
   gate; preserve pause/seek/rate/identity checks and report/poll idempotency.
+- Native Sessions without PlaySessionId may use only an existing issued and
+  observed admission lease, with current user/device/session/item matching and
+  transactional replacement protection; never trust an unbound self-report.
 - Show sourced recent playback and observation/unknown states; keep verified
   activity and ranking rules unchanged. Ship through normal PR/CI/tag gates.
 

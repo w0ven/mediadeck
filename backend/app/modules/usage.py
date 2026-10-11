@@ -37,6 +37,7 @@ import contextlib
 import contextvars
 import json
 import math
+import sqlite3
 import time
 import uuid
 from datetime import UTC, datetime
@@ -264,6 +265,13 @@ class UsageSampler:
                 continue
             if stopped and play and str(state.get('play_id') or '') != play:
                 continue
+            if stopped and state.get('play_id_source') == 'lease':
+                # The route already released the current Stop's lease. An
+                # extant replacement lease must not be closed by an old Stop.
+                lease = self._db.one('SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?',
+                                     (user_id, current_sid))
+                if lease and lease['play_id'] != play:
+                    continue
             if not sid and not device and not play:
                 continue  # no identity evidence: do not stop unrelated streams
             state['stopped_by_report'] = bool(stopped)
@@ -295,7 +303,10 @@ class UsageSampler:
         counts = previous.get('counts') or {}
         key = reason or 'verified'
         counts[key] = min(1_000_000_000, int(counts.get(key) or 0)+1)
-        summary = {'source': source, 'reason': key, 'position': observation.get('position'),
+        if source == 'progress':
+            counts['progress_'+key] = min(1_000_000_000, int(counts.get('progress_'+key) or 0)+1)
+        summary = {'source': source, 'reason': key, 'binding': observation.get('binding_source'),
+                   'position': observation.get('position'),
                    'rate': observation.get('rate'), 'credited_seconds': credited,
                    'attempt_at': max(attempt_at, float(previous.get('attempt_at') or 0)),
                    'counts': counts}
@@ -320,14 +331,27 @@ class UsageSampler:
         state.update(watch_observation=observation, watch_source=source, watch_reason=reason)
         return start, end, reason
 
+    def _report_play_matches(self, sid: str, state: dict, uid: str, play: str) -> bool:
+        if not play:
+            return False
+        if state.get('play_id') and state.get('play_id_source') != 'lease':
+            return state['play_id'] == play  # explicit Sessions identity wins
+        # Emby native Sessions may omit PlaySessionId. Only PlaybackInfo's
+        # existing, already-observed admission lease can supply that binding.
+        with contextlib.suppress(sqlite3.OperationalError):
+            lease = self._db.one('SELECT observed,snapshot_guard FROM stream_leases '
+                                 'WHERE user_id=? AND session_id=? AND play_id=?', (uid, sid, play))
+            return bool(lease and lease['observed'] and not lease['snapshot_guard'])
+        return False
+
     def _progress(self, uid: str, device: str, payload: dict, received_at: float) -> None:
         now = time.time()
         sid, play, item = (str(payload.get(k) or '') for k in ('SessionId','PlaySessionId','ItemId'))
         matches = [(key, state) for key, state in self._live.items()
                    if state['user_id'] == uid and (not sid or key == sid)
-                   and play and state.get('play_id') == play
                    and item and state.get('item_id') == item
-                   and device and state.get('device_id') == device]
+                   and device and state.get('device_id') == device
+                   and self._report_play_matches(key, state, uid, play)]
         if len(matches) != 1:
             if item and play and self._members.get(uid):
                 self._diagnose(uid, {}, now, 'progress', 'session_unresolved', attempt_at=received_at)
@@ -360,14 +384,20 @@ class UsageSampler:
         before = state.get('watch_observation')
         gap = received_at-float(state.get('report_received_at') or received_at)
         updated = dict(state)
+        lease_bound = not state.get('play_id') or state.get('play_id_source') == 'lease'
+        observation['binding_source'] = 'lease' if lease_bound else 'sessions'
+        updated.update(play_id=play, play_id_source=observation['binding_source'])
         start, end, reason = self._proof(updated, observation, gap, 'progress')
         delta = end-start
         updated.update(report_received_at=received_at, report_signature=signature,
                        playback_attempt_at=received_at, seconds=float(state['seconds'])+delta,
                        verified_seconds=float(state.get('verified_seconds') or 0)+delta)
         # Reporting changes viewing only. It must not bill bytes, traffic or points.
-        self._record_watch(sid, updated, start if delta else now, end if delta else now,
-                           evidence=(before, observation) if delta else None)
+        if not self._record_watch(sid, updated, start if delta else now, end if delta else now,
+                                  evidence=(before, observation) if delta else None,
+                                  required_lease=play if lease_bound else None):
+            self._diagnose(uid, observation, now, 'progress', 'session_unresolved', attempt_at=received_at)
+            return
         state.update(updated)
         self._diagnose(uid, observation, now, 'progress', reason, delta, received_at)
         self._publish_live()
@@ -451,6 +481,7 @@ class UsageSampler:
                     "playback_attempt_at": 0,
                     "watch_reason": observation['reason'] or 'baseline',
                     "play_id": observation['play_id'],
+                    "play_id_source": 'sessions',
                     "last_ts": now,
                     "was_playing": playing,
                     "seconds": 0.0,
@@ -500,6 +531,7 @@ class UsageSampler:
                     "playback_attempt_at": 0,
                     "watch_reason": observation['reason'] or 'baseline',
                     "play_id": observation['play_id'],
+                    "play_id_source": 'sessions',
                     "stopped_by_report": False,
                     "last_ts": now,
                     "was_playing": playing,
@@ -535,6 +567,8 @@ class UsageSampler:
                               ('watch_observation', 'watch_reason', 'watch_source')})
             watch_delta = end - start
             state['play_id'] = observation['play_id'] or state.get('play_id') or ''
+            if observation['play_id']:
+                state['play_id_source'] = 'sessions'
             state["last_ts"] = now
             state['was_playing'] = playing
             if not playing:
@@ -626,8 +660,13 @@ class UsageSampler:
 
     # -- persistence ---------------------------------------------------------
     def _record_watch(self, sid: str, state: dict, start: float, end: float, *,
-                      evidence: tuple[dict, dict] | None = None) -> None:
+                      evidence: tuple[dict, dict] | None = None,
+                      required_lease: str | None = None) -> bool:
         with self._db.write() as conn:
+            if required_lease is not None and not conn.execute(
+                    'SELECT 1 FROM stream_leases WHERE user_id=? AND session_id=? AND play_id=? '
+                    'AND observed=1 AND snapshot_guard=0', (state['user_id'], sid, required_lease)).fetchone():
+                return False  # same-transaction replacement/late-report guard
             key = state.setdefault('watch_key', uuid.uuid4().hex)
             if end > start:
                 added = conn.execute(
@@ -655,6 +694,7 @@ class UsageSampler:
             conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) '
                          'ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
                          (sid, json.dumps(state)))
+        return True
 
     def _commit(self, per_user: dict[str, int], now: float) -> None:
         day = day_key(now)

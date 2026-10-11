@@ -32,8 +32,14 @@ pause/resume baselines, seeks, buffering, rewinds, gaps over 120 seconds and
 restart downtime are not bypassed or backfilled.
 
 Authenticated, upstream-accepted Progress now supplies its actual position and
-receipt time to that same gate. It must match one existing bound playback. An
-omitted rate can use only an explicitly reported, fresh rate from that same
+receipt time to that same gate. It must match one existing bound playback. Native
+Sessions can omit PlaySessionId: only the existing issued, observed admission
+lease for that same user/session supplies it, with current device/item matching.
+Explicit conflicting Sessions identity is never overridden. The lease is checked
+again in the interval commit transaction, so replaced/deleted plays cannot credit
+late reports. This path never creates or writes a seat. A delayed old Stop cannot
+close a replacement; restart and source switches still reset the proof baseline.
+An omitted rate can use only an explicitly reported, fresh rate from that same
 session; a missing/stale/invalid rate remains unknown. Report and polling clocks
 are not bridged: switching source establishes a new baseline. Fresh reports take
 priority over cached Sessions rows. Per-play credited endpoints and transactional
