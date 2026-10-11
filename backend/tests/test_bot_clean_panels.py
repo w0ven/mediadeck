@@ -40,6 +40,7 @@ def clean_bot(request):
     b._call = call
     b._emby.set_user_password = password
     b.send = TelegramBot.send.__get__(b, TelegramBot)
+    b.send_message = TelegramBot.send_message.__get__(b, TelegramBot)
     b._edit = TelegramBot._edit.__get__(b, TelegramBot)
     return b
 

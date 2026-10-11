@@ -3197,12 +3197,18 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                                                  mid, 'feedback', _ACTOR.get())
 
     async def _show_account_card(self, chat_id, member):
-        if not _GROUP.get():
-            return await self._show(chat_id, self._account_card(member))
-        # A standalone, button-free card cannot later become an unrelated panel.
-        mid = await self.send_message(chat_id, self._brief_card(member))
+        if _GROUP.get():
+            shown = await self._show(chat_id, self._brief_card(member))
+            if shown:
+                self._queue_account_cleanup(chat_id, self._panel.get(self._pkey(chat_id)))
+            return shown
+        mid = self._panel.get(self._pkey(chat_id))
         if mid:
-            self._queue_account_cleanup(chat_id, mid)
+            return await self._edit(chat_id, mid, self._account_card(member))
+        mid = await self.send_message(chat_id, self._account_card(member))
+        if mid:
+            self._touch_panel(chat_id, mid)
+            self._menu_panel[self._pkey(chat_id)] = mid
         return bool(mid)
 
     def _usage_brief(self, member: dict[str, Any]) -> str:
@@ -4651,10 +4657,8 @@ class TelegramBot(GroupCommandCleanupMixin, PasswordBotMixin, RequestBotMixin, R
                 data = 'home'
             if in_group and data in ('me', 'me_status', 'usage', 'home'):
                 member = self._member_for_chat(tg_user_id)
-                if member and await self._edit(chat_id, int(message_id), self._brief_card(member)):
-                    mid = self._panel.get(self._pkey(chat_id), int(message_id))
-                    self._cancel_brief_cleanup(chat_id, mid)
-                    self._queue_account_cleanup(chat_id, mid)
+                if member:
+                    await self._edit(chat_id, int(message_id), self._brief_card(member))
                 return
             if in_group and data in ('help', 'rules'):
                 body = RULES_TEXT if data == 'rules' else self._group_help_text(self._member_for_chat(tg_user_id))
