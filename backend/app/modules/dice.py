@@ -101,7 +101,7 @@ class DiceService(GroupDiceService, PlayAccess):
             row = {'nonce': nonce, 'bot_id': self.bot_id, 'chat_id': chat, 'thread_id': thread,
                    'command_mid': mid, 'actor_uid': member['emby_user_id'], 'created': clock,
                    'deadline': deadline, 'timeout': deadline+600, 'round_number': beacon.future_round(deadline),
-                   'rules': encode({'version': GROUP_VERSION, 'draw_version': beacon.VERSION, 'chain': beacon.CHAIN, 'window': 180, 'wait': 600, 'fee': 0}),
+                   'rules': encode({'version': GROUP_VERSION, 'draw_version': beacon.VERSION, 'presentation': 'caption-v1', 'chain': beacon.CHAIN, 'window': 180, 'wait': 600, 'fee': 0}),
                    'secret': secret, 'commitment': hashlib.sha256(bytes.fromhex(secret)).hexdigest()}
             conn.execute(f"INSERT INTO dice_rounds({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
             for pool in ('size',):

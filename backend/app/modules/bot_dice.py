@@ -9,7 +9,7 @@ import time
 from html import escape
 
 from app.modules import dice_beacon as beacon
-from app.modules import dice_group_view
+from app.modules import dice_caption_view, dice_group_view
 from app.modules.bot_dice_group import GroupDiceBotMixin
 from app.modules.checkin_cleanup import CleanupService
 from app.modules.dice import DiceService
@@ -261,14 +261,17 @@ class DiceBotMixin(GroupDiceBotMixin):
         except (PlayError, GroupPointsError) as exc:
             await self._answer_callback(callback_id, str(exc))
 
-    async def _dice_edit(self, chat, mid, body, keys):
+    async def _dice_edit(self, chat, mid, body, keys, *, caption=False):
         # Never enter the generic personal/admin panel lifecycle or replace a missing card.
         from app.modules.telegram import _CALL_ERROR
         token = _CALL_ERROR.set(None)
         try:
-            result = await self._call('editMessageText', {'chat_id': chat, 'message_id': mid,
-                'text': body, 'parse_mode': 'HTML', 'disable_web_page_preview': True,
-                'reply_markup': {'inline_keyboard': keys}})
+            payload = {'chat_id': chat, 'message_id': mid,
+                'caption' if caption else 'text': body, 'parse_mode': 'HTML',
+                'reply_markup': {'inline_keyboard': keys}}
+            if not caption:
+                payload['disable_web_page_preview'] = True
+            result = await self._call('editMessageCaption' if caption else 'editMessageText', payload)
             return result is not None and result is not False or 'not modified' in str(_CALL_ERROR.get() or '').lower()
         except Exception:  # noqa: BLE001 - display failure must never block financial recovery
             return False
@@ -294,11 +297,11 @@ class DiceBotMixin(GroupDiceBotMixin):
         if is_group(row):
             with economy_write(self._db):
                 row, snapshot = self._dice_service().group_snapshot(row['nonce'])
-                body, keys = dice_group_view.group_card(row, snapshot)
+                body, keys = dice_caption_view.card(row, snapshot) if dice_caption_view.is_caption(row) else dice_group_view.group_card(row, snapshot)
         else:
             body, keys = group_card(row, 0, self._bot_username)
         with economy_write(self._db) as conn:
-            if is_group(row):
+            if is_group(row) and not dice_caption_view.is_caption(row):
                 self._dice_service().queue_message(conn, row['nonce'], 'art:open', row['chat_id'], art_name(row, opening=True), [[{'text': '查看本局', 'callback_data': f'dg:{row["nonce"]}:artopen'}]], thread=row['thread_id'])
             self._dice_service().queue_message(conn, row['nonce'], 'open', row['chat_id'], body, keys, row['thread_id'])
         await self._dice_deliver(row['nonce'])
@@ -329,13 +332,16 @@ class DiceBotMixin(GroupDiceBotMixin):
             token = CALL_DELIVERY.set(None)
             try:
                 try:
-                    if job['purpose'].startswith('art:'):
-                        payload = {'chat_id': int(job['recipient']), 'caption': '🎲 大小对决' if job['purpose'] == 'art:open' else dice_group_view.result_heading(row), 'parse_mode': 'HTML'}
+                    combined = dice_caption_view.is_caption(row) and job['purpose'] in ('open', 'report:0')
+                    if combined or job['purpose'].startswith('art:'):
+                        name = art_name(row, opening=job['purpose'] == 'open') if combined else job['body']
+                        caption = job['body'] if combined else '🎲 大小对决' if job['purpose'] == 'art:open' else dice_group_view.result_heading(row)
+                        payload = {'chat_id': int(job['recipient']), 'caption': caption, 'parse_mode': 'HTML'}
                         payload['reply_markup'] = {'inline_keyboard': json.loads(job['keyboard'])}
                         if job['thread']:
                             payload['message_thread_id'] = job['thread']
                         result = await self._call_multipart('sendPhoto', payload,
-                            {'photo': (job['body']+'.jpg', art_bytes(job['body']), 'image/jpeg')})
+                            {'photo': (name+'.jpg', art_bytes(name), 'image/jpeg')})
                         mid = result.get('message_id') if isinstance(result, dict) else None
                     else:
                         mid = await self._dice_send(int(job['recipient']), job['body'], json.loads(job['keyboard']), thread_id=job['thread'] or None)
