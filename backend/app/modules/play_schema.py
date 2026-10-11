@@ -84,5 +84,7 @@ def migrate(db):
     """)
     from app.modules.niuniu import migrate as migrate_niuniu
     migrate_niuniu(db)
+    from app.modules.dice import migrate as migrate_dice
+    migrate_dice(db)
     from app.modules.bot_play_panels import migrate as migrate_panels
     migrate_panels(db)

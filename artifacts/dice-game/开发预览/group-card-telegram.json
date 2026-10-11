@@ -1,0 +1,18 @@
+{
+  "text": "🎲 <b>骰局 · 等待封盘</b>\n封盘 00:58:07 · 已下注 2 人\n玩家对赌 · 确认后不可撤注\n\n<blockquote expandable>开奖凭证\n公开锁定 · 不重摇\n展开查看完整承诺\n局号 <code>08d470f00e20011a381377f8</code>\n固定信标 drand #6543563\n承诺 <code>756caf0752697dc54174706f09305df7775c4eb0f22923ca822336867294ab41</code>\n封盘后最多等待10分钟；无有效开奖数据则全局退款，已有结果按原结果结算。</blockquote>",
+  "parse_mode": "HTML",
+  "reply_markup": {
+    "inline_keyboard": [
+      [
+        {
+          "text": "进入私聊下注",
+          "url": "https://t.me/MediaDeckDemoBot?start=dice_08d470f00e20011a381377f8"
+        },
+        {
+          "text": "查看本局",
+          "callback_data": "dcg:08d470f00e20011a381377f8"
+        }
+      ]
+    ]
+  }
+}
