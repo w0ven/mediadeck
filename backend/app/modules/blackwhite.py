@@ -11,7 +11,7 @@ from app.modules.play_rounds import RoundCards, fair_split
 from app.modules.plugins import Field, Plugin, Spec
 from app.modules.red_packets import public_name
 
-DEFAULTS = {'min_stake': 10, 'max_stake': 500, 'default_stake': 10, 'lobby_seconds': 600}
+DEFAULTS = {'min_stake': 10, 'max_stake': 0, 'default_stake': 10, 'lobby_seconds': 600}
 
 
 class BlackwhiteService(RoundCards):
@@ -31,8 +31,9 @@ class BlackwhiteService(RoundCards):
             if not self.enabled():
                 raise PlayError('黑白板暂未开放')
             cfg = {**DEFAULTS, **self.config()}
+            cfg['max_stake'] = 0  # No business cap; arithmetic/storage safety still applies.
             stake = cfg['default_stake'] if stake is None else stake
-            integer(stake, '押注', cfg['min_stake'], cfg['max_stake'])
+            integer(stake, '押注', cfg['min_stake'], (2**63-1)//5)
             prior = conn.execute("SELECT * FROM play_rounds WHERE kind='blackwhite' AND bot_id=? AND chat_id=? AND command_message_id=?", (self.bot_id, chat, mid)).fetchone()
             if prior:
                 if (prior['thread_id'] != thread or prior['actor_tg_id'] != tg
@@ -141,14 +142,13 @@ class BlackwhiteService(RoundCards):
 class BlackwhitePlugin(Plugin):
     spec = Spec(id='blackwhite', name='黑白板', icon='⚫', category='points',
                 description='五人同注，少数胜；同面或组局超时全退。', fields=[
-                    Field('default_stake', '默认押注', kind='int', default=10, min=10, max=500),
-                    Field('min_stake', '最低押注', kind='int', default=10, min=10, max=500),
-                    Field('max_stake', '最高押注', kind='int', default=500, min=10, max=500),
+                    Field('default_stake', '默认押注', kind='int', default=10, min=10, max=(2**63-1)//5),
+                    Field('min_stake', '最低押注', kind='int', default=10, min=10, max=(2**63-1)//5),
                     Field('lobby_seconds', '组局超时秒数', kind='int', default=600, min=60, max=3600)])
 
     def validate_config(self, cfg):
-        if not cfg['min_stake'] <= cfg['default_stake'] <= cfg['max_stake']:
-            raise ValueError('最低押注≤默认押注≤最高押注')
+        if not cfg['min_stake'] <= cfg['default_stake']:
+            raise ValueError('最低押注≤默认押注')
 
     async def run(self, config):
         if self.ctx.telegram:

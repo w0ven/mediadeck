@@ -364,10 +364,11 @@ def test_creation_idempotent_config_snapshot_and_help_not_in_main_card(env):
         await choose(env, row, 0, 'black')
         assert env.services.points.ledger(env.uids[0])[0]['delta'] == -50
         current = env.bot._blackwhite_service().get(row['nonce'])
-        assert json.loads(current['config_json'])['max_stake'] == 500
+        assert json.loads(current['config_json'])['max_stake'] == 0
         main = env.tg.text(GROUP, row['card_message_id'])
         for word in ('不可更改', '管理员', '少数方', '秘密选择', '手续费'): assert word not in main
         await env.bot._dispatch_update({'callback_query': {'id': 'help', 'data': 'bwh:'+row['nonce'], 'message': card(env, row), 'from': env.actors[0]}})
         assert any('少数方' in p.get('text', '') for m, p in env.tg.calls if m == 'answerCallbackQuery')
-        with pytest.raises(ValueError): env.services.registry.save('blackwhite', config={'default_stake': 501})
+        env.services.registry.save('blackwhite', config={'default_stake': 501})
+        with pytest.raises(ValueError): env.services.registry.save('blackwhite', config={'default_stake': 0})
     asyncio.run(run())

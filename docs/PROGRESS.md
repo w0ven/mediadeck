@@ -2646,3 +2646,10 @@ three only appear at production scale or during a routine operation.
 - Protect replacement leases from old Stop reports, retain report/poll priority and restart baselines, and distinguish progress verification in bounded credential-free counters.
 - Add actual route and source-faithful missing-identity regressions, including wrong/absent/unobserved/guarded bindings, ambiguity, replacements, deletion, commit races, stop and restart. Original proof and traffic functions stay identical. Ship only through the standard PR/CI/tag workflow; no live playback or Bot test sends.
 - Final local integrated gates: 3785 passed, 56 environment skips and 2 subtests; full lint, isolated mock health and Chromium passed. Natural live Progress acceptance is checked separately after the official tag deployment.
+
+
+## 2026-10-11 — Self-claims, uncapped game stakes and active-room navigation
+- Allow packet senders to claim once under the same membership/audience and atomic ledger rules as other recipients.
+- Remove configured business stake ceilings from niuniu and blackwhite commands/settings; keep minimums, available funds, banker collateral and signed-integer storage safety. Existing room stakes/financial snapshots are unchanged.
+- Link active-niuniu feedback to its original card in the same group/topic and retain exact guide IDs for terminal cleanup, including timeout, retry and restart recovery. Cleanup never repeats game transactions or targets other rooms.
+- Direct handler/atomic packet regressions pass; align administrative browser checks with removal of the maximum-stake field. Release through existing full CI and tagged deployment; no live games or test messages.

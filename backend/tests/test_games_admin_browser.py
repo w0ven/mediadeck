@@ -33,8 +33,8 @@ def test_five_plugin_api_live_readonly_unknown_preservation_validation_and_auth(
             saved=client.post('/api/plugins/'+pid,json={'config':{'untrusted_new':'drop'}}).json()
             assert saved['config']['unknown_saved']=={'nested':'keep'} and 'untrusted_new' not in saved['config']
             assert registry._store.section('plugins')[pid]['extra_top']=={'keep':[1,2]}
-        invalid=(('checkin_cleanup',{'delay_seconds':59}),('blackwhite',{'min_stake':200,'max_stake':100}),
-                 ('niuniu',{'default_stake':30,'max_stake':20}),('red_packets',{'max_parts':0}),
+        invalid=(('checkin_cleanup',{'delay_seconds':59}),('blackwhite',{'min_stake':200,'default_stake':100}),
+                 ('niuniu',{'default_stake':30,'min_stake':40}),('red_packets',{'max_parts':0}),
                  ('points_ranking',{'page_size':4}),('niuniu',{'lobby_seconds':15.5}))
         for pid,cfg in invalid:
             old=copy.deepcopy(registry.config(pid))
@@ -95,12 +95,14 @@ def test_chromium_five_gemini_groups_advanced_hidden_save_drafts_and_real_issues
             niuniu.locator('.plugin-settings-group').last.locator('summary').click()
             page.fill('#pl-blackwhite-default_stake','50')
             # Concurrent backend change to an untouched known field and switch is not overwritten by this editor.
-            registry.save('blackwhite',enabled=False,config={'max_stake':450})
+            registry.save('blackwhite',enabled=False,config={'lobby_seconds':450})
             page.locator('[data-plugin="blackwhite"] [data-act="save"]').click()
             page.wait_for_function("document.querySelector('[data-plugin=blackwhite]').textContent.includes('已保存')")
-            assert registry.config('blackwhite')['default_stake']==50 and registry.config('blackwhite')['max_stake']==450
+            assert registry.config('blackwhite')['default_stake']==50 and registry.config('blackwhite')['lobby_seconds']==450
             assert not registry.enabled('blackwhite')
-            assert page.locator('#pl-blackwhite-max_stake').input_value()=='450'
+            assert page.locator('#pl-blackwhite-lobby_seconds').input_value()=='450'
+            assert page.locator('#pl-blackwhite-max_stake').count()==0
+            assert page.locator('#pl-niuniu-max_stake').count()==0
             assert page.locator('#pl-niuniu-default_stake').input_value()=='20'
             assert page.locator('#pl-niuniu-lobby_seconds').input_value()=='1200'
             niuniu.locator('[data-act="refresh-status"]').click()
@@ -114,11 +116,11 @@ def test_chromium_five_gemini_groups_advanced_hidden_save_drafts_and_real_issues
             page.wait_for_function("document.querySelector('[data-plugin=points_ranking]').textContent.includes('已保存')")
             assert registry.config('points_ranking')['page_size']==5
             # Cross-field error leaves all draft values intact; no successful save or partial config change.
-            page.fill('#pl-niuniu-max_stake','15')
+            page.fill('#pl-niuniu-min_stake','25')
             niuniu.locator('[data-act="save"]').click()
             page.wait_for_function("document.querySelector('[data-plugin=niuniu]').textContent.includes('保存失败')")
-            assert page.locator('#pl-niuniu-default_stake').input_value()=='20' and page.locator('#pl-niuniu-max_stake').input_value()=='15'
-            assert registry.config('niuniu')['max_stake']==500
+            assert page.locator('#pl-niuniu-default_stake').input_value()=='20' and page.locator('#pl-niuniu-min_stake').input_value()=='25'
+            assert registry.config('niuniu')['min_stake']==1
             for pid in IDS:
                 assert registry.config(pid)['future_config']=={'retain':True}
                 assert registry._store.section('plugins')[pid]['operator_extension']=='keep'
