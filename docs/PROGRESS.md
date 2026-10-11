@@ -2659,3 +2659,8 @@ three only appear at production scale or during a routine operation.
 - Record only confirmed Bot error replies to trusted group niuniu commands for deletion after 60 seconds. Private replies, game cards, final results and existing-room navigation keep their own lifetimes.
 - Reuse the durable exact-ID cleanup implementation with an isolated niuniu job kind; leases, restart recovery and retry do not depend on the check-in switch or replay funds. No historical scan or deletion.
 - Focused real-handler, cleanup and game regressions: 143 passed; lint passes. Publish through full CI and tagged deployment; no live game or test-message sends.
+
+## 2026-10-11 — Compact self-account card
+- Remove explanatory device/watch notes and personal-card keyboards; preserve factual values, unknown states and administrative detail cards.
+- Group /me and /myinfo emit standalone cards with exact-ID persistent 60-second deletion, separate from personal/menu lifetimes and check-in settings. Private cards remain.
+- Actual handler, clean-up timing, lease recovery, failed send, privacy and source preview regressions pass.

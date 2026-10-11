@@ -11,7 +11,7 @@ from app.modules.bot_play_hub import PlayHubBotMixin
 from app.modules.bot_play_panels import PlayPanelsBotMixin
 from app.modules.bot_poker import PokerBotMixin
 from app.modules.bot_scratch9 import Scratch9BotMixin
-from app.modules.checkin_cleanup import CHECKIN_TARGET, CleanupService, payload
+from app.modules.checkin_cleanup import CHECKIN_TARGET, AccountCardCleanup, CleanupService, payload
 from app.modules.command_cleanup import capture_response
 from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
@@ -121,9 +121,13 @@ class PlayBotMixin(BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9Bo
             self._plugins._record('checkin_cleanup', ok, summary, time.time(), 'worker')
         return processed
 
+    async def _drain_account_cards(self, *, now=None):
+        if self._db is None or not self.enabled:return
+        return await self._drain_checkin_deletes(now=now, service=AccountCardCleanup(self._db))
+
     async def _play_worker(self):
         while True:
-            for work in (self._drain_checkin_deletes, self._drain_niuniu_feedback, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
+            for work in (self._drain_checkin_deletes, self._drain_niuniu_feedback, self._drain_account_cards, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
                 try:
                     await work()
                 except asyncio.CancelledError:

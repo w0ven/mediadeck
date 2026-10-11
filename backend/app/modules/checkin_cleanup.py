@@ -84,6 +84,11 @@ class NiuniuFeedbackCleanup(CleanupService):
     key_prefix = 'niuniu-feedback'
 
 
+class AccountCardCleanup(CleanupService):
+    kind = 'account.card.delete'
+    key_prefix = 'account-card'
+
+
 class CheckinCleanupPlugin(Plugin):
     spec = Spec(id='checkin_cleanup', name='群签到自动清理', category='points', icon='🧹',
                 description='群签到指令和反馈60秒后清理，私聊保留。',
