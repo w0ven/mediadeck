@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+from app.modules.dice_banker import banker, is_banker
 from app.modules.dice_group import TERMINAL
 from app.modules.dice_group_view import clock, markets, result_heading
 from app.modules.game_mentions import result_mention, text_units
@@ -21,7 +22,18 @@ def pages(row, snapshot):
     else:
         state = '投注中' if row['state'] in ('opening', 'open') else '已封盘 · 待揭晓'
         header = f'🎲 <b>大小对决</b>　{state}\n⏳ {clock(row["deadline"])} 封盘 · 0抽成'
-    header += '\n\n'+markets(snapshot['totals'], row=row)
+    if is_banker(row):
+        bank = banker(row)
+        header += '\n\n👑 庄家 '+result_mention(bank['tg_id'], bank['display_name'])+f'　庄本 <b>{bank["capital"]:,}</b>'
+        if terminal:
+            net = json.loads(row['result'])['size']['banker']['net']
+            label = '持平' if net == 0 else f'{net:+,}'
+            header += '\n庄家净盈亏 <b>'+label+'</b>'
+        sides = {t['option']: t['amount'] for t in snapshot['totals']}
+        header += f'\n\n🔴 大 <b>{sides.get("大", 0):,}</b>　🔵 小 <b>{sides.get("小", 0):,}</b>'
+        header += '\n赢返2倍含本金 · 豹子通吃 · 0抽成'
+    else:
+        header += '\n\n'+markets(snapshot['totals'], row=row)
     if not terminal:
         header += '\n\n<code>/大 金额</code> · <code>/小 金额</code>\n发送即确认，不可撤注'
     tickets = snapshot['tickets']  # newest first, original ticket numbers retained

@@ -40,7 +40,8 @@ def env(request, monkeypatch):
     e.services.registry.get('dice').ctx.telegram = e.bot
     # Existing suite is the legacy seven-pool compatibility contract. Seed the
     # persisted pre-upgrade format, rather than changing new production rules.
-    original = DiceService.create
+    from dice_legacy import legacy_group_create
+    original = legacy_group_create
     def legacy_create(service, message, *, now=None):
         row = original(service, message, now=now)
         if json.loads(row['rules'])['version'] != beacon.VERSION:
@@ -58,7 +59,7 @@ def svc(e):
     return e.bot._dice_service()
 
 
-def message(e, text='/猜大小', index=0, mid=7001, private=False, thread=21):
+def message(e, text='/猜大小 1000', index=0, mid=7001, private=False, thread=21):
     chat = e.actors[index]['id'] if private else GROUP
     return {'chat': {'id': chat, 'type': 'private' if private else 'supergroup'}, 'from': e.actors[index],
             'message_id': mid, 'text': text, **({'is_topic_message': True, 'message_thread_id': thread} if not private and thread else {})}
@@ -593,7 +594,8 @@ def test_dice_only_menu_and_full_help_are_reachable(env):
         assert any('骰局玩法' in p.get('text','') or any(b.get('text')=='骰局玩法' for line in p.get('reply_markup',{}).get('inline_keyboard',[]) for b in line) for method,p in env.tg.calls if method=='sendMessage')
         await env.bot._dispatch_update({'message':message(env,'/猜大小帮助',private=True,mid=8998)})
         text=next(p['text'] for method,p in reversed(env.tg.calls) if method=='sendMessage')
-        assert '/大 2000' in text and '指令即确认' in text and '180秒' in text
+        assert '/猜大小 1000' in text and '发送即扣款' in text and '180秒' in text
+        assert '赢返2倍' in text and '庄家通吃' in text
         assert env.db.one("SELECT 1 FROM play_jobs WHERE job_key=?", (f'dice:{env.actors[0]["id"]}:8998',))
     asyncio.run(run())
 

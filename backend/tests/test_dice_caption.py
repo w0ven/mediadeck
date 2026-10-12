@@ -18,10 +18,14 @@ from app.modules.report_delivery import CALL_DELIVERY
 
 
 @pytest.fixture
-def env(request):
+def env(request, monkeypatch):
     e = request.getfixturevalue('bw_env')
     e.services.registry.save('dice', enabled=True)
     e.services.registry.get('dice').ctx.telegram = e.bot
+    from dice_legacy import legacy_group_create
+
+    from app.modules.dice import DiceService
+    monkeypatch.setattr(DiceService, 'create', legacy_group_create)
     return e
 
 

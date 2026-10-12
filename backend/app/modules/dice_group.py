@@ -6,6 +6,7 @@ import json
 import time
 
 from app.modules.account_deletion import deletion_in_progress
+from app.modules.dice_banker import BANKER_VERSION, banker, is_banker
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import PlayError, integer
 from app.modules.red_packets import public_name
@@ -17,7 +18,7 @@ TERMINAL = ('settled', 'refunded', 'empty')
 
 
 def is_group(row):
-    return json.loads(row['rules']).get('version') == GROUP_VERSION
+    return json.loads(row['rules']).get('version') in (GROUP_VERSION, BANKER_VERSION)
 
 
 def migrate(db):
@@ -92,6 +93,15 @@ class GroupDiceService:
                 raise PlayError('本局账号绑定已变化，本次未下注')
             accepted = conn.execute("SELECT accepted FROM dice_pools WHERE nonce=? AND pool='size'", (row['nonce'],)).fetchone()[0]
             integer(accepted+amount, '本局安全整数总额')
+            if is_banker(row):
+                bank = banker(row)
+                if uid == bank['user_id'] or tg == bank['tg_id']:
+                    raise PlayError('庄家不能下注自己的局')
+                integer(bank['capital']+accepted+amount, '本局托管安全整数总额')
+                sides = {r['option']: r['amount'] for r in conn.execute('SELECT option,SUM(amount) amount FROM dice_bets WHERE nonce=? GROUP BY option', (row['nonce'],))}
+                sides[option] = sides.get(option, 0)+amount
+                if abs(sides.get('大', 0)-sides.get('小', 0)) > bank['capital']:
+                    raise PlayError('超过本局庄本承赔范围，整笔未下注')
             if self.points.balance(uid) < amount:
                 raise PlayError('积分不足，本次未下注')
             ticket = hashlib.sha256(encode(['dice-group', self.bot_id, chat, mid]).encode()).hexdigest()
