@@ -7,10 +7,12 @@ from collections import defaultdict
 from app.modules.play_money import integer
 
 BANKER_VERSION = 'dice-size-banker-v1'
+QUICK_BANKER_VERSION = 'dice-size-banker-quicknet-v1'
+BANKER_VERSIONS = (BANKER_VERSION, QUICK_BANKER_VERSION)
 
 
 def is_banker(row):
-    return json.loads(row['rules']).get('version') == BANKER_VERSION
+    return json.loads(row['rules']).get('version') in BANKER_VERSIONS
 
 
 def banker(row):

@@ -30,7 +30,7 @@ def test_missing_saved_field_defaults_to_90_and_backend_exposes_setting(env):
     assert row['deadline']-row['created'] == 90
     assert json.loads(row['rules'])['window'] == 90
     assert row['timeout']-row['deadline'] == 600
-    assert row['round_number'] == beacon.future_round(row['deadline'])
+    assert row['round_number'] == 0
     assert registry.get('dice').readonly_status()['封盘秒数'] == 90
     assert '90秒封盘' in banker_help()
 
@@ -49,7 +49,7 @@ def test_saved_setting_reaches_bot_service_and_never_changes_existing_round(env,
     assert second['deadline']-second['created'] == seconds
     assert json.loads(second['rules'])['window'] == seconds
     assert second['timeout'] == second['deadline']+600
-    assert second['round_number'] == beacon.future_round(second['deadline'])
+    assert second['round_number'] == 0
     plugin = env.services.registry.get('dice')
     assert plugin.readonly_status()['封盘秒数'] == seconds
     assert plugin.readonly_status()['开奖最长等待秒数'] == 600
@@ -106,6 +106,9 @@ def test_preexisting_180_second_banker_keeps_original_beacon_and_caption(env):
     from app.modules.dice_caption_view import card
     env.services.registry.save('dice', config={'window_seconds': 180})
     row = asyncio.run(create(env))
+    rules = json.loads(row['rules'])
+    rules.update(version='dice-size-banker-v1', draw_version=beacon.VERSION, chain=beacon.CHAIN)
+    env.db.execute('UPDATE dice_rounds SET rules=?,round_number=?', (json.dumps(rules), beacon.future_round(row['deadline'])))
     svc(env).group_bet(message(env, '/小 10', index=1, mid=8100), '小', 10)
     env.services.registry.save('dice', config={'window_seconds': 90})
     current, snapshot = svc(env).group_snapshot(row['nonce'])

@@ -72,3 +72,17 @@ def derive(secret, nonce, beacon):
                     break
         counter += 1
     return seed.hex(), dice
+
+
+def for_row(row):
+    """Immutable version dispatch: old rules never acquire new draw semantics."""
+    from app.modules import dice_quicknet
+    from app.modules.dice_banker import QUICK_BANKER_VERSION
+    rules = json.loads(row['rules'])
+    if rules.get('version') == QUICK_BANKER_VERSION:
+        if (rules.get('draw_version') != dice_quicknet.VERSION or rules.get('chain') != dice_quicknet.CHAIN
+                or rules.get('selection') != dice_quicknet.SELECTION):
+            raise ValueError('invalid immutable quicknet rules')
+        return dice_quicknet
+    import sys
+    return sys.modules[__name__]

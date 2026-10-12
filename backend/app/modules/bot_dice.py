@@ -14,7 +14,7 @@ from app.modules.bot_dice_group import GroupDiceBotMixin
 from app.modules.checkin_cleanup import CleanupService
 from app.modules.dice import DiceService
 from app.modules.dice_art import art_bytes, art_name
-from app.modules.dice_banker import BANKER_VERSION
+from app.modules.dice_banker import BANKER_VERSIONS, QUICK_BANKER_VERSION
 from app.modules.dice_group import GROUP_VERSION, is_group
 from app.modules.dice_rules import POOLS, normalize, validate
 from app.modules.dice_view import group_card, private_card, report_pages
@@ -210,7 +210,7 @@ class DiceBotMixin(GroupDiceBotMixin):
                     conn.execute("UPDATE dice_messages SET state='sent',mid=?,lease=0 WHERE id=?", (mid, job['id']))
                     conn.execute("UPDATE dice_rounds SET card_mid=?,cleanup_queued=0,state=CASE WHEN state='opening' AND deadline>? THEN 'open' ELSE state END WHERE nonce=?", (mid, time.time(), nonce))
                     conn.execute("INSERT INTO dice_delivery_audit(job_id,action,mid,created) VALUES(?,'callback',?,?)", (job['id'],mid,time.time()))
-            await self._answer_callback(callback_id, f'固定drand轮次 {row["round_number"]}；请点进入私聊查看承诺及开奖证据。')
+            await self._answer_callback(callback_id, f'信标轮次 {row["round_number"] or "封盘时选定"}；请进入私聊查看承诺及开奖证据。')
         except (PlayError, GroupPointsError) as exc:
             await self._answer_callback(callback_id, str(exc))
 
@@ -397,61 +397,81 @@ class DiceBotMixin(GroupDiceBotMixin):
                     DiceCleanup(self._db).enqueue(self._active_bot_id, int(row['chat_id']), row['thread_id'], photo['mid'], 'feedback', self._active_bot_id, due=time.time())
                 self._db.execute('UPDATE dice_rounds SET cleanup_queued=1 WHERE nonce=?', (nonce,))
 
+    def _dice_draw_schedule(self, nonce, *, wake=False):
+        """One independent durable-round runner; the slow shared worker only recovers it."""
+        service = self._dice_service()
+        initial = service.get(nonce)
+        if json.loads(initial['rules']).get('version') != QUICK_BANKER_VERSION:
+            return
+        tasks = getattr(self, '_dice_draw_tasks', None)
+        if tasks is None:
+            tasks = self._dice_draw_tasks = {}
+        key = (self._active_bot_id, nonce)
+        current = tasks.get(key)
+        if current and not current[0].done():
+            if wake:
+                current[1].set()
+            return
+        event = asyncio.Event()
+        bot_id = self._active_bot_id
+
+        async def run():
+            while self.enabled and self._active_bot_id == bot_id and not asyncio.current_task().cancelling():
+                event.clear()
+                row = service.get(nonce)
+                if row['state'] == 'open' and time.time() < row['deadline']:
+                    try:
+                        await asyncio.wait_for(event.wait(), timeout=max(0.05, row['deadline']-time.time()))
+                    except TimeoutError:
+                        pass
+                    continue
+                await self._dice_run_round(row)
+                row = service.get(nonce)
+                if row['error'] and row['state'] not in ('settled', 'refunded', 'empty'):
+                    return
+                clock = time.time()
+                if row['state'] in ('opening', 'open'):
+                    target = row['deadline']
+                elif row['state'] == 'locked':
+                    target = min(row['timeout'], max(beacon.for_row(row).round_time(row['round_number']), row['beacon_due']))
+                elif row['state'] == 'fixed':
+                    target = clock
+                else:
+                    if row['error'] or not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):
+                        return  # recovery worker retries; don't spin on an undeliverable outbox
+                    pending = self._db.one("SELECT MIN(CASE WHEN state='sending' THEN lease ELSE due END) due FROM dice_messages WHERE nonce=? AND state IN ('pending','sending')", (nonce,))
+                    if pending['due'] is None:
+                        return
+                    target = pending['due']
+                try:
+                    await asyncio.wait_for(event.wait(), timeout=max(0.05, target-clock))
+                except TimeoutError:
+                    pass
+
+        task = asyncio.create_task(run())
+        tasks[key] = (task, event)
+        self._in_flight.add(task)
+        def done(completed):
+            self._in_flight.discard(completed)
+            if tasks.get(key, (None,))[0] is completed:
+                tasks.pop(key, None)
+            if not completed.cancelled() and completed.exception():
+                self._last_error = '骰局独立开奖任务待恢复'
+        task.add_done_callback(done)
+
     async def _dice_tick(self):
         if self._db is None or self._points is None or not self.enabled:
             return
-        service = self._dice_service()
         rows = self._db.query("SELECT * FROM dice_rounds WHERE bot_id=? AND (state IN ('opening','open','locked','fixed') OR EXISTS(SELECT 1 FROM dice_messages m WHERE m.nonce=dice_rounds.nonce AND m.state IN ('pending','sending')) OR (state IN ('settled','refunded','empty') AND cleanup_queued=0 AND NOT EXISTS(SELECT 1 FROM dice_messages m WHERE m.nonce=dice_rounds.nonce AND m.purpose LIKE 'report:%' AND m.state!='sent'))) ORDER BY created LIMIT 50", (self._active_bot_id,))
         for initial in rows:
             nonce = initial['nonce']
-            try:
-                if initial['state'] == 'opening' and time.time() < initial['deadline']:
-                    await self._dice_publish_open(initial)
-                row = service.close(nonce)
-                if is_group(row) and row['state'] == 'locked':
-                    await self._dice_group_refresh(nonce)
-                if row['state'] == 'locked':
-                    row = service.settle(nonce)
-                    if row['state'] == 'locked' and row['card_mid'] and not is_group(row):
-                        n = self._db.one('SELECT COUNT(DISTINCT user_id) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
-                        body, keys = group_card(row, n, self._bot_username)
-                        defer_ui(self, ('dice', nonce), lambda chat=int(row['chat_id']), mid=row['card_mid'], body=body, keys=keys: self._dice_edit(chat, mid, body, keys))
-                    if row['state'] == 'locked' and time.time() >= beacon.round_time(row['round_number']):
-                        try:
-                            raw = await asyncio.wait_for(beacon.fetch(row['round_number']), timeout=max(0.01, row['timeout']-time.time()))
-                            await asyncio.to_thread(service.fix, nonce, raw)
-                        except (ValueError, PlayError, TimeoutError):
-                            pass
-                row = service.settle(nonce)
-                if is_group(row):
-                    if row['state'] in ('settled', 'refunded', 'empty'):
-                        self._dice_group_reports(row)
-                    await self._dice_deliver(nonce)
-                    await self._dice_group_refresh(nonce)
-                    continue
-                if row['state'] in ('settled', 'refunded', 'empty'):
-                    tickets = self._db.query('SELECT * FROM dice_tickets WHERE nonce=? ORDER BY created,token', (nonce,))
-                    with economy_write(self._db) as conn:
-                        for i, body in enumerate(report_pages(row, tickets, self._bot_username)):
-                            service.queue_message(conn, nonce, f'report:{i}', row['chat_id'], body, thread=row['thread_id'])
-                        people = {t['user_id']: t for t in tickets}
-                        results = json.loads(row['result'])
-                        for uid, ticket in people.items():
-                            detail = '🎲 <b>骰局 · 本人结算</b>\n<code>'+nonce+'</code>'
-                            for pool, (label, _) in POOLS.items():
-                                outcome = results[pool]['users'].get(uid)
-                                if outcome:
-                                    detail += f'\n\n{label} · 投入 {outcome["invested"]}\n命中本金 {outcome["winning"]} · 奖金 {outcome["bonus"]} · 退款 {outcome["refund"]}\n返还 {outcome["returned"]} · 净盈亏 {outcome["net"]:+d}'
-                            detail += f'\n\n<a href="https://t.me/{self._bot_username}?start=dice_{nonce}">投注明细 · 开奖验真</a>'
-                            service.queue_message(conn, nonce, 'detail:'+uid, ticket['tg_id'], detail)
-                elif row['card_mid']:
-                    n = self._db.one('SELECT COUNT(DISTINCT user_id) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
-                    body, keys = group_card(row, n, self._bot_username)
-                    defer_ui(self, ('dice', nonce), lambda chat=int(row['chat_id']), mid=row['card_mid'], body=body, keys=keys: self._dice_edit(chat, mid, body, keys))
-                await self._dice_deliver(nonce)
-            except Exception:  # noqa: BLE001 - retain funds; do not block other fixed-result recovery
-                self._db.execute("UPDATE dice_rounds SET error='恢复异常，保留资金及固定结果，待核对' WHERE nonce=?", (nonce,))
-        for dirty in self._db.query("SELECT nonce FROM dice_rounds WHERE bot_id=? AND json_extract(rules,'$.version') IN (?,?) AND group_rendered<group_revision AND group_due<=? AND group_lease<=? AND group_retry<=? LIMIT 50", (self._active_bot_id, GROUP_VERSION, BANKER_VERSION, time.time(), time.time(), time.time())):
+            if json.loads(initial['rules']).get('version') == QUICK_BANKER_VERSION:
+                if initial['state'] in ('opening', 'open') and initial['card_mid']:
+                    self._dice_group_schedule(nonce)
+                self._dice_draw_schedule(nonce, wake=True)
+            else:
+                await self._dice_run_round(initial)
+        for dirty in self._db.query("SELECT nonce FROM dice_rounds WHERE bot_id=? AND json_extract(rules,'$.version') IN (?,?,?) AND group_rendered<group_revision AND group_due<=? AND group_lease<=? AND group_retry<=? LIMIT 50", (self._active_bot_id, GROUP_VERSION, *BANKER_VERSIONS, time.time(), time.time(), time.time())):
             await self._dice_group_refresh(dirty['nonce'])
         for session in self._db.query("SELECT * FROM dice_sessions WHERE bot_id=? AND state='active' AND mid IS NOT NULL AND expires>? AND rendered_revision<revision LIMIT 50", (self._active_bot_id, time.time())):
             member = self._members.find_by_telegram(session['tg_id'])
@@ -463,3 +483,62 @@ class DiceBotMixin(GroupDiceBotMixin):
         for m in self._db.query("SELECT * FROM dice_messages m WHERE bot_id=? AND purpose LIKE 'detail:%' AND state='sent' AND NOT EXISTS(SELECT 1 FROM play_jobs j WHERE j.bot_id=m.bot_id AND j.job_key='dice:'||m.recipient||':'||m.mid)", (self._active_bot_id,)):
             DiceCleanup(self._db).enqueue(self._active_bot_id, int(m['recipient']), 0, m['mid'], 'feedback', m['recipient'], due=time.time()+900)
         await self._drain_checkin_deletes(service=DiceCleanup(self._db))
+
+    async def _dice_run_round(self, initial):
+        service = self._dice_service()
+        nonce = initial['nonce']
+        try:
+            if initial['state'] == 'opening' and time.time() < initial['deadline']:
+                await self._dice_publish_open(initial)
+            row = service.close(nonce)
+            if is_group(row) and row['state'] == 'locked':
+                if json.loads(row['rules']).get('version') == QUICK_BANKER_VERSION:
+                    self._dice_group_schedule(nonce)
+                else:
+                    await self._dice_group_refresh(nonce)
+            if row['state'] == 'locked':
+                row = service.settle(nonce)
+                if row['state'] == 'locked' and row['card_mid'] and not is_group(row):
+                    n = self._db.one('SELECT COUNT(DISTINCT user_id) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
+                    body, keys = group_card(row, n, self._bot_username)
+                    defer_ui(self, ('dice', nonce), lambda chat=int(row['chat_id']), mid=row['card_mid'], body=body, keys=keys: self._dice_edit(chat, mid, body, keys))
+                draw = beacon.for_row(row)
+                if row['state'] == 'locked' and time.time() >= max(draw.round_time(row['round_number']), row['beacon_due']):
+                    try:
+                        raw = await asyncio.wait_for(draw.fetch(row['round_number']), timeout=max(0.01, row['timeout']-time.time()))
+                        await asyncio.to_thread(service.fix, nonce, raw)
+                    except (ValueError, PlayError, TimeoutError) as exc:
+                        if json.loads(row['rules']).get('version') == QUICK_BANKER_VERSION:
+                            delay = max(min(30, 2**min(row['beacon_attempts'], 5)), getattr(exc, 'retry_after', 0))
+                            self._db.execute("UPDATE dice_rounds SET beacon_attempts=beacon_attempts+1,beacon_due=? WHERE nonce=? AND state='locked'", (time.time()+delay, nonce))
+            row = service.settle(nonce)
+            if row['state'] == 'locked' and json.loads(row['rules']).get('version') == QUICK_BANKER_VERSION:
+                return  # caption edits have their own task; never delay the beacon wakeup
+            if is_group(row):
+                if row['state'] in ('settled', 'refunded', 'empty'):
+                    self._dice_group_reports(row)
+                await self._dice_deliver(nonce)
+                await self._dice_group_refresh(nonce)
+                return
+            if row['state'] in ('settled', 'refunded', 'empty'):
+                tickets = self._db.query('SELECT * FROM dice_tickets WHERE nonce=? ORDER BY created,token', (nonce,))
+                with economy_write(self._db) as conn:
+                    for i, body in enumerate(report_pages(row, tickets, self._bot_username)):
+                        service.queue_message(conn, nonce, f'report:{i}', row['chat_id'], body, thread=row['thread_id'])
+                    people = {t['user_id']: t for t in tickets}
+                    results = json.loads(row['result'])
+                    for uid, ticket in people.items():
+                        detail = '🎲 <b>骰局 · 本人结算</b>\n<code>'+nonce+'</code>'
+                        for pool, (label, _) in POOLS.items():
+                            outcome = results[pool]['users'].get(uid)
+                            if outcome:
+                                detail += f'\n\n{label} · 投入 {outcome["invested"]}\n命中本金 {outcome["winning"]} · 奖金 {outcome["bonus"]} · 退款 {outcome["refund"]}\n返还 {outcome["returned"]} · 净盈亏 {outcome["net"]:+d}'
+                        detail += f'\n\n<a href="https://t.me/{self._bot_username}?start=dice_{nonce}">投注明细 · 开奖验真</a>'
+                        service.queue_message(conn, nonce, 'detail:'+uid, ticket['tg_id'], detail)
+            elif row['card_mid']:
+                n = self._db.one('SELECT COUNT(DISTINCT user_id) n FROM dice_tickets WHERE nonce=?', (nonce,))['n']
+                body, keys = group_card(row, n, self._bot_username)
+                defer_ui(self, ('dice', nonce), lambda chat=int(row['chat_id']), mid=row['card_mid'], body=body, keys=keys: self._dice_edit(chat, mid, body, keys))
+            await self._dice_deliver(nonce)
+        except Exception:  # noqa: BLE001 - retain funds; do not block other fixed-result recovery
+            self._db.execute("UPDATE dice_rounds SET error='恢复异常，保留资金及固定结果，待核对' WHERE nonce=?", (nonce,))

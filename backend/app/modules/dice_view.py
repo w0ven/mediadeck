@@ -56,13 +56,15 @@ def private_card(session, row, balance, bets, result):
     view = p.get('view', 'home')
     keys = []
     if view == 'proof':
-        evidence = {'version': beacon.VERSION, 'chain': beacon.CHAIN, 'public_key': beacon.PUBLIC_KEY,
-                    'scheme': beacon.SCHEME, 'round': row['round_number'], 'commitment': row['commitment'],
-                    'nonce': row['nonce'], 'deadline': row['deadline'], 'timeout': row['timeout']}
+        draw = beacon.for_row(row)
+        evidence = {'version': draw.VERSION, 'chain': draw.CHAIN, 'public_key': draw.PUBLIC_KEY,
+                    'scheme': draw.SCHEME, 'round': row['round_number'], 'commitment': row['commitment'],
+                    'nonce': row['nonce'], 'deadline': row['deadline'], 'timeout': row['timeout'], 'closed_at': row.get('closed_at'), 'rules': json.loads(row['rules'])}
         if row['state'] not in ('opening', 'open'):
             evidence.update(secret=row['secret'], seed=row['seed'], dice=json.loads(row['dice']), beacon=json.loads(row['evidence']))
         body = head+'\n\n<b>开奖证据</b>\n<pre>'+escape(json.dumps(evidence, ensure_ascii=False, indent=2))+'</pre>'
-        body += '\n算法：SHA256(JSON紧凑ASCII[版本,链,轮次,种子,局ID,randomness])；SHA256(摘要字节＋8字节大端计数器)，计数器从0开始；只取0–251，%6＋1，取前三个。承诺=SHA256(种子hex解码)。验签BLS G2Basic，消息=SHA256(前签名字节＋8字节大端轮次)。'
+        body += '\n算法：SHA256(JSON紧凑ASCII[版本,链,轮次,种子,局ID,randomness])；SHA256(摘要字节＋8字节大端计数器)，计数器从0开始；只取0–251，%6＋1，取前三个。承诺=SHA256(种子hex解码)。'
+        body += ('RFC9380 G1签名/G2公钥，DST=BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_，消息=SHA256(8字节大端轮次)。' if draw is not beacon else '验签BLS G2Basic，消息=SHA256(前签名字节＋8字节大端轮次)。')
     elif view == 'mine':
         body = head+'\n\n<b>我的投注</b>'
         # Seven fixed pages keep every accepted choice readable even for a full portfolio.

@@ -5,7 +5,8 @@ import json
 import math
 import time
 
-from app.modules.dice_banker import banker, is_banker
+from app.modules import dice_quicknet as quicknet
+from app.modules.dice_banker import QUICK_BANKER_VERSION, banker, is_banker
 from app.modules.dice_group import TERMINAL
 from app.modules.dice_group_view import markets, result_heading
 from app.modules.game_mentions import result_mention, text_units
@@ -43,6 +44,16 @@ def pages(row, snapshot, *, now=None):
         header += '\n赢返2倍含本金 · 豹子通吃 · 0抽成'
     else:
         header += '\n\n'+markets(snapshot['totals'], row=row)
+    if not terminal and json.loads(row['rules']).get('version') == QUICK_BANKER_VERSION:
+        header += '\n<blockquote expandable>🔐 公平开奖\n<code>'+row['commitment']+'</code>'
+        header += '\n封盘时刻＋2秒后的首轮 quicknet（3秒/轮）'
+        if row['round_number']:
+            header += f' · #{row["round_number"]}'
+        header += '</blockquote>'
+    if terminal and json.loads(row['rules']).get('version') == QUICK_BANKER_VERSION and row['evidence'] != '{}':
+        header += (f'\n\n<blockquote expandable>🔐 验真 · <a href="https://api.drand.sh/{quicknet.CHAIN}/public/{row["round_number"]}">quicknet #{row["round_number"]}</a>'
+                   f'\n局 <code>{row["nonce"]}</code> · 封盘 {row["closed_at"]}'
+                   f'\n承诺 <code>{row["commitment"]}</code>\n种子 <code>{row["secret"]}</code></blockquote>')
     if not terminal:
         header += '\n\n<code>/大 金额</code> · <code>/小 金额</code>\n发送即确认，不可撤注'
     tickets = snapshot['tickets']  # newest first, original ticket numbers retained

@@ -525,50 +525,51 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
     @staticmethod
     def _command_list(admin: bool = False, *, group: bool = False
                       ) -> list[dict[str, str]]:
-        if group:
-            commands = [
-                {"command": "start", "description": "打开私聊"},
-                {"command": "me", "description": "我的简卡"},
-                {"command": "usage", "description": "用量与观看"},
-                {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
-                {"command": "today", "description": "今日榜 · 截至查看时"},
-                {"command": "transfer", "description": "回复消息发放积分" if admin else "回复消息转账（扣本人余额）"},
-                {"command": "redpacket", "description": "积分红包 · 模式/金额/份数"},
-                {"command": "games", "description": "一起玩 · 坐庄请发 /猜大小 庄本"},
-                {"command": "blackwhite", "description": "黑白板 · 五人同注"},
-                {"command": "niuniu", "description": "牛牛 · 五张定胜负"},
-                {"command": "pointsrank", "description": "积分榜 · 当前可用"},
-                {"command": "rules", "description": "行为准则"},
-                {"command": "help", "description": "使用说明"},
-            ]
-            if admin:
-                commands += [
-                    {"command": "kk", "description": "查用户／赠送开号"},
-                    {"command": "renew", "description": "续期"},
-                    {"command": "score", "description": "调整积分"},
-                    {"command": "prouser", "description": "直接授予白名单"},
-                    {"command": "revuser", "description": "移回默认组"},
-                    {"command": "rmemby", "description": "删除账号"},
-                ]
-            return commands
         commands = [
-            {"command": "start", "description": "打开菜单"},
-            {"command": "me", "description": "我的账号"},
+            {"command": "start", "description": "打开私聊" if group else "打开菜单"},
+            {"command": "me", "description": "我的简卡" if group else "我的账号"},
             {"command": "usage", "description": "用量与观看时长"},
-            {"command": "rebind", "description": "TG 换绑申请"},
-            {"command": "games", "description": "一起玩 · 坐庄请发 /猜大小 庄本"},
-            {"command": "pointsrank", "description": "积分榜 · 当前可用"},
-            {"command": "rank", "description": "昨日榜（加 影片 查电影/剧集）"},
-            {"command": "today", "description": "今日榜 · 截至查看时"},
-            {"command": "help", "description": "使用说明"},
+        ]
+        if not group:
+            commands.append({"command": "rebind", "description": "Telegram 换绑申请"})
+        commands += [
+            {"command": "pointsrank", "description": "积分排行榜·可用积分"},
+            {"command": "rank", "description": "昨日观看榜·加 影片 查电影/剧集"},
+            {"command": "today", "description": "今日观看榜·截至当前"},
+            {"command": "transfer", "description": "[admin] 回复消息发放积分" if group and admin else "积分转账·扣本人余额"},
+        ]
+        if group:
+            commands.append({"command": "redpacket", "description": "积分红包·模式/金额/份数"})
+        commands.append({"command": "games", "description": "一起玩 · 坐庄请发 /猜大小 庄本"})
+        if group:
+            commands += [
+                {"command": "blackwhite", "description": "黑白板·五人同注"},
+                {"command": "niuniu", "description": "牛牛·五张定胜负"},
+            ]
+        commands += [
+            {"command": "help", "description": "命令与使用说明"},
             {"command": "rules", "description": "行为准则"},
         ]
         if admin:
+            if not group:
+                commands.append({"command": "manage", "description": "[admin] 用户管理菜单"})
             commands += [
-                {"command": "manage", "description": "用户管理"},
-                {"command": "kk", "description": "查用户／赠送开号"},
-                {"command": "prouser", "description": "直接授予白名单"},
+                {"command": "kk", "description": "[admin] 查用户／赠送开号"},
+                {"command": "renew", "description": "[admin] 用户续期"},
+                {"command": "score", "description": "[admin] 调整用户积分"},
+                {"command": "prouser", "description": "[admin] 授予白名单"},
+                {"command": "revuser", "description": "[admin] 移回默认组"},
+                {"command": "rmemby", "description": "[admin] 删除账号"},
             ]
+            if not group:
+                commands += [
+                    {"command": "renewall", "description": "[admin] 全员续期·需确认"},
+                    {"command": "scoreall", "description": "[admin] 全员加分·需确认"},
+                    {"command": "gift", "description": "[admin] 发放账号权益"},
+                    {"command": "invite", "description": "[admin] 增加邀请名额"},
+                    {"command": "code", "description": "[admin] 生成卡密"},
+                    {"command": "auth", "description": "[admin] 预授权注册"},
+                ]
         return commands
 
     def invalidate_commands(self) -> None:
@@ -579,7 +580,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
     async def _sync_chat_commands(self, chat_id: Any, tg_user_id: str,
                                   language: str = "", *, group: bool = False
                                   ) -> None:
-        """Replace legacy chat overrides, including the user's language scope."""
+        """Replace known language overrides too: they outrank the fallback menu."""
         admin = self.is_admin(self._member_for_chat(tg_user_id))
         lang = str(language).lower().split("-", 1)[0].split("_", 1)[0]
         lang = lang if re.fullmatch(r"[a-z]{2}", lang) else ""
@@ -588,7 +589,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                 return
             chat_state = ("group-chat", lang)
             if self._chat_commands.get(f"gchat:{chat_id}") != chat_state:
-                for code in dict.fromkeys(["", lang]):
+                for code in dict.fromkeys(["", "zh", "en", lang]):
                     result = await self._call("setMyCommands", {
                         "scope": {"type": "chat", "chat_id": chat_id},
                         "language_code": code,
@@ -605,7 +606,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                      "user_id": int(tg_user_id) if str(tg_user_id).lstrip("-").isdigit()
                      else tg_user_id}
             commands = self._command_list(admin, group=True)
-            for code in dict.fromkeys(["", lang]):
+            for code in dict.fromkeys(["", "zh", "en", lang]):
                 result = await self._call("setMyCommands", {
                     "scope": scope, "language_code": code, "commands": commands,
                 }, timeout=15)
@@ -616,7 +617,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         state = (admin, lang)
         if self._chat_commands.get(str(chat_id)) == state:
             return
-        for code in dict.fromkeys(["", lang]):
+        for code in dict.fromkeys(["", "zh", "en", lang]):
             result = await self._call("setMyCommands", {
                 "scope": {"type": "chat", "chat_id": chat_id},
                 "language_code": code, "commands": self._command_list(admin),
@@ -658,16 +659,19 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
             return
         wanted = {c for c in self._group_allowlist() if re.fullmatch(r"-?\d+", c)}
         for stale in self._installed_group_chats - wanted:
-            await self._delete_command_scope({"type": "chat", "chat_id": stale})
-            await self._delete_command_scope(
-                {"type": "chat", "chat_id": int(stale)})
+            for lang in ("", "zh", "en"):
+                await self._delete_command_scope({"type": "chat", "chat_id": stale}, lang)
+                await self._delete_command_scope(
+                    {"type": "chat", "chat_id": int(stale)}, lang)
         for chat_id in wanted:
-            scoped = await self._call("setMyCommands", {
-                "scope": {"type": "chat", "chat_id": int(chat_id)},
-                "commands": self._command_list(False, group=True),
-            }, timeout=15)
-            if scoped is not True:
-                return
+            for lang in ("", "zh", "en"):
+                scoped = await self._call("setMyCommands", {
+                    "scope": {"type": "chat", "chat_id": int(chat_id)},
+                    "language_code": lang,
+                    "commands": self._command_list(False, group=True),
+                }, timeout=15)
+                if scoped is not True:
+                    return
         self._installed_group_chats = wanted
         self._commands_installed = True
 

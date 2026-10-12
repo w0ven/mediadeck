@@ -3,7 +3,7 @@ from contextlib import contextmanager
 from uuid import uuid4
 
 from app.core.errors import ConfigError
-from app.modules.dice_banker import BANKER_VERSION
+from app.modules.dice_banker import BANKER_VERSIONS
 from app.modules.economy_rules import economy_write
 
 
@@ -29,8 +29,8 @@ def self_deletion_guard(db, user_id):
                 (str(user_id),),
             ).fetchone()
             bank = conn.execute(
-                "SELECT 1 FROM dice_rounds WHERE actor_uid=? AND json_extract(rules,'$.version')=? "
-                "AND state NOT IN ('settled','refunded','empty') LIMIT 1", (str(user_id), BANKER_VERSION),
+                "SELECT 1 FROM dice_rounds WHERE actor_uid=? AND json_extract(rules,'$.version') IN (?,?) "
+                "AND state NOT IN ('settled','refunded','empty') LIMIT 1", (str(user_id), *BANKER_VERSIONS),
             ).fetchone()
             if bank:
                 raise ConfigError("你有未结算的骰局庄本，请等待结算后再注销；本次未删除账号。")
