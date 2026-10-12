@@ -14,7 +14,7 @@ from test_tg_interaction_context import GROUP
 
 from app.core.errors import ConfigError
 from app.modules.account_deletion import self_deletion_guard
-from app.modules.dice_banker import BANKER_VERSION, banker, settle_banker
+from app.modules.dice_banker import BANKER_VERSION, QUICK_BANKER_VERSION, banker, settle_banker
 from app.modules.dice_caption_view import pages
 from app.modules.dice_rules import MAX_INT
 from app.modules.game_mentions import text_units
@@ -69,7 +69,7 @@ def test_banker_open_idempotency_and_multithread_collateral(env):
     before = cash(env)
     row = opened(env, 600)
     assert row['deadline']-row['created'] == 90
-    assert json.loads(row['rules'])['version'] == BANKER_VERSION
+    assert json.loads(row['rules'])['version'] == QUICK_BANKER_VERSION
     assert banker(row)['capital'] == 600
     assert env.services.points.balance(env.uids[0]) == 400
     assert svc(env).create(message(env, '/猜大小 600'))['nonce'] == row['nonce']
@@ -233,15 +233,24 @@ def test_banker_caption_real_result_complete_history_and_unknown_ack(env):
             CALL_DELIVERY.set({'state': 'unknown', 'reason': 'lost ACK'})
         env.bot._call_multipart = lose
         await env.bot._dice_tick()
+        task = env.bot._dice_draw_tasks.get((env.bot._active_bot_id, row['nonce']))
+        if task:
+            await asyncio.wait_for(task[0], 2)
         report = env.db.one("SELECT * FROM dice_messages WHERE purpose='report:0'")
         assert report['state'] == 'unknown'
         assert not env.db.one('SELECT 1 FROM play_jobs WHERE job_key=?', (f'dice:{GROUP}:{row["card_mid"]}',))
         await env.bot._dice_tick()
+        task = env.bot._dice_draw_tasks.get((env.bot._active_bot_id, row['nonce']))
+        if task:
+            await asyncio.wait_for(task[0], 2)
         assert len([m for m,p in env.tg.calls if m == 'sendPhoto']) == 2
         actual = max(mid for (_,mid), p in env.tg.messages.items() if '庄家净盈亏' in p.get('caption',''))
         svc(env).recover_delivery(report['id'], confirmed_mid=actual)
         env.bot._call_multipart = real
         await env.bot._dice_tick()
+        task = env.bot._dice_draw_tasks.get((env.bot._active_bot_id, row['nonce']))
+        if task:
+            await asyncio.wait_for(task[0], 2)
         assert env.db.one('SELECT 1 FROM play_jobs WHERE job_key=?', (f'dice:{GROUP}:{row["card_mid"]}',))
     asyncio.run(run())
 
@@ -265,12 +274,15 @@ def test_unknown_open_collateral_is_not_reused_and_returns_on_empty_close(env):
         env.bot._call_multipart = real
         env.db.execute('UPDATE dice_rounds SET deadline=0')
         await env.bot._dice_tick()
+        task = env.bot._dice_draw_tasks.get((env.bot._active_bot_id, row['nonce']))
+        if task:
+            await asyncio.wait_for(task[0], 2)
         assert svc(env).get(row['nonce'])['state'] == 'empty'
         assert env.services.points.balance(env.uids[0]) == 1000
     asyncio.run(run())
 
 
-def test_signed_beacon_new_version_uses_existing_verification_and_never_rerolls(env):
+def test_signed_beacon_legacy_banker_uses_existing_verification_and_never_rerolls(env):
     import time
 
     from test_dice import SIGNED
@@ -278,7 +290,9 @@ def test_signed_beacon_new_version_uses_existing_verification_and_never_rerolls(
     from app.modules import dice_beacon as beacon
     row = opened(env)
     place(env, '大', 100)
-    env.db.execute("UPDATE dice_rounds SET state='locked',round_number=?,deadline=0,timeout=?", (SIGNED['round'], time.time()+600))
+    rules = json.loads(row['rules'])
+    rules.update(version=BANKER_VERSION, draw_version=beacon.VERSION, chain=beacon.CHAIN)
+    env.db.execute("UPDATE dice_rounds SET rules=?,state='locked',round_number=?,deadline=0,timeout=?", (json.dumps(rules), SIGNED['round'], time.time()+600))
     fixed_row = svc(env).fix(row['nonce'], SIGNED)
     expected_seed, expected_dice = beacon.derive(row['secret'], row['nonce'], beacon.verify(SIGNED, SIGNED['round']))
     assert fixed_row['seed'] == expected_seed and json.loads(fixed_row['dice']) == expected_dice

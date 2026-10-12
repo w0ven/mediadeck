@@ -6,7 +6,7 @@ import json
 import time
 
 from app.modules.account_deletion import deletion_in_progress
-from app.modules.dice_banker import BANKER_VERSION, banker, is_banker
+from app.modules.dice_banker import BANKER_VERSIONS, banker, is_banker
 from app.modules.dice_rules import MAX_INT
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import PlayError, integer
@@ -19,7 +19,7 @@ TERMINAL = ('settled', 'refunded', 'empty')
 
 
 def is_group(row):
-    return json.loads(row['rules']).get('version') in (GROUP_VERSION, BANKER_VERSION)
+    return json.loads(row['rules']).get('version') in (GROUP_VERSION, *BANKER_VERSIONS)
 
 
 def migrate(db):
@@ -138,7 +138,7 @@ class GroupDiceService:
             conn.execute('INSERT INTO dice_group_receipts(bot_id,chat_id,message_id,nonce,user_id,tg_id,option,amount,ticket,input_mode) VALUES(?,?,?,?,?,?,?,?,?,?)', (self.bot_id, chat, mid, row['nonce'], uid, tg, option, amount, ticket, mode))
             conn.execute('UPDATE dice_rounds SET group_revision=group_revision+1,group_due=CASE WHEN group_due=0 THEN ? ELSE group_due END WHERE nonce=?', (clock+2, row['nonce']))
             if cap is not None and accepted+amount == cap:
-                conn.execute("UPDATE dice_rounds SET state='locked',group_due=0 WHERE nonce=?", (row['nonce'],))
+                self._lock_round(conn, row, time.time() if now is None else now)
             # Same transaction as the accepted ticket: a restart cannot lose its deletion intent.
             payload = {'chat_id': int(chat), 'thread_id': thread, 'message_id': mid, 'source': 'command', 'actor_tg_id': tg}
             conn.execute("INSERT OR IGNORE INTO play_jobs(bot_id,job_key,kind,payload_json,created_at,due_at,expires_at) VALUES(?,?,'dice.delete',?,?,?,?)", (self.bot_id, f'dice:{chat}:{mid}', encode(payload), clock, clock+2, clock+48*3600))

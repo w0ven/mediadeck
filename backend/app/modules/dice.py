@@ -8,8 +8,16 @@ import secrets
 import time
 
 from app.modules import dice_beacon as beacon
+from app.modules import dice_quicknet as quicknet
 from app.modules.account_deletion import deletion_in_progress
-from app.modules.dice_banker import BANKER_VERSION, banker, is_banker, settle_banker
+from app.modules.dice_banker import (
+    BANKER_VERSION,
+    BANKER_VERSIONS,
+    QUICK_BANKER_VERSION,
+    banker,
+    is_banker,
+    settle_banker,
+)
 from app.modules.dice_config import (
     DEFAULT_WINDOW,
     MAX_WINDOW,
@@ -72,6 +80,8 @@ def migrate(db):
       UNIQUE(nonce,purpose,recipient));
     """)
     migrate_group(db)
+    for name, declaration in (('closed_at', 'REAL'), ('beacon_due', 'REAL NOT NULL DEFAULT 0'), ('beacon_attempts', 'INTEGER NOT NULL DEFAULT 0')):
+        db._ensure_column('dice_rounds', name, declaration)
 
 
 class DiceService(GroupDiceService, PlayAccess):
@@ -124,8 +134,8 @@ class DiceService(GroupDiceService, PlayAccess):
             deadline = clock + window
             row = {'nonce': nonce, 'bot_id': self.bot_id, 'chat_id': chat, 'thread_id': thread,
                    'command_mid': mid, 'actor_uid': member['emby_user_id'], 'created': clock,
-                   'deadline': deadline, 'timeout': deadline+600, 'round_number': beacon.future_round(deadline),
-                   'rules': encode({'version': BANKER_VERSION, 'banker': bank, 'draw_version': beacon.VERSION, 'presentation': 'caption-v1', 'chain': beacon.CHAIN, 'window': window, 'pool_multiplier': multiple, 'pool_cap': cap, 'wait': 600, 'fee': 0}),
+                   'deadline': deadline, 'timeout': deadline+600, 'round_number': 0,
+                   'rules': encode({'version': QUICK_BANKER_VERSION, 'banker': bank, 'draw_version': quicknet.VERSION, 'presentation': 'caption-v1', 'chain': quicknet.CHAIN, 'selection': quicknet.SELECTION, 'window': window, 'pool_multiplier': multiple, 'pool_cap': cap, 'wait': 600, 'fee': 0}),
                    'secret': secret, 'commitment': hashlib.sha256(bytes.fromhex(secret)).hexdigest()}
             conn.execute(f"INSERT INTO dice_rounds({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
             self.cash.reserve(conn, 'dice', nonce+':banker', bank['user_id'], capital, now=clock)
@@ -256,27 +266,36 @@ class DiceService(GroupDiceService, PlayAccess):
                 raise PlayError('请填已核实消息ID，或明确允许重发；重发可能重复送达')
             conn.execute('INSERT INTO dice_delivery_audit(job_id,action,mid,created) VALUES(?,?,?,?)', (job_id, 'ack' if confirmed_mid else 'retry', confirmed_mid or None, time.time()))
 
+    def _lock_round(self, conn, row, clock):
+        if row['state'] not in ('opening', 'open'):
+            return
+        if beacon.for_row(row) is quicknet:
+            conn.execute("UPDATE dice_rounds SET closed_at=?,round_number=?,timeout=? WHERE nonce=? AND closed_at IS NULL",
+                         (clock, quicknet.future_round(clock), clock+600, row['nonce']))
+        conn.execute("UPDATE dice_rounds SET state='locked',group_revision=group_revision+1,group_due=0 WHERE nonce=?", (row['nonce'],))
+
     def close(self, nonce, *, now=None):
         with economy_write(self.db) as conn:
             clock = time.time() if now is None else now
             row = self.get(nonce)
             if row['state'] in ('opening', 'open') and clock >= row['deadline']:
-                conn.execute("UPDATE dice_rounds SET state='locked',group_revision=group_revision+1,group_due=0 WHERE nonce=?", (nonce,))
+                self._lock_round(conn, row, clock)
             return self.get(nonce)
 
     def fix(self, nonce, raw, *, now=None):
         row = self.get(nonce)
-        verified = beacon.verify(raw, row['round_number'])
+        draw = beacon.for_row(row)
+        verified = draw.verify(raw, row['round_number'])
         with economy_write(self.db) as conn:
             clock = time.time() if now is None else now
             row = self.get(nonce)
             if row['state'] == 'fixed' or row['state'] == 'settled':
                 return row
-            if row['state'] != 'locked' or clock < beacon.round_time(row['round_number']):
+            if row['state'] != 'locked' or clock < draw.round_time(row['round_number']):
                 raise PlayError('尚未到固定开奖轮次')
             if clock >= row['timeout']:
                 raise PlayError('开奖等待已超时')
-            seed, dice = beacon.derive(row['secret'], nonce, verified)
+            seed, dice = draw.derive(row['secret'], nonce, verified)
             conn.execute("UPDATE dice_rounds SET state='fixed',evidence=?,seed=?,dice=?,group_revision=group_revision+1,group_due=0 WHERE nonce=?", (encode(verified), seed, encode(dice), nonce))
             return self.get(nonce)
 
@@ -290,7 +309,7 @@ class DiceService(GroupDiceService, PlayAccess):
             timeout = row['state'] == 'locked' and clock >= row['timeout']
             if row['state'] != 'fixed' and not (row['state'] == 'locked' and (timeout or not total)):
                 return row
-            if json.loads(row['rules'])['version'] not in (beacon.VERSION, GROUP_VERSION, BANKER_VERSION):
+            if json.loads(row['rules'])['version'] not in (beacon.VERSION, GROUP_VERSION, *BANKER_VERSIONS):
                 raise RuntimeError('unsupported immutable dice rules')
             result = {}
             for pool in (('size',) if is_group(row) else POOLS):
@@ -353,7 +372,7 @@ class DicePlugin(Plugin):
         jobs = [{**j, 'purpose': j['purpose'].split(':')[0]} for j in jobs]
         from app.modules.bot_dice import DiceCleanup
         issues = self.ctx.db.query("SELECT nonce,state,error FROM dice_rounds WHERE error<>'' AND state IN ('opening','open','locked','fixed') ORDER BY created DESC LIMIT 20")
-        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '新局规则': BANKER_VERSION, '旧局规则': [GROUP_VERSION, beacon.VERSION], '封盘秒数': window_seconds(self.ctx.registry.config('dice')), '总投注上限倍数': pool_multiplier(self.ctx.registry.config('dice')), '开奖最长等待秒数': 600}
+        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '新局规则': QUICK_BANKER_VERSION, '旧局规则': [BANKER_VERSION, GROUP_VERSION, beacon.VERSION], '封盘秒数': window_seconds(self.ctx.registry.config('dice')), '总投注上限倍数': pool_multiplier(self.ctx.registry.config('dice')), '开奖最长等待秒数': 600}
 
     async def run(self, config):
         if self.ctx.telegram:

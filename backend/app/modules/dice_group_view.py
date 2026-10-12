@@ -27,12 +27,12 @@ _BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
     '授权群发送 <code>/猜大小 1000</code>，锁定自己的1000积分庄本，{window}秒封盘。每局独立，不自动续庄。\n'
     '其他群友直接发送 <code>/大 金额</code> 或 <code>/小 金额</code>，庄家不能下注自己局。\n'
     '<code>/大 allin</code> / <code>/小 allin</code>：自动按余额与本方向可接额度取小，一次下注。\n'
-    '总投注上限=庄本×{multiple}；满额或计时先到即封盘，仍等原定信标轮次开奖。\n'
+    '总投注上限=庄本×{multiple}；满额或计时先到即封盘，随即等待快速公共信标开奖。\n'
     '小4–10点，大11–17点；非豹子命中赢返2倍（含本金），三骰相同为豹子，大小都输，庄家通吃。\n'
     '最低1整数积分，0抽成，不增发；允许追加及反向追加，发送即扣款，不可撤注。\n'
     '每笔后大小总额差不能超过庄本，超出整笔拒绝，不扣款。两边总额可以超过庄本，须余额与安全整数范围允许。\n'
     '庄本和玩家本金均托管，封盘按真实结果一次结算；单边下注照常对庄，无人下注退庄本。\n'
-    '固定未来drand轮次并验签，不重摇；10分钟无有效结果退还全部庄本与本金，已有结果按原结果结算。\n'
+    '开局公开种子承诺；封盘事务时刻＋2秒后的首个quicknet轮次（每3秒）验签开奖，不重摇；封盘后10分钟无有效结果退还全部庄本与本金，已有结果按原结果结算。\n'
     '历史无庄大小局及旧七池仍按各自原规则结算。')
 
 
@@ -131,13 +131,15 @@ def group_card(row, snapshot, *, report_body=None):
     elif view == 'rules':
         body = HELP.format(window=window)
     elif view == 'proof':
-        evidence = {'rules': json.loads(row['rules']), 'chain': beacon.CHAIN, 'public_key': beacon.PUBLIC_KEY,
-                    'scheme': beacon.SCHEME, 'nonce': row['nonce'], 'round': row['round_number'],
-                    'commitment': row['commitment'], 'deadline': row['deadline'], 'timeout': row['timeout']}
+        draw = beacon.for_row(row)
+        evidence = {'rules': json.loads(row['rules']), 'chain': draw.CHAIN, 'public_key': draw.PUBLIC_KEY,
+                    'scheme': draw.SCHEME, 'nonce': row['nonce'], 'round': row['round_number'],
+                    'commitment': row['commitment'], 'deadline': row['deadline'], 'timeout': row['timeout'], 'closed_at': row.get('closed_at')}
         if row['state'] not in ('opening', 'open'):
             evidence.update(secret=row['secret'], seed=row['seed'], dice=json.loads(row['dice']), beacon=json.loads(row['evidence']))
         body = '🔐 <b>开奖证据</b>\n<pre>'+escape(json.dumps(evidence, ensure_ascii=False, separators=(',', ':')))+'</pre>'
-        body += '\n推导：SHA256(紧凑ASCII JSON[draw_version,chain,round,secret,nonce,randomness])；SHA256(seed字节＋8字节大端计数器)，从0开始，拒绝252–255，%6＋1取前三个。承诺=SHA256(secret字节)。BLS G2Basic验签消息=SHA256(previous_signature字节＋8字节大端轮次)。'
+        body += '\n推导：SHA256(紧凑ASCII JSON[draw_version,chain,round,secret,nonce,randomness])；SHA256(seed字节＋8字节大端计数器)，从0开始，拒绝252–255，%6＋1取前三个。承诺=SHA256(secret字节)。'
+        body += ('RFC9380 G1签名/G2公钥，DST=BLS_SIG_BLS12381G1_XMD:SHA-256_SSWU_RO_NUL_，消息=SHA256(8字节大端轮次)。' if draw is not beacon else 'BLS G2Basic验签消息=SHA256(previous_signature字节＋8字节大端轮次)。')
     else:
         body += f'\n\n📜 <b>完整流水</b>　{snapshot["page"]+1}/{snapshot["pages"]} · 共{snapshot["count"]}笔'
         body += '\n'+'\n'.join(bet_line(t, snapshot['count']-snapshot['page']*PAGE_SIZE-i) for i, t in enumerate(snapshot['ledger'])) if snapshot['ledger'] else '\n暂无投注'

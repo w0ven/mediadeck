@@ -11,7 +11,7 @@ from test_dice_banker import env as banker_env  # noqa: F401
 from test_dice_countdown import Timer
 from test_dice_size_group import send
 
-from app.modules import dice_beacon as beacon
+from app.modules import dice_quicknet as beacon
 from app.modules.dice_caption_view import pages
 from app.modules.dice_group_view import banker_help
 from app.modules.dice_rules import MAX_INT
@@ -77,8 +77,9 @@ def test_allin_hits_pool_before_direction_capacity_and_replay_is_idempotent(env)
     done = place(env, '大', 'allin', mid=8103)
     assert receipt(env, 8103)['amount'] == 50 and done['state'] == 'locked'
     assert svc(env).get(row['nonce'])['group_due'] == 0
-    for key in ('deadline', 'round_number', 'timeout'):
-        assert done[key] == row[key]
+    assert done['deadline'] == row['deadline']
+    assert done['round_number'] == beacon.future_round(done['closed_at'])
+    assert done['timeout'] == done['closed_at']+600
     place(env, '大', 'allin', mid=8103)
     assert env.db.one('SELECT COUNT(*) n FROM dice_tickets')['n'] == 4
     with pytest.raises(PlayError, match='封盘'):
@@ -127,7 +128,7 @@ def test_opposite_direction_concurrent_bets_only_one_can_fill(env):
         db.close()
 
 
-def test_full_caption_immediately_seals_timer_and_worker_waits_original_beacon(env, monkeypatch):
+def test_full_caption_immediately_seals_timer_and_selects_quick_beacon(env, monkeypatch):
     async def run():
         timer = Timer(monkeypatch)
         row = await create(env, text='/猜大小 100')
@@ -143,13 +144,13 @@ def test_full_caption_immediately_seals_timer_and_worker_waits_original_beacon(e
         await timer.step()
         assert task.done() and not env.bot._dice_group_tasks
         async def forbidden(_):
-            pytest.fail('must not fetch before the original beacon round')
+            pytest.fail('must not fetch before selected quicknet round')
         monkeypatch.setattr(beacon, 'fetch', forbidden)
         await env.bot._dice_tick()
         assert svc(env).get(row['nonce'])['state'] == 'locked'
-        for key in ('deadline', 'round_number', 'timeout'):
-            assert current[key] == row[key]
-        assert current['timeout'] == row['deadline']+600
+        assert current['deadline'] == row['deadline']
+        assert current['round_number'] == beacon.future_round(current['closed_at'])
+        assert current['timeout'] == current['closed_at']+600
         assert len([m for m, _ in env.tg.calls if m == 'sendPhoto']) == 1
     asyncio.run(run())
 
