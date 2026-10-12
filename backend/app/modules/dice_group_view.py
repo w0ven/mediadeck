@@ -6,11 +6,12 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 
 from app.modules import dice_beacon as beacon
+from app.modules.dice_config import window_seconds
 from app.modules.dice_group import PAGE_SIZE, TERMINAL
 from app.modules.game_mentions import result_mention, text_units
 
 HELP = ('🎲 <b>骰局 · 大小对决</b>\n\n'
-        '在授权群发 /猜大小，180秒封盘。\n'
+        '在授权群发 /猜大小，{window}秒封盘。\n'
         '<b>直接在本群发送</b> <code>/大 2000</code> 或 <code>/小 500</code>，指令即确认扣款。\n'
         '小：4–10点；大：11–17点。三骰相同为豹子，全部退款。\n'
         '0抽成，最低1整数积分，不设人为金额上限，须余额及安全整数范围允许。'
@@ -22,8 +23,8 @@ HELP = ('🎲 <b>骰局 · 大小对决</b>\n\n'
         '仅站内积分。旧七池局仍按原90秒、七池规则收尾。')
 
 
-BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
-    '授权群发送 <code>/猜大小 1000</code>，锁定自己的1000积分庄本，180秒封盘。每局独立，不自动续庄。\n'
+_BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
+    '授权群发送 <code>/猜大小 1000</code>，锁定自己的1000积分庄本，{window}秒封盘。每局独立，不自动续庄。\n'
     '其他群友直接发送 <code>/大 金额</code> 或 <code>/小 金额</code>，庄家不能下注自己局。\n'
     '小4–10点，大11–17点；非豹子命中赢返2倍（含本金），三骰相同为豹子，大小都输，庄家通吃。\n'
     '最低1整数积分，0抽成，不增发；允许追加及反向追加，发送即扣款，不可撤注。\n'
@@ -31,6 +32,10 @@ BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
     '庄本和玩家本金均托管，封盘按真实结果一次结算；单边下注照常对庄，无人下注退庄本。\n'
     '固定未来drand轮次并验签，不重摇；10分钟无有效结果退还全部庄本与本金，已有结果按原结果结算。\n'
     '历史无庄大小局及旧七池仍按各自原规则结算。')
+
+
+def banker_help(config=None):
+    return _BANKER_HELP.format(window=window_seconds(config))
 
 
 def clock(ts):
@@ -114,14 +119,15 @@ def group_card(row, snapshot, *, report_body=None):
     body += '\n\n'+markets(snapshot['totals'], row=row)
     if not terminal:
         body += '\n\n↳ 群内直接发 <code>/大 2000</code> 或 <code>/小 500</code>\n<b>发送即确认，不可撤注</b>'
+    window = json.loads(row['rules']).get('window', 180)
     view = row.get('group_view', 'ledger')
     if view == 'summary' and report_body and terminal:
         # The immutable report remains the source of truth when returning from history.
         body = report_body
     elif view == 'details':
-        body = head+'\n\n180秒 · 0抽成 · 不可撤注\n玩法规则与开奖验真，请使用下方入口。'
+        body = head+f'\n\n{window}秒 · 0抽成 · 不可撤注\n玩法规则与开奖验真，请使用下方入口。'
     elif view == 'rules':
-        body = HELP
+        body = HELP.format(window=window)
     elif view == 'proof':
         evidence = {'rules': json.loads(row['rules']), 'chain': beacon.CHAIN, 'public_key': beacon.PUBLIC_KEY,
                     'scheme': beacon.SCHEME, 'nonce': row['nonce'], 'round': row['round_number'],

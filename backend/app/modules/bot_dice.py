@@ -48,11 +48,14 @@ class DiceCleanup(CleanupService):
 
 
 class DiceBotMixin(GroupDiceBotMixin):
+    def _dice_config(self):
+        return self._plugins.config('dice') if self._plugins else {}
+
     def _dice_service(self):
         if self._db is None or self._points is None:
             raise PlayError('积分服务暂不可用')
         self._check_bot_identity()
-        return DiceService(self._db, self._members, self._points, lambda: self._plugin_on('dice'), self._group_chat_allowed, self._active_bot_id)
+        return DiceService(self._db, self._members, self._points, lambda: self._plugin_on('dice'), self._group_chat_allowed, self._active_bot_id, config=self._dice_config)
 
     def _dice_cleanup(self, message, mid=None, *, due=None):
         DiceCleanup(self._db).enqueue(self._active_bot_id, message['chat']['id'], self._thread_id(message) or 0,
@@ -100,7 +103,7 @@ class DiceBotMixin(GroupDiceBotMixin):
                 session = service.new_session(parts[1][5:], message['from'])
                 await self._dice_draw(session)
             elif verb.split('@')[0] == '/猜大小帮助':
-                await self._dice_feedback(message, dice_group_view.BANKER_HELP)
+                await self._dice_feedback(message, dice_group_view.banker_help(self._dice_config()))
             else:
                 if len(parts) != 2:
                     raise PlayError('用法：/猜大小 庄本；开局后其他群友直接发送 /大 金额 或 /小 金额')
