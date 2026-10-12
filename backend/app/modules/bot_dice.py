@@ -14,6 +14,7 @@ from app.modules.bot_dice_group import GroupDiceBotMixin
 from app.modules.checkin_cleanup import CleanupService
 from app.modules.dice import DiceService
 from app.modules.dice_art import art_bytes, art_name
+from app.modules.dice_banker import BANKER_VERSION
 from app.modules.dice_group import GROUP_VERSION, is_group
 from app.modules.dice_rules import POOLS, normalize, validate
 from app.modules.dice_view import group_card, private_card, report_pages
@@ -99,10 +100,10 @@ class DiceBotMixin(GroupDiceBotMixin):
                 session = service.new_session(parts[1][5:], message['from'])
                 await self._dice_draw(session)
             elif verb.split('@')[0] == '/猜大小帮助':
-                await self._dice_feedback(message, dice_group_view.HELP)
+                await self._dice_feedback(message, dice_group_view.BANKER_HELP)
             else:
-                if len(parts) != 1:
-                    raise PlayError('用法：/猜大小；开局后直接发送 /大 金额 或 /小 金额')
+                if len(parts) != 2:
+                    raise PlayError('用法：/猜大小 庄本；开局后其他群友直接发送 /大 金额 或 /小 金额')
                 if chat['type'] == 'private':
                     raise PlayError('请在现有授权群发送 /猜大小')
                 row = service.create(message)
@@ -440,7 +441,7 @@ class DiceBotMixin(GroupDiceBotMixin):
                 await self._dice_deliver(nonce)
             except Exception:  # noqa: BLE001 - retain funds; do not block other fixed-result recovery
                 self._db.execute("UPDATE dice_rounds SET error='恢复异常，保留资金及固定结果，待核对' WHERE nonce=?", (nonce,))
-        for dirty in self._db.query("SELECT nonce FROM dice_rounds WHERE bot_id=? AND json_extract(rules,'$.version')=? AND group_rendered<group_revision AND group_due<=? AND group_lease<=? AND group_retry<=? LIMIT 50", (self._active_bot_id, GROUP_VERSION, time.time(), time.time(), time.time())):
+        for dirty in self._db.query("SELECT nonce FROM dice_rounds WHERE bot_id=? AND json_extract(rules,'$.version') IN (?,?) AND group_rendered<group_revision AND group_due<=? AND group_lease<=? AND group_retry<=? LIMIT 50", (self._active_bot_id, GROUP_VERSION, BANKER_VERSION, time.time(), time.time(), time.time())):
             await self._dice_group_refresh(dirty['nonce'])
         for session in self._db.query("SELECT * FROM dice_sessions WHERE bot_id=? AND state='active' AND mid IS NOT NULL AND expires>? AND rendered_revision<revision LIMIT 50", (self._active_bot_id, time.time())):
             member = self._members.find_by_telegram(session['tg_id'])

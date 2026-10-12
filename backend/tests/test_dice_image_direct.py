@@ -75,7 +75,7 @@ def test_new_command_only_and_direct_old_seven_pool_rejected(env):
         for cmd in ('/骰局', '/dice', '/猜大小@OtherBot'):
             await send(env, message(env, cmd))
         assert not env.db.query('SELECT * FROM dice_rounds')
-        row = await create(env, text='/猜大小@MediaDeckDemoBot')
+        row = await create(env, text='/猜大小@MediaDeckDemoBot 1000')
         env.db.execute('UPDATE dice_rounds SET rules=?', (json.dumps({'version': beacon.VERSION}),))
         await send(env, message(env, '/大 100', mid=8100))
         assert not env.db.query('SELECT * FROM dice_tickets')

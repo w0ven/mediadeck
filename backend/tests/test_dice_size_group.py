@@ -25,8 +25,10 @@ def env(request, monkeypatch):
     e.services.registry.save('dice', enabled=True)
     e.services.registry.get('dice').ctx.telegram = e.bot
     # Existing split photo/text rounds retain their persisted transport after upgrade.
+    from dice_legacy import legacy_group_create
+
     from app.modules.dice import DiceService
-    original = DiceService.create
+    original = legacy_group_create
     def split_create(service, message, *, now=None):
         row = original(service, message, now=now)
         rules = json.loads(row['rules'])
