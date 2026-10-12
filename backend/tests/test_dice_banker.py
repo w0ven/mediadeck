@@ -86,6 +86,7 @@ def test_banker_open_idempotency_and_multithread_collateral(env):
 
 
 def test_exposure_rejects_whole_bet_then_reverse_offsets_and_self_bet_forbidden(env):
+    env.services.registry.save('dice', config={'pool_multiplier': 10})
     row = opened(env, 100)
     before = cash(env)
     with pytest.raises(PlayError, match='庄家'):
@@ -193,6 +194,7 @@ def test_cross_connection_concurrent_risk_and_restart_replay(env):
 
 
 def test_safety_integer_boundaries(env):
+    env.services.registry.save('dice', config={'pool_multiplier': 1})
     env.services.points.add(env.uids[0], MAX_INT-1000, 'admin.adjust')
     row = opened(env, MAX_INT)
     with pytest.raises(PlayError, match='安全整数'):

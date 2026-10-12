@@ -33,6 +33,8 @@ class GroupDiceBotMixin:
             if len(parts) != 2 or (parts[1].lower() != 'allin' and not re.fullmatch(r'[0-9]{1,19}', parts[1])):
                 raise PlayError('群内发送：/大 金额 或 /小 金额，金额须为正整数或 allin')
             row = self._dice_service().group_bet(message, verb.split('@')[0][1:], 'allin' if parts[1].lower() == 'allin' else int(parts[1]))
+            if row['state'] == 'locked':
+                await self._dice_group_refresh(row['nonce'])
             self._dice_group_schedule(row['nonce'])
         except (PlayError, GroupPointsError) as exc:
             await self._dice_feedback(message, '🍃 '+escape(str(exc)))

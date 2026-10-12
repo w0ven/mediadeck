@@ -19,12 +19,14 @@ def is_caption(row):
 
 def pages(row, snapshot, *, now=None):
     terminal = row['state'] in TERMINAL
+    cap = json.loads(row['rules']).get('pool_cap') if is_banker(row) else None
+    total = sum(t['amount'] for t in snapshot['totals'])
     if terminal:
         header = result_heading(row)
     else:
         remaining = max(0, math.ceil(row['deadline']-(time.time() if now is None else now)))
         accepting = row['state'] in ('opening', 'open') and remaining > 0
-        state = '投注中' if accepting else '已封盘 · 等待开奖'
+        state = '投注中' if accepting else '已满额封盘 · 等待开奖' if cap is not None and total >= cap else '已封盘 · 等待开奖'
         remaining = remaining if accepting else 0
         header = f'🎲 <b>大小对决</b>　{state}\n⏳ 剩余 {remaining//60:02d}:{remaining%60:02d} · 0抽成'
     if is_banker(row):
@@ -36,6 +38,8 @@ def pages(row, snapshot, *, now=None):
             header += '\n庄家净盈亏 <b>'+label+'</b>'
         sides = {t['option']: t['amount'] for t in snapshot['totals']}
         header += f'\n\n🔴 大 <b>{sides.get("大", 0):,}</b>　🔵 小 <b>{sides.get("小", 0):,}</b>'
+        if cap is not None:
+            header += f'\n总池 <b>{total:,} / {cap:,}</b>'
         header += '\n赢返2倍含本金 · 豹子通吃 · 0抽成'
     else:
         header += '\n\n'+markets(snapshot['totals'], row=row)

@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from html import escape
 
 from app.modules import dice_beacon as beacon
-from app.modules.dice_config import window_seconds
+from app.modules.dice_config import pool_multiplier, window_seconds
 from app.modules.dice_group import PAGE_SIZE, TERMINAL
 from app.modules.game_mentions import result_mention, text_units
 
@@ -27,6 +27,7 @@ _BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
     '授权群发送 <code>/猜大小 1000</code>，锁定自己的1000积分庄本，{window}秒封盘。每局独立，不自动续庄。\n'
     '其他群友直接发送 <code>/大 金额</code> 或 <code>/小 金额</code>，庄家不能下注自己局。\n'
     '<code>/大 allin</code> / <code>/小 allin</code>：自动按余额与本方向可接额度取小，一次下注。\n'
+    '总投注上限=庄本×{multiple}；满额或计时先到即封盘，仍等原定信标轮次开奖。\n'
     '小4–10点，大11–17点；非豹子命中赢返2倍（含本金），三骰相同为豹子，大小都输，庄家通吃。\n'
     '最低1整数积分，0抽成，不增发；允许追加及反向追加，发送即扣款，不可撤注。\n'
     '每笔后大小总额差不能超过庄本，超出整笔拒绝，不扣款。两边总额可以超过庄本，须余额与安全整数范围允许。\n'
@@ -36,7 +37,7 @@ _BANKER_HELP = ('🎲 <b>猜大小 · 群友坐庄</b>\n\n'
 
 
 def banker_help(config=None):
-    return _BANKER_HELP.format(window=window_seconds(config))
+    return _BANKER_HELP.format(window=window_seconds(config), multiple=pool_multiplier(config))
 
 
 def clock(ts):

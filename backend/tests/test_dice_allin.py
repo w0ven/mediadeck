@@ -46,6 +46,7 @@ def test_balance_limit_and_case_insensitive_real_dispatch(env):
 
 
 def test_direction_capacity_and_reverse_offset_exceed_bankroll(env):
+    env.services.registry.save('dice', config={'pool_multiplier': 10})
     opened(env, 100)
     place(env, '大', 'allin')
     assert receipt(env)['amount'] == 100
@@ -82,6 +83,7 @@ def test_legacy_receipt_migration_defaults_to_numeric_and_replays(env):
 @pytest.mark.parametrize('case,match', [('balance', '可用积分为0'), ('capacity', '已满盘'), ('integer', '安全整数额度')])
 def test_zero_capacity_balance_and_safe_integer_room_do_not_reserve(env, case, match):
     if case == 'integer':
+        env.services.registry.save('dice', config={'pool_multiplier': 1})
         env.services.points.add(env.uids[0], MAX_INT-1000, 'admin.adjust')
         opened(env, MAX_INT)
     else:
@@ -95,6 +97,7 @@ def test_zero_capacity_balance_and_safe_integer_room_do_not_reserve(env, case, m
 
 
 def test_allin_clamps_to_safe_integer_room(env):
+    env.services.registry.save('dice', config={'pool_multiplier': 1})
     env.services.points.add(env.uids[0], MAX_INT-1050, 'admin.adjust')
     opened(env, MAX_INT-50)
     place(env, '小', 'allin')

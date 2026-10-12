@@ -97,6 +97,7 @@ class GroupDiceService:
             if conn.execute('SELECT 1 FROM dice_tickets WHERE nonce=? AND (user_id=? OR tg_id=?) AND NOT(user_id=? AND tg_id=?)', (row['nonce'], uid, tg, uid, tg)).fetchone():
                 raise PlayError('本局账号绑定已变化，本次未下注')
             accepted = conn.execute("SELECT accepted FROM dice_pools WHERE nonce=? AND pool='size'", (row['nonce'],)).fetchone()[0]
+            cap = json.loads(row['rules']).get('pool_cap') if is_banker(row) else None
             if mode == 'allin' and not is_banker(row):
                 raise PlayError('旧无庄局不支持 allin，请使用数字金额')
             if is_banker(row):
@@ -104,17 +105,23 @@ class GroupDiceService:
                 if uid == bank['user_id'] or tg == bank['tg_id']:
                     raise PlayError('庄家不能下注自己的局')
                 sides = {r['option']: r['amount'] for r in conn.execute('SELECT option,SUM(amount) amount FROM dice_bets WHERE nonce=? GROUP BY option', (row['nonce'],))}
+                capacity = bank['capital']+sides.get('小' if option == '大' else '大', 0)-sides.get(option, 0)
+                room = MAX_INT-bank['capital']-accepted
+                pool_room = cap-accepted if cap is not None else room
+                if mode == 'amount' and amount > pool_room and cap is not None:
+                    available = max(0, min(self.points.balance(uid), capacity, pool_room, room))
+                    raise PlayError(f'超过总投注上限，本方向还可押 {available:,} 分，整笔未下注')
                 if mode == 'allin':
                     balance = self.points.balance(uid)
-                    capacity = bank['capital']+sides.get('小' if option == '大' else '大', 0)-sides.get(option, 0)
-                    room = MAX_INT-bank['capital']-accepted
                     if balance <= 0:
                         raise PlayError('可用积分为0，本次未下注')
                     if capacity <= 0:
                         raise PlayError('本方向已满盘，本次未下注')
                     if room <= 0:
                         raise PlayError('本局安全整数额度已满，本次未下注')
-                    amount = min(balance, capacity, room)
+                    if pool_room <= 0:
+                        raise PlayError('总投注已满额，本次未下注')
+                    amount = min(balance, capacity, room, pool_room)
                 integer(bank['capital']+accepted+amount, '本局托管安全整数总额')
                 sides[option] = sides.get(option, 0)+amount
                 if abs(sides.get('大', 0)-sides.get('小', 0)) > bank['capital']:
@@ -130,6 +137,8 @@ class GroupDiceService:
             conn.execute("UPDATE dice_pools SET held=held+?,accepted=accepted+? WHERE nonce=? AND pool='size'", (amount, amount, row['nonce']))
             conn.execute('INSERT INTO dice_group_receipts(bot_id,chat_id,message_id,nonce,user_id,tg_id,option,amount,ticket,input_mode) VALUES(?,?,?,?,?,?,?,?,?,?)', (self.bot_id, chat, mid, row['nonce'], uid, tg, option, amount, ticket, mode))
             conn.execute('UPDATE dice_rounds SET group_revision=group_revision+1,group_due=CASE WHEN group_due=0 THEN ? ELSE group_due END WHERE nonce=?', (clock+2, row['nonce']))
+            if cap is not None and accepted+amount == cap:
+                conn.execute("UPDATE dice_rounds SET state='locked',group_due=0 WHERE nonce=?", (row['nonce'],))
             # Same transaction as the accepted ticket: a restart cannot lose its deletion intent.
             payload = {'chat_id': int(chat), 'thread_id': thread, 'message_id': mid, 'source': 'command', 'actor_tg_id': tg}
             conn.execute("INSERT OR IGNORE INTO play_jobs(bot_id,job_key,kind,payload_json,created_at,due_at,expires_at) VALUES(?,?,'dice.delete',?,?,?,?)", (self.bot_id, f'dice:{chat}:{mid}', encode(payload), clock, clock+2, clock+48*3600))
