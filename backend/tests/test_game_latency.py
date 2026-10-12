@@ -239,12 +239,13 @@ def test_menu_network_outside_click_lock_retains_permission_and_cache(nn_env):
         scopes = [p for m, p in e.tg.calls if m == 'setMyCommands' and p.get('scope', {}).get('type') == 'chat_member']
         assert not any(p['scope']['user_id'] == e.actors[2]['id'] for p in scopes)
         user_commands = [p for p in scopes if p['scope']['user_id'] == e.actors[1]['id']]
-        assert len(user_commands) == 1
-        assert not any(c['command'] == 'manage' for c in user_commands[0]['commands'])
+        assert len(user_commands) == 3
+        assert {p['language_code'] for p in user_commands} == {'', 'zh', 'en'}
+        assert all(not any(c['command'] == 'manage' for c in p['commands']) for p in user_commands)
         e.cfg['group_interaction_chats'] = [str(GROUP)]
         await e.bot._dispatch_update(nn_update(e, row, 'join', 1, 'menu-cached', original))
         await drain_ui(e.bot)
-        assert sum(m == 'setMyCommands' and p.get('scope', {}).get('user_id') == e.actors[1]['id'] for m, p in e.tg.calls) == 1
+        assert sum(m == 'setMyCommands' and p.get('scope', {}).get('user_id') == e.actors[1]['id'] for m, p in e.tg.calls) == 3
     asyncio.run(run())
 
 
