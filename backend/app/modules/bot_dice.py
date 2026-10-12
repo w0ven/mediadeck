@@ -331,6 +331,11 @@ class DiceBotMixin(GroupDiceBotMixin):
                     if not member or member['emby_user_id'] != job['purpose'][7:]:
                         conn.execute("UPDATE dice_messages SET state='failed',error='本人绑定已变化，未发送明细' WHERE id=?", (job['id'],))
                         continue
+                if job['purpose'] == 'open' and dice_caption_view.is_caption(row):
+                    current, snapshot = service.group_snapshot(nonce)
+                    body, keys = dice_caption_view.card(current, snapshot, now=clock)
+                    job.update(body=body, keyboard=encode(keys))
+                    conn.execute('UPDATE dice_messages SET body=?,keyboard=? WHERE id=?', (body, encode(keys), job['id']))
                 lease = clock+90
                 conn.execute("UPDATE dice_messages SET state='sending',lease=?,attempts=attempts+1 WHERE id=?", (lease, job['id']))
             token = CALL_DELIVERY.set(None)
@@ -379,6 +384,8 @@ class DiceBotMixin(GroupDiceBotMixin):
             finally:
                 CALL_DELIVERY.reset(token)
         row = service.get(nonce)
+        if dice_caption_view.is_caption(row) and row['state'] in ('opening', 'open') and row['card_mid']:
+            self._dice_group_schedule(nonce)
         if row['state'] in ('settled', 'refunded', 'empty'):
             pending = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%' AND state!='sent'", (nonce,))['n']
             count = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%'", (nonce,))['n']

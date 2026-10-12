@@ -48,11 +48,27 @@ class GroupDiceBotMixin:
             return
 
         async def update():
-            await asyncio.sleep(2.1)
-            try:
-                await self._dice_group_refresh(nonce)
-            except Exception:  # noqa: BLE001 - persisted revision is retried by the worker
-                self._last_error = '骰局群卡同步待重试'
+            while self.enabled:
+                row = self._dice_service().get(nonce)
+                if not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}):
+                    return
+                countdown = dice_caption_view.is_caption(row) and row['card_mid'] and row['state'] in ('opening', 'open', 'locked')
+                clock = time.time()
+                delay = max(2.1 if not countdown else 2, row['group_due']-clock,
+                            row['group_retry']-clock, row['group_lease']-clock)
+                if countdown and row['state'] in ('opening', 'open'):
+                    delay = min(delay, max(0, row['deadline']-clock))
+                await asyncio.sleep(delay)
+                try:
+                    await self._dice_group_refresh(nonce)
+                except Exception:  # noqa: BLE001 - durable state is recovered by the worker
+                    self._last_error = '骰局群卡同步待重试'
+                    return
+                row = self._dice_service().get(nonce)
+                if not countdown or row['state'] not in ('opening', 'open', 'locked'):
+                    return
+                if row['state'] == 'locked' and row['group_rendered'] >= row['group_revision']:
+                    return
         task = asyncio.create_task(update())
         tasks[nonce] = task
         self._in_flight.add(task)
@@ -66,18 +82,22 @@ class GroupDiceBotMixin:
             if (not is_group(row) or not self.enabled
                     or not self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'})):
                 return
+            clock = time.time()
+            if dice_caption_view.is_caption(row) and row['state'] in ('opening', 'open') and clock >= row['deadline']:
+                row = service.close(nonce, now=clock)
+            ticking = dice_caption_view.is_caption(row) and row['state'] in ('opening', 'open')
             job = conn.execute("SELECT * FROM dice_messages WHERE nonce=? AND purpose='report:0' AND state='sent'", (nonce,)).fetchone()
             mid = job['mid'] if job else row['card_mid']
             if row['state'] in TERMINAL and not job:
                 return
             clock = time.time()
             if (not mid or row['group_lease'] > clock or row['group_due'] > clock or row['group_retry'] > clock
-                    or (row['group_rendered'] >= row['group_revision'] and row['group_render_mid'] == mid)):
+                    or (not ticking and row['group_rendered'] >= row['group_revision'] and row['group_render_mid'] == mid)):
                 return
             token = secrets.token_hex(12)
             row, snapshot = service.group_snapshot(nonce)
             if dice_caption_view.is_caption(row):
-                body, keys = dice_caption_view.card(row, snapshot)
+                body, keys = dice_caption_view.card(row, snapshot, now=clock)
             else:
                 body, keys = group_card(row, snapshot, report_body=job['body'] if job else None)
             conn.execute('UPDATE dice_rounds SET group_token=?,group_lease=? WHERE nonce=?', (token, clock+90, nonce))

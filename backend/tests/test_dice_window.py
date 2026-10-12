@@ -104,7 +104,6 @@ def test_help_and_play_hub_use_current_config_legacy_card_uses_frozen_window(env
 
 def test_preexisting_180_second_banker_keeps_original_beacon_and_caption(env):
     from app.modules.dice_caption_view import card
-    from app.modules.dice_group_view import clock
     env.services.registry.save('dice', config={'window_seconds': 180})
     row = asyncio.run(create(env))
     svc(env).group_bet(message(env, '/小 10', index=1, mid=8100), '小', 10)
@@ -113,6 +112,6 @@ def test_preexisting_180_second_banker_keeps_original_beacon_and_caption(env):
     assert current['deadline'] == row['created']+180
     assert current['round_number'] == beacon.future_round(row['deadline'])
     assert json.loads(current['rules'])['window'] == 180
-    body, _ = card(current, snapshot)
-    assert clock(row['deadline'])+' 封盘' in body
+    body, _ = card(current, snapshot, now=row['created']+91)
+    assert '剩余 01:29' in body
     assert svc(env).close(row['nonce'], now=row['created']+91)['state'] == 'open'
