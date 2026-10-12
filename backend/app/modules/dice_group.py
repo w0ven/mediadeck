@@ -7,6 +7,7 @@ import time
 
 from app.modules.account_deletion import deletion_in_progress
 from app.modules.dice_banker import BANKER_VERSION, banker, is_banker
+from app.modules.dice_rules import MAX_INT
 from app.modules.economy_rules import economy_write, encode
 from app.modules.play_money import PlayError, integer
 from app.modules.red_packets import public_name
@@ -42,13 +43,16 @@ def migrate(db):
     CREATE INDEX IF NOT EXISTS dice_tickets_round ON dice_tickets(nonce);
     CREATE INDEX IF NOT EXISTS dice_bets_round ON dice_bets(nonce,pool);
     """)
+    db._ensure_column('dice_group_receipts', 'input_mode', "TEXT NOT NULL DEFAULT 'amount'")
 
 
 class GroupDiceService:
     def group_bet(self, message, option, amount, *, now=None):
         chat, thread = self.group(message)
         mid = integer(message.get('message_id'), '消息ID')
-        integer(amount, '下注积分')
+        mode = 'allin' if isinstance(amount, str) and amount.lower() == 'allin' else 'amount'
+        if mode == 'amount':
+            integer(amount, '下注积分')
         if option not in ('大', '小'):
             raise PlayError('请使用 /大 金额 或 /小 金额')
         reply = message.get('reply_to_message') or {}
@@ -66,7 +70,8 @@ class GroupDiceService:
             # Replay resolution precedes active-round selection, including after restart.
             prior = conn.execute('SELECT * FROM dice_group_receipts WHERE bot_id=? AND chat_id=? AND message_id=?', (self.bot_id, chat, mid)).fetchone()
             if prior:
-                if (prior['user_id'], prior['tg_id'], prior['option'], prior['amount']) != (uid, tg, option, amount):
+                if ((prior['user_id'], prior['tg_id'], prior['option'], prior['input_mode']) != (uid, tg, option, mode)
+                        or (mode == 'amount' and prior['amount'] != amount)):
                     raise PlayError('原消息已处理，不能修改旧注')
                 original = self.get(prior['nonce'])
                 if original['thread_id'] != thread:
@@ -92,16 +97,29 @@ class GroupDiceService:
             if conn.execute('SELECT 1 FROM dice_tickets WHERE nonce=? AND (user_id=? OR tg_id=?) AND NOT(user_id=? AND tg_id=?)', (row['nonce'], uid, tg, uid, tg)).fetchone():
                 raise PlayError('本局账号绑定已变化，本次未下注')
             accepted = conn.execute("SELECT accepted FROM dice_pools WHERE nonce=? AND pool='size'", (row['nonce'],)).fetchone()[0]
-            integer(accepted+amount, '本局安全整数总额')
+            if mode == 'allin' and not is_banker(row):
+                raise PlayError('旧无庄局不支持 allin，请使用数字金额')
             if is_banker(row):
                 bank = banker(row)
                 if uid == bank['user_id'] or tg == bank['tg_id']:
                     raise PlayError('庄家不能下注自己的局')
-                integer(bank['capital']+accepted+amount, '本局托管安全整数总额')
                 sides = {r['option']: r['amount'] for r in conn.execute('SELECT option,SUM(amount) amount FROM dice_bets WHERE nonce=? GROUP BY option', (row['nonce'],))}
+                if mode == 'allin':
+                    balance = self.points.balance(uid)
+                    capacity = bank['capital']+sides.get('小' if option == '大' else '大', 0)-sides.get(option, 0)
+                    room = MAX_INT-bank['capital']-accepted
+                    if balance <= 0:
+                        raise PlayError('可用积分为0，本次未下注')
+                    if capacity <= 0:
+                        raise PlayError('本方向已满盘，本次未下注')
+                    if room <= 0:
+                        raise PlayError('本局安全整数额度已满，本次未下注')
+                    amount = min(balance, capacity, room)
+                integer(bank['capital']+accepted+amount, '本局托管安全整数总额')
                 sides[option] = sides.get(option, 0)+amount
                 if abs(sides.get('大', 0)-sides.get('小', 0)) > bank['capital']:
                     raise PlayError('超过本局庄本承赔范围，整笔未下注')
+            integer(accepted+amount, '本局安全整数总额')
             if self.points.balance(uid) < amount:
                 raise PlayError('积分不足，本次未下注')
             ticket = hashlib.sha256(encode(['dice-group', self.bot_id, chat, mid]).encode()).hexdigest()
@@ -110,7 +128,7 @@ class GroupDiceService:
             conn.execute('INSERT INTO dice_tickets VALUES(?,?,?,?,?,?,?,?)', (ticket, row['nonce'], uid, tg, public_name(message['from']), encode(items), amount, clock))
             conn.execute('INSERT INTO dice_bets VALUES(?,?,?,?,?,?)', (ticket, row['nonce'], uid, 'size', option, amount))
             conn.execute("UPDATE dice_pools SET held=held+?,accepted=accepted+? WHERE nonce=? AND pool='size'", (amount, amount, row['nonce']))
-            conn.execute('INSERT INTO dice_group_receipts VALUES(?,?,?,?,?,?,?,?,?)', (self.bot_id, chat, mid, row['nonce'], uid, tg, option, amount, ticket))
+            conn.execute('INSERT INTO dice_group_receipts(bot_id,chat_id,message_id,nonce,user_id,tg_id,option,amount,ticket,input_mode) VALUES(?,?,?,?,?,?,?,?,?,?)', (self.bot_id, chat, mid, row['nonce'], uid, tg, option, amount, ticket, mode))
             conn.execute('UPDATE dice_rounds SET group_revision=group_revision+1,group_due=CASE WHEN group_due=0 THEN ? ELSE group_due END WHERE nonce=?', (clock+2, row['nonce']))
             # Same transaction as the accepted ticket: a restart cannot lose its deletion intent.
             payload = {'chat_id': int(chat), 'thread_id': thread, 'message_id': mid, 'source': 'command', 'actor_tg_id': tg}
