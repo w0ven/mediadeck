@@ -440,3 +440,60 @@ def test_brief_card_cleanup_deletes_bot_message_only(bot, monkeypatch):
     run(bot._expire_own_card(GROUP, mid, delay=GROUP_BRIEF_TTL))
     assert sleeps == [GROUP_BRIEF_TTL]
     assert bot.calls == [("deleteMessage", {"chat_id": GROUP, "message_id": mid})]
+
+
+@pytest.mark.parametrize('admin,group', [(False, False), (True, False), (False, True), (True, True)])
+def test_command_menu_categories_labels_and_supported_scope(admin, group):
+    import re
+    menu = TelegramBot._command_list(admin, group=group)
+    names = [c['command'] for c in menu]
+    descriptions = {c['command']: c['description'] for c in menu}
+    assert len(names) == len(set(names))
+    assert all(re.fullmatch('[a-z0-9_]{1,32}', name) for name in names)
+    assert all(1 <= len(c['description']) <= 256 for c in menu)
+    assert names.index('me') < names.index('pointsrank') < names.index('transfer') < names.index('help')
+    assert descriptions['pointsrank'] == '积分排行榜·可用积分'
+    assert '观看榜' in descriptions['rank'] and '观看榜' in descriptions['today']
+    expected = {'kk', 'renew', 'score', 'prouser', 'revuser', 'rmemby'} if admin else set()
+    if admin and not group:
+        expected |= {'manage', 'renewall', 'scoreall', 'gift', 'invite', 'code', 'auth'}
+    marked = {c['command'] for c in menu if c['description'].startswith('[admin]')}
+    assert marked == expected | ({'transfer'} if group and admin else set())
+    if not (group and admin):
+        assert descriptions['transfer'] == '积分转账·扣本人余额'
+    if group:
+        assert not {'rebind', 'manage', 'renewall', 'scoreall', 'gift', 'code', 'auth', 'invite'} & set(names)
+    else:
+        assert not {'redpacket', 'blackwhite', 'niuniu'} & set(names)
+
+
+def test_group_install_updates_zh_en_overrides_and_member_demotion(bot):
+    run(bot._install_commands())
+    writes = [p for m,p in bot.calls if m == 'setMyCommands' and p.get('scope') == {'type': 'chat', 'chat_id': GROUP}]
+    assert {p['language_code'] for p in writes} == {'', 'zh', 'en'}
+    assert all(not c['description'].startswith('[admin]') for p in writes for c in p['commands'])
+    run(bot._sync_chat_commands(GROUP, ADMIN, 'zh-hans', group=True))
+    bot.members.set_roles('admin1', [], actor='test')
+    bot.calls.clear()
+    run(bot._sync_chat_commands(GROUP, ADMIN, 'en', group=True))
+    members = [p for m,p in bot.calls if m == 'setMyCommands' and p['scope']['type'] == 'chat_member']
+    assert {p['language_code'] for p in members} == {'', 'zh', 'en'}
+    assert all(not c['description'].startswith('[admin]') for p in members for c in p['commands'])
+
+
+def test_private_admin_only_entries_stay_blocked_in_group(bot, monkeypatch):
+    called = []
+    async def handler(*args):
+        called.append(args)
+    for command_name in ('renewall', 'scoreall', 'gift', 'invite', 'code', 'auth'):
+        monkeypatch.setattr(bot, '_cmd_'+command_name, handler)
+        run(bot._handle_message(_msg('/'+command_name)))
+    assert not called
+
+
+def test_removed_group_also_removes_known_language_overrides(bot):
+    bot._installed_group_chats = {str(OTHER)}
+    run(bot._install_commands())
+    removed = [p for m,p in bot.calls if m == 'deleteMyCommands' and str(p['scope'].get('chat_id')) == str(OTHER)]
+    assert {p['language_code'] for p in removed} == {'', 'zh', 'en'}
+    assert all(p['scope']['type'] == 'chat' for p in removed)

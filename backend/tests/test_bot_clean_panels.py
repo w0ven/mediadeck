@@ -147,20 +147,20 @@ def test_password_confirmation_is_bound_and_cancelable(bot, interruption):
 
 def test_chat_commands_replace_legacy_scope_and_actual_language(bot):
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
-    assert len(bot.calls) == 2
+    assert len(bot.calls) == 3
     for method, payload in bot.calls:
         assert method == "setMyCommands"
         assert payload["scope"] == {"type": "chat", "chat_id": "900"}
         assert {c["command"] for c in payload["commands"]} == {
             "start", "me", "usage", "rebind", "rank", "today", "help", "rules", "manage", "kk", "prouser",
-            "games", "pointsrank"}
-    assert [p["language_code"] for _, p in bot.calls] == ["", "zh"]
+            "games", "pointsrank", "transfer", "renew", "score", "revuser", "rmemby", "renewall", "scoreall", "gift", "invite", "code", "auth"}
+    assert [p["language_code"] for _, p in bot.calls] == ["", "zh", "en"]
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
-    assert len(bot.calls) == 2
+    assert len(bot.calls) == 3
     bot.members.set_roles("admin1", [], actor="test")
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
     assert {c["command"] for c in bot.calls[-1][1]["commands"]} == {
-        "start", "me", "usage", "rebind", "rank", "today", "help", "rules", "games", "pointsrank"}
+        "start", "me", "usage", "rebind", "rank", "today", "help", "rules", "games", "pointsrank", "transfer"}
 
 
 def test_changing_bot_identity_never_deletes_other_bots_menu(bot):
@@ -322,3 +322,41 @@ def test_private_forward_lookup_and_group_privacy(bot):
     run(bot._handle_message({"chat": {"id": -10, "type": "group"},
                              "from": {"id": "900"}, "text": "/kk 901"}))
     assert bot.calls == []
+
+
+@pytest.mark.parametrize('command_name', ['renew', 'score', 'revuser', 'rmemby', 'renewall', 'scoreall', 'gift', 'invite', 'code', 'auth'])
+def test_new_private_admin_menu_entries_reach_existing_gated_handlers(bot, monkeypatch, command_name):
+    calls = []
+    async def handler(chat, actor, args):
+        calls.append((chat, actor, args))
+    monkeypatch.setattr(bot, '_cmd_'+('rm' if command_name == 'rmemby' else command_name), handler)
+    command(bot, '/'+command_name, chat='901')
+    assert not calls
+    command(bot, '/'+command_name, chat='900')
+    assert len(calls) == 1 and calls[0][0] == '900'
+
+
+def test_language_change_and_demotion_rewrite_known_overrides(bot):
+    run(bot._sync_chat_commands('900', '900', 'zh-hans'))
+    bot.calls.clear()
+    bot.members.set_roles('admin1', [], actor='test')
+    run(bot._sync_chat_commands('900', '900', 'en-US'))
+    assert {p['language_code'] for m,p in bot.calls if m == 'setMyCommands'} == {'', 'zh', 'en'}
+    assert all(not c['description'].startswith('[admin]') for m,p in bot.calls if m == 'setMyCommands' for c in p['commands'])
+    assert all('pointsrank' in {c['command'] for c in p['commands']} for m,p in bot.calls if m == 'setMyCommands')
+
+
+def test_failed_language_write_is_retried_not_cached(bot):
+    real = bot._call
+    async def fail_english(method, payload=None, **kw):
+        if method == 'setMyCommands' and payload.get('language_code') == 'en':
+            return False
+        return await real(method, payload, **kw)
+    bot._call = fail_english
+    run(bot._sync_chat_commands('900', '900', 'zh'))
+    assert '900' not in bot._chat_commands
+    bot._call = real
+    bot.calls.clear()
+    run(bot._sync_chat_commands('900', '900', 'zh'))
+    assert [p['language_code'] for m,p in bot.calls if m == 'setMyCommands'] == ['', 'zh', 'en']
+    assert bot._chat_commands['900'] == (True, 'zh')

@@ -149,3 +149,15 @@ def test_menu_new_buttons_real_callback_and_plugin_switches(env):
             assert {'games','pointsrank'}<=commands
             if group:assert {'blackwhite','niuniu'}<=commands
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('verb', ['/pointsrank', '/积分榜'])
+@pytest.mark.parametrize('group', [False, True])
+def test_points_menu_english_and_chinese_alias_route_to_available_points(env, verb, group):
+    async def run():
+        before = copy.deepcopy(env.db.query('SELECT * FROM points_ledger ORDER BY id'))
+        row = await cmd(env, verb, index=1, group=group)
+        assert row and '当前可用' in body(env, row)
+        assert '观看' not in body(env, row)
+        assert env.db.query('SELECT * FROM points_ledger ORDER BY id') == before
+    asyncio.run(run())
