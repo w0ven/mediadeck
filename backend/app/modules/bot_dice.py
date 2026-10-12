@@ -48,11 +48,14 @@ class DiceCleanup(CleanupService):
 
 
 class DiceBotMixin(GroupDiceBotMixin):
+    def _dice_config(self):
+        return self._plugins.config('dice') if self._plugins else {}
+
     def _dice_service(self):
         if self._db is None or self._points is None:
             raise PlayError('积分服务暂不可用')
         self._check_bot_identity()
-        return DiceService(self._db, self._members, self._points, lambda: self._plugin_on('dice'), self._group_chat_allowed, self._active_bot_id)
+        return DiceService(self._db, self._members, self._points, lambda: self._plugin_on('dice'), self._group_chat_allowed, self._active_bot_id, config=self._dice_config)
 
     def _dice_cleanup(self, message, mid=None, *, due=None):
         DiceCleanup(self._db).enqueue(self._active_bot_id, message['chat']['id'], self._thread_id(message) or 0,
@@ -100,7 +103,7 @@ class DiceBotMixin(GroupDiceBotMixin):
                 session = service.new_session(parts[1][5:], message['from'])
                 await self._dice_draw(session)
             elif verb.split('@')[0] == '/猜大小帮助':
-                await self._dice_feedback(message, dice_group_view.BANKER_HELP)
+                await self._dice_feedback(message, dice_group_view.banker_help(self._dice_config()))
             else:
                 if len(parts) != 2:
                     raise PlayError('用法：/猜大小 庄本；开局后其他群友直接发送 /大 金额 或 /小 金额')
@@ -328,6 +331,11 @@ class DiceBotMixin(GroupDiceBotMixin):
                     if not member or member['emby_user_id'] != job['purpose'][7:]:
                         conn.execute("UPDATE dice_messages SET state='failed',error='本人绑定已变化，未发送明细' WHERE id=?", (job['id'],))
                         continue
+                if job['purpose'] == 'open' and dice_caption_view.is_caption(row):
+                    current, snapshot = service.group_snapshot(nonce)
+                    body, keys = dice_caption_view.card(current, snapshot, now=clock)
+                    job.update(body=body, keyboard=encode(keys))
+                    conn.execute('UPDATE dice_messages SET body=?,keyboard=? WHERE id=?', (body, encode(keys), job['id']))
                 lease = clock+90
                 conn.execute("UPDATE dice_messages SET state='sending',lease=?,attempts=attempts+1 WHERE id=?", (lease, job['id']))
             token = CALL_DELIVERY.set(None)
@@ -376,6 +384,8 @@ class DiceBotMixin(GroupDiceBotMixin):
             finally:
                 CALL_DELIVERY.reset(token)
         row = service.get(nonce)
+        if dice_caption_view.is_caption(row) and row['state'] in ('opening', 'open') and row['card_mid']:
+            self._dice_group_schedule(nonce)
         if row['state'] in ('settled', 'refunded', 'empty'):
             pending = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%' AND state!='sent'", (nonce,))['n']
             count = self._db.one("SELECT COUNT(*) n FROM dice_messages WHERE nonce=? AND purpose LIKE 'report:%'", (nonce,))['n']

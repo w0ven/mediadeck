@@ -10,6 +10,7 @@ import time
 from app.modules import dice_beacon as beacon
 from app.modules.account_deletion import deletion_in_progress
 from app.modules.dice_banker import BANKER_VERSION, banker, is_banker, settle_banker
+from app.modules.dice_config import DEFAULT_WINDOW, MAX_WINDOW, MIN_WINDOW, window_seconds
 from app.modules.dice_group import GROUP_VERSION, GroupDiceService, is_group
 from app.modules.dice_group import migrate as migrate_group
 from app.modules.dice_rules import MAX_INT, POOLS, settle_pool, validate
@@ -68,9 +69,10 @@ def migrate(db):
 
 
 class DiceService(GroupDiceService, PlayAccess):
-    def __init__(self, db, members, points, enabled, allowed, bot_id):
+    def __init__(self, db, members, points, enabled, allowed, bot_id, *, config=None):
         super().__init__(db, members, allowed, bot_id)
         self.points, self.cash, self.enabled = points, CashBook(points), enabled
+        self.config = config or dict
 
     def get(self, nonce):
         row = self.db.one('SELECT * FROM dice_rounds WHERE nonce=? AND bot_id=?', (nonce, self.bot_id))
@@ -109,11 +111,12 @@ class DiceService(GroupDiceService, PlayAccess):
                 raise PlayError('庄本余额不足，本次未开局')
             bank = {'user_id': member['emby_user_id'], 'tg_id': tg, 'display_name': public_name(message['from']), 'capital': capital}
             nonce, secret = secrets.token_hex(12), secrets.token_hex(32)
-            deadline = clock + 180
+            window = window_seconds(self.config())
+            deadline = clock + window
             row = {'nonce': nonce, 'bot_id': self.bot_id, 'chat_id': chat, 'thread_id': thread,
                    'command_mid': mid, 'actor_uid': member['emby_user_id'], 'created': clock,
                    'deadline': deadline, 'timeout': deadline+600, 'round_number': beacon.future_round(deadline),
-                   'rules': encode({'version': BANKER_VERSION, 'banker': bank, 'draw_version': beacon.VERSION, 'presentation': 'caption-v1', 'chain': beacon.CHAIN, 'window': 180, 'wait': 600, 'fee': 0}),
+                   'rules': encode({'version': BANKER_VERSION, 'banker': bank, 'draw_version': beacon.VERSION, 'presentation': 'caption-v1', 'chain': beacon.CHAIN, 'window': window, 'wait': 600, 'fee': 0}),
                    'secret': secret, 'commitment': hashlib.sha256(bytes.fromhex(secret)).hexdigest()}
             conn.execute(f"INSERT INTO dice_rounds({','.join(row)}) VALUES({','.join('?' for _ in row)})", tuple(row.values()))
             self.cash.reserve(conn, 'dice', nonce+':banker', bank['user_id'], capital, now=clock)
@@ -323,10 +326,14 @@ class DiceService(GroupDiceService, PlayAccess):
 
 
 class DicePlugin(Plugin):
-    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='群友坐庄 · /猜大小 庄本 · 180秒封盘 · 0抽成；其他人直接发送 /大 金额 或 /小 金额即确认，不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
+    spec = Spec(id='dice', name='骰局', icon='🎲', category='points', description='群友坐庄 · /猜大小 庄本 · 默认90秒封盘（后台可配置）· 0抽成；其他人直接发送 /大 金额 或 /小 金额即确认，不可撤注。沿用现有授权群与话题。恢复字段仅在手动运行时执行；不影响资金。', fields=[
+        Field('window_seconds', '封盘秒数（30～600秒）', kind='int', default=DEFAULT_WINDOW, min=MIN_WINDOW, max=MAX_WINDOW, help='默认90秒；只影响后续新局，已开局的封盘和开奖轮次不变。'),
         Field('receipt_job', '待核实消息任务ID（0不操作）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_mid', '人工核实已送达的消息ID（原聊天内）', kind='int', default=0, min=0, max=MAX_INT),
         Field('receipt_retry', '未填消息ID时允许重发（可能重复送达）', kind='bool', default=False)])
+
+    def validate_config(self, config):
+        window_seconds(config)
 
     def readonly_status(self):
         states = {r['state']: r['n'] for r in self.ctx.db.query('SELECT state,COUNT(*) n FROM dice_rounds GROUP BY state')}
@@ -335,7 +342,7 @@ class DicePlugin(Plugin):
         jobs = [{**j, 'purpose': j['purpose'].split(':')[0]} for j in jobs]
         from app.modules.bot_dice import DiceCleanup
         issues = self.ctx.db.query("SELECT nonce,state,error FROM dice_rounds WHERE error<>'' AND state IN ('opening','open','locked','fixed') ORDER BY created DESC LIMIT 20")
-        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '新局规则': BANKER_VERSION, '旧局规则': [GROUP_VERSION, beacon.VERSION], '封盘秒数': 180, '开奖最长等待秒数': 600}
+        return {'局状态': states, '财务恢复待核对': issues, '消息待核实': uncertain, '待核实任务': jobs, '过程清理': DiceCleanup(self.ctx.db).summary(), '新局规则': BANKER_VERSION, '旧局规则': [GROUP_VERSION, beacon.VERSION], '封盘秒数': window_seconds(self.ctx.registry.config('dice')), '开奖最长等待秒数': 600}
 
     async def run(self, config):
         if self.ctx.telegram:

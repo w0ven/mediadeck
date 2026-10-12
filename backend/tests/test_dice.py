@@ -594,7 +594,7 @@ def test_dice_only_menu_and_full_help_are_reachable(env):
         assert any('骰局玩法' in p.get('text','') or any(b.get('text')=='骰局玩法' for line in p.get('reply_markup',{}).get('inline_keyboard',[]) for b in line) for method,p in env.tg.calls if method=='sendMessage')
         await env.bot._dispatch_update({'message':message(env,'/猜大小帮助',private=True,mid=8998)})
         text=next(p['text'] for method,p in reversed(env.tg.calls) if method=='sendMessage')
-        assert '/猜大小 1000' in text and '发送即扣款' in text and '180秒' in text
+        assert '/猜大小 1000' in text and '发送即扣款' in text and '90秒' in text
         assert '赢返2倍' in text and '庄家通吃' in text
         assert env.db.one("SELECT 1 FROM play_jobs WHERE job_key=?", (f'dice:{env.actors[0]["id"]}:8998',))
     asyncio.run(run())

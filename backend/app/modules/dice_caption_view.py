@@ -2,10 +2,12 @@
 from __future__ import annotations
 
 import json
+import math
+import time
 
 from app.modules.dice_banker import banker, is_banker
 from app.modules.dice_group import TERMINAL
-from app.modules.dice_group_view import clock, markets, result_heading
+from app.modules.dice_group_view import markets, result_heading
 from app.modules.game_mentions import result_mention, text_units
 
 PRESENTATION = 'caption-v1'
@@ -15,13 +17,16 @@ def is_caption(row):
     return json.loads(row['rules']).get('presentation') == PRESENTATION
 
 
-def pages(row, snapshot):
+def pages(row, snapshot, *, now=None):
     terminal = row['state'] in TERMINAL
     if terminal:
         header = result_heading(row)
     else:
-        state = '投注中' if row['state'] in ('opening', 'open') else '已封盘 · 待揭晓'
-        header = f'🎲 <b>大小对决</b>　{state}\n⏳ {clock(row["deadline"])} 封盘 · 0抽成'
+        remaining = max(0, math.ceil(row['deadline']-(time.time() if now is None else now)))
+        accepting = row['state'] in ('opening', 'open') and remaining > 0
+        state = '投注中' if accepting else '已封盘 · 等待开奖'
+        remaining = remaining if accepting else 0
+        header = f'🎲 <b>大小对决</b>　{state}\n⏳ 剩余 {remaining//60:02d}:{remaining%60:02d} · 0抽成'
     if is_banker(row):
         bank = banker(row)
         header += '\n\n👑 庄家 '+result_mention(bank['tg_id'], bank['display_name'])+f'　庄本 <b>{bank["capital"]:,}</b>'
@@ -70,8 +75,8 @@ def pages(row, snapshot):
     return [body+(f'\n\n{i+1}/{len(chunks)}' if len(chunks) > 1 else '') for i, body in enumerate(chunks)]
 
 
-def card(row, snapshot, *, first=False):
-    bodies = pages(row, snapshot)
+def card(row, snapshot, *, first=False, now=None):
+    bodies = pages(row, snapshot, now=now)
     page = 0 if first else min(max(0, row['group_page']), len(bodies)-1)
     keys = []
     if len(bodies) > 1:

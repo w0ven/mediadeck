@@ -68,7 +68,7 @@ def test_bad_capital_never_opens_or_charges(env, text):
 def test_banker_open_idempotency_and_multithread_collateral(env):
     before = cash(env)
     row = opened(env, 600)
-    assert row['deadline']-row['created'] == 180
+    assert row['deadline']-row['created'] == 90
     assert json.loads(row['rules'])['version'] == BANKER_VERSION
     assert banker(row)['capital'] == 600
     assert env.services.points.balance(env.uids[0]) == 400
