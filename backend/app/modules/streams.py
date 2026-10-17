@@ -9,6 +9,7 @@ Billing continues to exclude pauses; lease deadlines survive Deck restarts.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -362,6 +363,7 @@ class StreamAdmission:
     async def issue_info(self, uid: str, device: str, session_id: str,
                          issue: Any,
                          session_profile: dict[str, str] | None = None,
+                         item_id: str = "",
                          ) -> tuple[Admission, int, dict[str, Any]]:
         """Keep admission + upstream issuance + PlaySessionId binding atomic.
 
@@ -395,6 +397,21 @@ class StreamAdmission:
                 # the previous play's observed flag release this pending start
                 # when an old Stopped report makes the session briefly idle.
                 sid = str(matches[0]["Id"])
+                if item_id and matches[0].get('DeviceId'):
+                    item = matches[0].get('NowPlayingItem') or {}
+                    item = item if str(item.get('Id') or '') == item_id else {}
+                    sources = data.get('MediaSources') or []
+                    metadata = {'client': matches[0].get('Client') or '',
+                                'item_name': item.get('Name') or '', 'item_type': item.get('Type') or '',
+                                'series_name': item.get('SeriesName') or '',
+                                'runtime_ticks': item.get('RunTimeTicks') or
+                                    next((source.get('RunTimeTicks') for source in sources
+                                          if isinstance(source, dict) and source.get('RunTimeTicks')), None)}
+                    self._db.execute('INSERT OR IGNORE INTO watch_playbacks '
+                                     '(user_id,play_id,session_id,device_id,item_id,issued_at,metadata_json) '
+                                     'VALUES(?,?,?,?,?,?,?)',
+                                     (uid, str(data['PlaySessionId']), sid, str(matches[0]['DeviceId']),
+                                      item_id, time.time(), json.dumps(metadata)))
                 previous = self._db.one("SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?", (uid, sid))
                 replacement = bool(previous and (previous["play_id"] or matches[0].get("NowPlayingItem")))
                 self._db.execute("UPDATE stream_leases SET "
@@ -444,6 +461,9 @@ class StreamAdmission:
                     sid = str(bound[0]["session_id"])
             matches = self._matching(rows, uid, device, sid)
             code = await self._emby.report_stopped(token, device, payload)
+            if 200 <= code < 300 and play_id:
+                self._db.execute('UPDATE watch_playbacks SET closed_at=? WHERE user_id=? '
+                                 'AND play_id=? AND device_id=?', (time.time(), uid, play_id, device))
             if 200 <= code < 300 and len(matches) == 1:
                 sid = str(matches[0]["Id"])
                 lease = self._db.one("SELECT play_id FROM stream_leases "

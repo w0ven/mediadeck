@@ -43,6 +43,7 @@ def sampled(tmp_path, monkeypatch):
         for row in rows:
             row['LastActivityDate'] = datetime.fromtimestamp(clock[0], UTC).isoformat()
             row['PlayState']['PositionTicks'] = int((clock[0]-1_800_000_000)*10_000_000)
+            row['PlayState']['PlaybackRate'] = 1
         return rows
 
     emby.active_sessions_raw = fresh_sessions

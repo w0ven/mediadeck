@@ -142,7 +142,8 @@ def test_usage_cancellation_cannot_overlap_an_unfinished_commit(tmp_path, monkey
     async def fresh_sessions():
         return [{'Id': 's', 'UserId': 'u1', 'NowPlayingItem': {'Id': 'item', 'Bitrate': 8000000},
                  'LastActivityDate': datetime.fromtimestamp(clock[0], UTC).isoformat(),
-                 'PlayState': {'IsPaused': False, 'PositionTicks': int((clock[0]-1800000000)*10_000_000)}}]
+                 'PlayState': {'IsPaused': False, 'PlaybackRate': 1,
+                               'PositionTicks': int((clock[0]-1800000000)*10_000_000)}}]
 
     emby = SimpleNamespace(active_sessions_raw=fresh_sessions)
     sampler = UsageSampler(db, members, emby)

@@ -92,17 +92,19 @@ def test_report_keeps_original_strict_rejection_gate(progress, variant, reason):
     assert diagnosis(db)['reason'] == reason
 
 
-def test_missing_rate_only_uses_explicit_fresh_bound_session_metadata(progress):
+def test_missing_rate_uses_accepted_progress_without_inventing_session_rate(progress):
     db, _, sampler, _, clock = progress
     event = payload(5);event.pop('PlaybackRate')
     clock[0] = BASE+5;sampler._progress('u','device',event,clock[0])
     event['PositionTicks'] = 35*10_000_000
     clock[0] = BASE+35;sampler._progress('u','device',event,clock[0])
-    assert seconds(db) == 30  # initial raw Sessions explicitly reported rate=1
+    assert seconds(db) == 30
     event['PositionTicks'] = 70*10_000_000
     clock[0] = BASE+70;sampler._progress('u','device',event,clock[0])
-    assert seconds(db) == 30 and diagnosis(db)['reason'] == 'rate_unknown'
+    assert seconds(db) == 65 and diagnosis(db)['reason'] == 'verified'
     assert diagnosis(db)['rate'] is None
+    assert diagnosis(db)['timing_basis'] == 'accepted_progress'
+    assert all(row['playback_rate'] is None for row in db.query('SELECT playback_rate FROM watch_verified_samples'))
 
 
 @pytest.mark.parametrize('field,value', [('SessionId','other'), ('PlaySessionId','other'), ('ItemId','other')])

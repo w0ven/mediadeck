@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-18 — Playback-bound elapsed viewing without invented speed
+
+- Count fresh, authenticated and accepted progress by elapsed time when the
+  client omits playback speed; retain unknown speed as NULL rather than using
+  the server's default. Frozen, paused, stopped, seeking and disconnected
+  intervals do not backfill time, and explicit speeds keep their strict proof.
+- Persist user/session/device/item/play bindings at PlaybackInfo issuance,
+  independently of concurrency seats. Preserve fresh report identity over
+  cached poll metadata, close superseded plays and persist Stop tombstones.
+- Preserve every historical viewing row and total in a transactional nullable
+  rate migration. Keep traffic accounting and speed-verified reward eligibility
+  unchanged; do not reconstruct missing history.
+- Add source-faithful missing-speed replay, all-view consistency, lease loss,
+  identity rejection, stop/replacement races, frozen/delayed reports, restart,
+  actual HTTP lifecycle and legacy-schema preservation regressions.
+- Focused regression and lint pass. Publish through PR/CI and an official tag;
+  production acceptance separately checks migration and natural live reports.
+
 ## 2026-10-12 — private account password change and self deletion
 
 - Restore reachable password-change and account-deletion buttons on private

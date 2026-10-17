@@ -63,7 +63,7 @@ def test_normal_pause_resume_seek_and_every_view_agree(env):
 
 
 @pytest.mark.parametrize('variant', ['zero', 'frozen', 'missing_pos', 'paused', 'unknown_pause',
-                                     'old_heartbeat', 'missing_heartbeat', 'invalid_pos', 'nan', 'no_item'])
+                                     'old_heartbeat', 'missing_heartbeat', 'missing_rate', 'invalid_pos', 'nan', 'no_item'])
 def test_invalid_evidence_never_accrues(env, variant):
     db, _, sampler, _ = env
     for offset in (0, 30, 60, 3600, 12*3600):
@@ -73,6 +73,7 @@ def test_invalid_evidence_never_accrues(env, variant):
         if variant == 'unknown_pause': s['PlayState'].pop('IsPaused')
         if variant == 'old_heartbeat': s['LastActivityDate'] = session(BASE-600, 0)['LastActivityDate']
         if variant == 'missing_heartbeat': s.pop('LastActivityDate')
+        if variant == 'missing_rate': s['PlayState'].pop('PlaybackRate')
         if variant == 'invalid_pos': s['PlayState']['PositionTicks'] = 7200*10_000_000
         if variant == 'nan': s['PlayState']['PositionTicks'] = float('nan')
         if variant == 'no_item': s.pop('NowPlayingItem')

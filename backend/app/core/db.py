@@ -331,10 +331,10 @@ CREATE TABLE IF NOT EXISTS watch_verified_samples (
     item_type TEXT NOT NULL DEFAULT '', series_name TEXT NOT NULL DEFAULT '',
     client TEXT NOT NULL DEFAULT '', play_method TEXT NOT NULL DEFAULT '',
     started_at REAL NOT NULL, ended_at REAL NOT NULL, seconds REAL NOT NULL,
-    position_start REAL NOT NULL, position_end REAL NOT NULL, playback_rate REAL NOT NULL,
+    position_start REAL NOT NULL, position_end REAL NOT NULL, playback_rate REAL,
     PRIMARY KEY(run_key, ended_at),
     CHECK(ended_at>started_at AND seconds>0 AND seconds<=ended_at-started_at+0.000001),
-    CHECK(position_end>position_start AND playback_rate>0)
+    CHECK(position_end>position_start AND (playback_rate IS NULL OR playback_rate>0))
 );
 CREATE INDEX IF NOT EXISTS idx_verified_watch_user_time ON watch_verified_samples(emby_user_id, ended_at);
 CREATE INDEX IF NOT EXISTS idx_verified_watch_time ON watch_verified_samples(ended_at, started_at);
@@ -342,6 +342,14 @@ CREATE TABLE IF NOT EXISTS watch_verified_totals (
     emby_user_id TEXT PRIMARY KEY, seconds REAL NOT NULL,
     first_at REAL NOT NULL, last_at REAL NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS watch_playbacks (
+    user_id TEXT NOT NULL, play_id TEXT NOT NULL, session_id TEXT NOT NULL,
+    device_id TEXT NOT NULL, item_id TEXT NOT NULL, issued_at REAL NOT NULL,
+    closed_at REAL NOT NULL DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY(user_id, play_id)
+);
+CREATE INDEX IF NOT EXISTS idx_watch_playback_session ON watch_playbacks(user_id,session_id);
 
 -- One bounded, credential-free observation summary per existing viewer.
 CREATE TABLE IF NOT EXISTS watch_diagnostics (
@@ -692,6 +700,7 @@ class Database:
             # written against the new columns would fail at runtime.
             self._retire_legacy_redeem_codes()
             self._conn.executescript(SCHEMA)
+            self._nullable_watch_rate()
             cur = self._conn.execute("SELECT value FROM meta WHERE key='schema_version'")
             row = cur.fetchone()
             if row is None:
@@ -806,6 +815,20 @@ class Database:
                 END;
             """)
             self._conn.commit()
+
+    def _nullable_watch_rate(self) -> None:
+        columns = self._conn.execute('PRAGMA table_info(watch_verified_samples)').fetchall()
+        if not any(row['name'] == 'playback_rate' and row['notnull'] for row in columns):
+            return
+        ddl = SCHEMA.split('CREATE TABLE IF NOT EXISTS watch_verified_samples (', 1)[1].split(';', 1)[0]
+        with self._conn:
+            self._conn.execute('BEGIN')
+            self._conn.execute('CREATE TABLE watch_verified_samples_next (' + ddl)
+            self._conn.execute('INSERT INTO watch_verified_samples_next SELECT * FROM watch_verified_samples')
+            self._conn.execute('DROP TABLE watch_verified_samples')
+            self._conn.execute('ALTER TABLE watch_verified_samples_next RENAME TO watch_verified_samples')
+            self._conn.execute('CREATE INDEX idx_verified_watch_user_time ON watch_verified_samples(emby_user_id,ended_at)')
+            self._conn.execute('CREATE INDEX idx_verified_watch_time ON watch_verified_samples(ended_at,started_at)')
 
     def _retire_legacy_redeem_codes(self) -> None:
         """Move a v0.13-shaped redeem_codes aside instead of dropping it.
