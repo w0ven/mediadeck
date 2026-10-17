@@ -1617,7 +1617,7 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
     try:
         admission, code, data = await app.state.streams.issue_info(
             uid, device, query.get("SessionId", query.get("sessionId", "")), issue,
-            session_profile=session_profile)
+            session_profile=session_profile, item_id=item_id)
     except HTTPException:
         raise
     except Exception:  # noqa: BLE001 - never return a partially checked URL

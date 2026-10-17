@@ -171,7 +171,7 @@ class StatsService:
                 'verification_since': self._verification_since, 'unverified_playback_now': unverified_now,
                 'window_basis': 'recorded_intervals', 'source': 'recorded_viewing',
                 'diagnostic': diagnostic,
-                'coverage_note': '累计保留已记录观看；时段和影片仅统计可定位的记录，缺失片段不补算。'}
+                'coverage_note': '累计保留已记录观看；时段和影片仅统计可定位的记录，缺失片段不补算。未报倍速按连续进度上报计时。'}
 
     def recent_watches(self, user_id: str, limit: int = 5) -> list[dict[str, Any]]:
         return self._db.query(
@@ -606,6 +606,8 @@ class StatsService:
         self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_verified_samples WHERE ended_at < ?', (cutoff_ts,))
+        self._db.execute('DELETE FROM watch_playbacks WHERE issued_at < ? AND closed_at > 0 AND closed_at < ?',
+                         (cutoff_ts, cutoff_ts))
         audit = self._db.execute(
             "DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
         return {"play_events": events, "usage_daily": usage, "audit_log": audit}

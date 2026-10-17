@@ -132,7 +132,7 @@ def watch_observation(session: dict[str, Any], now: float) -> dict[str, Any]:
     play = session.get('PlayState') or {}
     position = _number(play.get('PositionTicks'))
     position = position / TICKS_PER_SECOND if position is not None and position >= 0 else None
-    rate = _number(play.get('PlaybackRate', session.get('PlaybackRate', 1.0)))
+    rate = _number(play.get('PlaybackRate', session.get('PlaybackRate')))
     runtime = _number((session.get('NowPlayingItem') or {}).get('RunTimeTicks'))
     activity = None
     try:
@@ -170,6 +170,14 @@ def verified_watch_interval(before: dict | None, current: dict, observed_gap: fl
     progress = current['position'] - before['position']
     if not 0 < elapsed <= MAX_BILLABLE_GAP_SECONDS or progress <= 0:
         return 0, 0, 'stalled_or_rewound'
+    if before.get('timing_basis') != current.get('timing_basis'):
+        return 0, 0, 'baseline'
+    if current.get('timing_basis') == 'accepted_progress':
+        if elapsed > WATCH_HEARTBEAT_MAX_AGE or progress > max(1, elapsed * 4):
+            return 0, 0, 'seek_or_buffering'
+        end = current['activity']
+        start = max(since, before.get('anchor_floor', before['activity']), end-elapsed)
+        return (start, end, '') if end > start else (0, 0, 'before_verification')
     if before['rate'] != current['rate']:
         return 0, 0, 'rate_changed'
     expected = elapsed * current['rate']
@@ -220,6 +228,16 @@ class UsageSampler:
         self._verified_since = float(epoch.get('value') or 0)
         for row in db.query('SELECT session_id,state_json FROM watch_checkpoints'):
             value = json.loads(row['state_json'])
+            if (not value.get('stopped_by_report') and value.get('play_id') and value.get('device_id')
+                    and value.get('item_id') and value.get('play_id_source') in ('sessions', 'lease', 'issuance')
+                    and 0 <= time.time()-float(value.get('last_ts') or 0) <= WATCH_HEARTBEAT_MAX_AGE):
+                metadata = {key: value.get(key) for key in
+                            ('client', 'item_name', 'item_type', 'series_name', 'runtime_ticks')}
+                db.execute('INSERT OR IGNORE INTO watch_playbacks '
+                           '(user_id,play_id,session_id,device_id,item_id,issued_at,metadata_json) '
+                           'VALUES(?,?,?,?,?,?,?)',
+                           (value['user_id'], value['play_id'], row['session_id'], value['device_id'],
+                            value['item_id'], float(value.get('started_at') or time.time()), json.dumps(metadata)))
             value['last_ts'] = None
             value['was_playing'] = False
             value['speed_bps'] = 0
@@ -258,22 +276,41 @@ class UsageSampler:
     def _playback_report(self, user_id, device, payload, stopped):
         sid = str(payload.get('SessionId') or '')
         play = str(payload.get('PlaySessionId') or '')
+        if stopped and play and device:
+            self._db.execute('UPDATE watch_playbacks SET closed_at=? WHERE user_id=? AND play_id=? '
+                             'AND device_id=?', (time.time(), user_id, play, device))
         for current_sid, state in self._live.items():
             if state['user_id'] != user_id or (sid and current_sid != sid):
                 continue
             if device and str(state.get('device_id') or '') != device:
                 continue
-            if stopped and play and str(state.get('play_id') or '') != play:
+            if play and str(state.get('play_id') or '') != play:
+                continue
+            if payload.get('ItemId') and str(payload['ItemId']) != state.get('item_id'):
                 continue
             if stopped and state.get('play_id_source') == 'lease':
                 # The route already released the current Stop's lease. An
                 # extant replacement lease must not be closed by an old Stop.
                 lease = self._db.one('SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?',
                                      (user_id, current_sid))
-                if lease and lease['play_id'] != play:
+                if lease and lease['play_id'] != (play or state.get('play_id')):
                     continue
             if not sid and not device and not play:
                 continue  # no identity evidence: do not stop unrelated streams
+            if state.get('play_id') and state.get('device_id'):
+                if stopped:
+                    self._db.execute('INSERT INTO watch_playbacks '
+                                     '(user_id,play_id,session_id,device_id,item_id,issued_at,closed_at) '
+                                     'VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id,play_id) '
+                                     'DO UPDATE SET closed_at=excluded.closed_at',
+                                     (user_id, state['play_id'], current_sid, state['device_id'],
+                                      state['item_id'], state.get('started_at') or 0, time.time()))
+                else:
+                    self._db.execute('UPDATE watch_playbacks SET closed_at=0 WHERE user_id=? AND play_id=? '
+                                     'AND session_id=? AND device_id=? AND NOT EXISTS '
+                                     '(SELECT 1 FROM watch_playbacks newer WHERE newer.user_id=? '
+                                     'AND newer.session_id=? AND newer.issued_at>watch_playbacks.issued_at)',
+                                     (user_id, state['play_id'], current_sid, state['device_id'], user_id, current_sid))
             state['stopped_by_report'] = bool(stopped)
             state['watch_observation'] = None
             state['watch_source'] = ''
@@ -287,6 +324,11 @@ class UsageSampler:
             with self._db.write() as conn:
                 conn.execute('INSERT INTO watch_checkpoints VALUES(?,?) ON CONFLICT(session_id) DO UPDATE SET state_json=excluded.state_json',
                              (current_sid, json.dumps(state)))
+        if stopped and play and device:
+            self._db.execute('INSERT OR IGNORE INTO watch_playbacks '
+                             '(user_id,play_id,session_id,device_id,item_id,issued_at,closed_at) '
+                             'VALUES(?,?,?,?,?,0,?)',
+                             (user_id, play, sid, device, str(payload.get('ItemId') or ''), time.time()))
         self._publish_live()
 
     async def playback_progress(self, user_id: str, device: str, payload: dict, *,
@@ -307,7 +349,8 @@ class UsageSampler:
             counts['progress_'+key] = min(1_000_000_000, int(counts.get('progress_'+key) or 0)+1)
         summary = {'source': source, 'reason': key, 'binding': observation.get('binding_source'),
                    'position': observation.get('position'),
-                   'rate': observation.get('rate'), 'credited_seconds': credited,
+                   'rate': observation.get('rate'), 'timing_basis': observation.get('timing_basis', 'rate_verified'),
+                   'credited_seconds': credited,
                    'attempt_at': max(attempt_at, float(previous.get('attempt_at') or 0)),
                    'counts': counts}
         with self._db.write() as conn:
@@ -334,6 +377,12 @@ class UsageSampler:
     def _report_play_matches(self, sid: str, state: dict, uid: str, play: str) -> bool:
         if not play:
             return False
+        binding = self._db.one('SELECT session_id,device_id,item_id,closed_at FROM watch_playbacks '
+                               'WHERE user_id=? AND play_id=?', (uid, play))
+        if binding:
+            return (not binding['closed_at'] and binding['session_id'] == sid
+                    and binding['device_id'] == state.get('device_id')
+                    and binding['item_id'] == state.get('item_id'))
         if state.get('play_id') and state.get('play_id_source') != 'lease':
             return state['play_id'] == play  # explicit Sessions identity wins
         # Emby native Sessions may omit PlaySessionId. Only PlaybackInfo's
@@ -347,7 +396,28 @@ class UsageSampler:
     def _progress(self, uid: str, device: str, payload: dict, received_at: float) -> None:
         now = time.time()
         sid, play, item = (str(payload.get(k) or '') for k in ('SessionId','PlaySessionId','ItemId'))
-        matches = [(key, state) for key, state in self._live.items()
+        binding = self._db.one('SELECT * FROM watch_playbacks WHERE user_id=? AND play_id=?', (uid, play))
+        replacement = None
+        if (binding and not binding['closed_at'] and device and device == binding['device_id']
+                and item == binding['item_id'] and (not sid or sid == binding['session_id'])):
+            key = binding['session_id']
+            state = self._live.get(key)
+            if not state or state.get('item_id') != item or state.get('play_id') != play:
+                metadata = json.loads(binding['metadata_json'])
+                replacement = {
+                    'user_id': uid, 'username': (self._members.get(uid) or {}).get('username', ''),
+                    'item_id': item, 'item_name': metadata.get('item_name', ''),
+                    'item_type': metadata.get('item_type', ''), 'series_name': metadata.get('series_name', ''),
+                    'client': metadata.get('client', ''), 'play_method': '', 'remote_ip': '',
+                    'device_id': device, 'play_id': play, 'play_id_source': 'issuance',
+                    'runtime_ticks': metadata.get('runtime_ticks'), 'started_at': int(received_at),
+                    'watch_key': uuid.uuid4().hex, 'sampled': True, 'seconds': 0.0,
+                    'verified_seconds': 0.0, 'bytes': 0, 'last_ts': now, 'was_playing': False,
+                    'watch_observation': None, 'watch_source': '', 'last_verified_end': 0,
+                    'report_received_at': 0, 'report_signature': None, 'transcoded': False,
+                }
+        candidates = {**self._live, binding['session_id']: replacement} if replacement else self._live
+        matches = [(key, state) for key, state in candidates.items()
                    if state['user_id'] == uid and (not sid or key == sid)
                    and item and state.get('item_id') == item
                    and device and state.get('device_id') == device
@@ -367,25 +437,31 @@ class UsageSampler:
         position = payload.get('PositionTicks', reported.get('PositionTicks'))
         paused = payload.get('IsPaused', reported.get('IsPaused'))
         rate = payload.get('PlaybackRate', reported.get('PlaybackRate'))
-        if ('PlaybackRate' not in payload and 'PlaybackRate' not in reported and
-                0 <= now-float(state.get('reported_rate_at') or 0) <= WATCH_HEARTBEAT_MAX_AGE):
-            # Reuse only an explicit fresh rate from this exact bound session.
-            # Missing payload AND missing/stale session rate remains unknown.
-            rate = state.get('reported_rate')
+        missing_rate = 'PlaybackRate' not in payload and 'PlaybackRate' not in reported
         observation = watch_observation({
             'DeviceId': device, 'PlaySessionId': play,
             'NowPlayingItem': {'Id': item, 'RunTimeTicks': state.get('runtime_ticks')},
             'PlayState': {'PositionTicks': position, 'IsPaused': paused, 'PlaybackRate': rate},
             'LastActivityDate': datetime.fromtimestamp(received_at, UTC).isoformat()}, now)
+        if missing_rate:
+            observation['timing_basis'] = 'accepted_progress'
+            if observation['reason'] == 'rate_unknown':
+                observation['reason'] = ('' if -2 <= now-received_at <= WATCH_HEARTBEAT_MAX_AGE
+                                         else 'heartbeat_stale')
+        if payload.get('IsSeeking') is True or str(payload.get('EventName') or '').lower() in ('seek', 'seeking'):
+            observation['reason'] = 'seek_or_buffering'
         signature = [observation['position'], paused, observation['rate']]
-        if signature == state.get('report_signature'):
-            self._diagnose(uid, observation, now, 'progress', 'duplicate_progress', attempt_at=received_at)
-            return
+        if signature == state.get('report_signature') and not observation['reason']:
+            if missing_rate and received_at-float(state.get('report_received_at') or received_at) > 2:
+                observation['reason'] = 'stalled_or_rewound'
+            else:
+                self._diagnose(uid, observation, now, 'progress', 'duplicate_progress', attempt_at=received_at)
+                return
         before = state.get('watch_observation')
         gap = received_at-float(state.get('report_received_at') or received_at)
         updated = dict(state)
-        lease_bound = not state.get('play_id') or state.get('play_id_source') == 'lease'
-        observation['binding_source'] = 'lease' if lease_bound else 'sessions'
+        lease_bound = not binding and (not state.get('play_id') or state.get('play_id_source') == 'lease')
+        observation['binding_source'] = 'issuance' if binding else 'lease' if lease_bound else 'sessions'
         updated.update(play_id=play, play_id_source=observation['binding_source'])
         start, end, reason = self._proof(updated, observation, gap, 'progress')
         delta = end-start
@@ -395,9 +471,15 @@ class UsageSampler:
         # Reporting changes viewing only. It must not bill bytes, traffic or points.
         if not self._record_watch(sid, updated, start if delta else now, end if delta else now,
                                   evidence=(before, observation) if delta else None,
-                                  required_lease=play if lease_bound else None):
+                                  required_lease=play if lease_bound else None,
+                                  required_binding=play if binding else None):
             self._diagnose(uid, observation, now, 'progress', 'session_unresolved', attempt_at=received_at)
             return
+        if replacement:
+            old = self._live.get(sid)
+            if old:
+                self._finish(sid, old, now)
+            self._live[sid] = state
         state.update(updated)
         self._diagnose(uid, observation, now, 'progress', reason, delta, received_at)
         self._publish_live()
@@ -496,9 +578,9 @@ class UsageSampler:
                             str(session.get('DeviceId') or '') == state.get('device_id'))
             # A fresh accepted report may be more current than a cached idle row.
             # This retains viewing identity only; `playing`/traffic stay unchanged.
-            current_item = str(item.get("Id") or (state['item_id'] if report_fresh else ''))
+            current_item = state['item_id'] if report_fresh else str(item.get("Id") or '')
             if (user_id != state['user_id'] or current_item != state['item_id']
-                    or (state.get('play_id') and observation['play_id']
+                    or (not report_fresh and state.get('play_id') and observation['play_id']
                         and state['play_id'] != observation['play_id'])):
                 self._finish(sid, state, now)
                 self._live[sid] = {
@@ -540,6 +622,8 @@ class UsageSampler:
                 }
                 continue
 
+            if str(item.get('Id') or '') != state['item_id']:
+                item = {}
             # Session endpoints/client metadata can change without a new Id.
             # Sharing observes this tick's network, never a stale first address.
             state.update({
@@ -555,7 +639,9 @@ class UsageSampler:
                 "reported_rate_at": observation.get('activity') or 0,
             })
             delta = now - float(state['last_ts']) if state.get('last_ts') is not None else 0
-            if state.get('stopped_by_report'):
+            closed = self._db.one('SELECT closed_at FROM watch_playbacks WHERE user_id=? AND play_id=?',
+                                  (user_id, state.get('play_id') or ''))
+            if state.get('stopped_by_report') or (closed and closed['closed_at']):
                 observation['reason'] = 'stopped'
             before = state.get('watch_observation')
             proof_state = dict(state)
@@ -566,9 +652,10 @@ class UsageSampler:
                 state.update({key: proof_state.get(key) for key in
                               ('watch_observation', 'watch_reason', 'watch_source')})
             watch_delta = end - start
-            state['play_id'] = observation['play_id'] or state.get('play_id') or ''
-            if observation['play_id']:
-                state['play_id_source'] = 'sessions'
+            if not report_fresh:
+                state['play_id'] = observation['play_id'] or state.get('play_id') or ''
+                if observation['play_id']:
+                    state['play_id_source'] = 'sessions'
             state["last_ts"] = now
             state['was_playing'] = playing
             if not playing:
@@ -661,8 +748,18 @@ class UsageSampler:
     # -- persistence ---------------------------------------------------------
     def _record_watch(self, sid: str, state: dict, start: float, end: float, *,
                       evidence: tuple[dict, dict] | None = None,
-                      required_lease: str | None = None) -> bool:
+                      required_lease: str | None = None,
+                      required_binding: str | None = None) -> bool:
         with self._db.write() as conn:
+            if required_binding:
+                binding = conn.execute('SELECT issued_at FROM watch_playbacks WHERE user_id=? AND session_id=? '
+                                       'AND play_id=? AND device_id=? AND item_id=? AND closed_at=0',
+                                       (state['user_id'], sid, required_binding, state['device_id'], state['item_id'])).fetchone()
+                if not binding:
+                    return False
+                conn.execute('UPDATE watch_playbacks SET closed_at=? WHERE user_id=? AND session_id=? '
+                             'AND play_id<>? AND issued_at<=? AND closed_at=0',
+                             (time.time(), state['user_id'], sid, required_binding, binding[0]))
             if required_lease is not None and not conn.execute(
                     'SELECT 1 FROM stream_leases WHERE user_id=? AND session_id=? AND play_id=? '
                     'AND observed=1 AND snapshot_guard=0', (state['user_id'], sid, required_lease)).fetchone():
@@ -731,10 +828,14 @@ class UsageSampler:
     def _finish(self, sid: str, state: dict[str, Any], now: float) -> None:
         seconds = int(state.get("seconds") or 0)
         if seconds < MIN_PLAY_SECONDS:
-            self._db.execute('DELETE FROM watch_checkpoints WHERE session_id=?', (sid,))
+            self._db.execute('DELETE FROM watch_checkpoints WHERE session_id=? '
+                             "AND COALESCE(json_extract(state_json,'$.watch_key'),'')=?",
+                             (sid, state.get('watch_key') or ''))
             return
         with self._db.write() as conn:
-            conn.execute('DELETE FROM watch_checkpoints WHERE session_id=?', (sid,))
+            conn.execute('DELETE FROM watch_checkpoints WHERE session_id=? '
+                         "AND COALESCE(json_extract(state_json,'$.watch_key'),'')=?",
+                         (sid, state.get('watch_key') or ''))
             conn.execute(
                 "INSERT INTO play_events (emby_user_id,username,item_id,item_name,"
                 "item_type,series_name,device_id,client,play_method,node,remote_ip,"
