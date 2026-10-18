@@ -10,8 +10,16 @@ Newest entries first. Every working session appends one entry.
 - Relay verified direct-stream GET/HEAD and Range bytes through one loopback
   scheduler; retain signature checks, concurrent-play protection and billing.
 - Isolate this change from unrelated local edits; focused and isolated nginx
-  signature/metering tests pass. Local full run lacked Chromium, so browser
-  tests remain for PR CI. Publish and verify a tagged live cutover separately.
+  signature/metering tests pass. PR CI passed before the live-hotfix integration;
+  verify the combined commit before a tagged live cutover.
+
+## 2026-10-18 — Reconcile live playback admission hotfix
+
+- Isolate the existing live admission optimization from the uncommitted deployment
+  checkout: concurrent owner and item verification, preserving whitelist and
+  fail-closed semantics. Test-only admin defaults are synthetic.
+- Focused tests and lint pass in a separate worktree. Submit as a separate PR
+  before reconciling the live node and publishing aggregate stream limits.
 
 ## 2026-10-18 — Playback-bound elapsed viewing without invented speed
 

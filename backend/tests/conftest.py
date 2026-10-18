@@ -17,6 +17,8 @@ from app.core.config import settings
 def isolated_data_dir(tmp_path, monkeypatch) -> Iterator[None]:
     monkeypatch.setenv("MEDIADECK_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MEDIADECK_MOCK", "1")
+    monkeypatch.setenv("MEDIADECK_ADMIN_USER", "admin")
+    monkeypatch.setenv("MEDIADECK_ADMIN_PASSWORD", "change-me")
     settings.cache_clear()
     yield
     settings.cache_clear()

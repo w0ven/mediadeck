@@ -71,6 +71,10 @@ jobs:
         run: ruff check app tests
       - name: Test including isolated nginx and network-namespace fixtures
         run: sudo env "PATH=$PATH" "TZ=$TZ" "MEDIADECK_MOCK=$MEDIADECK_MOCK" "PLAYWRIGHT_BROWSERS_PATH=$PLAYWRIGHT_BROWSERS_PATH" "$(command -v python)" -m pytest tests -q
+      - name: Test gateway local playback and registry cache
+        run: |
+          python3 ../deploy/gateway/test_duanju_local.py
+          python3 ../deploy/gateway/test_registry_cache.py
       - name: Mock startup and health
         run: |
           python - <<'PY'

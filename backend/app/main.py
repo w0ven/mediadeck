@@ -1581,8 +1581,13 @@ async def _admit_playback(request: Request, item_id: str,
     strict_uid = (await app.state.whitelist_route.user(request.headers, query)
                   if entry and entry.whitelist_only else None)
     try:
-        uid = strict_uid or await app.state.emby.user_for_token(token, device)
-        permitted = await app.state.emby.verify_item_access(item_id, token)
+        if strict_uid:
+            uid = strict_uid
+            permitted = await app.state.emby.verify_item_access(item_id, token)
+        else:
+            uid, permitted = await asyncio.gather(
+                app.state.emby.user_for_token(token, device),
+                app.state.emby.verify_item_access(item_id, token))
     except Exception:  # noqa: BLE001 - upstream failure must not issue a URL
         raise HTTPException(503, "playback authentication unavailable", headers=headers) from None
     if not uid or not permitted:

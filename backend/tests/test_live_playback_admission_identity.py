@@ -4,11 +4,13 @@ import asyncio
 
 import httpx
 import pytest
+from fastapi import HTTPException, Request
 from test_stream_admission import (
     client,  # noqa: F401 - pytest fixture
     headers,
 )
 
+from app import main
 from app.adapters.live import LiveEmby
 from app.main import app
 
@@ -81,3 +83,55 @@ def test_get_empty_success_still_fails_closed_instead_of_inventing_metadata(monk
     emby = adapter(monkeypatch, lambda request: httpx.Response(200))
     with pytest.raises(ValueError):
         asyncio.run(emby.playback_info("item42", "GET", {"X-Emby-Token": "caller"}, {}, None))
+
+
+def test_playback_admission_checks_owner_and_item_concurrently(client, monkeypatch):
+    owner_started = asyncio.Event()
+    item_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def owner(token, device):
+        assert (token, device) == ("tok:u1", "a")
+        owner_started.set()
+        await release.wait()
+        return "u1"
+
+    async def item(item_id, token):
+        assert (item_id, token) == ("item42", "tok:u1")
+        item_started.set()
+        await release.wait()
+        return True
+
+    monkeypatch.setattr(app.state.emby, "user_for_token", owner)
+    monkeypatch.setattr(app.state.emby, "verify_item_access", item)
+    request = Request({"type": "http", "method": "GET", "path": "/Videos/item42/original",
+                       "headers": [(b"x-emby-token", b"tok:u1"),
+                                   (b"x-emby-device-id", b"a")], "query_string": b""})
+
+    async def check():
+        pending = asyncio.create_task(main._admit_playback(request, "item42", {}, reserve=False))
+        try:
+            await asyncio.wait_for(asyncio.gather(owner_started.wait(), item_started.wait()), 1)
+        finally:
+            release.set()
+        assert await pending == "u1"
+
+    asyncio.run(check())
+
+
+def test_playback_admission_still_refuses_when_item_check_fails(client, monkeypatch):
+    async def owner(token, device):
+        return "u1"
+
+    async def item(item_id, token):
+        raise RuntimeError("upstream unavailable")
+
+    monkeypatch.setattr(app.state.emby, "user_for_token", owner)
+    monkeypatch.setattr(app.state.emby, "verify_item_access", item)
+    request = Request({"type": "http", "method": "GET", "path": "/Videos/item42/original",
+                       "headers": [(b"x-emby-token", b"tok:u1"),
+                                   (b"x-emby-device-id", b"a")], "query_string": b""})
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(main._admit_playback(request, "item42", {}, reserve=False))
+    assert exc.value.status_code == 503
+    assert app.state.db.query("SELECT * FROM stream_leases") == []
