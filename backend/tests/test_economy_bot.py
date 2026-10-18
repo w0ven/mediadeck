@@ -1,6 +1,7 @@
 """Actual Telegram update dispatch exercises user-facing economy entry points."""
 
 import asyncio
+import time
 
 import pytest
 from test_economy import SECRET, FakeBot, build, proof
@@ -8,13 +9,17 @@ from test_tg_interaction_context import GROUP, VIEWER, click, command
 from test_tg_interaction_context import env as interaction_env  # noqa: F401
 
 from app.core.config import settings
-from app.modules.economy_rules import DEFAULT_CARDS
+from app.modules.economy_rules import DEFAULT_CARDS, day_bounds
 from app.modules.titles import TitleService
 
 
 @pytest.fixture
 def env(request, monkeypatch):
     e = request.getfixturevalue("interaction_env")
+    # A 600-second viewing proof cannot fit inside the first ten minutes of a day.
+    # Pin this isolated Bot fixture to midday; boundary behavior has separate tests.
+    noon = day_bounds(time.time())[1] + 12 * 3600
+    monkeypatch.setattr(time, "time", lambda: noon)
     monkeypatch.setenv("MEDIADECK_CHECKIN_SECRET", SECRET)
     settings.cache_clear()
     services = build(e.db)

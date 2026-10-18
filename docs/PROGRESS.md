@@ -10,8 +10,10 @@ Newest entries first. Every working session appends one entry.
 - Relay verified direct-stream GET/HEAD and Range bytes through one loopback
   scheduler; retain signature checks, concurrent-play protection and billing.
 - Isolate this change from unrelated local edits; focused and isolated nginx
-  signature/metering tests pass. PR CI passed before the live-hotfix integration;
-  verify the combined commit before a tagged live cutover.
+  signature/metering tests pass. The combined CI crossed Beijing midnight,
+  exposing a test fixture that expected 600 seconds of today's viewing before
+  00:10. Pin only the isolated check-in fixtures to midday and rerun CI before
+  a tagged live cutover.
 
 ## 2026-10-18 — Reconcile live playback admission hotfix
 
