@@ -3,6 +3,14 @@
 Owner sets priorities when he wants to; otherwise this plan is executed
 top-down without asking. Every item ships as its own PR + release tag.
 
+## Confirmed aggregate streaming rate by account
+- Standard and whitelist baseline allowances are decimal 15 MB/s and 35 MB/s;
+  existing bandwidth cards and individual increases remain additive.
+- All parallel signed video Ranges for one account share its final effective
+  node-local byte budget; preserve auth, Range, billing and admission paths.
+- Publish via isolated PR/CI/tag; update the two live groups through the existing
+  update path and switch the private node route only during authorized release.
+
 ## Confirmed unified viewing statistics and progress collection
 - Restore one cumulative viewing value from existing non-duplicated ledgers; do
   not invent missing history, dated/title allocations, or change money/traffic.

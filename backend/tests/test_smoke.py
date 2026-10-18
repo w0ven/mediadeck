@@ -766,6 +766,9 @@ def test_agent_is_downloadable() -> None:
         meterd = client.get("/agent/meterd.py")
         assert meterd.status_code == 200
         assert "/api/edge/" in meterd.text and "measured" in meterd.text
+        proxy = client.get("/agent/stream_rate_proxy.py")
+        assert proxy.status_code == 200
+        assert "class AggregateLimiter" in proxy.text
 
 
 # ---- stream edge authentication --------------------------------------------
@@ -921,6 +924,53 @@ def test_shared_key_is_attributed_by_device_not_by_first_caller() -> None:
         assert "location" not in third.headers
 
 
+def test_signed_direct_link_uses_baseline_and_effective_member_rate() -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    with TestClient(app) as client:
+        for node in client.get("/api/nodes", headers=_basic()).json():
+            client.delete(f"/api/nodes/{node['name']}", headers=_basic())
+        _node(client, "edge-tiers", sign_secret="topsecret",
+              sign_arg_digest="k", sign_arg_expires="e")
+        client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
+        for group, cap in (("standard", 15_000_000), ("whitelist", 35_000_000)):
+            group_rate = client.put(f"/api/groups/{group}", headers=_basic(),
+                                    json={"bandwidth_limit_kbps": cap // 125})
+            assert group_rate.status_code == 200, group_rate.text
+            result = client.put("/api/members/u1", headers=_basic(), json={"group_id": group})
+            assert result.status_code == 200, result.text
+            # Group entitlement changes can correctly stop the old session.
+            app.state.emby.set_sessions([{"Id": "tier-session", "UserId": "u1", "DeviceId": "tier-dev"}])
+            app.state.cache.clear()
+            response = client.get("/emby/Videos/item42/stream.mkv?Static=true",
+                                  headers={**_play(), "X-Emby-Device-Id": "tier-dev"},
+                                  follow_redirects=False)
+            assert response.status_code == 302, response.text
+            assert parse_qs(urlsplit(response.headers["location"]).query)["r"] == [str(cap)]
+
+        # A personal bandwidth increase above the whitelist baseline must be
+        # signed as the final effective limit, not clamped back to 35 MB/s.
+        override = client.put("/api/members/u1/overrides", headers=_basic(),
+                              json={"bandwidth_limit_kbps": 400_000})
+        assert override.status_code == 200, override.text
+        app.state.emby.set_sessions([{"Id": "personal-session", "UserId": "u1",
+                                     "DeviceId": "tier-dev"}])
+        app.state.cache.clear()
+        raised = client.get("/emby/Videos/item42/stream.mkv?Static=true",
+                            headers={**_play(), "X-Emby-Device-Id": "tier-dev"},
+                            follow_redirects=False)
+        assert raised.status_code == 302, raised.text
+        assert parse_qs(urlsplit(raised.headers["location"]).query)["r"] == ["50000000"]
+
+
+def test_unresolved_direct_rate_falls_back_to_decimal_15_mb_without_user_tag() -> None:
+    import asyncio
+
+    with TestClient(app):
+        resolver = app.state.playback._rate_resolver
+        assert asyncio.run(resolver("invalid-token")) == (15_000_000, "")
+
+
 def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> None:
     """Regression: a 15 MB/s save never reached the node.
 
@@ -937,8 +987,8 @@ def test_group_rate_is_signed_and_changing_it_stops_inheriting_sessions() -> Non
         client.put("/api/settings/playback", headers=_basic(), json={"enabled": True})
         client.put("/api/members/u1", headers=_basic(),
                    json={"group_id": "standard"})
-        # 15 MB/s in the panel unit: 15 * 1048576 / 125 kbps.
-        kbps = round(15 * 1048576 / 125)
+        # Panel's decimal 15 MB/s is exactly 120000 kbps = 15000000 B/s.
+        kbps = 120_000
         client.put("/api/groups/standard", headers=_basic(),
                    json={"bandwidth_limit_kbps": kbps})
         app.state.emby.set_sessions([{"Id": "live-u1", "UserId": "u1", "DeviceId": "smoke-client"}])

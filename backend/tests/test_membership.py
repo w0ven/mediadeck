@@ -290,11 +290,12 @@ def test_policy_prefers_member_overrides(stack) -> None:
     assert policy["SimultaneousStreamLimit"] == 5
 
 
-def test_rate_bytes_per_sec_is_what_nginx_limit_rate_reads() -> None:
+def test_rate_bytes_per_sec_matches_panel_and_relay_budget() -> None:
     assert rate_bytes_per_sec(0) == 0
     assert rate_bytes_per_sec(8000) == 1_000_000
-    kbps = round(15 * 1048576 / 125)
-    assert rate_bytes_per_sec(kbps) == kbps * 125
+    # Panel presets are decimal MB/s, not binary MiB/s.
+    assert rate_bytes_per_sec(120_000) == 15_000_000
+    assert rate_bytes_per_sec(280_000) == 35_000_000
 
 
 def test_terminate_users_stops_only_matching_sessions(stack) -> None:

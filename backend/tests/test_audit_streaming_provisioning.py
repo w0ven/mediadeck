@@ -71,7 +71,16 @@ def test_nginx_literals_do_not_become_directives_or_recursive_variables():
     assert 'auth_request /_mediadeck/verify;' in text
     assert json.loads(signing_config(node))["secret"] == secret
     assert 'alias ' not in text
-    assert 'proxy_pass http://127.0.0.1:9810/;' in text
+    assert 'proxy_pass http://127.0.0.1:9820/0/;' in text
+    assert 'proxy_pass http://127.0.0.1:9810/;' not in text
+    assert 'proxy_set_header X-Mediadeck-Rate-Key $mediadeck_user_key;' in text
+    assert 'limit_rate $mediadeck_rate;' not in text
+    assert '""      15000000;' in text and '"0"     15000000;' in text
+    assert '15728640' not in text and '36700160' not in text
+    for preserved in ('limit_conn mediadeck_peruser 4;', 'proxy_force_ranges on;',
+                      'mirror /_mediadeck/announce;', 'mediadeck-speed.log mediadeck_speed;',
+                      'proxy_buffering off;', 'proxy_read_timeout 30s;'):
+        assert preserved in text
 
 
 @pytest.mark.skipif(not shutil.which("nginx"), reason="nginx parser unavailable")
