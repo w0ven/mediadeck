@@ -106,7 +106,8 @@ def test_bot_transfer_confirmation_contains_zero_fee_received_and_executes_once(
     assert len(env.services.points.ledger("u2")) == 1
 
 
-def test_bot_checkin_shows_progress_and_negative_delta_without_plus_minus(env, monkeypatch):
+def test_bot_checkin_shows_progress_and_negative_delta_without_plus_minus(env, monkeypatch,
+                                                                        checkin_clock):
     async def run():
         mid = await command(env, "/start", chat=VIEWER, user=VIEWER)
         await click(env, "checkin", mid, chat=VIEWER, user=VIEWER)

@@ -41,7 +41,7 @@ from app.modules.entries import entry_target, identify_entry
 from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
 from app.modules.entry_proxy import friend_config
 from app.modules.events import EventStream, safe_stream
-from app.modules.groups import GroupService
+from app.modules.groups import WHITELIST_GROUP_ID, GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
 from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
@@ -323,17 +323,23 @@ async def _startup() -> None:
         cached = app.state.cache.get(cache_key)
         if cached is not None:
             return cached
-        result: tuple[int, str] = (0, "")
+        # Untagged callers fall back to origin; never grant an uncapped URL.
+        result: tuple[int, str] = (15_000_000, "")
         try:
             uid = await app.state.emby.user_for_token(token, device)
             if uid:
                 member = app.state.members.get(uid)
                 kbps = int((member or {}).get("bandwidth_limit_kbps") or 0)
-                result = (rate_bytes_per_sec(kbps), user_tag(uid))
-        except Exception:  # noqa: BLE001 - fail open: sign uncapped
-            result = (0, "")
-        # An unresolved caller is cached only briefly: it means the stream is
-        # running uncapped and unattributed, and that must self-heal as soon
+                # Effective group/personal/card bandwidth is the signed cap.
+                # The 15/35 decimal MB/s tiers are defaults, not ceilings on
+                # legitimately purchased or individually assigned increases.
+                baseline = (35_000_000 if member and member.get("group_id") == WHITELIST_GROUP_ID
+                            and member.get("state") == "active" else 15_000_000)
+                result = (rate_bytes_per_sec(kbps) or baseline, user_tag(uid))
+        except Exception:  # noqa: BLE001 - unresolved identity cannot grant direct playback
+            result = (15_000_000, "")
+        # An unresolved caller is cached only briefly: direct playback falls
+        # back to origin, and the identity should self-heal as soon
         # as the session registers rather than persist for a full minute.
         app.state.cache.set(cache_key, result, ttl=60 if result[1] else 10)
         return result
@@ -725,7 +731,7 @@ async def event_stream(request: Request, topics: str = "") -> StreamingResponse:
 
 def _agent_file(name: str) -> FileResponse:
     """Serve a node-agent file from the single copy in the repo."""
-    if name not in {"loadprobe.py", "flowmeter.py", "meterd.py"}:
+    if name not in {"loadprobe.py", "flowmeter.py", "meterd.py", "stream_rate_proxy.py"}:
         raise HTTPException(404, "agent not found in this deployment")
     for candidate in (
         FilePath(__file__).resolve().parents[2] / "agent" / name,
@@ -750,6 +756,11 @@ async def agent_flowmeter() -> FileResponse:
 @app.get("/agent/meterd.py", include_in_schema=False)
 async def agent_meterd() -> FileResponse:
     return _agent_file("meterd.py")
+
+
+@app.get("/agent/stream_rate_proxy.py", include_in_schema=False)
+async def agent_stream_rate_proxy() -> FileResponse:
+    return _agent_file("stream_rate_proxy.py")
 
 
 # ---- settings --------------------------------------------------------------

@@ -46,6 +46,8 @@ class FakeStore:
 
 @pytest.fixture()
 def stack(tmp_path, monkeypatch):
+    noon = day_bounds(time.time())[1] + 12 * 3600
+    monkeypatch.setattr(time, "time", lambda: noon)
     monkeypatch.setenv("MEDIADECK_CHECKIN_SECRET", "local-test-only-secret-material-32bytes")
     db = Database(tmp_path / "plugins.db")
     groups = GroupService(db)

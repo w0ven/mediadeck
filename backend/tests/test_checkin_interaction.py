@@ -13,7 +13,7 @@ from test_tg_interaction_context import env as interaction_env  # noqa: F401
 
 
 @pytest.fixture
-def env(request):
+def env(request, checkin_clock):
     return request.getfixturevalue("economy_env")
 
 

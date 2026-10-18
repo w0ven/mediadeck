@@ -78,9 +78,14 @@ def test_nginx_never_touches_fuse_and_reader_binds_only_loopback():
     text = nginx_site(node)
     assert "alias " not in text
     assert "auth_request /_mediadeck/verify;" in text
-    assert "proxy_pass http://127.0.0.1:9810/;" in text
+    # The single shared relay receives the signed-user budget; only its
+    # isolated reader remains bound to the original loopback port.
+    assert "proxy_pass http://127.0.0.1:9820/0/;" in text
+    assert "proxy_pass http://127.0.0.1:9810/;" not in text
+    assert "proxy_set_header X-Mediadeck-Rate-Key $mediadeck_user_key;" in text
     unit = media_reader_unit(node, node.pools[0], 0)
     assert "--addr 127.0.0.1:9810" in unit
     assert "--read-only" in unit
     script = install_script(node, "https://panel.example.com")
     assert script.count("systemctl enable --now mediadeck-reader-edge-main.service") == 1
+    assert script.count("systemctl enable --now mediadeck-stream-rate.service") == 1

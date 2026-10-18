@@ -2,6 +2,19 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-18 — Account-aggregate streaming speed (release candidate)
+
+- Preserve decimal 15/35 MB/s standard/whitelist baselines and additive
+  bandwidth-card or personal increases; signed effective rates share a single
+  node-local budget across direct-video Ranges and reader pools.
+- Relay verified direct-stream GET/HEAD and Range bytes through one loopback
+  scheduler; retain signature checks, concurrent-play protection and billing.
+- Isolate this change from unrelated local edits; focused and isolated nginx
+  signature/metering tests pass. The combined CI crossed Beijing midnight,
+  exposing a test fixture that expected 600 seconds of today's viewing before
+  00:10. Pin only the isolated check-in fixtures to midday and rerun CI before
+  a tagged live cutover.
+
 ## 2026-10-18 — Reconcile live playback admission hotfix
 
 - Isolate the existing live admission optimization from the uncommitted deployment

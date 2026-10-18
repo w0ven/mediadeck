@@ -1,0 +1,14 @@
+# Example only: fill placeholders using environment-private deployment data.
+[Unit]
+Description=mediadeck node-wide aggregate streaming rate proxy
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 __RELAY_SCRIPT__ --port __RELAY_PORT__ --pool /0/:__READER_PORT_A__ --pool /1/:__READER_PORT_B__
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

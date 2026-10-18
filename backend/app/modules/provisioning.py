@@ -32,6 +32,7 @@ from app.modules.signing import validate_arg_names
 
 LOADPROBE_PORT = 9800
 METERD_PORT = 9801
+RATE_PROXY_PORT = 9820
 
 
 def _config_name(value: str) -> str:
@@ -169,23 +170,22 @@ def nginx_site(node: Any) -> str:
     location {_nginx_quote(str(pool.url_prefix).rstrip('/') + '/')} {{{guard}
         # FUSE open/stat can block even with aio threads. Only the isolated
         # loopback HTTP reader touches the mount; nginx and health stay live.
-        proxy_pass http://127.0.0.1:{9810 + index}/;
+        # One process handles all pools so both Range and parallel streams
+        # consume the same signed-user byte budget. No direct reader fallback.
+        proxy_pass http://127.0.0.1:{RATE_PROXY_PORT}/{index}/;
         proxy_http_version 1.1;
         proxy_set_header Connection "";
+        proxy_set_header X-Mediadeck-Rate-Key $mediadeck_user_key;
+        proxy_set_header X-Mediadeck-Rate $mediadeck_rate;
         proxy_buffering off;
         proxy_connect_timeout 1s;
         proxy_read_timeout 30s;
         proxy_force_ranges on;
 
-        # Per-user cap from the signed r argument (bytes/second, 0 =
-        # uncapped). limit_rate is per request. HTTP/1.1 stops one TCP
-        # connection from multiplexing N full-rate Ranges (that was the
-        # 15 x N burst). Players still open a couple of sockets for seek
-        # overlap and a second allowed stream; 1 rejected those as 503 and
-        # clients showed "file corrupt". 4 covers two streams + seek.
-        # No burst window.
+        # Keep seek overlap and two concurrent players, but do not use
+        # nginx limit_rate: it is per request, NOT per member. The shared
+        # loopback relay paces the aggregate at the signed r budget.
         limit_conn mediadeck_peruser 4;
-        limit_rate $mediadeck_rate;
 
         # Real transfer bytes per user for the panel's live-speed display.
         access_log /var/log/nginx/mediadeck-speed.log mediadeck_speed;
@@ -224,11 +224,12 @@ def nginx_site(node: Any) -> str:
 # Media delivery for streaming node "{node.name}". Managed by mediadeck.
 {literal_config}
 
-# Effective rate. The signed r argument is the member's cap in bytes/second;
-# "0" means the operator chose uncapped. A link with no r at all predates the
-# rate rollout and gets a conservative safety cap instead.
+# Legacy nginx variable retained for speed logs and existing consumers.
+# The shared loopback relay enforces the actual aggregate budget; signed
+# zero and missing r now fall back to 15 decimal MB/s, not unlimited.
 map $arg_r $mediadeck_rate {{
-    ""      15728640;
+    ""      15000000;
+    "0"     15000000;
     default $arg_r;
 }}
 
@@ -409,6 +410,29 @@ WantedBy=multi-user.target
 """
 
 
+def rate_proxy_unit(node: Any) -> str:
+    """One node-wide process: independent per-pool processes bypass aggregation."""
+    _config_name(node.name)
+    pools = [f"--pool /{index}/:{9810 + index}" for index, pool in enumerate(node.pools or [])
+             if pool.node_path]
+    if not pools:
+        raise ValueError("rate proxy requires a media pool")
+    return f"""[Unit]
+Description=mediadeck node-wide aggregate streaming rate proxy ({node.name})
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /opt/mediadeck-agent/stream_rate_proxy.py --port {RATE_PROXY_PORT} {' '.join(pools)}
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+"""
+
+
 def loadprobe_unit(node: Any) -> str:
     _config_name(node.name)
     return f"""# /etc/systemd/system/mediadeck-loadprobe.service
@@ -475,6 +499,8 @@ def install_script(node: Any, panel_url: str) -> str:
     nginx_config = nginx_site(node)
     probe_config = loadprobe_unit(node)
     meter_config = meterd_unit(node, panel)
+    rate_config = rate_proxy_unit(node) if any(pool.node_path for pool in pools) else ""
+    rate_end = _delimiter("MEDIADECK_RATE_EOF", rate_config)
     reader_steps = []
     for index, pool in enumerate(pools):
         if not pool.node_path:
@@ -615,6 +641,16 @@ grep -q '^user_allow_other' /etc/fuse.conf || echo 'user_allow_other' >> /etc/fu
 {"".join(mount_steps) or 'echo "    (无媒体根，跳过)"'}
 
 echo "==> 5/6 配置 nginx 与证书"
+# Start the fail-closed node-wide byte scheduler BEFORE nginx can route video.
+# New enrollment always uses exactly one scheduler across all media pools.
+{f'''curl -fsSL {shlex.quote(panel + '/agent/stream_rate_proxy.py')} -o /opt/mediadeck-agent/stream_rate_proxy.py
+cat > /etc/systemd/system/mediadeck-stream-rate.service <<'{rate_end}'
+{rate_config}
+{rate_end}
+systemctl daemon-reload
+systemctl enable --now mediadeck-stream-rate.service
+python3 -c 'import socket; s=socket.create_connection(("127.0.0.1", {RATE_PROXY_PORT}), timeout=3); s.close()'
+''' if rate_config else ''}
 mkdir -p /var/lib/mediadeck /var/www/html
 # Re-enrollment must not erase an existing exhausted-member deny snapshot.
 [ -e /var/lib/mediadeck/deny.map ] || printf '%s\\n' '# none' > /var/lib/mediadeck/deny.map

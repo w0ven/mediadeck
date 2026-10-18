@@ -31,7 +31,7 @@ if str(ROOT / "backend") not in sys.path:
 from app.core.config import NodePool, StreamNode
 from app.modules.entries import PlaybackEntry, entry_target
 from app.modules.entry_proxy import friend_config
-from app.modules.provisioning import nginx_site, signing_config
+from app.modules.provisioning import RATE_PROXY_PORT, nginx_site, signing_config
 from app.modules.signing import sign_url, user_tag
 
 KEY = "synthetic-v2-nginx-secret"
@@ -103,7 +103,7 @@ def exercise(root, args):
                           NodePool(name="gd3", emby_prefix="/archive", url_prefix="/s/gd3", node_path=str(pool_other))])
     config_path, meter_db, deny = root / "signing.json", root / "meter.db", root / "deny.map"
     deny.write_text("# none\n")
-    probe_process = meter_process = nginx_process = None
+    probe_process = meter_process = nginx_process = relay_process = None
     readers = []
     logs = []
 
@@ -140,6 +140,12 @@ def exercise(root, args):
                            f"reader-{index}")
             readers.append(reader)
             wait_port(9810 + index, reader)
+        # The generated signed locations now use one account-wide scheduler
+        # for both reader pools; keep it inside this isolated net namespace.
+        relay_process = spawn([sys.executable, str(ROOT / "agent/stream_rate_proxy.py"),
+                               "--port", str(RATE_PROXY_PORT),
+                               "--pool", "/0/:9810", "--pool", "/1/:9811"], "rate-relay")
+        wait_port(RATE_PROXY_PORT, relay_process)
         meter_process = spawn([sys.executable, str(ROOT / "agent/meterd.py"), "--bind", "127.0.0.1",
                                "--port", str(meter_port), "--persist", str(meter_db),
                                "--deny-map", str(deny), "--interval", "3600", "--enable-nft"], "meter")
@@ -249,6 +255,7 @@ def exercise(root, args):
         stop(nginx_process)
         stop(probe_process)
         stop(meter_process)
+        stop(relay_process)
         for reader in readers:
             stop(reader)
         for log in logs:
