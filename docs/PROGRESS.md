@@ -2,6 +2,14 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-18 — Reconcile live playback admission hotfix
+
+- Isolate the existing live admission optimization from the uncommitted deployment
+  checkout: concurrent owner and item verification, preserving whitelist and
+  fail-closed semantics. Test-only admin defaults are synthetic.
+- Focused tests and lint pass in a separate worktree. Submit as a separate PR
+  before reconciling the live node and publishing aggregate stream limits.
+
 ## 2026-10-18 — Playback-bound elapsed viewing without invented speed
 
 - Count fresh, authenticated and accepted progress by elapsed time when the
