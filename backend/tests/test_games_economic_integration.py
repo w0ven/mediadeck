@@ -52,7 +52,7 @@ def local(e,db):
 
 
 @pytest.mark.parametrize('repeat',range(3))
-def test_four_connections_cross_game_packet_checkin_cash_competition_and_restart(env,repeat):
+def test_four_connections_cross_game_packet_checkin_cash_competition_and_restart(env,repeat,checkin_clock):
     uid=env.uids[1];actor=env.actors[1]
     env.services.points.add(uid,600-env.services.points.balance(uid),'isolated.adjust')
     proof(env.db,uid,now=time.time())
