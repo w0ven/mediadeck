@@ -91,6 +91,14 @@ def text(bot, chat="900"):
     return row.get("text") or row.get("caption", "")
 
 
+def assert_inline_password(bot, password, chat="900"):
+    row = bot.transport.messages[(str(chat), bot._panel[str(chat)])]
+    assert row["parse_mode"] == "HTML"
+    assert f"<code>{escape(password)}</code>" in text(bot, chat)
+    assert "<pre>" not in text(bot, chat)
+    assert "copy_text" not in json.dumps(row.get("reply_markup", {}))
+
+
 def begin_reset(bot, chat="900"):
     message(bot, "/me", chat)
     tap(bot, "resetpw", chat)
@@ -136,12 +144,13 @@ def test_reset_choice_confirmation_exact_password_once_private_no_audit_secret(
     if mode == "custom":
         message(bot, secret)
     assert bot._pending["900"][0] == "password_confirm" and not bot.emby.passwords
-    assert escape(secret) in text(bot)
+    assert_inline_password(bot, secret)
     callback, mid = choose(bot, "confirm")
     tap(bot, callback, mid=mid)
     assert bot.emby.passwords == [("u1", secret)]
     assert bot.cache_changes == [True]
-    assert escape(secret) in text(bot) and "u1" in text(bot)
+    assert_inline_password(bot, secret)
+    assert "u1" in text(bot)
     assert "900" not in bot._pending
     assert secret not in str(bot.db.query("SELECT * FROM audit_log"))
     assert secret not in str(bot.db.query("SELECT * FROM request_cards"))
@@ -165,12 +174,14 @@ def test_all_registration_entries_choose_password_then_final_confirm(bot, via, m
     secret = bot._pending["910"][2]["password"]
     assert bot._pending["910"][0] == "password_confirm" and not bot.emby.created
     assert "ChosenUser" in text(bot, "910") and "30 天" in text(bot, "910")
+    assert_inline_password(bot, secret, "910")
     callback, mid = choose(bot, "confirm", "910")
     tap(bot, callback, "910", mid)
     assert bot.emby.created == ["ChosenUser"]
     assert bot.emby.passwords == [("new-ChosenUser", secret)]
     assert bot.members.find_by_telegram("910")["emby_user_id"] == "new-ChosenUser"
-    assert "注册成功" in text(bot, "910") and escape(secret) in text(bot, "910")
+    assert "注册成功" in text(bot, "910")
+    assert_inline_password(bot, secret, "910")
     assert not bot._pending.get("910")
     assert secret not in str(bot.db.query("SELECT * FROM audit_log"))
     for method, p in bot.transport.calls:

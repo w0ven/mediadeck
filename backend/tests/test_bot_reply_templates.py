@@ -197,7 +197,7 @@ def test_card_and_password_html_escape_real_inputs():
         'password_mode': 'custom', 'password': ' <&Demo> ',
     }))
     body = captured[-1][0]
-    assert '<pre> &lt;&amp;Demo&gt; </pre>' in body
+    assert '<code> &lt;&amp;Demo&gt; </code>' in body
     assert ' <&Demo> ' in plain(body)
 
 

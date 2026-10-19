@@ -156,7 +156,7 @@ class PasswordBotMixin:
         mode = "随机生成" if p["password_mode"] == "random" else "自定义"
         body = (
             f"🔐 <b>{title}</b>\n用户名：<code>{escape(p['username'])}</code>\n"
-            f"密码方式：{mode}\n新密码：<pre>{escape(p['password'])}</pre>\n"
+            f"密码方式：{mode}\n新密码：<code>{escape(p['password'])}</code>\n"
         )
         if p["purpose"] == "register":
             admission = p.get("admission")
@@ -341,7 +341,7 @@ class PasswordBotMixin:
             mid,
             (
                 f"🔑 <b>密码已重置</b>\n用户名：<code>{escape(str(current.get('username') or ''))}</code>\n"
-                f"新密码：<pre>{escape(password)}</pre>\n<i>请保存密码，勿转发。</i>"
+                f"新密码：<code>{escape(password)}</code>\n<i>请保存密码，勿转发。</i>"
                 + cache_notice
             )
             if ok
