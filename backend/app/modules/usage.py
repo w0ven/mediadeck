@@ -256,6 +256,7 @@ class UsageSampler:
         # admission refusal on the stream path is the actual guarantee.
         self._pending_kicks: list[tuple[str, str]] = []
         self.concurrency_handler: Any = None
+        self.session_client_handler: Any = None
         self._concurrency_kicks: set[tuple[str, str]] = set()
         # Clients that ignore Playback/Stop would otherwise be retried every
         # tick (~5s), hammering Emby session writes. Back off per session id.
@@ -501,6 +502,11 @@ class UsageSampler:
 
         now = time.time()  # timestamp the returned snapshot, not request issuance
         result, billed_users = await run_usage_io(self._sample, sessions, now, node_of)
+        if self.session_client_handler:
+            try:
+                result["session_clients"] = await self.session_client_handler(sessions)
+            except Exception:  # noqa: BLE001 - metering continues, failure stays explicit
+                result["session_clients"] = {"ok": False, "error": "session client verification unavailable"}
         if billed_users and self._enforcement:
             result["enforced"] = await self._enforce_exhausted(billed_users)
         if self._pending_kicks and self._enforcement:
