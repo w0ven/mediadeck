@@ -51,7 +51,7 @@ def test_missing_rate_counts_elapsed_and_all_views_agree(bound, speed):
     assert stats.member_detail('u')['recent_plays'][0]['seconds'] == 20
     assert all(r['playback_rate'] is None for r in db.query('SELECT playback_rate FROM watch_verified_samples'))
     assert diagnosis(db)['binding'] == 'issuance'
-    assert watch_progress(db,'u',clock[0])[1] == 0
+    assert watch_progress(db,'u',clock[0])[1] == 20
     assert not db.query('SELECT * FROM usage_daily')
 
 
@@ -74,18 +74,21 @@ def test_unknown_rate_stall_pause_seek_gap_and_rewind_do_not_backfill(bound):
     report(sampler,clock,45,15,IsPaused=False)
     report(sampler,clock,55,25)
     assert seconds(db) == 20
+    assert watch_progress(db,'u',clock[0])[1] == 20
     report(sampler,clock,65,500)
     report(sampler,clock,75,510)
     report(sampler,clock,85,520,EventName='Seek')
     report(sampler,clock,95,530)
     report(sampler,clock,105,540)
     assert seconds(db) == 40
+    assert watch_progress(db,'u',clock[0])[1] == 40
     report(sampler,clock,205,640)
     assert seconds(db) == 40
     report(sampler,clock,215,650)
     report(sampler,clock,225,100)
     report(sampler,clock,235,110)
     assert seconds(db) == 60
+    assert watch_progress(db,'u',clock[0])[1] == 60
 
 
 def test_issuance_binding_survives_absent_concurrency_lease_and_cached_other_title(bound):

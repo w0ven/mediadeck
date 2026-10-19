@@ -2,6 +2,18 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-19 — Align daily check-in with verified viewing
+
+- Count every existing verified viewing interval toward the Beijing-day
+  check-in gate, including accepted progress without a reported playback rate.
+  Keep unknown speed unknown and leave playback proof and traffic billing intact.
+- Regress the 590/600-second admission boundary, duplicate check-ins, existing
+  history and Beijing-midnight clipping for nullable rates. Assert that paused,
+  stalled, seeking, rewound and disconnected reports retain the same exclusions.
+- Focused regressions, full local tests, lint and isolated mock startup pass.
+  Publish through the official PR/CI/tag flow before deployment; do not
+  auto-check-in or alter balances.
+
 ## 2026-10-18 — Account-aggregate streaming speed (release candidate)
 
 - Preserve decimal 15/35 MB/s standard/whitelist baselines and additive
