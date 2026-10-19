@@ -1598,7 +1598,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         server = str(cfg.get('emby_public_url') or '').strip()
         expires = (member or {}).get('expires_at_effective', (member or {}).get('expires_at'))
         lines = ['✅ <b>注册成功</b>\n', f'用户名：<code>{username}</code>',
-                 f'密码：<pre>{escape(password)}</pre>']
+                 f'密码：<code>{escape(password)}</code>']
         if server:
             lines.append('服务器：' + escape(server))
         lines.append('有效期：' + _fmt_expiry(expires))
