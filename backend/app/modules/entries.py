@@ -82,8 +82,6 @@ def validate_entries(raw: Any, current: list[dict[str, Any]],
             stream_origin = https_origin(stream_origin)
             if not isinstance(pinned_node, str) or not NODE_RE.fullmatch(pinned_node):
                 raise ConfigError("固定节点名无效")
-            if node_names is not None and pinned_node not in node_names:
-                raise ConfigError(f"固定节点 {pinned_node} 不在节点池中")
             if stream_origin in origins or stream_origin == origin or stream_origin == official:
                 raise ConfigError("推流域名不能与入口域名、官方 Emby 入口或其他入口重复")
         restricted = entry.get("whitelist_only", previous.get(entry_id, {}).get("whitelist_only", False))
@@ -99,6 +97,12 @@ def validate_entries(raw: Any, current: list[dict[str, Any]],
         if stream_origin:
             row["stream_origin"] = stream_origin
             row["node"] = pinned_node
+            # Removing a node leaves its old entry inert. Preserve only that
+            # exact stored row so unrelated saves and healthy-key rotations
+            # still work; never create, repoint or rotate an orphan binding.
+            if (node_names is not None and pinned_node not in node_names
+                    and (rotate or row != previous.get(entry_id))):
+                raise ConfigError(f"固定节点 {pinned_node} 不在节点池中")
             origins.add(stream_origin)
         result.append(row)
         ids.add(entry_id)

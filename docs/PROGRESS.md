@@ -2731,3 +2731,10 @@ three only appear at production scale or during a routine operation.
 - Remove explanatory device/watch notes and personal-card keyboards; preserve factual values, unknown states and administrative detail cards.
 - Group /me and /myinfo emit standalone cards with exact-ID persistent 60-second deletion, separate from personal/menu lifetimes and check-in settings. Private cards remain.
 - Actual handler, clean-up timing, lease recovery, failed send, privacy and source preview regressions pass.
+
+## 2026-10-19 — Preserve unchanged entries after node removal
+- Allow only an exactly unchanged stored orphan entry through integration validation; unrelated saves and healthy-entry credential rotation remain possible without remapping or deleting it.
+- Continue refusing new orphan bindings and changes to their origin, stream origin, node, restriction or credential; retain revision conflict protection and existing playback behavior.
+- New regression reproduced three failures before the change; all nine new cases and 164 focused entry/whitelist regressions pass after it, with focused lint clean.
+- Full lint passes. After providing the isolated browser runtime, the complete local suite passes: 4537 passed, 59 skipped, and two subtests passed. Mock startup and health remain verified.
+- Release follows the normal PR/CI, merge and tagged deployment workflow; production configuration and orphan bindings are preserved.
