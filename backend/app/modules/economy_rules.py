@@ -61,8 +61,7 @@ def watch_progress(db, user, now):
     row = (
         db.one(
             "SELECT COALESCE(SUM(MIN(ended_at,?)-MAX(started_at,?)),0) AS seconds "
-            "FROM watch_verified_samples WHERE emby_user_id=? AND ended_at>? AND started_at<? "
-            "AND playback_rate IS NOT NULL",
+            "FROM watch_verified_samples WHERE emby_user_id=? AND ended_at>? AND started_at<?",
             (min(now, end), start, str(user), start, min(now, end)),
         )
         or {}

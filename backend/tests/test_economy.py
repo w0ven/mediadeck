@@ -219,6 +219,43 @@ def test_two_five_minute_plays_sum_to_gate_and_duplicate_heartbeats_do_not(env):
     assert env.checkin.checkin("u", now=NOW)["ok"]
 
 
+@pytest.mark.parametrize("speed", [0.5, 1, 2])
+def test_accepted_missing_rate_progress_qualifies_for_checkin(env, speed):
+    first = NOW - 600
+    env.clock[0] = first
+    env.db.execute(
+        "INSERT INTO watch_playbacks(user_id,play_id,session_id,device_id,item_id,issued_at) "
+        "VALUES(?,?,?,?,?,?)", ("u", "p", "s", "d", "film", first)
+    )
+    sampler = UsageSampler(env.db, env.members, MockEmby())
+    for offset in range(0, 601, 10):
+        env.clock[0] = first + offset
+        event = {"SessionId": "s", "PlaySessionId": "p", "ItemId": "film",
+                 "PositionTicks": offset * speed * 10000000, "IsPaused": False}
+        sampler._progress("u", "d", event, env.clock[0])
+        if offset == 590:
+            result = env.checkin.checkin("u", now=env.clock[0])
+            assert not result["ok"] and result["watched_seconds"] == 590
+    assert all(row["playback_rate"] is None for row in env.db.query("SELECT playback_rate FROM watch_verified_samples"))
+    assert watch_progress(env.db, "u", NOW)[1] == 600
+    assert not env.db.query("SELECT * FROM usage_daily")
+    assert not env.db.query("SELECT * FROM points_ledger")
+    result = env.checkin.checkin("u", now=NOW)
+    assert result["ok"] and result["watched_seconds"] == 600
+    assert not env.checkin.checkin("u", now=NOW)["ok"]
+    assert len(env.db.query("SELECT * FROM checkins")) == 1
+
+
+@pytest.mark.parametrize("rate", [None, 1])
+def test_existing_verified_intervals_clip_at_beijing_midnight_regardless_of_rate(env, rate):
+    _, midnight, _ = day_bounds(NOW)
+    proof(env.db, "u", now=midnight + 30, seconds=60)
+    env.db.execute("UPDATE watch_verified_samples SET playback_rate=?", (rate,))
+    assert watch_progress(env.db, "u", midnight + 30)[1] == 30
+    assert watch_progress(env.db, "u", midnight - 0.001)[1] == pytest.approx(29.999)
+    assert env.checkin.checkin("u", now=midnight + 30)["watched_seconds"] == 30
+
+
 def test_cross_day_clips_each_interval_in_beijing_not_process_timezone(env):
     _, midnight, _ = day_bounds(NOW)
     env.db.execute(
