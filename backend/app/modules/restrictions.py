@@ -14,10 +14,12 @@ from typing import Any
 from app.modules.enforcement import BLOCKING_STATES, EnforcementService
 from app.modules.member_ops import observe_one, record_remote
 from app.modules.report_delivery import CALL_DELIVERY, failure, record_failure
+from app.modules.session_clients import DEFAULT as CLIENT_DEFAULT
+from app.modules.session_clients import matches, validate_config
 
 RULES = {"concurrency": "超过同播限制", "web_login": "Emby 网页登录", "web_play": "Emby 网页观看"}
 ACTIONS = {"pause": "阻止／停止本次播放", "disable": "禁用账号", "delete": "删除账号", "enable": "解除禁用"}
-EVENT_RULES = {**RULES, "manual": "管理员手动操作"}
+EVENT_RULES = {**RULES, "manual": "管理员手动操作", "client_filter": "会话客户端限制"}
 DEFAULTS = {
     "concurrency": {"enabled": True, "action": "pause"},
     "web_login": {"enabled": False, "action": "disable"},
@@ -79,6 +81,54 @@ class RestrictionService:
         return bool((user.get("Policy") or {}).get("IsAdministrator")
                     or "admin" in (member.get("roles") or []))
 
+    def client_config(self) -> dict[str, Any]:
+        raw = self.store.section("session_client_filter")
+        return validate_config(raw or CLIENT_DEFAULT)
+
+    def save_client_config(self, payload: dict[str, Any]) -> dict[str, Any]:
+        config = validate_config(payload)
+        self.store.set_section("session_client_filter", config)
+        return config
+
+    async def inspect_client(self, uid: str, device: str = "", sid: str = "",
+                             profile: dict[str, str] | None = None) -> bool:
+        """Fresh unique authenticated session only; no password-failure input."""
+        from app.modules.streams import matching_sessions
+
+        if not self.client_config()["enabled"]:
+            return False
+        if not uid or not (sid or device):
+            raise RuntimeError("session client identity unavailable")
+
+        async def confirm():
+            rows = await self.emby.active_sessions_raw()
+            found = matching_sessions(rows, uid, device, sid, profile)
+            if (len(found) != 1 or not found[0].get("Id")
+                    or sum(str(s.get("Id") or "") == str(found[0]["Id"]) for s in rows) != 1):
+                raise RuntimeError("session client identity unavailable")
+            session = found[0]
+            # Current web policy is authoritative, including its exemptions.
+            if is_web_client(session) or not matches(session, self.client_config()):
+                return None
+            return {"session_id": str(session["Id"]), "playing": bool(session.get("NowPlayingItem"))}
+
+        event = await self.apply("client_filter", uid, confirm)
+        return event is not None
+
+    async def sample_clients(self, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        config = self.client_config()
+        checked, errors = 0, 0
+        if config["enabled"]:
+            for session in rows:
+                if (session.get("UserId") and session.get("Id") and not is_web_client(session)
+                        and matches(session, config)):
+                    try:
+                        await self.inspect_client(str(session["UserId"]), sid=str(session["Id"]))
+                        checked += 1
+                    except Exception:  # noqa: BLE001 - do not infer a violation on failure
+                        errors += 1
+        return {"ok": errors == 0, "checked": checked, "errors": errors}
+
     async def apply(self, rule: str, uid: str, confirm: Any) -> dict[str, Any] | None:
         """Recheck under the sanction lock; None means no confirmed violation.
 
@@ -87,12 +137,24 @@ class RestrictionService:
         activity, not simply return the initial rejection.
         """
         async with self._lock, self.enforcement._apply_lock:
-            cfg = self.config().get(rule, {})
+            client_rule = rule == "client_filter"
+            cfg = ({**self.client_config(), "action": "pause"} if client_rule
+                   else self.config().get(rule, {}))
             if not cfg.get("enabled"):
                 return None
             user = await self.user(uid)
-            if not user or self.exempt(uid, user):
+            if not user:
+                if client_rule:
+                    raise RuntimeError("session client account unavailable")
                 return None
+            if self.exempt(uid, user):
+                return None
+            if client_rule:
+                member = self.members.get(uid)
+                if not member or user["Policy"].get("IsAdministrator") is not False:
+                    raise RuntimeError("session client account unavailable")
+                if member.get("group_id") in cfg["exempt_groups"]:
+                    return None
             evidence = await confirm()
             if not evidence:
                 return None
@@ -102,24 +164,40 @@ class RestrictionService:
             if not sid:
                 return None
             now = int(time.time())
-            old = self.db.query("SELECT * FROM restriction_events WHERE user_id=? AND rule=? AND (session_id=? OR rule='web_login') AND created_at>=? AND id>COALESCE((SELECT MAX(id) FROM restriction_events WHERE user_id=? AND rule='manual' AND action='enable' AND status='done'),0) ORDER BY id DESC LIMIT 1", (uid, rule, sid, now - 300, uid))
+            old = self.db.query("SELECT * FROM restriction_events WHERE user_id=? AND rule=? AND (session_id=? OR rule='web_login') AND (rule='client_filter' OR created_at>=?) AND id>COALESCE((SELECT MAX(id) FROM restriction_events WHERE user_id=? AND rule='manual' AND action='enable' AND status='done'),0) ORDER BY id DESC LIMIT 1", (uid, rule, sid, now - 300, uid))
             if old:
-                return old[0]
+                prior = old[0]
+                # False is a definite refusal, unlike an interrupted/unknown send.
+                # Reuse its receipt/notices, and retry only after fresh confirmation
+                # of the same non-exempt, matching, still-playing session above.
+                if not (client_rule and prior["status"] == "failed" and safe.get("playing")):
+                    return prior
+                attempts = max(1, int(json.loads(prior["evidence_json"]).get("stop_attempts", 1)))
+                if now - prior["updated_at"] < min(300, 30 * 2 ** min(attempts - 1, 4)):
+                    return prior
+                safe["stop_attempts"] = attempts + 1
+                event_id = prior["id"]
+                # Durable intent first: a crash becomes unknown, never a blind retry.
+                self.db.execute("UPDATE restriction_events SET status='pending',evidence_json=?,updated_at=? WHERE id=?",
+                                (json.dumps(safe), now, event_id))
             member = self.members.get(uid) or {}
             action = cfg["action"]
-            with self.db.write() as conn:
-                cursor = conn.execute("INSERT INTO restriction_events(user_id,username,tg_user_id,rule,action,session_id,evidence_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                                      (uid, str(user.get("Name") or member.get("username") or uid), str(member.get("tg_user_id") or ""), rule, action, sid, json.dumps(safe), now, now))
-                event_id = cursor.lastrowid
-                tg = self.telegram_config()
-                targets = [("private", str(member.get("tg_user_id") or ""))]
-                targets += [("group:" + str(chat), str(chat)) for chat in tg.get("group_interaction_chats", [])]
-                if len(targets) == 1:
-                    targets.append(("group:", ""))
-                for kind, chat in targets:
-                    conn.execute("INSERT OR IGNORE INTO restriction_notices(event_id,kind,chat_id,state,error) VALUES(?,?,?,?,?)",
-                                 (event_id, kind, chat, "pending" if chat else "skipped", "" if chat else ("未绑定 Telegram" if kind == "private" else "未配置互动群")))
-            status, result = "done", "已拒绝本次请求"
+            if not old:
+                if client_rule:
+                    safe["stop_attempts"] = 1
+                with self.db.write() as conn:
+                    cursor = conn.execute("INSERT INTO restriction_events(user_id,username,tg_user_id,rule,action,session_id,evidence_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                                          (uid, str(user.get("Name") or member.get("username") or uid), str(member.get("tg_user_id") or ""), rule, action, sid, json.dumps(safe), now, now))
+                    event_id = cursor.lastrowid
+                    tg = self.telegram_config()
+                    targets = [("private", str(member.get("tg_user_id") or ""))]
+                    targets += [("group:" + str(chat), str(chat)) for chat in tg.get("group_interaction_chats", [])]
+                    if len(targets) == 1:
+                        targets.append(("group:", ""))
+                    for kind, chat in targets:
+                        conn.execute("INSERT OR IGNORE INTO restriction_notices(event_id,kind,chat_id,state,error) VALUES(?,?,?,?,?)",
+                                     (event_id, kind, chat, "pending" if chat else "skipped", "" if chat else ("未绑定 Telegram" if kind == "private" else "未配置互动群")))
+            status, result = "done", ("客户端规则匹配；未禁用账号" if client_rule else "已拒绝本次请求")
             try:
                 if action == "disable":
                     # Preserve a suspension locally so reconciliation cannot undo it.
@@ -143,9 +221,11 @@ class RestrictionService:
                         result = "账号已删除（不连带删除其他账号）"
                     else:
                         status, result = "failed", "删除未确认成功；本次请求已拒绝，需管理员核实"
-                if safe.get("playing") and status == "done":
+                if (safe.get("playing") or client_rule) and status == "done":
                     accepted = await self.emby.stop_session(sid)
                     result += "；已发送该会话停止指令（客户端执行待确认）" if accepted else "；停止指令未获确认"
+                    if client_rule and not accepted:
+                        status = "failed"
                 elif action == "pause":
                     result = ("已拒绝本次登录" if rule == "web_login" else
                               "已拒绝本次网页起播" if rule == "web_play" else

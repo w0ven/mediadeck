@@ -2738,3 +2738,9 @@ three only appear at production scale or during a routine operation.
 - New regression reproduced three failures before the change; all nine new cases and 164 focused entry/whitelist regressions pass after it, with focused lint clean.
 - Full lint passes. After providing the isolated browser runtime, the complete local suite passes: 4537 passed, 59 skipped, and two subtests passed. Mock startup and health remain verified.
 - Release follows the normal PR/CI, merge and tagged deployment workflow; production configuration and orphan bindings are preserved.
+
+## 2026-10-19 — Authenticated session client migration and explicit legacy applicability
+- Add opt-in session Client/DeviceName/ApplicationVersion deny matching with configured group and administrator exemptions. Reuse restriction receipts and notices; never disable/delete accounts for this rule, punish failed passwords, or infer identity from a webhook/User-Agent. Preserve the separate web policy.
+- Enforce on successful login/playback admission and freshly rechecked existing session samples. Reuse persistent per-session receipts/notices; definite stop refusals retry only on fresh confirmed playback with durable 30-to-300-second backoff, while unknown outcomes never blindly replay.
+- Add a generic legacy synchronization helper with explicit operator-approved not_applicable reason/successor and atomic receipts. Missing configuration and active failures remain nonzero, and job acceptance is not reported as completed synchronization.
+- Full lint passes. All 4635 collected tests finish across two disjoint 103-file groups: 4576 passed, 59 skipped, and two subtests passed. The stop-refusal regression fails before the fix and passes after it. PR/CI and tagged release remain required before operator configuration and retirement of the old callback; no production configuration or endpoints are included.

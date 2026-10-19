@@ -514,6 +514,7 @@ async def _startup() -> None:
         enforcement=app.state.enforcement)
     app.state.telegram._restrictions = app.state.restrictions
     app.state.usage.concurrency_handler = app.state.restrictions.sampled_concurrency
+    app.state.usage.session_client_handler = app.state.restrictions.sample_clients
 
     async def restriction_notice_loop() -> None:
         while True:
@@ -1478,6 +1479,16 @@ async def _restrict_concurrency(uid: str, admission: Any) -> None:
         await app.state.restrictions.apply("concurrency", uid, confirm)
 
 
+async def _restrict_session_client(uid: str, device: str = "", sid: str = "",
+                                   profile: dict[str, str] | None = None) -> None:
+    try:
+        blocked = await app.state.restrictions.inspect_client(uid, device, sid, profile)
+    except Exception:  # noqa: BLE001 - no punishment from ambiguous identity
+        raise HTTPException(503, "session client verification unavailable") from None
+    if blocked:
+        raise HTTPException(403, "session client restricted", headers={"Cache-Control": "private, no-store"})
+
+
 async def _restrict_web_playback(uid: str, request: Request, query: dict[str, str]) -> None:
     service = app.state.restrictions
     if not service.config()["web_play"]["enabled"]:
@@ -1567,6 +1578,7 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
             raise HTTPException(503, "login restriction verification unavailable", headers=headers) from None
         # Never expose the newly issued AccessToken of a denied browser login.
         raise HTTPException(403, "web login restricted", headers=headers)
+    await _restrict_session_client(uid, sid=str(session.get("Id") or ""))
     return JSONResponse(data, status_code=code, headers=headers)
 
 
@@ -1593,6 +1605,14 @@ async def _admit_playback(request: Request, item_id: str,
     if not uid or not permitted:
         raise HTTPException(403, "playback access denied", headers=headers)
     await _restrict_web_playback(uid, request, query)
+    sid = query.get("SessionId", query.get("sessionId", ""))
+    if app.state.restrictions.client_config()["enabled"] and not (sid or device):
+        play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
+        bound = app.state.db.query("SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?",
+                                   (uid, play_id)) if play_id else []
+        if len(bound) == 1:
+            sid = str(bound[0]["session_id"])
+    await _restrict_session_client(uid, device, sid, caller_session_profile(request.headers, query))
     if not reserve:
         return uid
     admission = await app.state.streams.inspect(
@@ -2644,6 +2664,22 @@ async def restriction_save(payload: dict[str, Any] = Body(...),  # noqa: B008
     except ValueError as exc:
         raise HTTPException(422, str(exc)) from None
     app.state.members.audit(user, "restriction.config", detail=json.dumps(result))
+    return result
+
+
+@app.get("/api/access/session-clients", dependencies=[Depends(_auth)])
+async def session_clients_get() -> dict[str, Any]:
+    return app.state.restrictions.client_config()
+
+
+@app.put("/api/access/session-clients", dependencies=[Depends(_auth)])
+async def session_clients_save(payload: dict[str, Any] = Body(...),  # noqa: B008
+                               user: str = Depends(_auth)) -> dict[str, Any]:
+    try:
+        result = app.state.restrictions.save_client_config(payload)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from None
+    app.state.members.audit(user, "restriction.session_clients.config")
     return result
 
 
