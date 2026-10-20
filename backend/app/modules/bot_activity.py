@@ -40,15 +40,18 @@ class ActivityBotMixin:
         level, q, today = info['level'], info['qualification'], info['today']
         title = info['worn_title'] or level['title']
         lines = [f"👤 <b>{escape(str(member.get('username') or '—'))}</b>",
-                 self._group_label(member) + ' · ' + self._status_label(member),
-                 '🏷️ ' + escape(title),
+                 self._group_label(member, title=title),
+                 self._status_label(member),
                  f"📈 成长 {level['growth']}" + (f" / {level['next_threshold']}" if level.get('next_threshold') else ' · 专属等级' if level['level'] == 8 else ' · 满级'),
-                 f"🎁 今日观影奖励 {today['points']}/48积分 · {today['growth']}/60成长",
-                 f"🎬 近30天核验 {int(q['seconds']//60)}/80分钟 · {q['days']}/3有效日",
-                 f"🪙 积分 {info['balance']} · 本级续费 {info['renewal_price']}积分/30天",
-                 '🤖 自动保号：' + ('已开启' if info['auto_renew'] else '未开启（自愿）'),
-                 '⏳ 到期：' + beijing_stamp(info['expires_at']),
-                 '🗑️ 删除候选：' + ('白名单豁免' if info['exempt'] else beijing_stamp(info['delete_at']))]
+                 f"🎁 今日观影奖励 {today['points']}/48积分 · {today['growth']}/60成长"]
+        if info['exempt']:
+            lines += [f"🪙 积分 {info['balance']}", '🛡️ 白名单 · ♾ 永久']
+        else:
+            lines += [f"🎬 近30天核验 {int(q['seconds']//60)}/80分钟 · {q['days']}/3有效日",
+                      f"🪙 积分 {info['balance']} · 本级续费 {info['renewal_price']}积分/30天",
+                      '🤖 自动保号：' + ('已开启' if info['auto_renew'] else '未开启（自愿）'),
+                      '⏳ 到期：' + beijing_stamp(info['expires_at']),
+                      '🗑️ 删除候选：' + beijing_stamp(info['delete_at'])]
         return lines, info
 
     @staticmethod
@@ -56,9 +59,9 @@ class ActivityBotMixin:
         rows = []
         if info['managed'] and not info['exempt']:
             rows += [[{'text':'⏳ 续费30天 · 预览', 'callback_data':'activity:renew'}],
-                     [{'text':'🛑 关闭自动保号' if info['auto_renew'] else '🤖 了解并开启自动保号',
+                     [{'text':'🛑 关闭自动保号' if info['auto_renew'] else '🤖 开启自动保号',
                        'callback_data':'activity:auto:off' if info['auto_renew'] else 'activity:auto:on'}]]
-        rows += [[{'text':'🎒 签到与背包','callback_data':'bag'}, {'text':'◀ 我的账号','callback_data':'me'}]]
+        rows += [[{'text':'🎒 背包','callback_data':'bag'}, {'text':'◀ 我的账号','callback_data':'me'}]]
         return rows
 
     async def _activity_action(self, chat_id, message_id, member, action, *, actor, in_group=False, callback=False):
@@ -148,15 +151,12 @@ class ActivityBotMixin:
             if action != 'status':
                 raise ValueError('操作已失效，请重新打开等级权益')
             lines += ['', '👑 <b>最终有效权益</b>', *quota_lines(member, compact=True), *bandwidth_lines(member, compact=True),
-                      f"📺 同播：{member.get('max_streams') or '不限'}路 · 🎬 月求片：{member['group'].get('request_quota') or '不限'}次",
-                      '✨ 个人覆盖和有效道具优先，升级不清除',
-                      '🎬 有效日需当日核验满10分钟；观影奖励自动结算，免签到',
-                      '⚠️ 到期停播，72小时后可删除（管理员开关和复核）；保留期间可查看/达标续费']
+                      f"📺 同播：{member.get('max_streams') or '不限'}路 · 🎬 月求片：{member['group'].get('request_quota') or '不限'}次"]
             lines += ['📱 ' + self._device_count_text(member).split('\n')[0],
                       '📥 下载：'+('允许' if member.get('allow_download') else '不允许')+' · 🎞 转码：'+('允许' if member.get('allow_transcode') else '不允许')]
             if self._stats is not None and hasattr(self._stats, 'watch_summary'):
                 history = self._stats.watch_summary(uid) or {}
-                lines += ['', '📊 观看记录 · 非发奖依据',
+                lines += ['', '📊 观看记录',
                           '近24小时 '+duration(history.get('seconds_24h'))+' · 近30天 '+duration(history.get('seconds_30d')),
                           '累计 '+duration(history.get('recorded_seconds'))]
             if member.get('note'):

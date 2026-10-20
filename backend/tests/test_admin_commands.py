@@ -221,12 +221,42 @@ def test_kk_reports_the_account_at_a_glance(bot) -> None:
     reply = _run(bot, "/kk alice")
     for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "本月流量", "带宽", "积分：120"):
         assert fragment in reply
+    assert len(reply.splitlines()) <= 12
+    for text in ('按设备名称归并', '非硬件唯一识别', '观看记录', '核验', '发奖依据'):
+        assert text not in reply
     details = _tap(bot, 'admin_binding')
     for fragment in ("alice", "状态", "用户组", "有效期", "积分", "注册渠道",
                      "邀请人", "下级", "Telegram", "设备分组", "按设备名称归并",
                      "原始登录标识记录", "最近活跃", "求片剩余"):
         assert fragment in details
     assert "120" in details
+
+
+def test_kk_short_prompts_do_not_grant_or_create_accounts(bot) -> None:
+    prompt = _run(bot, '/kk')
+    assert 'TG数字ID' in prompt and len(prompt.splitlines()) == 2
+    usage = _run(bot, '/kk alice extra')
+    assert '/kk' in usage and '回复' in usage and len(usage.splitlines()) == 2
+    unknown = _run(bot, '/kk 777')
+    assert '777' in unknown and '尚未注册' in unknown
+    assert len(unknown.splitlines()) == 3
+    assert bot.members.find_by_telegram('777') is None
+    assert bot._registration.get_grant('777') is None
+    assert any(b['callback_data'] == 'admin_gift' for row in bot.sent[-1][2] for b in row)
+
+
+def test_kk_short_card_preserves_escaping_unknowns_and_access_warning(bot) -> None:
+    from test_bot_reply_templates import plain
+
+    member = {'emby_user_id': 'missing', 'username': '<User&>', 'group_name': '<Group&>',
+              '_access_text': '\n本地封禁：未封禁 · Emby：未知，请刷新核实\n'}
+    bot._points = None
+    body = bot._user_card(member)
+    assert '&lt;User&amp;&gt;' in body and '&lt;Group&amp;&gt;' in body
+    assert '有效期：暂不可用' in body and '积分：暂不可用' in body
+    assert '计量暂不可用' in body and '暂无法确认' in body
+    assert 'Emby：未知，请刷新核实' in body
+    assert '<User&>' in plain(body)
 
 
 def test_kk_accepts_an_at_handle(bot) -> None:

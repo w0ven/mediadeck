@@ -56,15 +56,16 @@ def test_private_card_complete_compact_and_renew_preview_confirmation_retry(env)
     async def run():
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        for text in ('Lv1 布衣', '偷得浮生半日闲', '成长 0', '今日观影奖励 0/48积分',
+        for text in ('Lv1. 🌱 布衣 偷得浮生半日闲', '偷得浮生半日闲', '成长 0', '今日观影奖励 0/48积分',
                      '0/60成长', '80/80分钟', '3/3有效日', '本级续费 80积分',
                      '自动保号：未开启', '到期：', '删除候选：', '北京时间'):
             assert text in body
         assert len(body.splitlines()) <= 12
         assert 'webaccount' not in body
-        assert 'activity:status' in {b['callback_data'] for b in actions(e, mid)}
+        assert {'activity:status', 'activity:auto:on', 'activity:renew'} <= {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'activity:status', mid)
         assert '最终有效权益' in e.tg.text(VIEWER, mid)
+        await tap(e, 'me', mid)
         await tap(e, 'activity:renew', mid)
         text = e.tg.text(VIEWER, mid)
         assert '本次价格：80积分' in text and '原到期：' in text and '预计新到期：' in text
@@ -103,9 +104,11 @@ def test_activity_member_pages_escape_dynamic_text_and_fit_telegram(env, monkeyp
         assert '&lt;u&gt;Title&amp;&lt;/u&gt;' in body
         assert len(plain(body).encode('utf-16-le')) // 2 <= 4096
     assert '&lt;i&gt;Note&amp;&lt;/i&gt;' in details
-    for text in ('最终有效权益', '已用：', '剩余：', '满10分钟', '到期停播',
-                 '72小时', '管理员开关和复核', '非发奖依据'):
+    for text in ('最终有效权益', '已用：', '剩余：', '📊 观看记录'):
         assert text in details
+    for text in ('个人覆盖', '有效道具优先', '满10分钟', '自动结算', '免签到',
+                 '到期停播', '72小时', '管理员开关和复核', '非发奖依据'):
+        assert text not in details
     assert all(len(button['callback_data'].encode()) <= 64 for row in keyboard for button in row)
 
 
@@ -133,7 +136,7 @@ def test_expired_and_manually_disabled_can_view_confirm_without_unblocking(env, 
     e.bot._on_member_changed = AsyncMock(return_value={'remote_ok':False})
     async def run():
         mid = await private_command(e, '/me')
-        assert 'Lv1 布衣' in e.tg.text(VIEWER, mid)
+        assert 'Lv1. 🌱 布衣 偷得浮生半日闲' in e.tg.text(VIEWER, mid)
         await tap(e, 'activity:renew', mid)
         confirm = find_action(e, mid, 'activity:confirm:')
         await tap(e, confirm, mid)
@@ -183,17 +186,18 @@ def test_other_actor_forged_private_or_group_callbacks_never_charge_or_enable(en
     assert not e.db.query('SELECT * FROM activity_members WHERE auto_renew=1')
 
 
-@pytest.mark.parametrize('entry', ['button', '等级权益', '开启自动保号'])
+@pytest.mark.parametrize('entry', ['button', '/start account', '/myinfo', '等级权益', '开启自动保号'])
 def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
     e = env
     balance = e.services.points.balance('u1')
     async def run():
         if entry == 'button':
             mid = await private_command(e, '/me')
-            await tap(e, 'activity:status', mid)
         else:
             mid = await private_command(e, entry)
         if entry != '开启自动保号':
+            assert {'activity:auto:on', 'activity:renew'} <= {b['callback_data'] for b in actions(e, mid)}
+            assert '🤖 开启自动保号' in {b['text'] for b in actions(e, mid)}
             await tap(e, 'activity:auto:on', mid)
         body = e.tg.text(VIEWER, mid)
         for text in ('默认关闭', '主动确认', '到期前24小时', '近30天80分钟', '3有效日',
@@ -210,12 +214,31 @@ def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
         assert e.services.points.balance('u1') == balance
         await tap(e, 'me', mid)
         assert '自动保号：已开启' in e.tg.text(VIEWER, mid)
+        assert 'activity:auto:off' in {b['callback_data'] for b in actions(e, mid)}
+        assert 'activity:auto:on' not in {b['callback_data'] for b in actions(e, mid)}
         await private_command(e, '关闭自动保号')
         mid = e.bot._panel[str(VIEWER)]
         assert e.members.get('u1')['auto_renew']
         await tap(e, find_action(e, mid, 'activity:auto-confirm:'), mid)
         assert not e.members.get('u1')['auto_renew']
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('public', [False, True])
+def test_whitelist_card_keeps_rewards_and_usage_without_renewal_clutter(env, public):
+    from test_bot_reply_templates import plain
+    e = env
+    e.members.upsert('u1', '', {'group_id': 'whitelist'})
+    body = e.bot._account_card(e.members.get('u1'), public=public)
+    assert '白名单' in body and '♾ 永久' in body
+    for text in ('积分', '成长', '奖励', '偷得浮生半日闲'):
+        assert text in body
+    for text in ('续费预算', '本级续费', '缺口', '近30天核验', '合格日', '有效日', '自动保号', '删除候选'):
+        assert text not in body
+    if public:
+        for text in ('📊 <b>本月流量', '🚀 带宽', '📺 同播', '📥 下载', '🎞️ 转码', '🎬 <b>观看记录', '🪙', '📈', '🎁'):
+            assert text in body
+    assert len(plain(body).encode('utf-16-le')) // 2 <= 4096
 
 
 def test_whitelist_and_worn_title_in_bot_card_and_no_web_code(env):
@@ -232,7 +255,8 @@ def test_whitelist_and_worn_title_in_bot_card_and_no_web_code(env):
         await e.bot._titles.wear('u1', title['id'])
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        assert 'Lv1 布衣 · 白名单' in body and '清风明月' in body and '白名单豁免' in body
+        assert 'Lv1. 🌱 布衣 清风明月 · 白名单' in body and '白名单 · ♾ 永久' in body
+        assert not {'activity:renew', 'activity:auto:on', 'activity:auto:off'} & {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'activity:status', mid)
         assert 'activity:renew' not in {b['callback_data'] for b in actions(e, mid)}
         await private_command(e, '/webaccount')
@@ -259,6 +283,78 @@ def test_normal_receipt_luck_button_only_owner_and_terminal_callbacks(env, monke
         assert '不可重抽或恢复普通' in posted(e)[-1]['text']
         assert json.loads(e.db.one("SELECT result_json FROM checkins WHERE emby_user_id='u1'")['result_json'])['points']==3
         assert 'webaccount' not in re.sub('<[^>]*>', '', str(posted(e)))
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('change', ['other_actor', 'group', 'binding', 'timeout', 'cancel'])
+def test_account_auto_button_confirmation_remains_actor_and_binding_bound(env, monkeypatch, change):
+    e = env
+    async def run():
+        mid = await private_command(e, '/me')
+        assert 'activity:auto:on' in {b['callback_data'] for b in actions(e, mid)}
+        await tap(e, 'activity:auto:on', mid)
+        confirm = find_action(e, mid, 'activity:auto-confirm:')
+        if change == 'other_actor':
+            await click(e, confirm, mid, chat=VIEWER, user=904)
+        elif change == 'group':
+            await click(e, confirm, mid, chat=GROUP, user=VIEWER)
+        else:
+            if change == 'binding':
+                e.members.bind_telegram('u1', '905')
+                e.members.bind_telegram('u1', str(VIEWER))
+            elif change == 'timeout':
+                now = time.time()
+                monkeypatch.setattr(time, 'time', lambda: now+301)
+            else:
+                await tap(e, 'activity:status', mid)
+            await tap(e, confirm, mid)
+        assert not e.members.get('u1')['auto_renew']
+    asyncio.run(run())
+    assert not e.db.query("SELECT * FROM points_ledger WHERE reason='activity.renew'")
+
+
+@pytest.mark.parametrize('enabled,dual,expected', [
+    (False, True, set()), (True, False, {'checkin'}), (True, True, {'checkin', 'luckcheckin'}),
+])
+def test_independent_checkin_entry_keeps_plugin_and_mode_gates(env, enabled, dual, expected):
+    e = env
+    e.services.registry.save('checkin', enabled=enabled, config={'dual_checkin': dual})
+    async def run():
+        mid = await private_command(e, '/start')
+        assert {b['callback_data'] for b in actions(e, mid)} & {'checkin', 'luckcheckin'} == expected
+        await tap(e, 'bag', mid)
+        assert not {b['callback_data'] for b in actions(e, mid)} & {'checkin', 'luckcheckin'}
+    asyncio.run(run())
+
+
+def test_level_name_and_title_are_one_identity_on_account_home_and_activity(env):
+    from test_bot_reply_templates import plain
+    e = env
+    cfg = e.levels.config()
+    cfg['config']['levels'][1].update(name='听风', icon='🍃', title='🍂 风止星归')
+    e.levels.save_config(cfg['config'], cfg['revision'])
+    e.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u1',120,'test','level2',?)", (int(time.time()),))
+    label = 'Lv2. 🍃 听风 🍂 风止星归'
+    member = e.members.get('u1')
+    for card in (e.bot._account_card(member), e.bot._account_card(member, public=True), e.bot._home(str(VIEWER), 'Demo')[0]):
+        assert label in plain(card)
+        assert plain(card).count('风止星归') == 1
+    async def run():
+        mid = await private_command(e, '/activity')
+        assert label in plain(e.tg.text(VIEWER, mid))
+    asyncio.run(run())
+    member['activity_level'].update(name='<听风&>', title='<风止&星归>', icon='🍃')
+    assert '&lt;听风&amp;&gt; &lt;风止&amp;星归&gt;' in e.bot._group_label(member)
+
+
+def test_unmanaged_account_does_not_offer_automatic_charging(env):
+    e = env
+    cfg = e.levels.config()
+    cfg['config']['enabled'] = False
+    e.levels.save_config(cfg['config'], cfg['revision'])
+    async def run():
+        mid = await private_command(e, '/start account')
+        assert not {'activity:renew', 'activity:auto:on', 'activity:auto:off'} & {b['callback_data'] for b in actions(e, mid)}
     asyncio.run(run())
 
 
@@ -298,19 +394,23 @@ def test_confirm_result_persists_across_reconstructed_services(env):
     asyncio.run(run())
 
 
-def test_luck_terminal_hides_both_checkin_buttons_in_fresh_bag(env, monkeypatch):
+def test_checkin_is_independent_home_action_and_terminal_hides_both_buttons(env, monkeypatch):
     e = env
     monkeypatch.setattr('app.modules.dual_checkin.draw', lambda *args:0)
     async def run():
-        mid = await private_command(e, '/me')
-        await tap(e, 'bag', mid)
+        mid = await private_command(e, '/start')
         assert {'checkin','luckcheckin'} <= {b['callback_data'] for b in actions(e, mid)}
-        await tap(e, 'checkin', mid)
+        assert {b['callback_data'] for b in e.tg.message(VIEWER, mid)['reply_markup']['inline_keyboard'][0]} == {'checkin', 'luckcheckin'}
         await tap(e, 'bag', mid)
+        assert not {'checkin','luckcheckin'} & {b['callback_data'] for b in actions(e, mid)}
+        assert '签到' not in e.tg.text(VIEWER, mid)
+        await tap(e, 'home', mid)
+        await tap(e, 'checkin', mid)
+        await tap(e, 'home', mid)
         assert 'checkin' not in {b['callback_data'] for b in actions(e, mid)}
         assert 'luckcheckin' in {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'luckcheckin', mid)
-        await tap(e, 'bag', mid)
+        await tap(e, 'home', mid)
         assert not {'checkin','luckcheckin'} & {b['callback_data'] for b in actions(e, mid)}
     asyncio.run(run())
 
