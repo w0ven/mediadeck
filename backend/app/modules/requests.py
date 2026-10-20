@@ -179,7 +179,7 @@ class RequestService:
     def quota_for(self, member):
         group_id = str(member.get("group_id") or "")
         group = self._groups.get(group_id) if self._groups and group_id else None
-        group = group or member.get("group") or {}
+        group = (member.get("group") if member.get("activity_managed") else group) or member.get("group") or {}
         try:
             return max(0, int(group.get("request_quota") or 0))
         except (ValueError, TypeError):

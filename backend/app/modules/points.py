@@ -32,6 +32,9 @@ from typing import Any
 # these are the ones the UI knows how to label.
 REASON_LABELS = {
     "checkin": "每日签到",
+    "watch.reward": "核验观影奖励",
+    "checkin.adjust": "运气签到覆盖差额",
+    "activity.renew": "等级保号续费",
     "transfer.out": "转账支出",
     "transfer.in": "转账收入",
     "shop.redeem": "商城兑换",
@@ -126,6 +129,10 @@ class PointsService:
         """
         user_id = str(user_id)
         delta = int(delta)
+        # Every spender shares the cross-connection boundary with check-in
+        # recovery and renewal. A Python lock alone cannot protect another worker.
+        if not conn.in_transaction:
+            conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             "SELECT COALESCE(SUM(delta),0) AS total FROM points_ledger "
             "WHERE emby_user_id=?", (user_id,))

@@ -261,6 +261,8 @@ class ShopService:
         member = self._members.get(user_id) if self._members else None
         if not member:
             raise ShopError("账号不存在")
+        if member.get('activity_managed') and not member.get('activity_exempt') and member.get('state') != 'active':
+            raise ShopError('账号当前不可用；到期保留期间仅可查看与达标续费')
 
         limit = int(item.get("per_user_limit") or 0)
         if limit > 0 and self.redeemed_count(user_id, item_id) >= limit:

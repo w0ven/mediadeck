@@ -32,7 +32,7 @@ from app.core.config import settings
 from app.core.db import Database
 from app.core.errors import ConfigError, ConflictError, NotConfigured, UpstreamError
 from app.core.store import SettingsStore
-from app.modules import member_ops
+from app.modules import activity_api, member_ops
 from app.modules.access import AccessRules
 from app.modules.downloaders import MockDownloader, QbittorrentClient
 from app.modules.edgelog import MAX_LINES_PER_INGEST, TrafficLedger
@@ -47,6 +47,7 @@ from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeStore
 from app.modules.inventory import InventoryService
+from app.modules.levels import LevelService
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.metering import UNIT as METER_UNIT
 from app.modules.metering import MeasuredMeteringService
@@ -89,6 +90,7 @@ from app.modules.titles import TitleService
 from app.modules.tmdb import TmdbClient
 from app.modules.updater import MockUpdater, Updater
 from app.modules.usage import UsageSampler, run_usage_io
+from app.modules.watch_rewards import ActivityService
 from app.modules.whitelist_route import (
     CAP_ARG,
     ISSUER,
@@ -385,6 +387,9 @@ async def _startup() -> None:
     # Points are a ledger, so the service is a thin wrapper over the database
     # and can be built as soon as it exists. The shop is what spends them.
     app.state.points = PointsService(app.state.db)
+    app.state.activity = ActivityService(app.state.db, app.state.points)
+    app.state.levels = LevelService(app.state.db, app.state.members, app.state.points, app.state.activity)
+    app.state.members.bind_levels(app.state.levels)
     app.state.shop = ShopService(app.state.db, app.state.members,
                                  app.state.points,
                                  notice_config=app.state.settings_service.telegram_config)
@@ -448,6 +453,9 @@ async def _startup() -> None:
                 await app.state.usage.tick(node_of=_node_for_item)
 
             now = time.time()
+            if membership['enforcement_enabled'] and app.state.levels.config()['config']['enabled']:
+                with contextlib.suppress(Exception):
+                    await app.state.levels.sync_effects(_telegram_member_changed)
             if hasattr(app.state,"titles"):
                 with contextlib.suppress(Exception):
                     await app.state.titles.sync()
@@ -541,6 +549,8 @@ async def _startup() -> None:
         settings=app.state.settings_service,
         store=store,
         points=app.state.points,
+        activity=app.state.activity,
+        levels=app.state.levels,
         shop=app.state.shop,
         scheduler=app.state.scheduler,
         requests=app.state.requests,
@@ -701,7 +711,7 @@ async def root(request: Request,
     if ver:
         for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js",
                       "members.js", "workspace.js", "workspace.css", "hardglass.css",
-                      "dialog.js"):
+                      "dialog.js", "activity_admin.js"):
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     return HTMLResponse(html)
 
@@ -2473,6 +2483,7 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
         "edge": edge_detail,
         "points": app.state.points.balance(user_id),
         "points_ledger": app.state.points.ledger(user_id, 20),
+        "activity_levels": await asyncio.to_thread(app.state.levels.status, user_id),
         "requests": app.state.requests.for_user(user_id, limit=10),
         "request_remaining": app.state.requests.remaining(user_id),
         "usage": usage,
@@ -3741,3 +3752,6 @@ async def cached_image(item_id: str, image_type: str, request: Request) -> Respo
     if etag:
         headers["ETag"] = etag
     return Response(content=data, media_type=content_type, headers=headers)
+
+
+activity_api.register(app, _auth)

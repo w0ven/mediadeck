@@ -142,11 +142,13 @@ class LiveEmby:
             )
             return r.status_code in (200, 204)
 
-    async def delete_selfservice_user(self, user_id: str, *, authorize: Any) -> bool:
+    async def delete_selfservice_user(self, user_id: str, *, authorize: Any, allow_absent: bool = False) -> bool:
         """Fail closed on unknown/admin policy; recheck binding after remote I/O."""
         base, headers, timeout, verify = self._conn()
         async with self._client(timeout, verify) as client:
             r = self._check(await client.get(f"{base}/emby/Users/{user_id}", headers=headers))
+            if r.status_code == 404 and allow_absent:
+                return bool(authorize())
             if r.status_code != 200:
                 return False
             body = r.json()

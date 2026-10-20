@@ -270,6 +270,10 @@ class MemberService:
         self._groups = groups
         self._metering = None
         self._metering_cutover = None
+        self._levels = None
+
+    def bind_levels(self, levels: Any) -> None:
+        self._levels = levels
 
     def bind_metering(self, metering: Any,
                       cutover: Any = None) -> None:
@@ -366,6 +370,8 @@ class MemberService:
         from app.modules.whitelist_cards import project_authoritative_group
         project_authoritative_group(self._db, out)
         group = self._groups.get(out.get("group_id") or "")
+        if self._levels is not None:
+            group = self._levels.project(out, group)
         out["group"] = group
         out["group_name"] = group["name"] if group else "(未分组)"
         out["billing_mode"] = group["billing_mode"] if group else "none"
@@ -471,6 +477,8 @@ class MemberService:
         stored = str(member.get("status") or "active")
         if stored in MANUAL_STATES:
             return stored, "管理员手动设置"
+        if member.get('activity_lifecycle') == 'deleting':
+            return 'expired', '删除结果待确认，暂停播放及续费'
         if member.get('card_group_unavailable'):
             return 'suspended', '白名单卡到期，原用户组不可用，待管理员处理'
         if not group:
@@ -506,6 +514,10 @@ class MemberService:
                actor: str = "system", *, conn: Any = None) -> dict[str, Any]:
         if not user_id:
             raise ConfigError("缺少 Emby 用户 ID")
+        if conn is None and self._levels is not None and self._levels.config()['config']['enabled']:
+            from app.modules.economy_rules import economy_write
+            with economy_write(self._db) as tx:
+                return self.upsert(user_id, username, payload, actor=actor, conn=tx)
         execute = conn.execute if conn is not None else self._db.execute
         now = int(time.time())
         existing = self._db.one(
@@ -652,6 +664,8 @@ class MemberService:
                 "register_via": {"from": None, "to": register_via},
                 "inviter_id": {"from": None, "to": inviter_id},
             }), conn=conn)
+        if self._levels is not None and (not existing or existing['status'] == 'pending' and status == 'active'):
+            self._levels.enroll_new(user_id, now, conn=conn)
         return self.get(user_id)  # type: ignore[return-value]
 
     def enroll_defaults(self, emby_users: list[dict[str, Any]],
@@ -1122,6 +1136,17 @@ class MemberService:
         if not member:
             raise KeyError(user_id)
         before = member.get("status")
+        if self._levels is not None and self._levels.config()['config']['enabled']:
+            from app.modules.economy_rules import economy_write
+            with economy_write(self._db) as conn:
+                conn.execute("UPDATE members SET status=?,updated_at=? WHERE emby_user_id=?",
+                             (status, int(time.time()), user_id))
+                self.audit(actor, "member.status", user_id, encode_audit_detail({
+                    "status": {"from": before, "to": status},
+                }), conn=conn)
+                if before == 'pending' and status == 'active':
+                    self._levels.enroll_new(user_id, int(time.time()), conn=conn)
+            return self.get(user_id)
         self._db.execute(
             "UPDATE members SET status=?,updated_at=? WHERE emby_user_id=?",
             (status, int(time.time()), user_id))

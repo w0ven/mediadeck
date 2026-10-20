@@ -56,17 +56,9 @@ def draw(secret: str, user: str, day: str, domain: str, size: int):
 
 def watch_progress(db, user, now):
     day, start, end = day_bounds(now)
-    # Clip each independent proof to the Beijing calendar day, then add. Never
-    # infer time from a live wall clock or from an unfinished play's duration.
-    row = (
-        db.one(
-            "SELECT COALESCE(SUM(MIN(ended_at,?)-MAX(started_at,?)),0) AS seconds "
-            "FROM watch_verified_samples WHERE emby_user_id=? AND ended_at>? AND started_at<?",
-            (min(now, end), start, str(user), start, min(now, end)),
-        )
-        or {}
-    )
-    return day, max(0.0, float(row.get("seconds") or 0))
+    # Shared union rule: parallel verified devices cannot accelerate admission.
+    from app.modules.watch_rewards import verified_seconds
+    return day, verified_seconds(db, user, start, min(now, end))
 
 
 def default_holidays():

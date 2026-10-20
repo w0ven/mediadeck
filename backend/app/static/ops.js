@@ -1387,7 +1387,7 @@ function listData(list) {
 }
 function pluginFields(c) {
   const groups = {
-    checkin:[['基础与连签',['streak_tiers'],true],['周末与默认活动',['weekends','double_ppm','multiplier','drops'],true],['节日管理',['holidays'],true]],
+    checkin:[['签到规则与旧版连签',['dual_checkin','streak_tiers'],true],['周末与默认活动',['weekends','double_ppm','multiplier','drops'],true],['节日管理',['holidays'],true]],
     inventory:[['道具叠加限制',['bandwidth_cap_mbps','streams_cap'],true],['称号同步设置',['title_chat'],false]],
     points_transfer:[['转账额度与手续费',['enabled_for_members','daily_limit','min_amount','fee_percent'],true],['收款安全设置',['restrict_receivers'],false]],
     red_packets:[['红包额度',['enabled_for_members','max_total','max_parts'],true]],

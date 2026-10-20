@@ -94,6 +94,8 @@ class CheckinPlugin(Plugin):
         icon="✅",
         interval=0,
         fields=[
+            Field("dual_checkin", "启用普通/运气双签到", kind="bool", default=False,
+                  help="默认关闭。启用后普通固定10；运气1～10/11～20/21～30概率65%/25%/10%。取消积分加成，保留连签展示及单次掉落。"),
             Field(
                 "streak_tiers",
                 "连签加成（%）",
@@ -137,7 +139,7 @@ class CheckinPlugin(Plugin):
 
     # -- the action a member triggers ---------------------------------------
 
-    def checkin(self, user_id: str, now: float | None = None) -> dict[str, Any]:
+    def checkin(self, user_id: str, now: float | None = None, *, mode: str = "normal") -> dict[str, Any]:
         """Award today's points, or refuse because today is already paid.
 
         The refusal is a normal return rather than an exception: "already
@@ -154,6 +156,11 @@ class CheckinPlugin(Plugin):
             return {"ok": False, "reason": "账号不存在"}
 
         with economy_write(db) as conn:
+            if self._config().get("dual_checkin"):
+                from app.modules.dual_checkin import checkin
+                return checkin(self, conn, points, user_id, now, mode)
+            if mode != "normal":
+                return {"ok": False, "reason": "运气签到尚未启用"}
             return self._checkin(conn, points, user_id, now)
 
     def _checkin(self, conn: Any, points: Any, user_id: str, now: float | None) -> dict[str, Any]:

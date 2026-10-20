@@ -136,3 +136,5 @@ def migrate(db):
     migrate_shop_notices(db)
     from app.modules.scratch9 import migrate as migrate_scratch9
     migrate_scratch9(db)
+    from app.modules.activity_schema import migrate as migrate_activity
+    migrate_activity(db)
