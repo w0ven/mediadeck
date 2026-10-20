@@ -52,6 +52,11 @@ class LocalPlaybackTests(unittest.TestCase):
         self.addCleanup(env.stop)
         gateway.configure()
 
+        # These tests isolate File association/byte relay; the real admission
+        # HTTP exchange is covered by test_gateway_admission_integration.py.
+        patch_admit = mock.patch.object(gateway.Handler, 'admit', return_value=True)
+        patch_admit.start()
+        self.addCleanup(patch_admit.stop)
         self.forwarded = []
 
         def forward(handler):

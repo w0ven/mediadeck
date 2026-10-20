@@ -88,6 +88,16 @@ def test_real_edge_origin_phases_and_bytes(client, tmp_path):  # noqa: F811
                     reply = client.request(self.command, self.path, headers=dict(self.headers), content=body, follow_redirects=False)
                     status, content, headers = reply.status_code, reply.content, dict(reply.headers)
                 elif role == "gateway":
+                    # Routing stub honors the gateway's issuer-owned admission
+                    # contract; real gateway branches have separate integration tests.
+                    admission = client.get("/api/playback/admit", headers={
+                        **dict(self.headers), "X-Original-URI": self.path,
+                        "X-Original-Method": self.command})
+                    if admission.status_code != 204:
+                        self.send_response(admission.status_code)
+                        self.send_header("Content-Length", "0")
+                        self.end_headers()
+                        return
                     # Preserve full signed query, exactly as the real router does.
                     signed = sign_url("https://edge-a.example.com", "/s/main/E01.mkv", SIGNING_KEY, 300,
                         arg_digest="k", arg_expires="e", utag=user_tag("u1"), rate_bps=1000000)

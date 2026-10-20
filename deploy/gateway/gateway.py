@@ -150,13 +150,41 @@ class Handler(BaseHTTPRequestHandler):
    for k in ('api_key','ApiKey','apikey','X-Emby-Token'):
     if q.get(k):token=q[k][0];break
   if not token:return self.send(401,b'Authentication required')
-  # Verify the caller's own token and edition visibility, never substitute admin credentials.
+  if not self.admit():return
+  # Admission owns user/item/web/client/stream policy. Still verify the exact
+  # edition association with the caller's credential before resolving a URL.
   url='http://127.0.0.1:8096/emby/Items/'+urllib.parse.quote(item,safe='')+'/PlaybackInfo'
   try:
    with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=90) as r:data=json.load(r)
   except urllib.error.HTTPError as e:return self.send(403 if e.code==403 else 401,b'Access denied')
   if not any(str(x.get('Id'))==sid for x in data.get('MediaSources',[])):return self.send(403,b'Edition unavailable')
   return self.resolve(source)
+ def deck_request(self,c,path,admission=False):
+  # Preserve repeated identity headers for Deck's ambiguity checks. Never use
+  # a caller-supplied original-URI/method as evidence for this request.
+  c.putrequest('GET' if admission else self.command,path,skip_host=True,skip_accept_encoding=True)
+  for k,v in self.headers.items():
+   if k.lower() not in ('connection','content-length','transfer-encoding','x-original-uri','x-original-method'):
+    c.putheader(k,v)
+  if admission:
+   c.putheader('X-Original-URI',self.path)
+   c.putheader('X-Original-Method',self.command)
+  c.putheader('Connection','close')
+  c.endheaders()
+ def admit(self):
+  # Self-issued CMCC/local streams use the SAME complete gate as Deck streams.
+  # Forwarded streams never call here: 8300 checks them at their issuer.
+  # No successful-result cache, redirect following or trusted "admitted" flag.
+  c=http.client.HTTPConnection('127.0.0.1',8300,timeout=30)
+  try:
+   self.deck_request(c,'/api/playback/admit',admission=True)
+   status=c.getresponse().status
+  except Exception:status=503
+  finally:c.close()
+  if status==204:return True
+  self.send(status if status in (401,403) else 503,b'Playback admission refused',
+            {'Cache-Control':'private, no-store'})
+  return False
  def resolve(self,source):
   u=urllib.parse.urlsplit(source['url'])
   if u.scheme!='https' or u.netloc.lower()!=OPENLIST_PUBLIC_HOST or not u.path.startswith('/d/'):return self.send(502,b'Invalid source configuration')
@@ -176,8 +204,9 @@ class Handler(BaseHTTPRequestHandler):
   if row is None:return False
   token=duanju_caller_token(self.headers,q)
   if not token:self.send(401,b'Authentication required');return True
-  # The external admission layer remains first. Repeat caller visibility and
-  # the actual File/source association here; never substitute admin credentials.
+  if not self.admit():return True
+  # Check the actual File/source association after complete Deck admission;
+  # never substitute admin credentials or rely on an outer nginx subrequest.
   url='http://127.0.0.1:8096/emby/Items/'+m[1]+'/PlaybackInfo'
   try:
    with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=12) as r:data=json.load(r)
@@ -198,8 +227,7 @@ class Handler(BaseHTTPRequestHandler):
  def forward(self):
   c=http.client.HTTPConnection('127.0.0.1',8300,timeout=60)
   try:
-   headers={k:v for k,v in self.headers.items() if k.lower() not in ('connection','content-length','transfer-encoding')}
-   c.request(self.command,self.path,headers=headers);r=c.getresponse();body=r.read(1024*1024)
+   self.deck_request(c,self.path);r=c.getresponse();body=r.read(1024*1024)
    # Existing MediaDeck dispatch only returns redirects/errors, never video payloads.
    hs={k:v for k,v in r.getheaders() if k.lower() not in ('content-length','transfer-encoding','connection','server','date')}
    self.send(r.status,body,hs)
