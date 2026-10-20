@@ -130,32 +130,3 @@ def test_actual_bot_received_commands_preserve_reply_and_show_net(bot_env, monke
         assert "最终奖励：<b>3" in posted(e)[-1]["text"]
         assert posted(e)[-1]["reply_parameters"]["message_id"] == 303
     asyncio.run(run())
-
-
-def test_bot_member_renew_code_and_level_card_use_same_services(bot_env):  # noqa: F811
-    from app.modules.levels import DAY, LevelService, defaults
-    from app.modules.watch_rewards import ActivityService
-    e = bot_env
-    levels = LevelService(e.db, e.services.members, e.services.points, ActivityService(e.db, e.services.points))
-    e.services.members.bind_levels(levels)
-    e.members.bind_levels(levels)
-    e.services.points.add('u1', 100, 'admin.adjust')
-    config = defaults(); config['enabled'] = True
-    levels.save_config(config, 0)
-    now = int(time.time())
-    e.db.execute("INSERT INTO activity_members(emby_user_id,enrolled_at) VALUES('u1',?)", (now,))
-    e.db.execute("UPDATE members SET expires_at=? WHERE emby_user_id='u1'", (now+DAY,))
-    for i in range(3): proof(e.db, 'u1', now=now-i*DAY, seconds=1600, key='renew'+str(i))
-    before = e.services.points.balance('u1')
-    async def run():
-        await e.bot._dispatch_update({'message': message('/activity')})
-        assert '/renew30' in posted(e)[-1]['text']
-        await e.bot._dispatch_update({'message': message('/webaccount', mid=302)})
-        assert '一次性登录码' in posted(e)[-1]['text']
-        await e.bot._dispatch_update({'message': message('/renew30', mid=303)})
-        assert '已入账' in posted(e)[-1]['text']
-        await e.bot._dispatch_update({'message': message('/renew30', mid=303)})
-        assert e.services.points.balance('u1') == before-80
-    asyncio.run(run())
-    card = e.bot._account_card(e.services.members.get('u1'))
-    assert 'Lv1 布衣' in card and '续费预算 80' in card and '今日观影奖励' in card

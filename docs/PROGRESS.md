@@ -2,6 +2,29 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Correct member activity UX to Bot-only
+
+- Remove the unshipped member Web pages, one-time codes/session module, member
+  HTTP endpoints and token-table declaration. No database DROP is executed.
+  Retain admin-only level configuration, migration, deletion preview and recovery.
+- Add a compact private Bot account card and a clear level/renewal navigation
+  button. Preserve existing functions, worn titles, whitelist display and
+  detailed rights/history. Chinese commands use the same flows.
+- Renewal always previews price, old/estimated new expiry and blockers first.
+  Owner-bound five-minute intents are persisted; confirmation rechecks binding
+  revision, configuration, funds and eligibility atomically. Repeat/lost-response
+  confirmation uses the same result, including after service reconstruction.
+- Auto-renew requires an explanatory opt-in confirmation; disable is explicit.
+  Reject other actors and group callbacks. Expired members can still view/renew;
+  manual suspension remains. Normal check-in replies offer a warned luck button,
+  and terminal luck state hides both actions on newly opened bags.
+- Validation: full suite 4712 passed, 79 skipped, 2 subtests passed; skips retain
+  the same optional Caddy/FFmpeg/public-beacon reasons. Bot update/callback and
+  admin browser/API regressions pass, including member-route 404/admin-auth 401.
+  Related 138-test UTC run passed. Ruff and diff checks pass.
+- Next: controller integration review; no unresolved product decisions. No
+  production access/change, live TG calls, deletion, push, release or deployment.
+
 ## 2026-10-21 — Integrate watch activity levels and renewable membership
 
 - Add verified-only silent rewards, independent growth ledgers, durable proof
@@ -12,7 +35,8 @@ Newest entries first. Every working session appends one entry.
   Preserve whitelist sales/exemptions, existing inventory, balances and manual blocks.
 - Add normal/luck check-in final rewards with weighted positive outcomes,
   one-way replacement, spendable-balance recovery protection and single drops.
-  Connect actual Bot commands/buttons and member-owned Web login/actions.
+  Connect actual Bot commands/buttons; member access is Bot-only (corrected above),
+  while the Web remains administrator-only.
 - Replace the groups main view with levels/whitelist rights and an explicitly
   collapsed legacy maintenance area; use distinct icons, two-character identities,
   classical titles and explicit Beijing-time expiry/deletion displays.
@@ -24,10 +48,10 @@ Newest entries first. Every working session appends one entry.
   ledgers and recoverable remote uncertainty. Exempt managed levels from old
   inactivity cleanup. Document migration, switch sequencing and rollback limits in
   `docs/ACTIVITY_LEVELS.md`; update `docs/ROADMAP.md` to final decisions.
-- Validation: full suite 4679 passed, 79 skipped, 2 subtests passed. Skips are
-  existing Caddy/FFmpeg requirements and the opt-in public beacon test. New
-  Chromium flow covers mobile/desktop, real isolated API routes, check-in net
-  adjustment, auto-renew preference, renewal, configuration and migration.
+- Initial validation: full suite 4679 passed, 79 skipped, 2 subtests passed. Skips
+  are existing Caddy/FFmpeg requirements and the opt-in public beacon test.
+  Superseded member-Web coverage is removed in the Bot-only correction above;
+  administrator Chromium configuration/migration coverage is retained.
   New lifecycle tests also run under UTC with a non-Beijing browser timezone.
   Ruff, JavaScript syntax, diff checks and isolated uvicorn mock startup pass.
 - Next: controller integration review, then separately authorized PR/CI/release

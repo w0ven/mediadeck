@@ -42,6 +42,7 @@ import httpx
 from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_accounts import AccountBotMixin
+from app.modules.bot_activity import ActivityBotMixin
 from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_play import PLAY_CALLBACKS, PlayBotMixin
@@ -267,7 +268,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
+class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -1134,9 +1135,10 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
             rows.append([{"text": "🛠 管理", "callback_data": "admin"}])
         return rows
 
-    @staticmethod
-    def info_menu() -> list[list[dict[str, str]]]:
-        return [
+    def info_menu(self) -> list[list[dict[str, str]]]:
+        member = self._member_for_chat(_ACTOR.get()) if _ACTOR.get() else None
+        activity = [[{'text':'🌱 等级权益与保号', 'callback_data':'activity:status'}]] if member and member.get('activity_level') else []
+        return activity + [
             [{"text": "📺 设备", "callback_data": "devices"},
              {"text": "🔑 修改密码", "callback_data": "resetpw"}],
             [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
@@ -1218,10 +1220,20 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         """What the member owns or can spend; don't advertise disabled plugins."""
         extra = []
         if self._plugin_on("checkin"):
-            extra.append({"text": "✅ 每日签到", "callback_data": "checkin"})
             plugin = self._plugin('checkin')
-            if plugin and callable(getattr(plugin, '_config', None)) and plugin._config().get('dual_checkin'):
-                extra.append({"text": "🍀 运气签到", "callback_data": "luckcheckin"})
+            dual = plugin and callable(getattr(plugin, '_config', None)) and plugin._config().get('dual_checkin')
+            saved = None
+            if dual and _ACTOR.get() and self._db is not None:
+                from app.modules.economy_rules import day_bounds
+                member = self._member_for_chat(_ACTOR.get())
+                if member:
+                    row = self._db.one('SELECT result_json FROM checkins WHERE emby_user_id=? AND day=?',
+                                       (member['emby_user_id'], day_bounds(time.time())[0]))
+                    saved = json.loads(row['result_json'] or '{}') if row else None
+            if saved is None:
+                extra.append({"text": "✅ 普通签到 +10" if dual else "✅ 每日签到", "callback_data": "checkin"})
+            if dual and (saved is None or saved.get('calculation_version') == 'dual-checkin-v1' and saved.get('mode') == 'normal'):
+                extra.append({"text": "🍀 运气签到 · 覆盖可能减少", "callback_data": "luckcheckin"})
         if self._plugin_on("points_transfer"):
             extra.append({"text": "💸 积分转账", "callback_data": "transfer"})
         return ([extra] if extra else []) + [
@@ -1770,44 +1782,8 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
     def _checkin_command(text: str):
         return re.fullmatch(r"(?:签到|运气签到|/(?:签到|运气签到|checkin|luckcheckin)(?:@([A-Za-z0-9_]+))?)", text, re.IGNORECASE)
 
-    async def _activity_action(self, chat_id, message_id, member, action):
-        levels = getattr(self._members, '_levels', None)
-        if not member or levels is None:
-            await self.send(chat_id, '请先绑定账号；等级服务尚未就绪。')
-            return
-        uid = member['emby_user_id']
-        try:
-            if action == 'webaccount':
-                if _GROUP.get():
-                    await self.send(chat_id, '请私聊Bot发送 /webaccount 获取个人登录码。')
-                    return
-                from app.modules.activity_web import issue_code
-                code = issue_code(levels.db, uid, member.get('tg_user_id'))
-                await self.send(chat_id, '在面板同域名的 /activity 页面输入此一次性登录码（5分钟有效）：\n'
-                                f'<code>{code}</code>\n不要转发给他人。')
-                return
-            if action == 'renew':
-                result = levels.renew(uid, f'bot:{chat_id}:{message_id}')
-                warning = await self._after_member_change(member)
-                await self.send(chat_id, f"续费30天已入账，扣除{result['cost']}积分。不解除人工限制。" + warning)
-                return
-            if action in ('auto:on', 'auto:off'):
-                levels.set_auto(uid, action == 'auto:on')
-                await self.send(chat_id, '自动保号已开启。到期前24小时，观影和积分达标才扣费。' if action == 'auto:on' else '自动保号已关闭。')
-                return
-            status = levels.status(uid)
-            q = status['qualification']
-            await self.send(chat_id, f"续费预算 {status['renewal_price']}积分；余额缺口{status['shortfall']}。\n"
-                            f"近30天核验 {int(q['seconds'])}/4800秒；合格观看日 {q['days']}/3。\n"
-                            '/renew30 续30天 · /autorenew_on 开启自动保号 · /autorenew_off 关闭 · /webaccount Web资料卡',
-                            [[{'text':'续30天（扣积分）','callback_data':'activity:renew'}],
-                             [{'text':'关闭自动保号' if status['auto_renew'] else '主动开启自动保号',
-                               'callback_data':'activity:auto:off' if status['auto_renew'] else 'activity:auto:on'}]])
-        except Exception as exc:  # noqa: BLE001 - controlled member feedback, no false success
-            await self.send(chat_id, '操作未完成：' + _public_error(exc))
-
     async def _checkin_feedback(self, chat_id: Any, message_id: int,
-                                text: str, name: str = "") -> None:
+                                text: str, name: str = "", keyboard=None) -> None:
         actor = _ACTOR.get()
         if _GROUP.get() and actor:
             text = f'<a href="tg://user?id={actor}">{escape(name or "发起人")}</a> 的签到\n\n' + text
@@ -1816,14 +1792,18 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                    "reply_parameters": {"message_id": message_id}}
         if _THREAD.get():
             payload["message_thread_id"] = _THREAD.get()
+        if keyboard:
+            payload["reply_markup"] = {"inline_keyboard": keyboard}
         # A receipt is not a menu: do not edit or replace the user's old panel.
         result = await self._call("sendMessage", payload)
         self._capture_checkin_feedback(payload, result)
+        if keyboard and isinstance(result, dict):
+            self._remember_card_actor(chat_id, result.get("message_id"))
 
     async def _checkin(self, chat_id: Any, message_id: int,
                        member: dict[str, Any] | None, name: str = "", *, mode: str = "normal") -> None:
-        async def feedback(text):
-            await self._checkin_feedback(chat_id, message_id, text, name)
+        async def feedback(text, keyboard=None):
+            await self._checkin_feedback(chat_id, message_id, text, name, keyboard)
 
         if not member:
             await feedback("🔗 请先私聊Bot绑定系统账号，再来签到。")
@@ -1868,7 +1848,8 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
             lines.append(f"🍀 幸运 ×{multiplier}")
         if result.get('drop_spec'):
             lines.append('🎁 ' + escape(str(result['drop_spec'].get('name') or '道具')))
-        await feedback('\n'.join(lines))
+        keyboard = [[{'text':'🍀 运气签到 · 可能减少且不可恢复', 'callback_data':'luckcheckin'}]] if result.get('calculation_version') == 'dual-checkin-v1' and result.get('mode') == 'normal' else None
+        await feedback('\n'.join(lines), keyboard)
 
     def _node_snapshot(self) -> list[dict[str, Any]]:
         nodes: list[dict[str, Any]] = []
@@ -3232,6 +3213,12 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
 
     def _account_card(self, member: dict[str, Any], *, public: bool = False,
                        managing: bool = False) -> str:
+        if member.get('activity_level') and not public and not managing:
+            try:
+                lines, _ = self._activity_summary(member)
+                return '\n'.join(lines)
+            except Exception:  # noqa: BLE001, S110 - fall through to explicit unavailable feedback
+                pass
         name = escape(str(member.get('username') or '—'))
         badge = self._whitelist_decoration(member) or '👤 '
         heading = f'🛠 <b>管理目标 · {name}</b>' if managing else badge + f'<b>{name}</b>'
@@ -3286,7 +3273,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                 if info['delete_at'] and not info['exempt']:
                     lines.append('到期保留至：' + datetime.fromtimestamp(info['delete_at'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间'))
                 if not public:
-                    lines.append('/activity 保号操作 · /webaccount Web资料卡')
+                    lines.append('私聊「我的账号 → 等级权益与保号」查看/续费')
             except Exception:  # noqa: BLE001 - explicitly unknown, never invent zero eligibility
                 lines.append('等级与续费资格暂不可读取')
         if not managing:
@@ -4381,13 +4368,21 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                                     text: str, in_group: bool) -> None:
         activity_command = text.lower().split('@')[0]
         actions = {'/renew30': 'renew', '/autorenew_on': 'auto:on', '/autorenew_off': 'auto:off',
-                   '/activity': 'status', '/webaccount': 'webaccount'}
+                   '/activity': 'status', '等级权益': 'status', '保号': 'status',
+                   '续费': 'renew', '续费30天': 'renew', '开启自动保号': 'auto:on', '关闭自动保号': 'auto:off'}
         if activity_command in actions:
             try:
                 reliable_user(message)
             except GroupPointsError:
                 return
-            await self._activity_action(chat_id, message['message_id'], self._member_for_chat(tg_user_id), actions[activity_command])
+            suffix = text.partition('@')[2]
+            self._check_bot_identity()
+            if suffix and suffix.lower() != self._bot_username.lower():
+                return
+            if (not in_group and str(chat_id) != tg_user_id or self._anonymous_sender(message)
+                    or type(message.get('message_id')) is not int or message['message_id'] <= 0):
+                return
+            await self._activity_action(chat_id, message['message_id'], self._member_for_chat(tg_user_id), actions[activity_command], actor=tg_user_id, in_group=in_group)
             return
         if self._checkin_command(text):
             with self._checkin_cleanup_context(message, command=True, actor=tg_user_id):
@@ -4710,7 +4705,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
             return
         if data.startswith('activity:'):
             await self._answer_callback(callback_id)
-            await self._activity_action(chat_id, int(message_id), self._member_for_chat(tg_user_id), data[len('activity:'):])
+            await self._activity_action(chat_id, int(message_id), self._member_for_chat(tg_user_id), data[len('activity:'):], actor=tg_user_id, in_group=in_group, callback=True)
             return
         if data in ('checkin', 'luckcheckin'):
             await self._answer_callback(callback_id)

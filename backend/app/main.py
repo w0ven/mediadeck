@@ -3754,4 +3754,4 @@ async def cached_image(item_id: str, image_type: str, request: Request) -> Respo
     return Response(content=data, media_type=content_type, headers=headers)
 
 
-activity_api.register(app, _auth, STATIC_DIR, _telegram_member_changed)
+activity_api.register(app, _auth)

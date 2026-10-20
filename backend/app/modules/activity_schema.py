@@ -53,9 +53,10 @@ def migrate(db):
         deletion_error TEXT NOT NULL DEFAULT '', deletion_updated_at INTEGER NOT NULL DEFAULT 0,
         deletion_lease INTEGER NOT NULL DEFAULT 0
     );
-    CREATE TABLE IF NOT EXISTS activity_web_tokens (
-        digest TEXT PRIMARY KEY, user_id TEXT NOT NULL, tg_user_id TEXT NOT NULL,
-        kind TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER
+    CREATE TABLE IF NOT EXISTS activity_renew_intents (
+        nonce TEXT PRIMARY KEY, user_id TEXT NOT NULL, tg_user_id TEXT NOT NULL,
+        chat_id TEXT NOT NULL, snapshot_json TEXT NOT NULL, expires_at INTEGER NOT NULL,
+        result_json TEXT
     );
     CREATE TABLE IF NOT EXISTS activity_effect_sync (
         user_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL DEFAULT '', bandwidth INTEGER,

@@ -194,20 +194,43 @@ class LevelService:
             self.members.audit(actor, 'activity.grant_lv8', uid, '管理员明确授予专属Lv8，期限与余额不变', conn=conn)
         return self.members.get(uid)
 
-    def set_auto(self, uid, enabled):
+    def set_auto(self, uid, enabled, *, tg_uid=None, binding_revision=None):
         if type(enabled) is not bool:
             raise ValueError("自动保号开关无效")
         with economy_write(self.db) as conn:
+            if tg_uid is not None:
+                owner = conn.execute('SELECT tg_user_id FROM members WHERE emby_user_id=?', (uid,)).fetchone()
+                if not owner or str(owner[0]) != str(tg_uid) or self.binding_revision(uid) != binding_revision:
+                    raise ValueError('账号绑定已变化，请重新确认')
             row = conn.execute("SELECT * FROM activity_members WHERE emby_user_id=?", (uid,)).fetchone()
             if not row or row['lifecycle'] != 'ready':
                 raise ValueError("账号尚未转入等级体系或删除结果待确认")
             conn.execute("UPDATE activity_members SET auto_renew=? WHERE emby_user_id=?", (int(enabled), uid))
         return {"ok": True, "auto_renew": enabled}
 
-    def renew(self, uid, request_id, *, now=None, automatic=False):
+    def binding_revision(self, uid):
+        return self.db.one("SELECT MAX(id) AS revision FROM audit_log WHERE subject=? AND action IN "
+                           "('member.telegram.bind','member.telegram.unbind','telegram.rebind.approved')", (uid,))['revision']
+
+    def renew(self, uid, request_id, *, now=None, automatic=False, bot_intent=None):
         now = int(time.time() if now is None else now)
         request = {"days": 30, "automatic": automatic}
         with economy_write(self.db) as conn:
+            intent = None
+            if bot_intent is not None:
+                nonce, tg_uid, chat_id = bot_intent
+                intent = conn.execute('SELECT * FROM activity_renew_intents WHERE nonce=?', (nonce,)).fetchone()
+                binding = conn.execute('SELECT tg_user_id FROM members WHERE emby_user_id=?', (uid,)).fetchone()
+                if (not intent or intent['user_id'] != uid or intent['tg_user_id'] != str(tg_uid)
+                        or intent['chat_id'] != str(chat_id) or not binding or str(binding[0]) != str(tg_uid)
+                        or request_id != 'bot-renew:'+nonce):
+                    raise ValueError('续费确认不属于当前账号，请重新预览')
+                if json.loads(intent['snapshot_json']).get('binding') != self.binding_revision(uid):
+                    raise ValueError('账号绑定已变化，请重新预览确认')
+                if intent['result_json']:
+                    return json.loads(intent['result_json'])
+                if intent['expires_at'] <= now:
+                    raise ValueError('续费确认已过期，请重新预览')
             cached = receipt(conn, 'activity.renew', request_id, uid, request)
             if cached is not None:
                 return cached
@@ -228,6 +251,11 @@ class LevelService:
                 raise ValueError(f"近30天有效观影{int(active['seconds'])}/4800秒，合格观看日{active['days']}/3，未达标")
             level = member['activity_level']
             cost = level['price']
+            if intent is not None:
+                snapshot = json.loads(intent['snapshot_json'])
+                if snapshot != {'expiry': expiry, 'price': cost, 'level': level['level'],
+                                'revision': self.config()['revision'], 'binding': self.binding_revision(uid)}:
+                    raise ValueError('期限或等级价格已变化，请重新预览确认')
             new_expiry = max(now, int(expiry))+30*DAY
             balance = self.points._apply(conn, uid, -cost, 'activity.renew', request_id, 'activity', now)
             self.write_expiry(conn, uid, member, new_expiry, now)
@@ -235,6 +263,8 @@ class LevelService:
                       "cost": cost, "balance": balance, "days": 30, "level": level['level'],
                       "config_revision": self.config()['revision'], "remote_ok": None}
             save_receipt(conn, 'activity.renew', request_id, uid, request, result)
+            if intent is not None:
+                conn.execute('UPDATE activity_renew_intents SET result_json=? WHERE nonce=?', (encode(result), nonce))
             self.members.audit('activity', 'activity.renew', uid, encode(result), conn=conn)
             return result
 
