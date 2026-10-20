@@ -281,7 +281,8 @@ def test_personal_and_admin_watch_totals_survive_prune(bot):
     assert s['historical_unverified_seconds'] == 600
     bot._stats.prune(400)
     assert bot._stats.watch_summary('u1')['historical_unverified_seconds'] == 600
-    assert "近30天：<b>1分</b>" in bot._user_card(bot.members.get("u1"))
+    assert "近30天：<b>1分</b>" in bot._account_card(bot.members.get("u1"))
+    assert '观看记录' not in bot._user_card(bot.members.get('u1'))  # /kk keeps details behind its buttons
     detail = bot._admin_details(bot.members.get("u1"))
     assert '累计观看：10分' in detail
     assert '历史未核验' not in detail

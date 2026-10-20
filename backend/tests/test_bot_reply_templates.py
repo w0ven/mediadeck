@@ -170,19 +170,45 @@ def test_unknown_values_never_become_zero_or_unlimited():
     assert '有效期：暂不可用' in body
     account = bot._account_card({'emby_user_id': 'demo'})
     assert '有效期：暂不可用' in account
-    assert '同时播放：暂不可用' in account and '设备分组：暂不可用' in account
+    assert '同播：暂不可用' in account and '设备分组：暂不可用' in account
     assert '累计观看：<b>暂不可用</b>' in account
     bot._points = SimpleNamespace(balance=lambda uid: (_ for _ in ()).throw(OSError()))
     assert '余额：<b>暂不可用</b>' in bot._points_text({'emby_user_id': 'demo'})
     assert '流水暂不可用' in bot._points_text({'emby_user_id': 'demo'})
 
 
+@pytest.mark.parametrize('compact', [False, True])
 @pytest.mark.parametrize('kbps,expected', [(125829, '125.8 Mbps'), (20000, '20.0 Mbps'),
                                            (999, '999 kbps'), (0, '不限'), (None, '暂不可用')])
-def test_bandwidth_rounding_is_display_only(kbps, expected):
+def test_bandwidth_rounding_is_display_only(kbps, expected, compact):
     member = {'bandwidth_limit_kbps': kbps}
-    assert expected in '\n'.join(bandwidth_lines(member))
+    lines = bandwidth_lines(member, compact=compact)
+    assert expected in '\n'.join(lines)
+    assert lines == [('🚀 ' if compact else '') + f'带宽：<b>{expected}</b>']
     assert member['bandwidth_limit_kbps'] == kbps
+
+
+@pytest.mark.parametrize('member,label,used,remaining', [
+    ({'quota_source': 'measured'}, '本月流量', '计量暂不可用', '暂无法确认'),
+    ({'quota_source': 'measured', 'measured_used_bytes': 0, 'traffic_quota_bytes': 0},
+     '本月流量', '0 B', '不限'),
+    ({'quota_source': 'measured', 'measured_used_bytes': 1024**3,
+      'traffic_quota_bytes': 10 * 1024**3}, '本月流量', '1.0 GiB', '9.0 GiB'),
+    ({'quota_source': 'measured', 'traffic_quota_bytes': 10 * 1024**3,
+      'metering': {'measurement_status': 'no_usage_records', 'coverage': {'degraded': False}}},
+     '本月流量', '本周期暂无播放记录', '10.0 GiB'),
+    ({'traffic_used_bytes': 3 * 1024**3, 'traffic_quota_bytes': 2 * 1024**3},
+     '本月流量（估算）', '3.0 GiB', '0 B'),
+])
+def test_compact_quota_preserves_measurements_and_original_admin_layout(member, label, used, remaining):
+    import copy
+
+    before = copy.deepcopy(member)
+    original = [f'<b>{label}</b>', f'已用：<b>{used}</b>', f'剩余：<b>{remaining}</b>']
+    assert quota_lines(member) == original
+    assert quota_lines(member, compact=False) == original
+    assert quota_lines(member, compact=True) == ['📊 ' + original[0], original[1] + ' · ' + original[2]]
+    assert member == before
 
 
 def test_card_and_password_html_escape_real_inputs():

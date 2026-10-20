@@ -2,6 +2,38 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Preserve final deployed Bot UX in integration PR #159
+
+- Include the final deployed independent check-in entry, account renewal controls,
+  whitelist presentation and compact member/admin views. Runtime Bot sources match
+  that final changeset exactly; playback admission repair sources remain unchanged.
+- Resolve the check-in test overlap to the final deployed version. Format one new
+  test import and align five legacy Telegram tests with the already deployed menu
+  and ranking labels; retain exact action sets and all behavioral safety assertions.
+- Final local full-suite coverage: 4862 passed, 79 optional-runtime skips,
+  2 subtests, across disjoint batches and the corrected Telegram-file rerun
+  (105 passed). Five stale display/menu assertions initially failed and were
+  corrected without runtime changes; none are waived. Ruff/mock startup passed.
+- Continue the existing PR #159 with final-head CI; publish under an unused tag.
+  Existing tags and prior validation records remain intact. Live rollout follows
+  backend -> gateway -> nginx, with all local deployment edits preserved.
+
+## 2026-10-21 — Integrate deployed Bot copy with playback admission repair
+
+- Preserve the deployed member Bot copy and its safety-contract tests alongside
+  the playback admission repair from PR #158; no runtime source changes beyond
+  these two existing changesets. Keep existing release tags immutable.
+- Align three legacy check-in display assertions with the deployed icon labels:
+  check exact streak-bonus and item-drop lines separately, retaining reward,
+  balance, inventory and frozen-history checks. No business rule changes.
+- New integration baseline: 4845 passed, 79 optional-runtime skips, 2 subtests
+  across disjoint full-suite batches plus the updated test-file rerun. The first
+  batch exposed 12 stale display assertions; all 22 cases in that file passed
+  after the test-only correction. No failed test is waived.
+- Next: new PR/CI and a unique release tag, followed by the documented staged
+  rollout and bounded live validation. Preserve both existing features and local
+  deployment edits; never replace the running Bot work with the repair alone.
+
 ## 2026-10-21 — Isolate playback admission latency and remove duplicate gates
 
 - Serialize admission, metadata issuance, lifecycle binding and violation proof

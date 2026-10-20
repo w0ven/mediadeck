@@ -76,7 +76,7 @@ def test_real_service_private_group_only_actual_award_lines_history_and_balance(
             assert escape(drop_name) in plain
             assert len(env.services.bag.items('u1'))==1
         if not bonus and effective_multiplier==1 and not drop:
-            assert plain.splitlines()==['✅ <b>签到成功</b>',f'积分 <b>{award:+d}</b>',f'余额 <b>{before_balance+award}</b>']
+            assert plain.splitlines()==['✅ <b>签到成功</b>',f'🪙 积分 <b>{award:+d}</b> · 余额 <b>{before_balance+award}</b>']
         if chat==GROUP:assert '&lt;Viewer&gt;' in body and ' 的签到' in body
         ledger=copy.deepcopy(env.services.points.ledger('u1'))
         # Current config changes cannot rewrite frozen history on a second check-in.
