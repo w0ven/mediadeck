@@ -2,6 +2,22 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Preserve final deployed Bot UX in integration PR #159
+
+- Include the final deployed independent check-in entry, account renewal controls,
+  whitelist presentation and compact member/admin views. Runtime Bot sources match
+  that final changeset exactly; playback admission repair sources remain unchanged.
+- Resolve the check-in test overlap to the final deployed version. Format one new
+  test import and align five legacy Telegram tests with the already deployed menu
+  and ranking labels; retain exact action sets and all behavioral safety assertions.
+- Final local full-suite coverage: 4862 passed, 79 optional-runtime skips,
+  2 subtests, across disjoint batches and the corrected Telegram-file rerun
+  (105 passed). Five stale display/menu assertions initially failed and were
+  corrected without runtime changes; none are waived. Ruff/mock startup passed.
+- Continue the existing PR #159 with final-head CI; publish under an unused tag.
+  Existing tags and prior validation records remain intact. Live rollout follows
+  backend -> gateway -> nginx, with all local deployment edits preserved.
+
 ## 2026-10-21 — Integrate deployed Bot copy with playback admission repair
 
 - Preserve the deployed member Bot copy and its safety-contract tests alongside

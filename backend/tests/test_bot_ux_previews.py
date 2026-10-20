@@ -4,7 +4,13 @@ import time
 from pathlib import Path
 
 from test_activity_bot import (  # noqa: F401
-    bot_env, economy_env, env, find_action, interaction_env, private_command, tap,
+    bot_env,
+    economy_env,
+    env,
+    find_action,
+    interaction_env,
+    private_command,
+    tap,
 )
 from test_bot_reply_templates import plain
 from test_tg_interaction_context import VIEWER

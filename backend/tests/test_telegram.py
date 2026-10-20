@@ -565,7 +565,7 @@ def test_rankings_list_both_viewers_and_titles() -> None:
     assert "alice" not in text
     assert "Some Show" in text and "40" in text
     assert "A Film" in text
-    assert "▎电影" in text and "▎电视剧" in text
+    assert "🎬 <b>电影</b>" in text and "📺 <b>电视剧</b>" in text
 
 
 def test_rankings_say_so_when_there_is_nothing_yet() -> None:
@@ -578,7 +578,7 @@ def test_rankings_say_so_when_there_is_nothing_yet() -> None:
 
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_Empty())
-    assert "还没有排行数据" in bot._rankings_text(1)
+    assert "📭 暂无排行数据" in bot._rankings_text(1)
 
 
 def test_a_broken_stats_source_does_not_crash_the_bot() -> None:
@@ -973,17 +973,17 @@ def _actions(keyboard) -> set:
 
 
 def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
-    """Identity and backpack are the entry points; details hang off them."""
+    """Check-in is independent; account/backpack details retain their submenus."""
     bot = _points_bot(enabled={"checkin", "points_transfer"})
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
-                              "help"}
+                              "help", "checkin"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "devices", "resetpw", "delete_account", "home", "rebind", "me"}
-    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "checkin", "transfer", "inventory", "titles"}
+    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "transfer", "inventory", "titles"}
 
 
 def test_the_backpack_holds_invites_shop_and_history() -> None:
@@ -1266,7 +1266,7 @@ def test_the_ranking_gains_a_points_section() -> None:
     bot = TelegramBot(lambda: {"enabled": False, "bot_token": ""},
                       _FakeMembers(), stats=_FakeStats(), points=_FakePoints())
     text = bot._rankings_text(1)
-    assert "播放日榜" in text and "▎电影" in text
+    assert "播放日榜" in text and "🎬 <b>电影</b>" in text
     assert "alice" not in text
 
 
@@ -1730,8 +1730,8 @@ def test_member_rankings_keep_scores_and_home_without_period_switches() -> None:
     assert "本周观影榜" in bot._watch_rankings_text(168)
     heat = bot._heat_rankings_text(1)
     assert "今日热度排行" in heat
-    assert "▎电影" in heat and "A Film" in heat
-    assert "▎电视剧" in heat and "Some Show" in heat
+    assert "🎬 <b>电影</b>" in heat and "A Film" in heat
+    assert "📺 <b>电视剧</b>" in heat and "Some Show" in heat
 
 
 # -- response latency -------------------------------------------------------
