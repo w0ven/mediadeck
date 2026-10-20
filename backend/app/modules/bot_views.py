@@ -94,7 +94,7 @@ def bytes_label(value: int | None) -> str:
     return ""
 
 
-def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
+def quota_lines(member: dict[str, Any], *, public: bool = False, compact: bool = False) -> list[str]:
     measured = member.get("quota_source") == "measured"
     sample = member.get("metering") or {}
     used = member.get("measured_used_bytes") if measured else member.get("traffic_used_bytes")
@@ -108,13 +108,16 @@ def quota_lines(member: dict[str, Any], *, public: bool = False) -> list[str]:
     remaining = ('暂无法确认' if quota is None else '不限' if not quota else
                  bytes_label(quota) if no_records else
                  bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
+    # Opt in only on member pages; admin cards retain their original layout.
+    if compact:
+        return [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b> · 剩余：<b>{remaining}</b>']
     lines = [f'<b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
     return lines
 
 
-def bandwidth_lines(member: dict[str, Any]) -> list[str]:
+def bandwidth_lines(member: dict[str, Any], *, compact: bool = False) -> list[str]:
     raw = member.get('bandwidth_limit_kbps')
     bw = int(raw) if raw is not None else None
     cap = ('暂不可用' if bw is None else
            f'{bw / 1000:.1f} Mbps' if bw >= 1000 else f'{bw} kbps' if bw else '不限')
-    return [f'带宽：<b>{cap}</b>']
+    return [('🚀 ' if compact else '') + f'带宽：<b>{cap}</b>']

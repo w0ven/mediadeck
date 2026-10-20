@@ -1089,10 +1089,10 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
         if self._registration_open():
             rows.append([{"text": "🆕 注册账号", "callback_data": "register"}])
         rows.append([
-            {"text": "TG 换绑", "callback_data": "rebind"},
+            {"text": "🔗 TG 换绑", "callback_data": "rebind"},
             {"text": "📜 准则", "callback_data": "rules"},
         ])
-        rows.append([{"text": "帮助", "callback_data": "help"}])
+        rows.append([{"text": "💡 帮助", "callback_data": "help"}])
         join = self._group_join_button()
         if join:
             rows.append([join])
@@ -1117,9 +1117,9 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             [{"text": "👤 我的账号", "callback_data": "me"},
              {"text": "🌐 播放线路", "callback_data": "me_nodes"}],
             [{"text": "🎬 求片中心", "callback_data": "request_center"},
-             {"text": "🎒 积分背包", "callback_data": "bag"}],
+             {"text": "🎒 签到背包", "callback_data": "bag"}],
             [{"text": "🏆 排行榜", "callback_data": "rank"},
-             {"text": "帮助", "callback_data": "help"}],
+             {"text": "💡 帮助", "callback_data": "help"}],
         ]
         play = []
         if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice'):
@@ -1142,7 +1142,7 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             [{"text": "📺 设备", "callback_data": "devices"},
              {"text": "🔑 修改密码", "callback_data": "resetpw"}],
             [{"text": "🔗 TG 换绑", "callback_data": "rebind"},
-             {"text": "刷新", "callback_data": "me"}],
+             {"text": "🔄 刷新", "callback_data": "me"}],
             [{"text": "🗑 删除账号", "callback_data": "delete_account"}],
             [{"text": "◀ 功能首页", "callback_data": "home"}],
         ]
@@ -1312,14 +1312,14 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             bits.append(self._group_label(member))
         bits.append(_member_expiry_label(member))
         lines = [
-            self._whitelist_decoration(member) + "<b>MediaDeck · 我的影库</b>\n",
-            f"{escape(str(member.get('username') or '成员'))}，欢迎回来",
+            self._whitelist_decoration(member) + "🎬 <b>MediaDeck · 我的影库</b>\n",
+            f"👋 {escape(str(member.get('username') or '成员'))}，欢迎回来",
             " · ".join(bits),
         ]
         user_id = str(member.get("emby_user_id") or "")
         balance = self._balance(user_id)
         if balance or self._plugin_on("checkin") or self._plugin_on("points_transfer"):
-            lines.append(f"积分 <b>{balance}</b>")
+            lines.append(f"🪙 积分 <b>{balance}</b>")
         return "\n".join(lines), self._with_admin_row(self.member_menu(), member)
 
     def _guest_home(self, tg_name: str) -> str:
@@ -1332,20 +1332,20 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             channels.append("卡密")
         lines = [f"👋 你好，{escape(str(tg_name))}\n"]
         if open_:
-            lines.append("<b>MediaDeck · 开放注册</b>\n")
+            lines.append("🟢 <b>MediaDeck · 开放注册</b>\n")
             if channels:
                 how = "或".join(channels)
-                lines.append(f"没有账号：用{how}即可开通")
+                lines.append(f"✨ 没有账号：凭{how}开通")
             else:
-                lines.append("管理员已授权的用户可以直接注册。")
-            lines.append("已有账号请使用原 TG；更换 TG 可申请换绑。")
+                lines.append("✨ 已获管理员授权可直接注册")
+            lines.append("🔄 已有账号：请用原 TG；换号请申请换绑")
         else:
-            lines.append("<b>MediaDeck · 暂停注册</b>\n")
-            lines.append("已有用户请使用已绑定的 Telegram；更换 TG 可申请换绑。")
+            lines.append("🔴 <b>MediaDeck · 暂停注册</b>\n")
+            lines.append("🔄 已有账号：请用已绑定的 TG；换号请申请换绑")
         rules = self.membership.rules() if self.membership else {}
         if rules.get("gate_enabled") and any(
                 t.get("enabled") for t in (rules.get("targets") or [])):
-            lines.append("\n使用前需要先加入关联群组并关注频道。")
+            lines.append("\n📢 使用前需先加入关联群组并关注频道")
         return "\n".join(lines)
 
     # -- registration ---------------------------------------------------------
@@ -1759,13 +1759,13 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
         points go', and the answer is already written down.
         """
         user_id = str(member.get("emby_user_id") or "")
-        lines = [f"💰 <b>我的积分</b>\n\n当前余额：<b>{self._balance(user_id)}</b>"]
+        lines = [f"💰 <b>我的积分</b>\n\n🪙 当前余额：<b>{self._balance(user_id)}</b>"]
         rows: list[dict[str, Any]] | None = None
         if self._points is not None:
             with contextlib.suppress(Exception):
                 rows = self._points.ledger(user_id, limit=5)
         if rows:
-            lines.append("\n<b>最近流水</b>")
+            lines.append("\n📜 <b>最近流水</b>")
             for row in rows:
                 delta = int(row.get("delta") or 0)
                 when = time.strftime("%m-%d %H:%M",
@@ -1775,7 +1775,7 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
                     f"{when} · {escape(str(row.get('reason_label') or row.get('reason')))} "
                     f"· <b>{sign}{delta}</b>")
         else:
-            lines.append("\n流水暂不可用。" if rows is None else "\n暂无积分记录。")
+            lines.append("\n⚠️ 流水暂不可用" if rows is None else "\n📭 暂无积分记录")
         return "\n".join(lines)
 
     @staticmethod
@@ -1806,14 +1806,14 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             await self._checkin_feedback(chat_id, message_id, text, name, keyboard)
 
         if not member:
-            await feedback("🔗 请先私聊Bot绑定系统账号，再来签到。")
+            await feedback("🔗 请先私聊Bot绑定账号再来签到")
             return
         plugin = self._plugin("checkin")
         if plugin is None:
-            await feedback("⏳ 签到服务暂不可用，请稍后重试或联系管理员。")
+            await feedback("⏳ 签到服务暂不可用，请稍后或联系管理员")
             return
         if not self._plugin_on("checkin"):
-            await feedback("签到功能未开启，请联系管理员。")
+            await feedback("🛑 签到功能未开启，请联系管理员")
             return
         user_id = str(member.get("emby_user_id") or "")
         try:
@@ -1823,26 +1823,26 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             return
         if not result.get("ok"):
             saved = result.get('saved_result') or {}
-            final = (f"今日最终奖励：<b>{saved['points']}</b>\n"
+            final = (f"✨ 今日最终奖励：<b>{saved['points']}</b>\n"
                      if saved.get('calculation_version') == 'dual-checkin-v1' else '')
             await feedback(
                 f"📅 {escape(str(result.get('reason') or '今天已签到'))}\n\n" + final +
-                f"当前余额：<b>{result.get('balance', self._balance(user_id))}</b>")
+                f"💰 当前余额：<b>{result.get('balance', self._balance(user_id))}</b>")
             return
         lines = ["✅ <b>签到成功</b>",
-                 f"积分 <b>{int(result.get('points') or 0):+d}</b>",
-                 f"余额 <b>{result.get('balance')}</b>"]
+                 f"🪙 积分 <b>{int(result.get('points') or 0):+d}</b>",
+                 f"💰 余额 <b>{result.get('balance')}</b>"]
         if result.get("calculation_version") == "dual-checkin-v1":
-            lines.append(f"连续签到 {result['streak']} 天")
+            lines.append(f"🔥 连续签到 {result['streak']} 天")
             if result.get("previous_points"):
-                lines.append(f"覆盖原奖励 {result['previous_points']}，本次净调整 {result['delta']:+d}")
+                lines.append(f"🔄 覆盖原奖励 {result['previous_points']}，本次净调整 {result['delta']:+d}")
             if result.get("mode") == "normal":
                 lines.append("🍀 /luckcheckin 运气签到：" + result['warning'])
             else:
-                lines.append("🍀 今日运气结果已锁定，不可重抽或恢复普通。")
+                lines.append("🍀 今日运气结果已锁定，不可重抽或恢复普通")
         bonus = int(result.get("bonus") or 0)
         if bonus > 0:
-            lines.append(f"连签奖励 <b>+{bonus}</b>")
+            lines.append(f"🎁 连签奖励 <b>+{bonus}</b>")
         multiplier = int(result.get("multiplier") or 1)
         if multiplier > 1:
             lines.append(f"🍀 幸运 ×{multiplier}")
@@ -5046,16 +5046,16 @@ class TelegramBot(ActivityBotMixin, GroupCommandCleanupMixin, AccountBotMixin, P
             return
         if data == "bag_records":
             await self._edit(chat_id, message_id, "📜 <b>背包流水</b>",
-                             [[{"text": "积分流水", "callback_data": "me_points"},
-                               {"text": "兑换记录", "callback_data": "orders"}],
+                             [[{"text": "🪙 积分流水", "callback_data": "me_points"},
+                               {"text": "🛍 兑换记录", "callback_data": "orders"}],
                               [{"text": "◀ 背包", "callback_data": "bag"}]])
             return
         if data == "bag":
             await self._edit(
                 chat_id, message_id,
-                "🎒 <b>背包</b>\n\n"
-                f"当前积分：<b>{self._balance(str(member.get('emby_user_id')))}</b>\n\n"
-                "这里是你的邀请码、可兑换的商品和兑换记录。",
+                "🎒 <b>签到与背包</b>\n\n"
+                f"🪙 当前积分：<b>{self._balance(str(member.get('emby_user_id')))}</b>\n\n"
+                "📦 邀请码 · 道具 · 兑换记录",
                 self.bag_menu())
             return
         if data.startswith('notice:'):

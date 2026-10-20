@@ -84,6 +84,31 @@ def test_private_card_complete_compact_and_renew_preview_confirmation_retry(env)
     assert not e.db.query('SELECT * FROM activity_watch_days')  # read/preview never settles
 
 
+def test_activity_member_pages_escape_dynamic_text_and_fit_telegram(env, monkeypatch):
+    from test_bot_reply_templates import plain
+
+    e = env
+    member = e.members.get('u1')
+    member.update(username='<b>Demo&😀</b>', note='<i>Note&</i>')
+    info = e.levels.status('u1')
+    info['worn_title'] = '<u>Title&</u>'
+    monkeypatch.setattr(e.levels, 'status', lambda uid: info)
+    account = e.bot._account_card(member)
+    e.bot._edit = AsyncMock()
+    asyncio.run(e.bot._activity_action(VIEWER, 1, member, 'status',
+                                      actor=str(VIEWER), callback=True))
+    details, keyboard = e.bot._edit.await_args.args[2:]
+    for body in (account, details):
+        assert '&lt;b&gt;Demo&amp;😀&lt;/b&gt;' in body
+        assert '&lt;u&gt;Title&amp;&lt;/u&gt;' in body
+        assert len(plain(body).encode('utf-16-le')) // 2 <= 4096
+    assert '&lt;i&gt;Note&amp;&lt;/i&gt;' in details
+    for text in ('最终有效权益', '已用：', '剩余：', '满10分钟', '到期停播',
+                 '72小时', '管理员开关和复核', '非发奖依据'):
+        assert text in details
+    assert all(len(button['callback_data'].encode()) <= 64 for row in keyboard for button in row)
+
+
 @pytest.mark.parametrize('change,reason', [('money','还缺'),('watch','有效日'),('early','72小时'),('deleting','待确认')])
 def test_unqualified_preview_explains_without_confirm_or_charge(env, change, reason):
     e = env
@@ -158,15 +183,31 @@ def test_other_actor_forged_private_or_group_callbacks_never_charge_or_enable(en
     assert not e.db.query('SELECT * FROM activity_members WHERE auto_renew=1')
 
 
-def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env):
+@pytest.mark.parametrize('entry', ['button', '等级权益', '开启自动保号'])
+def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
     e = env
+    balance = e.services.points.balance('u1')
     async def run():
-        mid = await private_command(e, '等级权益')
-        await tap(e, 'activity:auto:on', mid)
-        assert '默认关闭' in e.tg.text(VIEWER, mid) and '自动按当时等级价格扣积分' in e.tg.text(VIEWER, mid)
+        if entry == 'button':
+            mid = await private_command(e, '/me')
+            await tap(e, 'activity:status', mid)
+        else:
+            mid = await private_command(e, entry)
+        if entry != '开启自动保号':
+            await tap(e, 'activity:auto:on', mid)
+        body = e.tg.text(VIEWER, mid)
+        for text in ('默认关闭', '主动确认', '到期前24小时', '近30天80分钟', '3有效日',
+                     '每天核验满10分钟', '余额充足', '自动按当时等级价格扣积分续30天',
+                     '未达标不扣费', '不解除人工禁用', '到期停播', '72小时', '管理员开关和复核'):
+            assert text in body
+        confirm = find_action(e, mid, 'activity:auto-confirm:')
+        assert '确认开启自动扣分续期' in next(b['text'] for b in actions(e, mid)
+                                             if b['callback_data'] == confirm)
         assert not e.members.get('u1')['auto_renew']
-        await tap(e, find_action(e, mid, 'activity:auto-confirm:'), mid)
+        assert e.services.points.balance('u1') == balance
+        await tap(e, confirm, mid)
         assert e.members.get('u1')['auto_renew']
+        assert e.services.points.balance('u1') == balance
         await tap(e, 'me', mid)
         assert '自动保号：已开启' in e.tg.text(VIEWER, mid)
         await private_command(e, '关闭自动保号')
@@ -285,7 +326,9 @@ def test_lost_confirmation_result_has_safe_same_intent_retry(env, monkeypatch):
         confirm = find_action(e, mid, 'activity:confirm:')
         monkeypatch.setattr(e.levels, 'renew', lost)
         await tap(e, confirm, mid)
-        assert '暂未确认' in e.tg.text(VIEWER, mid)
+        body = e.tg.text(VIEWER, mid)
+        assert '暂未确认' in body and '勿重复购买' in body
+        assert not any(text in body for text in ('未扣费', '操作成功', 'simulated lost response'))
         assert find_action(e, mid, 'activity:confirm:') == confirm
         balance = e.services.points.balance('u1')
         monkeypatch.setattr(e.levels, 'renew', original)
