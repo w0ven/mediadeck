@@ -2,6 +2,22 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Integrate deployed Bot copy with playback admission repair
+
+- Preserve the deployed member Bot copy and its safety-contract tests alongside
+  the playback admission repair from PR #158; no runtime source changes beyond
+  these two existing changesets. Keep existing release tags immutable.
+- Align three legacy check-in display assertions with the deployed icon labels:
+  check exact streak-bonus and item-drop lines separately, retaining reward,
+  balance, inventory and frozen-history checks. No business rule changes.
+- New integration baseline: 4845 passed, 79 optional-runtime skips, 2 subtests
+  across disjoint full-suite batches plus the updated test-file rerun. The first
+  batch exposed 12 stale display assertions; all 22 cases in that file passed
+  after the test-only correction. No failed test is waived.
+- Next: new PR/CI and a unique release tag, followed by the documented staged
+  rollout and bounded live validation. Preserve both existing features and local
+  deployment edits; never replace the running Bot work with the repair alone.
+
 ## 2026-10-21 — Isolate playback admission latency and remove duplicate gates
 
 - Serialize admission, metadata issuance, lifecycle binding and violation proof

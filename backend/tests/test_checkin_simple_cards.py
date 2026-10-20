@@ -71,12 +71,16 @@ def test_real_service_private_group_only_actual_award_lines_history_and_balance(
         assert ('连签奖励' in plain)==(bonus>0)
         if bonus>0:assert f'连签奖励 <b>+{bonus}</b>' in plain
         assert ('🍀 幸运' in plain)==(effective_multiplier>1)
-        assert ('🎁' in plain)==drop
+        # The member copy uses the gift icon for both streak bonuses and items.
+        gift_lines = ([f'🎁 连签奖励 <b>+{bonus}</b>'] if bonus > 0 else [])
+        if drop:
+            gift_lines.append('🎁 ' + escape(drop_name))
+        assert [line for line in plain.splitlines() if line.startswith('🎁 ')] == gift_lines
         if drop:
             assert escape(drop_name) in plain
             assert len(env.services.bag.items('u1'))==1
         if not bonus and effective_multiplier==1 and not drop:
-            assert plain.splitlines()==['✅ <b>签到成功</b>',f'积分 <b>{award:+d}</b>',f'余额 <b>{before_balance+award}</b>']
+            assert plain.splitlines()==['✅ <b>签到成功</b>',f'🪙 积分 <b>{award:+d}</b>',f'💰 余额 <b>{before_balance+award}</b>']
         if chat==GROUP:assert '&lt;Viewer&gt;' in body and ' 的签到' in body
         ledger=copy.deepcopy(env.services.points.ledger('u1'))
         # Current config changes cannot rewrite frozen history on a second check-in.
@@ -111,6 +115,8 @@ def test_frozen_legacy_success_fields_render_without_recomputing_or_mutating_his
     body=core(posted(env)[-1]['text'])
     assert f'积分 <b>{points:+d}</b>' in body and '余额 <b>115</b>' in body
     assert ('连签奖励' in body)==bool(bonus)
-    assert all(word not in body for word in ('连续签到','基础','×1','%','幸运','🎁'))
+    assert all(word not in body for word in ('连续签到','基础','×1','%','幸运'))
+    assert [line for line in body.splitlines() if line.startswith('🎁 ')] == (
+        [f'🎁 连签奖励 <b>+{bonus}</b>'] if bonus else [])
     assert saved==original
     assert {table:env.db.query('SELECT * FROM '+table) for table in before}==before
