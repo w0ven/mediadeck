@@ -181,13 +181,42 @@ def verified_watch_interval(before: dict | None, current: dict, observed_gap: fl
     if before['rate'] != current['rate']:
         return 0, 0, 'rate_changed'
     expected = elapsed * current['rate']
-    # Heartbeat clocks and decoded positions have bounded subsecond jitter.
-    # Never credit a position jump, buffering gap, or more than elapsed time.
-    if abs(progress - expected) > max(0.75, expected * 0.05):
+    # Accepted reports use arrival time, which includes bounded network jitter.
+    # Poll snapshots retain their stricter activity-clock check.
+    jitter = current['rate'] * min(2, elapsed * 0.2) if current.get('accepted_report') else 0
+    if abs(progress - expected) > max(0.75, expected * 0.05, jitter):
         return 0, 0, 'seek_or_buffering'
     end = current['activity']
     start = max(since, before.get('anchor_floor', before['activity']),
                 end - min(elapsed, progress / current['rate']))
+    return (start, end, '') if end > start else (0, 0, 'before_verification')
+
+
+def continuous_watch_interval(before: dict, current: dict, since: float) -> tuple[float, float, str]:
+    elapsed = current['activity'] - before['activity']
+    progress = current['position'] - before['position']
+    if not 0 < elapsed <= WATCH_HEARTBEAT_MAX_AGE:
+        return 0, 0, 'seek_or_buffering'
+    speed = progress / elapsed
+    if not max(1.1 * current['rate'], current['rate'] + 0.1) < speed <= 4:
+        return 0, 0, 'seek_or_buffering'
+    intervals = [*(before.get('continuous_intervals') or []), (elapsed, progress)][-3:]
+    duration = sum(pair[0] for pair in intervals)
+    distance = sum(pair[1] for pair in intervals)
+    average = distance / duration
+    if any(abs(distance - average * seconds) >
+           max(0.75, average * seconds * 0.05, average * min(2, seconds * 0.25)) + 0.000001
+           for seconds, distance in intervals):
+        intervals = [(elapsed, progress)]
+        duration = elapsed
+    current['continuous_intervals'] = intervals
+    if len(intervals) < 3 or duration < 20:
+        return 0, 0, 'seek_or_buffering'
+    # Repeated advancing reports can establish continuity, not an actual rate.
+    # Credit only this interval; never backfill the candidate windows.
+    current['credit_basis'] = 'continuous_progress'
+    end = current['activity']
+    start = max(since, before.get('anchor_floor', before['activity']), end-elapsed)
     return (start, end, '') if end > start else (0, 0, 'before_verification')
 
 
@@ -350,7 +379,8 @@ class UsageSampler:
             counts['progress_'+key] = min(1_000_000_000, int(counts.get('progress_'+key) or 0)+1)
         summary = {'source': source, 'reason': key, 'binding': observation.get('binding_source'),
                    'position': observation.get('position'),
-                   'rate': observation.get('rate'), 'timing_basis': observation.get('timing_basis', 'rate_verified'),
+                   'rate': observation.get('rate'),
+                   'timing_basis': observation.get('credit_basis') or observation.get('timing_basis', 'rate_verified'),
                    'credited_seconds': credited,
                    'attempt_at': max(attempt_at, float(previous.get('attempt_at') or 0)),
                    'counts': counts}
@@ -365,6 +395,11 @@ class UsageSampler:
     def _proof(self, state: dict, observation: dict, gap: float, source: str) -> tuple[float, float, str]:
         before = state.get('watch_observation') if state.get('watch_source', 'poll') == source else None
         start, end, reason = verified_watch_interval(before, observation, gap, self._verified_since)
+        if (source == 'progress' and reason == 'seek_or_buffering' and before
+                and not before.get('reason') and not observation.get('reason')
+                and observation.get('rate') is not None
+                and before.get('rate') == observation['rate']):
+            start, end, reason = continuous_watch_interval(before, observation, self._verified_since)
         if end > start:
             start = max(start, float(state.get('last_verified_end') or 0))
             if end <= start:
@@ -444,6 +479,7 @@ class UsageSampler:
             'NowPlayingItem': {'Id': item, 'RunTimeTicks': state.get('runtime_ticks')},
             'PlayState': {'PositionTicks': position, 'IsPaused': paused, 'PlaybackRate': rate},
             'LastActivityDate': datetime.fromtimestamp(received_at, UTC).isoformat()}, now)
+        observation['accepted_report'] = True
         if missing_rate:
             observation['timing_basis'] = 'accepted_progress'
             if observation['reason'] == 'rate_unknown':
@@ -453,7 +489,7 @@ class UsageSampler:
             observation['reason'] = 'seek_or_buffering'
         signature = [observation['position'], paused, observation['rate']]
         if signature == state.get('report_signature') and not observation['reason']:
-            if missing_rate and received_at-float(state.get('report_received_at') or received_at) > 2:
+            if received_at-float(state.get('report_received_at') or received_at) > 2:
                 observation['reason'] = 'stalled_or_rewound'
             else:
                 self._diagnose(uid, observation, now, 'progress', 'duplicate_progress', attempt_at=received_at)
@@ -788,7 +824,8 @@ class UsageSampler:
                     (key, state['user_id'], state.get('item_id') or '', state.get('item_name') or '',
                      state.get('item_type') or '', state.get('series_name') or '', state.get('client') or '',
                      state.get('play_method') or '', start, end, end-start,
-                     before['position'], current['position'], current['rate'])).rowcount
+                     before['position'], current['position'],
+                     None if current.get('credit_basis') == 'continuous_progress' else current['rate'])).rowcount
                 if added:
                     conn.execute('INSERT INTO watch_verified_totals VALUES(?,?,?,?) '
                                  'ON CONFLICT(emby_user_id) DO UPDATE SET seconds=seconds+excluded.seconds,'
