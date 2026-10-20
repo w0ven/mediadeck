@@ -1596,13 +1596,22 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
 
 
 async def _admit_playback(request: Request, item_id: str,
-                          query: dict[str, str], *, reserve: bool = True) -> str:
+                          query: dict[str, str], *, reserve: bool = True,
+                          original_uri: str | None = None) -> str:
     token = caller_token(request.headers, query)
     device = caller_device(request.headers, query)
     headers = {"Cache-Control": "private, no-store"}
     if not token:
         raise HTTPException(401, "playback authentication required", headers=headers)
     entry = app.state.whitelist_route.entry(request.headers)
+    if entry and entry.whitelist_only:
+        # Direct issuers no longer rely on nginx's separate route-admit call.
+        # Keep its strict URI/duplicate-query checks before dict parsing loses
+        # ambiguity. Only playback_admit supplies its explicit subrequest URI.
+        raw_uri = original_uri if original_uri is not None else (
+            request.scope["raw_path"].decode("latin-1") + "?"
+            + request.scope["query_string"].decode("latin-1"))
+        target(raw_uri)
     strict_uid = (await app.state.whitelist_route.user(request.headers, query)
                   if entry and entry.whitelist_only else None)
     try:
@@ -1792,7 +1801,8 @@ async def playback_admit(request: Request) -> Response:
                          original.path, re.IGNORECASE)
     if not match:
         raise HTTPException(403, "unsupported playback path")
-    await _admit_playback(request, match[1], dict(parse_qsl(original.query)))
+    await _admit_playback(request, match[1], dict(parse_qsl(original.query)),
+                          original_uri=request.headers.get("x-original-uri", ""))
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
 
 

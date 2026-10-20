@@ -13,6 +13,7 @@ import json
 import time
 from dataclasses import dataclass, replace
 from typing import Any
+from weakref import WeakValueDictionary
 
 from app.modules.usage import is_playing
 
@@ -100,7 +101,7 @@ def matching_sessions(rows: list[dict[str, Any]], uid: str, device: str = "",
 
 
 class StreamAdmission:
-    """Single Deck worker; serialized fresh snapshots and durable SQLite leases.
+    """Single Deck worker; per-user fresh snapshots and durable SQLite leases.
 
     A pending lease ends on a successful client Stopped report or disappearance
     of the Emby session. An observed play also ends when Emby reports it idle.
@@ -113,7 +114,7 @@ class StreamAdmission:
         self._members = members
         self._emby = emby
         self._db = members._db
-        self._lock = asyncio.Lock()
+        self._user_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._db.execute("CREATE TABLE IF NOT EXISTS stream_leases ("
                          "user_id TEXT NOT NULL, session_id TEXT NOT NULL, "
                          "observed INTEGER NOT NULL DEFAULT 0, "
@@ -127,6 +128,19 @@ class StreamAdmission:
         # period, not an immediate wipe; never reset deadlines on a restart.
         self._db.execute("UPDATE stream_leases SET pending_at=? WHERE pending_at=0",
                          (time.time(),))
+
+    def _user_lock(self, user_id: str | None) -> asyncio.Lock:
+        # All devices/plays for one authenticated user share a lock. Never hold
+        # another user's admission behind this user's upstream network I/O.
+        # Lookup/creation has no await (single worker/event loop). The async
+        # context and its waiters retain strong references; weak values reclaim
+        # idle locks without evicting a held lock or splitting queued waiters.
+        uid = str(user_id or "").strip()  # same identity normalization as _admit
+        lock = self._user_locks.get(uid)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_locks[uid] = lock
+        return lock
 
     @staticmethod
     def _validate_snapshot(rows: Any) -> list[dict[str, Any]]:
@@ -193,7 +207,7 @@ class StreamAdmission:
     async def inspect(self, user_id: str | None, device_id: str = "",
                       token: str = "", session_id: str = "", play_id: str = "",
                       session_profile: dict[str, str] | None = None) -> Admission:
-        async with self._lock:
+        async with self._user_lock(user_id):
             try:
                 sessions = await self._snapshot()
             except Exception:  # noqa: BLE001 - unavailable is never an empty snapshot
@@ -207,7 +221,7 @@ class StreamAdmission:
                     sessions: list[dict[str, Any]] | None = None,
                     session_profile: dict[str, str] | None = None) -> Admission:
         """Explicit snapshot seam for deterministic tests; HTTP uses inspect."""
-        async with self._lock:
+        async with self._user_lock(user_id):
             try:
                 sessions = self._validate_snapshot(sessions)
             except ValueError:
@@ -311,7 +325,7 @@ class StreamAdmission:
                 or not admission.user_id or not admission.session_id or not admission.device_id
                 or admission.cap <= 0 or len(admission.live_session_ids) != admission.cap):
             return None
-        async with self._lock:
+        async with self._user_lock(admission.user_id):
             try:
                 uid, sid = admission.user_id, admission.session_id
                 member = self._members.get(uid)
@@ -365,13 +379,13 @@ class StreamAdmission:
                          session_profile: dict[str, str] | None = None,
                          item_id: str = "",
                          ) -> tuple[Admission, int, dict[str, Any]]:
-        """Keep admission + upstream issuance + PlaySessionId binding atomic.
+        """Keep admission + upstream issuance + PlaySessionId binding atomic per user.
 
         The metadata proxy is necessary: nginx auth_request cannot see the
         PlaySessionId in PlaybackInfo's response. Without binding it a delayed
         Stopped report from an old play could release the replacement's seat.
         """
-        async with self._lock:
+        async with self._user_lock(uid):
             rows = await self._snapshot()
             result = self._admit(uid, device, session_id, rows,
                                  session_profile=session_profile)
@@ -437,7 +451,7 @@ class StreamAdmission:
         play_id = str(payload.get("PlaySessionId") or "")
         if not 200 <= code < 300 or not play_id:
             return code
-        async with self._lock:
+        async with self._user_lock(uid):
             rows = self._db.query("SELECT session_id FROM stream_leases "
                                   "WHERE user_id=? AND play_id=?", (uid, play_id))
             if len(rows) == 1:
@@ -451,7 +465,7 @@ class StreamAdmission:
 
     async def report_stopped(self, uid: str, device: str, token: str,
                              payload: dict[str, Any]) -> int:
-        async with self._lock:
+        async with self._user_lock(uid):
             rows = await self._snapshot()
             sid = str(payload.get("SessionId") or "")
             play_id = str(payload.get("PlaySessionId") or "")

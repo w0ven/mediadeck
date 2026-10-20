@@ -115,8 +115,10 @@ server {
         proxy_set_header X-Mediadeck-Entry "";
         proxy_set_header X-Mediadeck-Entry-Key "";
     }
+    # Deploy matching Deck URI checks + guarded gateway BEFORE removing this
+    # location's old auth_request. All other whitelist gates stay in place.
     location @wl_direct {
-        auth_request /_wl_admission;
+        # The selected issuer runs full personal/member/playback admission.
         proxy_pass http://127.0.0.1:8339;
         proxy_set_header Host __PANEL_HOST__;
         proxy_set_header X-Forwarded-Host __PANEL_HOST__;

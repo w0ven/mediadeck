@@ -2,6 +2,25 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Isolate playback admission latency and remove duplicate gates
+
+- Serialize admission, metadata issuance, lifecycle binding and violation proof
+  per authenticated user rather than across all users; retain same-user atomicity,
+  failure/cancellation cleanup and progress network I/O outside the lock.
+- Make each stream issuer own complete admission: forwarded streams use Deck;
+  gateway-issued cloud/local streams call the same Deck gate before issuing.
+  Preserve caller identity, raw URI, GET/HEAD/Range and strict whitelist URI checks.
+- Coordinate only the direct-issuer nginx gates; preserve HLS, lifecycle and
+  capability-specific boundaries. No trusted client bypass header or auth cache.
+- Add deterministic concurrency and real loopback nginx/gateway/Deck regressions.
+  Full local validation in three disjoint batches: 4832 passed, 79 skipped,
+  2 subtests passed; Ruff, independent gateway tests (7 + 23), diff checks and
+  isolated mock startup passed. Optional runtime skips remain explicit; required
+  PR CI and authorized live validation are separate release gates.
+- Document backend -> gateway -> nginx rollout and gate-first, worker-drained
+  rollback. Next: PR/CI/release, then separately authorized staged deployment
+  and bounded live validation. No unresolved implementation decision.
+
 ## 2026-10-21 — Correct member activity UX to Bot-only
 
 - Remove the unshipped member Web pages, one-time codes/session module, member
