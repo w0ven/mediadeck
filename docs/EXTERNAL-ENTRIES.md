@@ -17,6 +17,39 @@ nodes with HTTPS base origins and media URL prefixes under `/s/`. A node URL
 outside `/s/` retains the ordinary direct target; template export refuses a
 fleet with incompatible mappings instead of emitting a misleading proxy.
 
+## Member self-hosted configuration
+
+The Bot's private **播放线路** page has **反代配置** next to **分流规则**.
+Bound members can download either `emby-proxy.conf` (nginx 1.25.1+) or a
+`Caddyfile`. Replace every `proxy.example.com` with the member's own domain,
+point DNS at that server, and validate before loading. The nginx file belongs
+in an `http {}` include and needs working certificate paths; Caddy can manage
+its own certificate. Install one copy of this single-site template per proxy
+instance; combining multiple copies requires distinct upstream/map names.
+The templates target a dedicated domain, not a subpath entry such as `/cola`
+or a Cloudflare Worker. Those deployments need their own prefix and redirect
+handling; do not paste these templates into them unchanged.
+
+These templates do not register an entry or contain entry, administrator,
+Emby or node signing credentials. They forward normal requests to the official
+HTTPS origin with the viewer's own Emby authentication, remove any incoming
+entry assertions, and rewrite only `Location` values whose exact origin is a
+configured node and whose path begins `/s/`. The entire signed suffix is kept
+unchanged under the local `/_n/<node>/s/` route. Domestic-cloud and unrelated
+redirects are untouched. The node still verifies the original signature.
+
+The templates reuse the fixed-upstream, raw-path, TLS/SNI, Range, WebSocket,
+no-cache and credential-stripping rules below. The member's server must reach
+the official origin and each node; this download does not verify the member's
+DNS, certificate, firewall or connectivity. Re-download after node origin or
+name changes. Unsupported or ambiguous node mappings fail explicitly rather
+than exporting a configuration that routes to the wrong node.
+
+`tests/test_member_proxy_live.py` runs both actual proxy engines against TLS
+mock upstreams, including same-origin Emby/node layouts, the signed 302-to-206
+chain, encoded filenames, query preservation, suffix ranges, domestic redirects,
+forged assertions, tampered signatures, POST bodies and WebSocket frames.
+
 ## Register an entry
 
 In **Settings → 外部反代入口**, enter an ID and HTTPS origin, then click

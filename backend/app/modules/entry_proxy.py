@@ -7,6 +7,7 @@ guessed, and the entry credential is attached only on the Emby hop.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from urllib.parse import urlsplit
@@ -52,14 +53,15 @@ class _Plan:
     pinned: _Upstream | None = None
 
 
-def _plan(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) -> _Plan:
+def _plan(entry: dict[str, str], emby_url: str, nodes: list[StreamNode], *,
+          require_key: bool = True) -> _Plan:
     origin = https_origin(entry["origin"])
     emby = https_origin(emby_url)
     if not ID_RE.fullmatch(entry["id"]):
         raise ConfigError("入口 ID 无效")
     # Only panel-generated URL-safe keys may be embedded in a config file.
     key = entry.get("proxy_key", "")
-    if len(key) < 40 or any(c not in KEY_ALPHABET for c in key):
+    if require_key and (len(key) < 40 or any(c not in KEY_ALPHABET for c in key)):
         raise ConfigError("入口凭据无效，请轮换后重新导出")
 
     upstreams = []
@@ -276,6 +278,21 @@ server {{
 """
 
 
+def member_proxy_config(emby_url: str, nodes: list[StreamNode], server: str) -> str:
+    if server not in SERVERS:
+        raise ConfigError("反代类型仅支持 Caddy 或 nginx")
+    plan = _plan({'id': 'member-proxy', 'origin': 'https://proxy.example.com'},
+                 emby_url, nodes, require_key=False)
+    if len({node.origin for node in plan.nodes}) != len(plan.nodes):
+        raise ConfigError("节点共用回源域名，无法生成唯一的视频路由，请联系管理员")
+    config = _caddy(plan) if server == 'caddy' else _nginx(plan)
+    return config.replace(
+        '# Private file: contains this entry\'s proxy credential. Store with mode 600.',
+        '# Replace proxy.example.com with your own domain. No administrator or entry key is needed.\n'
+        '# Keep signed URLs private. Domestic-cloud redirects remain direct.\n'
+        '# Do not add a cache or rewrite signed query parameters.')
+
+
 def friend_caddy(entry: dict[str, str], emby_url: str, nodes: list[StreamNode]) -> str:
     return friend_config(entry, emby_url, nodes, "caddy")
 
@@ -287,6 +304,13 @@ def _namespace(plan: _Plan) -> str:
 
 
 def _caddy(plan: _Plan) -> str:
+    assertions = (f'header_up X-Mediadeck-Entry {plan.entry_id}\n'
+                  f'            header_up X-Mediadeck-Entry-Key {plan.key}' if plan.key else
+                  'header_up -X-Mediadeck-Entry\n            header_up -X-Mediadeck-Entry-Key')
+    redirects = '' if plan.key else ''.join(
+        '            header_down Location "^' + node.origin.replace('.', '[.]') + '(/s/.*)$" '
+        + '"' + plan.origin + '/_n/' + node.name + '${1}"\n'
+        for node in plan.nodes)
     blocks = []
     for index, node in enumerate(plan.nodes):
         pattern = node.name.replace(".", "[.]")
@@ -330,11 +354,10 @@ def _caddy(plan: _Plan) -> str:
     handle {{
         reverse_proxy {plan.emby} {{
             header_up Host {plan.emby_host}
-            header_up X-Mediadeck-Entry {plan.entry_id}
-            header_up X-Mediadeck-Entry-Key {plan.key}
+            {assertions}
             header_up X-Forwarded-Host {plan.origin_host}
             header_down -X-Mediadeck-Entry-Key
-            transport http {{
+{redirects}            transport http {{
                 tls_server_name {plan.emby_hostname}
                 read_timeout {READ_TIMEOUT}
             }}
@@ -354,6 +377,12 @@ def _nginx(plan: _Plan) -> str:
     ns = _namespace(plan)
     origin = urlsplit(plan.origin)
     port = origin.port or 443
+    assertions = (f'proxy_set_header X-Mediadeck-Entry {plan.entry_id};\n'
+                  f'        proxy_set_header X-Mediadeck-Entry-Key {plan.key};' if plan.key else
+                  'proxy_set_header X-Mediadeck-Entry "";\n        proxy_set_header X-Mediadeck-Entry-Key "";')
+    redirects = '' if plan.key else ''.join(
+        '        proxy_redirect ~^' + re.escape(node.origin) + '(/s/.*)$ '
+        + plan.origin + '/_n/' + node.name + '$1;\n' for node in plan.nodes)
     maps, blocks = [], []
     for index, node in enumerate(plan.nodes):
         var = f"{ns}_{index}"
@@ -441,13 +470,12 @@ server {{
     location / {{
         if (${ns}_reserved) {{ return 404; }}
         proxy_pass {plan.emby};
-        proxy_set_header Host {plan.emby_host};
+{redirects}        proxy_set_header Host {plan.emby_host};
         proxy_ssl_server_name on;
         proxy_ssl_name {plan.emby_hostname};
         proxy_ssl_verify on;
         proxy_ssl_trusted_certificate /etc/ssl/certs/ca-certificates.crt;
-        proxy_set_header X-Mediadeck-Entry {plan.entry_id};
-        proxy_set_header X-Mediadeck-Entry-Key {plan.key};
+        {assertions}
         proxy_set_header X-Forwarded-Host {plan.origin_host};
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;

@@ -274,9 +274,11 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
                  shop: Any = None, plugins: Any = None,
                  scheduler: Any = None, requests: Any = None,
                  tmdb: Any = None, groups: Any = None, *,
+                 proxy_config_provider: Callable[[str], str] | None = None,
                  on_password_changed: Callable[[], None] | None = None,
                  on_member_changed: Callable[[str, int | None], Awaitable[dict[str, Any]]] | None = None) -> None:
         self._config = config_provider
+        self._proxy_config = proxy_config_provider
         self._members = members
         self._emby = emby
         self._restrictions: Any = None  # shared manual/sanction service wired at startup
@@ -1151,11 +1153,52 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         actions = [{"text": "🔄 刷新线路", "callback_data": "me_nodes"}]
         if str(self._cfg().get("playback_routing_rules") or "").strip():
             actions.append({"text": "📋 分流规则", "callback_data": "me_routing"})
+        actions.append({"text": "⚙️ 反代配置", "callback_data": "me_proxy"})
         return [actions, [{"text": "◀ 功能首页", "callback_data": "home"}]]
 
     @staticmethod
     def routing_menu() -> list[list[dict[str, str]]]:
         return [[{"text": "◀ 播放线路", "callback_data": "me_nodes"}]]
+
+    @staticmethod
+    def proxy_menu() -> list[list[dict[str, str]]]:
+        return [[{"text": "Nginx", "callback_data": "me_proxy:nginx"},
+                 {"text": "Caddy", "callback_data": "me_proxy:caddy"}],
+                [{"text": "◀ 播放线路", "callback_data": "me_nodes"}]]
+
+    @staticmethod
+    def _proxy_text() -> str:
+        return (
+            "⚙️ <b>自建反代配置</b>\n\n"
+            "选择 Nginx 或 Caddy 获取完整配置文件。将其中的 <code>proxy.example.com</code> "
+            "全部替换为自己的域名，并将 DNS 指向反代服务器。模板使用独立域名，不直接适用于子路径入口或 Worker。\n\n"
+            "· GD 视频的签名跳转会回到自己的反代；国内盘直链保持原样。\n"
+            "· 不需要管理员密钥或登记入口；客户端仍使用自己的 Emby 账号。\n"
+            "· 服务器须能访问官方播放入口和 GD 节点。不要缓存响应、丢弃签名参数或修改视频路径。\n"
+            "· Nginx 需 1.25.1+、有效证书，将文件放在 http 配置上下文中，先执行 "
+            "<code>nginx -t</code>。Caddy 可自动申请证书，先执行 "
+            "<code>caddy validate --config Caddyfile --adapter caddyfile</code>。\n\n"
+            "<i>这是可调整的配置模板，不是对你的域名、证书和网络连通性的检测；勿覆盖原有配置。</i>"
+        )
+
+    async def _proxy_document(self, chat_id: Any, message_id: Any, server: str) -> None:
+        if server not in ('nginx', 'caddy'):
+            await self._edit(chat_id, message_id, "请选择 Nginx 或 Caddy。", self.proxy_menu())
+            return
+        try:
+            if self._proxy_config is None:
+                raise ConfigError("反代模板尚未就绪，请联系管理员")
+            config = self._proxy_config(server)
+        except ConfigError as exc:
+            await self._edit(chat_id, message_id, _public_error(exc), self.proxy_menu())
+            return
+        name = 'emby-proxy.conf' if server == 'nginx' else 'Caddyfile'
+        result = await self._call_multipart(
+            'sendDocument', {'chat_id': str(chat_id), 'caption':
+                             f'{server} 反代配置：替换 proxy.example.com 为自己的域名；使用前先检查配置。'},
+            {'document': (name, config.encode(), 'text/plain; charset=utf-8')})
+        if not isinstance(result, dict) or not result.get('message_id'):
+            await self._edit(chat_id, message_id, "配置文件未确认送达，请稍后重试。", self.proxy_menu())
 
     def _routing_text(self) -> str:
         rules = str(self._cfg().get("playback_routing_rules") or "").strip()
@@ -4690,6 +4733,8 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         owner = self._card_owner(chat_id, message_id)
         if in_group and owner and owner != str(tg_user_id):
             return
+        if in_group and (data == 'me_proxy' or data.startswith('me_proxy:')):
+            return
         if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes", "me_routing",
                                  "req_new", "request_center", "watch_recent", "transfer", "shop", "invites"):
             return
@@ -4710,7 +4755,7 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
         if data in ('home', 'me', 'bag', 'bag_records', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
                     'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry',
-                    'play_hub', 'points_board'):
+                    'play_hub', 'points_board', 'me_proxy') or data.startswith('me_proxy:'):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
@@ -4906,6 +4951,12 @@ class TelegramBot(GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, R
             return
         if data == "me_routing":
             await self._edit(chat_id, message_id, self._routing_text(), self.routing_menu())
+            return
+        if data == 'me_proxy':
+            await self._edit(chat_id, message_id, self._proxy_text(), self.proxy_menu())
+            return
+        if data.startswith('me_proxy:'):
+            await self._proxy_document(chat_id, message_id, data.split(':', 1)[1])
             return
         if data == "bag_records":
             await self._edit(chat_id, message_id, "📜 <b>背包流水</b>",

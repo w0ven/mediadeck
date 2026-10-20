@@ -44,6 +44,12 @@ jobs:
       - name: Install isolated browser test runtime
         timeout-minutes: 5
         run: python -m playwright install --with-deps chromium
+      - name: Install loopback proxy test runtimes
+        timeout-minutes: 3
+        run: |
+          sudo apt-get install -y --no-install-recommends caddy nginx
+          caddy version
+          nginx -v
       - name: Select actual headless shell for offline CLI browser tests
         run: |
           python - <<'PY'
