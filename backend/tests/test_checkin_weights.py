@@ -149,4 +149,4 @@ def test_effective_admin_rule_description_matches_fixed_weights_without_new_conf
         assert fragment in text
     assert '等概率（可为负）' not in text
     assert {field.key for field in CheckinPlugin.spec.fields} == {
-        'streak_tiers','weekends','double_ppm','multiplier','drops','holidays'}
+        'dual_checkin','streak_tiers','weekends','double_ppm','multiplier','drops','holidays'}

@@ -203,7 +203,7 @@ def test_holiday_overrides_weekend_without_stacking_and_annual_lunar_dates(env):
     assert activity_for(config, NOW - 86400)["event"] == "normal"
 
 
-def test_two_five_minute_plays_sum_to_gate_and_duplicate_heartbeats_do_not(env):
+def test_parallel_five_minute_plays_do_not_accelerate_gate_or_duplicate_heartbeats(env):
     sampler = UsageSampler(env.db, env.members, MockEmby())
     first = NOW - 300
     for seconds in range(0, 301, 30):
@@ -214,9 +214,13 @@ def test_two_five_minute_plays_sum_to_gate_and_duplicate_heartbeats_do_not(env):
         sampler._sample(sessions + sessions, first + seconds, None)
         if seconds == 270:
             result = env.checkin.checkin("u", now=first + seconds)
-            assert not result["ok"] and result["watched_seconds"] == 540
-    assert watch_progress(env.db, "u", NOW)[1] == 600
-    assert env.checkin.checkin("u", now=NOW)["ok"]
+            assert not result["ok"] and result["watched_seconds"] == 270
+    assert watch_progress(env.db, "u", NOW)[1] == 300
+    assert not env.checkin.checkin("u", now=NOW)["ok"]
+    for seconds in range(330, 601, 30):
+        sampler._sample([play(first + seconds, seconds)], first + seconds, None)
+    assert watch_progress(env.db, "u", NOW + 300)[1] == 600
+    assert env.checkin.checkin("u", now=NOW + 300)["ok"]
 
 
 @pytest.mark.parametrize("speed", [0.5, 1, 2])

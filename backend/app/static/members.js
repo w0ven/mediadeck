@@ -649,12 +649,13 @@
         const gopts = (ms.groups || []).map((g) =>
           `<option value="${esc(g.id)}" ${g.id === m.group_id ? 'selected' : ''}>${esc(g.name)}</option>`).join('');
         body = `${isWhitelistGroup(m.group_id)?`<div class="hg-whitelist-banner">${whitelistEmblem()}<div><b>白名单 · 专属成员</b><small>固定分组标识，实际权限以账号权益为准</small></div></div>`:''}<h4 class="hg-section-title">账号与权益</h4><dl class="member-kv">
-          <dt>用户组</dt><dd>${groupBadge(m.group_id,m.group_name)}</dd>
+          <dt>等级 / 权益</dt><dd>${m.activity_level?`${esc(m.activity_level.icon)} Lv${m.activity_level.level} ${esc(m.activity_level.name)}${isWhitelistGroup(m.group_id)?' · 白名单':''}`:groupBadge(m.group_id,m.group_name)}</dd>
+          ${m.activity_level&&d.activity_levels?`<dt>称号 / 成长</dt><dd>${esc(d.activity_levels.worn_title||m.activity_level.title)} · ${m.activity_level.growth}${m.activity_level.next_threshold?' / '+m.activity_level.next_threshold:''}</dd><dt>今日静默奖励</dt><dd>${d.activity_levels.today.points}积分 / ${d.activity_levels.today.growth}成长</dd><dt>续费预算</dt><dd>${d.activity_levels.renewal_price}积分 · 缺口${d.activity_levels.shortfall}</dd><dt>30天续费资格</dt><dd>${Math.floor(d.activity_levels.qualification.seconds/60)}/80分钟 · ${d.activity_levels.qualification.days}/3合格日</dd><dt>自动保号</dt><dd>${d.activity_levels.auto_renew?'用户已开启':'默认关闭，需用户主动开启'}</dd>`:''}
           <dt>Telegram</dt><dd>${esc(m.tg_username ? '@'+m.tg_username : m.tg_user_id || '未绑定')}</dd>
           <dt>本地封禁</dt><dd>${m.status === 'suspended' ? '已封禁' : '未封禁'}</dd>
           <dt>权益</dt><dd>${entitlementTag(m)} ${esc(m.state_reason || '')} ${esc((m.remaining_restrictions || []).join('、'))}</dd>
           <dt>Emby / 同步</dt><dd id="md-emby-status">${embySyncCell(m)}</dd>
-          <dt>到期</dt><dd>${esc(fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
+          <dt>到期</dt><dd>${esc(m.activity_level&&m.expires_at_effective?activityBeijingStamp(m.expires_at_effective):fmtExpiry((m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at)))}</dd>
           <dt>设备分组</dt><dd>${esc(m.device_count == null ? '暂不可用' : m.device_count + ' 组')}（按设备名称归并，非硬件唯一识别）</dd>
           <dt>配额用量</dt><dd>${usageCell(m)}</dd>
           ${m.metering ? `<dt>实测周期</dt><dd>${esc(m.metering.period || '未知')}（UTC自然月） · 最近上报 ${esc(m.metering.as_of ? fmtAgeTs(m.metering.as_of) : '未知')}</dd>` : ''}
@@ -663,6 +664,8 @@
         ${d.watch?`<p class="help">${esc(d.watch.coverage_note || '累计保留已记录观看；时段和影片仅统计可定位的记录。')} 记录起点：${esc(d.watch.first_at?new Date(d.watch.first_at*1000).toLocaleString():'未知')}；当前进度计时观察自 ${esc(d.watch.verification_since?new Date(d.watch.verification_since*1000).toLocaleString():'未知')}。暂停、跳转、卡住或证据缺失不补时。${d.watch.unverified_playback_now?'当前播放待核验，暂不计时。':''}</p>`:''}${timingDiagnostic(d.watch)}
         <h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
+          ${m.activity_managed?'<button class="btn sm" id="md-grant-lv8">明确授予专属Lv8</button>':''}
+          ${m.activity_lifecycle==='deleting'?'<button class="btn sm" id="md-recover-deletion">核实远端并恢复删除互斥</button>':''}
           <button class="btn sm danger" type="button" data-member-action="actions/disable">禁用账号</button>
           <button class="btn sm" type="button" data-member-action="actions/enable">解除禁用</button>
           <label>续期 <input id="md-days" type="number" min="1" value="30" style="width:72px"> 天
@@ -743,6 +746,18 @@
       if(!$('#modal-root')) (opening?$('#md-close'):host.querySelector('[data-tab].active'))?.focus({preventScroll:true});
       rememberDetailForm(host);
       bindMemberActions(host, id, m, tab);
+      const grantLevel = $('#md-grant-lv8');
+      if(grantLevel) grantLevel.onclick=()=>runMemberAction(grantLevel,async current=>{
+        if(!(await deckConfirm('明确授予该用户专属Lv8？后续续费1积分，期限和余额本次不变。')))return;
+        await api(`/api/activity/members/${encodeURIComponent(id)}/grant-lv8`,{method:'POST',body:JSON.stringify({confirm:true})});
+        await refreshActionDetail(id,'overview',current);
+      });
+      const recoverDeletion = $('#md-recover-deletion');
+      if(recoverDeletion) recoverDeletion.onclick=()=>runMemberAction(recoverDeletion,async current=>{
+        if(!(await deckConfirm('仅在远端仍存在且删除未执行时恢复互斥。账号期限和人工禁用不变，确认？')))return;
+        await api(`/api/activity/members/${encodeURIComponent(id)}/recover-deletion`,{method:'POST',body:JSON.stringify({confirm:true})});
+        await refreshActionDetail(id,'overview',current);
+      });
       const renew = $('#md-renew');
       if (renew) renew.onclick = () => runMemberAction(renew, current => memberRenew(id, current));
       const groupGo = $('#md-group-go');

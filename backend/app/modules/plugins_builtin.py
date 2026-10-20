@@ -38,12 +38,14 @@ from app.modules.command_cleanup import GroupCommandCleanupPlugin
 from app.modules.dice import DicePlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
+from app.modules.level_lifecycle import LevelLifecyclePlugin
 from app.modules.niuniu import NiuniuPlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
 from app.modules.points_ranking import PointsRankingPlugin
 from app.modules.poker import PokerPlugin
 from app.modules.scratch9 import Scratch9Plugin
+from app.modules.watch_rewards_plugin import WatchRewardsPlugin
 
 # How long a "we told you" note is kept before it is considered stale. Without
 # this the state document grows one entry per member forever, and a member who
@@ -69,6 +71,8 @@ class PluginContext:
     settings: Any = None
     store: Any = None
     points: Any = None
+    activity: Any = None
+    levels: Any = None
     shop: Any = None
     # Node dispatcher, so a member can be shown where they will be served
     # from and how busy it is.
@@ -298,7 +302,7 @@ class InactiveCleanupPlugin(Plugin):
         for member in members.list(limit=5000):
             if member.get("status") != "active":
                 continue
-            if str(member.get("group_id") or "") == WHITELIST_GROUP_ID:
+            if member.get('activity_managed') or str(member.get("group_id") or "") == WHITELIST_GROUP_ID:
                 exempt += 1
                 continue
             last_seen = member.get("last_seen_at")
@@ -924,6 +928,8 @@ def ensure_request_library_watch(store: Any) -> None:
 
 
 BUILTIN_PLUGINS = (
+    WatchRewardsPlugin,
+    LevelLifecyclePlugin,
     IntakePipelinePlugin,
     GroupAuditPlugin,
     InactiveCleanupPlugin,

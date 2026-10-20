@@ -19,7 +19,7 @@ const NAV = [
   ]},
   { group: '用户', icon: '☺', items: [
     { id: 'members', icon: '☺', label: '用户管理', sub: '账号、套餐、邀请关系与积分' },
-    { id: 'groups', icon: '▣', label: '套餐与用户组', sub: '时长、流量、并发与求片次数' },
+    { id: 'groups', icon: '▣', label: '等级与权益', sub: '成长、保号、流量与并发权益' },
     { id: 'invites', icon: '🎫', label: '邀请与授权', sub: '预授权名单、邀请名额与邀请树' },
     { id: 'redeem', icon: '🎟', label: '卡密管理', sub: '生成、发放与作废注册卡密' },
   ]},

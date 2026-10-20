@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>MediaDeck · 我的等级</title><link rel="stylesheet" href="/static/app.css"><link rel="stylesheet" href="/static/hardglass.css"></head>
+<body><main style="max-width:900px;margin:32px auto;padding:16px"><h1>MediaDeck · 我的等级</h1>
+<section id="activity-login" class="card"><div class="card-body"><h2>使用个人登录码</h2><p>请在已绑定的Bot私聊发送 /webaccount，输入5分钟内有效的一次性登录码。到期账号仍可查看与续费。</p><form id="activity-login-form"><label>登录码 <input id="activity-code" type="password" required autocomplete="off"></label><button class="btn primary">登录</button></form></div></section>
+<div id="activity-status" role="status" aria-live="polite"></div><section id="activity-profile" hidden class="card"><div class="card-body"><h2 id="activity-level"></h2><p id="activity-title"></p><dl id="activity-facts" class="member-kv"></dl>
+<div class="toolbar"><button class="btn" id="activity-checkin">普通签到 +10</button><button class="btn" id="activity-luck">运气签到</button><button class="btn primary" id="activity-renew">续费30天</button></div>
+<p class="help">运气签到：1～10占65%、11～20占25%、21～30占10%，区间内等概率。结果可能更低，覆盖后不可恢复；当天不可重抽。覆盖前必须有足够可用余额回收最多9积分。</p>
+<label><input type="checkbox" id="activity-auto">主动开启自动保号（默认关闭）</label><p>仅到期前72小时内可续30天；自动保号在前24小时检查。近30天需核验观影80分钟且3个日各满10分钟。续费不重置使用量，不解除人工限制。</p></div></section></main>
+<script src="/static/dialog.js"></script><script src="/static/activity_member.js"></script></body></html>

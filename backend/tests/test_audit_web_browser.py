@@ -444,6 +444,7 @@ def test_side_effect_form_double_click_failure_retry(page, route, button, path, 
     page.route('**'+path,fail)
     go(page,route)
     if button=='group-create':
+        page.locator('#level-legacy-groups>summary').click()
         page.locator('.hg-group-new>summary').click()
     for key,value in fields.items():
         page.locator('#'+key).fill(value)

@@ -2,6 +2,38 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-21 — Integrate watch activity levels and renewable membership
+
+- Add verified-only silent rewards, independent growth ledgers, durable proof
+  outbox/day watermarks and atomic retry-safe settlement. Apply the approved
+  daily caps, seven natural levels and manually/migration-granted exclusive Lv8.
+- Integrate level bases before personal/card overrides, monthly request quotas,
+  one-time activation, qualified thirty-day renewal and opt-in auto-renewal.
+  Preserve whitelist sales/exemptions, existing inventory, balances and manual blocks.
+- Add normal/luck check-in final rewards with weighted positive outcomes,
+  one-way replacement, spendable-balance recovery protection and single drops.
+  Connect actual Bot commands/buttons and member-owned Web login/actions.
+- Replace the groups main view with levels/whitelist rights and an explicitly
+  collapsed legacy maintenance area; use distinct icons, two-character identities,
+  classical titles and explicit Beijing-time expiry/deletion displays.
+- Implement compare-and-apply migration preview: dated legacy samples only before
+  the verification cutover, strict classification thresholds, free uniform thirty-day
+  initial terms, no historical rewards, no silent shortening of special terms.
+- Add disabled-by-default expiry deletion using persistent renewal exclusion,
+  unsettled-fund/proof guards, immediate remote administrator checks, retained
+  ledgers and recoverable remote uncertainty. Exempt managed levels from old
+  inactivity cleanup. Document migration, switch sequencing and rollback limits in
+  `docs/ACTIVITY_LEVELS.md`; update `docs/ROADMAP.md` to final decisions.
+- Validation: full suite 4679 passed, 79 skipped, 2 subtests passed. Skips are
+  existing Caddy/FFmpeg requirements and the opt-in public beacon test. New
+  Chromium flow covers mobile/desktop, real isolated API routes, check-in net
+  adjustment, auto-renew preference, renewal, configuration and migration.
+  New lifecycle tests also run under UTC with a non-Beijing browser timezone.
+  Ruff, JavaScript syntax, diff checks and isolated uvicorn mock startup pass.
+- Next: controller integration review, then separately authorized PR/CI/release
+  and deployment. No open product decisions. No production reads/migration,
+  real deductions/deletion/messages, pushes, release tags or service restarts.
+
 ## 2026-10-19 — Align daily check-in with verified viewing
 
 - Count every existing verified viewing interval toward the Beijing-day

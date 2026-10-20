@@ -154,6 +154,8 @@ class InventoryService:
             member = self.members.get(user)
             if not member:
                 raise ValueError("账号不存在")
+            if member.get('activity_managed') and not member.get('activity_exempt') and member.get('state') != 'active':
+                raise ValueError('账号当前不可用；到期保留期间仅可查看与达标续费')
             spec = json.loads(row["spec_json"])
             validate_bag_spec(spec)
             if spec['kind'] == 'custom':
