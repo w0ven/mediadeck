@@ -39,7 +39,7 @@ from app.modules.edgelog import MAX_LINES_PER_INGEST, TrafficLedger
 from app.modules.enforcement import EnforcementService
 from app.modules.entries import entry_target, identify_entry
 from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
-from app.modules.entry_proxy import friend_config
+from app.modules.entry_proxy import friend_config, member_proxy_config
 from app.modules.events import EventStream, safe_stream
 from app.modules.groups import WHITELIST_GROUP_ID, GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
@@ -505,6 +505,9 @@ async def _startup() -> None:
         shop=app.state.shop, scheduler=app.state.scheduler,
         requests=app.state.requests, tmdb=app.state.tmdb,
         groups=app.state.groups,
+        proxy_config_provider=lambda server: member_proxy_config(
+            app.state.settings_service.integration_config()['emby_public_url'],
+            app.state.settings_service.nodes(), server),
         on_password_changed=lambda: app.state.cache.drop_prefix('panelauth:'),
         on_member_changed=_telegram_member_changed)
     app.state.telegram.start()

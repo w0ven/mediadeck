@@ -1257,7 +1257,7 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
 def test_line_page_does_not_keep_account_card_buttons() -> None:
     bot = _bot()
     actions = _actions(bot.nodes_menu())
-    assert actions == {"me_nodes", "home"}
+    assert actions == {"me_nodes", "me_proxy", "home"}
     assert "resetpw" not in actions and "me_status" not in actions
     assert "devices" not in actions
 

@@ -65,9 +65,14 @@ def test_reference_and_origin_caddyfiles_parse(client, tmp_path):  # noqa: F811 
         assert json.loads(result.stdout)["apps"]["http"]["servers"]
 
 
+@pytest.fixture
+def proxy_entries():
+    return ('friend-a', 'friend-b')
+
+
 @pytest.fixture(params=["caddy", pytest.param("nginx", marks=pytest.mark.skipif(
     not NGINX_AVAILABLE, reason="nginx binary or MEDIADECK_NGINX_DOCKER is needed"))])
-def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
+def proxy(client, tmp_path, request, proxy_entries):  # noqa: F811 - imported pytest fixture
     engine = request.param
     cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
     subprocess.run([
@@ -137,6 +142,10 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
                 response = client.request(self.command, self.path, headers=dict(self.headers),
                                           follow_redirects=False)
                 self.send(response.status_code, response.content, dict(response.headers))
+            elif self.path == '/redirect/domestic':
+                self.send(302, headers={'Location': 'https://cloud.example.net/file?signature=unchanged'})
+            elif self.path == '/redirect/lookalike':
+                self.send(302, headers={'Location': 'https://edge-a.example.com.evil.example.net/s/main/a?k=unchanged'})
             elif self.path.startswith("/auth"):
                 self.send(401)
             else:
@@ -160,7 +169,7 @@ def proxy(client, tmp_path, request):  # noqa: F811 - imported pytest fixture
     request.addfinalizer(close_upstream)
     port = _port()
     config_parts = []
-    for entry in ("friend-a", "friend-b"):
+    for entry in proxy_entries:
         response = client.get(f"/api/integration/frontend?server={engine}&entry={entry}", auth=ADMIN)
         assert response.status_code == 200
         config_parts.append(response.json()["config"].replace(
@@ -344,7 +353,9 @@ def test_caddy_real_redirect_range_query_sni_and_auth(proxy, monkeypatch):
         suffix = http.get(target, headers={**byte_headers, "Range": "bytes=-4"})
         assert suffix.status_code == 206 and suffix.content == b"cdef"
         assert http.head(target, headers=byte_headers).status_code == 206
-        assert http.get(target.replace("r=0", "r=99"), headers=byte_headers).status_code == 403
+        rate = parse_qs(signed.query)['r'][0]
+        assert http.get(target.replace('r='+rate, 'r='+str(int(rate)+1)),
+                        headers=byte_headers).status_code == 403
     assert "emby.example.com" in names
     assert {"edge-a.example.com", "edge-b.example.com"} & set(names)
     auth_start = len(requests)

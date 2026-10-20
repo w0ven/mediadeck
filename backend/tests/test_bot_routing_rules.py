@@ -43,7 +43,7 @@ def test_lines_rules_and_back_edit_one_card_without_expanding_the_line_page(bot)
                    playback_lines_note="主线路建议代理；国内盘资源请直连。",
                    playback_routing_rules=RULES)
     lines = tap(bot, "me_nodes")
-    assert actions(lines) == {"me_nodes", "me_routing", "home"}
+    assert actions(lines) == {"me_nodes", "me_routing", "me_proxy", "home"}
     assert "国内盘资源请直连" in lines["text"] and "rules:" not in lines["text"]
     rules = tap(bot, "me_routing")
     assert actions(rules) == {"me_nodes"}
