@@ -1,246 +1,308 @@
 #!/usr/bin/env python3
-"""Node metering daemon — register HTTP, report loop, deny list.
+"""Legacy meterd service name, now only a playback access-policy guard.
 
-Stdlib only. Does not enable nft until ``--enable-nft`` (or METERD_ENABLE=1).
-Importing this file never talks to nft or the panel.
+No FlowMeter, byte sampling, report spool, nft calls or traffic database writes.
+Signature verification and aggregate bandwidth pacing remain in their own agents.
 """
 from __future__ import annotations
 
 import argparse
+import hashlib
+import ipaddress
 import json
 import os
-import sys
+import re
+import subprocess
 import threading
-import urllib.error
+import time
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-_AGENT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _AGENT_DIR not in sys.path:
-    sys.path.insert(0, _AGENT_DIR)
 
-from flowmeter import DenyPublisher, FlowMeter
+class DenyPublisher:
+    """Atomic write + optional nginx -t/reload of the dedicated deny map.
 
-USER_AGENT = "mediadeck-meterd/1.0"
+    Reload is off unless ``nginx_bin`` is set. Same body hash is a no-op.
+    A failed -t restores the previous map. A failed reload leaves the new
+    file (it is already valid) and reports not-applied so the next cycle
+    retries the signal.
+    """
 
+    def __init__(self, path: str, *, nginx_bin: str | None = None,
+                 nginx_conf: str | None = None, nginx_prefix: str | None = None
+                 ) -> None:
+        self.path = path
+        self.nginx_bin = nginx_bin
+        self.nginx_conf = nginx_conf
+        self.nginx_prefix = nginx_prefix
+        self.last_hash: str | None = None
+        self.last_error: str | None = None
+        self.reload_count = 0
 
-def _post(url: str, token: str, payload: dict, timeout: float = 30.0) -> dict:
-    body = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json",
-                 "Authorization": f"Bearer {token}",
-                 "User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8", "replace"))
+    @staticmethod
+    def render(tags: list[str] | set[str]) -> str:
+        cleaned = sorted({str(t).strip() for t in tags if str(t).strip()})
+        return "".join(f'"{tag}" 1;\n' for tag in cleaned) or "# none\n"
 
+    @staticmethod
+    def digest(body: str) -> str:
+        return hashlib.sha256(body.encode()).hexdigest()
 
-class Meterd:
-    def __init__(self, meter: FlowMeter, *, panel: str = "", node: str = "",
-                 token: str = "", interval: float = 15.0,
-                 publisher: DenyPublisher | None = None) -> None:
-        self.meter = meter
-        self.panel = panel.rstrip("/")
-        self.node = node or meter.node
-        self.token = token
-        self.interval = max(5.0, float(interval))
-        self.publisher = publisher
-        self._applied_rev: int | None = None
-        self._pending_rev: int | None = None
-        self._stop = threading.Event()
+    @staticmethod
+    def write_file(path: str, body: str) -> None:
+        directory = os.path.dirname(os.path.abspath(path)) or "."
+        os.makedirs(directory, exist_ok=True)
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
 
-    def handle_register(self, qs: dict[str, list[str]],
-                        headers: dict[str, str]) -> tuple[int, dict]:
-        local_ip = (qs.get("lip") or qs.get("local_ip") or [""])[0]
-        local_port = (qs.get("lp") or qs.get("local_port") or [""])[0]
-        remote_ip = (qs.get("a") or qs.get("rip") or qs.get("remote_ip") or [""])[0]
-        remote_port = (qs.get("p") or qs.get("rp") or qs.get("remote_port") or [""])[0]
-        utag = (qs.get("u") or qs.get("utag") or [""])[0]
-        cid = (qs.get("cid") or qs.get("connection") or [""])[0]
-        if not local_ip:
-            local_ip = headers.get("X-Mediadeck-Local-Addr", "")
-        if not local_port:
-            local_port = headers.get("X-Mediadeck-Local-Port", "")
-        if not remote_ip:
-            remote_ip = headers.get("X-Real-IP") or headers.get("X-Forwarded-For", "")
-        if not remote_port:
-            remote_port = headers.get("X-Mediadeck-Remote-Port", "")
-        if not utag:
-            utag = headers.get("X-Mediadeck-Utag", "")
+    def _nginx_cmd(self, *extra: str) -> list[str]:
+        cmd = [self.nginx_bin or "nginx"]
+        if self.nginx_prefix:
+            cmd.extend(["-p", self.nginx_prefix])
+        if self.nginx_conf:
+            cmd.extend(["-c", self.nginx_conf])
+        cmd.extend(extra)
+        return cmd
+
+    def publish(self, tags: list[str], *, force: bool = False) -> dict[str, Any]:
+        body = self.render(tags)
+        digest = self.digest(body)
+        if not force and self.last_hash == digest:
+            return {"ok": True, "changed": False, "reloaded": False,
+                    "hash": digest, "error": None, "reload_count": self.reload_count}
+        previous = None
+        if os.path.exists(self.path):
+            with open(self.path, encoding="utf-8") as fh:
+                previous = fh.read()
         try:
-            result = self.meter.register(
-                local_ip, int(local_port), remote_ip, int(remote_port), utag,
-                nginx_cid=cid or None)
-        except (TypeError, ValueError) as exc:
-            return 400, {"ok": False, "allow": False, "reason": f"bad_tuple:{exc}"}
-        if result.get("allow"):
-            return 204, result
-        if result.get("reason") == "blocked":
-            return 403, result
-        if result.get("reason") == "not_enabled":
-            # Agent up but nft not armed: fail-open, do not invent a ban.
-            return 204, result
-        return 403, result
+            self.write_file(self.path, body)
+        except OSError as exc:
+            self.last_error = f"write:{exc}"
+            return {"ok": False, "changed": False, "reloaded": False,
+                    "hash": digest, "error": self.last_error,
+                    "reload_count": self.reload_count}
+        if not self.nginx_bin:
+            self.last_hash = digest
+            self.last_error = None
+            return {"ok": True, "changed": True, "reloaded": False,
+                    "hash": digest, "error": None, "reload_count": self.reload_count}
+        check = subprocess.run(self._nginx_cmd("-t"), capture_output=True,
+                               text=True, timeout=10, check=False)
+        if check.returncode != 0:
+            if previous is not None:
+                self.write_file(self.path, previous)
+            else:
+                try:
+                    os.remove(self.path)
+                except OSError:
+                    pass
+            err = (check.stderr or check.stdout or "nginx -t failed")[-400:]
+            self.last_error = f"nginx_t:{err}"
+            return {"ok": False, "changed": False, "reloaded": False,
+                    "hash": digest, "error": self.last_error,
+                    "reload_count": self.reload_count}
+        reload = subprocess.run(self._nginx_cmd("-s", "reload"),
+                                capture_output=True, text=True, timeout=10,
+                                check=False)
+        if reload.returncode != 0:
+            err = (reload.stderr or reload.stdout or "nginx reload failed")[-400:]
+            self.last_error = f"nginx_reload:{err}"
+            return {"ok": False, "changed": True, "reloaded": False,
+                    "hash": digest, "error": self.last_error,
+                    "reload_count": self.reload_count}
+        self.last_hash = digest
+        self.last_error = None
+        self.reload_count += 1
+        return {"ok": True, "changed": True, "reloaded": True,
+                "hash": digest, "error": None, "reload_count": self.reload_count}
 
-    def publish_deny(self, *, force: bool = False) -> dict:
-        """Write the deny map and optionally nginx -t/reload. Never claims loaded on failure."""
-        tags = self.meter.blocked_tags()
-        if self.publisher is None:
-            self.meter.write_deny_map()
-            return {"ok": True, "changed": True, "reloaded": False, "error": None}
-        return self.publisher.publish(tags, force=force)
-
-    def apply_remote_policy(self, last: dict) -> dict:
-        """Apply a panel policy reply. Returns publish result; applied only if publish ok."""
-        policy = (last or {}).get("policy") or {}
-        rev = policy.get("rev")
-        if last.get("ok") and policy.get("snapshot"):
-            self.meter.apply_policy(
-                policy.get("blocked_tags") or last.get("blocked_tags") or [],
-                terminate=True, snapshot=True)
-            self._pending_rev = int(rev) if rev is not None else None
-        elif last.get("ok"):
-            self.meter.apply_policy(
-                last.get("blocked_tags") or [],
-                unblock_tags=last.get("unblock_tags") or [],
-                terminate=True, snapshot=False)
-            self._pending_rev = None
+class AccessPolicy:
+    """Only access identities/deny state. No byte counters, nft, or traffic DB writes."""
+    def __init__(self, state_path, deny_path, publisher=None, legacy_path=None):
+        self.path, self.deny_path, self.publisher = state_path, deny_path, publisher
+        self.lock = threading.RLock()
+        self.blocked, self.connections = set(), {}
+        if os.path.exists(state_path):
+            with open(state_path, encoding='utf-8') as f:
+                data = json.load(f)
+            self.blocked = set(data['blocked'])
+            self.connections = {tuple(r['key']): r['tag'] for r in data['connections']}
         else:
-            return {"ok": False, "error": "policy_not_ok"}
-        published = self.publish_deny()
-        if published.get("ok") and self._pending_rev is not None:
-            self._applied_rev = self._pending_rev
-        elif not published.get("ok"):
-            # Keep previous applied_rev. Next successful report retries.
-            published["applied"] = False
-        return published
+            if os.path.exists(deny_path):
+                with open(deny_path, encoding='utf-8') as f:
+                    self.blocked = set(re.findall(r'^"([A-Za-z0-9_-]+)"\s+1;', f.read(), re.M))
+            # Preserve the old register/kill safety on the first transition. Read identities only.
+            if legacy_path and os.path.exists(legacy_path):
+                import sqlite3
+                from pathlib import Path
+                db = sqlite3.connect(Path(legacy_path).resolve().as_uri()+'?mode=ro')
+                try:
+                    db.execute('PRAGMA query_only=ON')
+                    for lip, lp, rip, rp, tag, cid in db.execute(
+                            'SELECT local_ip,local_port,remote_ip,remote_port,utag,nginx_cid FROM conns WHERE closed_at IS NULL'):
+                        self.connections[(lip, str(lp), rip, str(rp), str(cid or ''))] = tag
+                finally:
+                    db.close()
 
-    def report_once(self) -> dict:
-        env = self.meter.collect()
-        env["policy_applied_rev"] = self._applied_rev
-        if not self.panel or not self.token:
-            return {"ok": False, "reason": "no_panel", "envelope": env}
-        url = f"{self.panel}/api/edge/{self.node}/measured"
-        pending = self.meter.pending()
-        last = {"ok": False}
-        for item in pending:
-            item["policy_applied_rev"] = self._applied_rev
-            try:
-                last = _post(url, self.token, item)
-            except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError) as exc:
-                return {"ok": False, "reason": f"post:{type(exc).__name__}",
-                        "error": str(exc)[:200]}
-            ack = (last or {}).get("ack") or {}
-            if last.get("ok") and ack.get("boot_id") and ack.get("seq") is not None:
-                self.meter.ack(str(ack["boot_id"]), int(ack["seq"]))
-            if last.get("ok"):
-                published = self.apply_remote_policy(last)
-                last = dict(last)
-                last["deny_publish"] = published
-        return last
+    def _save(self):
+        directory = os.path.dirname(os.path.abspath(self.path))
+        os.makedirs(directory, exist_ok=True)
+        tmp = self.path+'.tmp'
+        fd = os.open(tmp, os.O_CREAT|os.O_WRONLY|os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as f:
+            json.dump({'blocked':sorted(self.blocked), 'connections':[
+                {'key':list(key), 'tag':tag} for key,tag in self.connections.items()]}, f)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, self.path)
 
-    def loop(self) -> None:
-        while not self._stop.wait(self.interval):
-            try:
-                self.report_once()
-            except Exception as exc:  # noqa: BLE001
-                print(f"report failed: {type(exc).__name__}: {exc}", flush=True)
+    @staticmethod
+    def terminate(key):
+        lip, lp, rip, rp = key[:4]
+        def address(ip, port):
+            return f'[{ip}]:{port}' if ':' in ip else f'{ip}:{port}'
+        subprocess.run(['ss','-K','src',address(lip,lp),'dst',address(rip,rp)],
+                       capture_output=True, timeout=5, check=False)
 
-    def stop(self) -> None:
-        self._stop.set()
+    def register(self, qs):
+        tag = str((qs.get('u') or [''])[0])
+        if tag and not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', tag):
+            return 400
+        try:
+            lip = str(ipaddress.ip_address(qs['lip'][0]))
+            rip = str(ipaddress.ip_address(qs['a'][0]))
+            lp, rp = int(qs['lp'][0]), int(qs['p'][0])
+            if not 0 < lp < 65536 or not 0 < rp < 65536:
+                return 400
+            key = (lip, str(lp), rip, str(rp), str((qs.get('cid') or [''])[0]))
+        except (KeyError, ValueError, IndexError):
+            return 400
+        with self.lock:
+            if tag in self.blocked:
+                return 403
+            previous = self.connections.get(key)
+            if previous is not None and previous != tag:
+                self.terminate(key)
+                return 403
+            # nginx connection ID differentiates reuse of an address/port tuple.
+            for old in [old for old in self.connections if old[:4] == key[:4] and old != key]:
+                del self.connections[old]
+            self.connections[key] = tag
+            self._save()
+        return 204
+
+    def prune_connections(self):
+        """Keep only live socket identities; never request TCP byte counters."""
+        with self.lock:
+            result = subprocess.run(['ss', '-Htn', 'state', 'established'],
+                                    capture_output=True, text=True, timeout=5, check=False)
+            if result.returncode:
+                return
+            live = set()
+            for line in result.stdout.splitlines():
+                endpoints = [p for p in line.split() if ':' in p]
+                if len(endpoints) < 2:
+                    continue
+                try:
+                    pair = []
+                    for value in endpoints[-2:]:
+                        host, port = value.rsplit(':', 1)
+                        pair.extend((str(ipaddress.ip_address(host.strip('[]'))), str(int(port))))
+                    live.add(tuple(pair))
+                except ValueError:
+                    continue
+            self.connections = {key: tag for key, tag in self.connections.items() if key[:4] in live}
+            self._save()
+
+    def apply(self, body):
+        policy = body.get('policy') or {}
+        if not body.get('ok') or policy.get('snapshot') is not True:
+            raise ValueError('authoritative_snapshot_required')
+        tags = policy.get('blocked_tags')
+        if not isinstance(tags,list) or any(not isinstance(t,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}',t) for t in tags):
+            raise ValueError('invalid_policy')
+        with self.lock:
+            wanted = set(tags)
+            for key, tag in list(self.connections.items()):
+                if tag in wanted:
+                    self.terminate(key)
+            self.blocked = wanted
+            self._save()
+            return self.publisher.publish(sorted(wanted)) if self.publisher else {'ok': True}
 
 
-def serve(meterd: Meterd, bind: str, port: int) -> ThreadingHTTPServer:
-    daemon = meterd
-
+def serve(policy, bind, port):
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            parsed = urlparse(self.path)
-            if parsed.path.rstrip("/") in ("", "/healthz"):
-                body = json.dumps({
-                    "ok": True, "enabled": daemon.meter.enabled,
-                    "boot_id": daemon.meter.boot_id,
-                    "blocked": daemon.meter.blocked_tags(),
-                }).encode()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            if parsed.path.startswith("/register"):
-                qs = parse_qs(parsed.query)
-                headers = {k: v for k, v in self.headers.items()}
-                code, result = daemon.handle_register(qs, headers)
-                if code == 204:
-                    self.send_response(204)
-                    self.end_headers()
-                    return
-                body = json.dumps(result).encode()
-                self.send_response(code)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
-                return
-            self.send_response(404)
-            self.end_headers()
-
-        def log_message(self, *_args) -> None:
+        def do_GET(self):
+            if not ipaddress.ip_address(self.client_address[0]).is_loopback:
+                self.send_response(403); self.end_headers(); return
+            route = urlparse(self.path)
+            if route.path.rstrip('/') in ('', '/healthz'):
+                body = json.dumps({'ok':True, 'mode':'access_policy_only', 'traffic_tracking':False}).encode()
+                self.send_response(200); self.send_header('Content-Length',str(len(body))); self.end_headers(); self.wfile.write(body)
+            elif route.path == '/register':
+                code = policy.register(parse_qs(route.query, keep_blank_values=True))
+                self.send_response(code); self.send_header('Content-Length','0'); self.end_headers()
+            else:
+                self.send_response(404); self.end_headers()
+        def log_message(self, *_):
             pass
-
-    class ReuseServer(ThreadingHTTPServer):
-        allow_reuse_address = True
-
-    server = ReuseServer((bind, port), Handler)
+    server = ThreadingHTTPServer((bind, port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--panel", default=os.environ.get("MEDIADECK_PANEL", ""))
-    parser.add_argument("--node", default=os.environ.get("MEDIADECK_NODE", "local"))
-    parser.add_argument("--token-file", default=os.environ.get("MEDIADECK_TOKEN_FILE", ""))
-    parser.add_argument("--persist", default=os.environ.get(
-        "MEDIADECK_METER_DB", "/var/lib/mediadeck/flowmeter.db"))
-    parser.add_argument("--bind", default="127.0.0.1")
-    parser.add_argument("--port", type=int, default=9801)
-    parser.add_argument("--interval", type=float, default=15)
-    parser.add_argument("--enable-nft", action="store_true",
-                        default=os.environ.get("METERD_ENABLE") == "1")
-    parser.add_argument("--deny-map", default=os.environ.get(
-        "MEDIADECK_DENY_MAP", "/var/lib/mediadeck/deny.map"))
-    parser.add_argument("--nginx-bin", default=os.environ.get("MEDIADECK_NGINX_BIN", ""))
-    parser.add_argument("--nginx-conf", default=os.environ.get("MEDIADECK_NGINX_CONF", ""))
-    parser.add_argument("--nginx-prefix", default=os.environ.get("MEDIADECK_NGINX_PREFIX", ""))
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, 'policy redirect refused', headers, fp)
+
+
+def fetch_policy(panel, node, token):
+    request = urllib.request.Request(panel.rstrip('/')+'/api/edge/'+urllib.parse.quote(node,safe='')+'/policy',
+                                     headers={'Authorization':'Bearer '+token})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    with opener.open(request, timeout=15) as response:
+        return json.load(response)
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Access-policy guard; traffic accounting retired')
+    parser.add_argument('--panel', default=os.environ.get('MEDIADECK_PANEL',''))
+    parser.add_argument('--node', default=os.environ.get('MEDIADECK_NODE','local'))
+    parser.add_argument('--token-file', default=os.environ.get('MEDIADECK_TOKEN_FILE',''))
+    parser.add_argument('--bind', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=9801)
+    parser.add_argument('--interval', type=float, default=15)
+    parser.add_argument('--deny-map', default='/var/lib/mediadeck/deny.map')
+    parser.add_argument('--state-file', default='/var/lib/mediadeck/access-policy.json')
+    parser.add_argument('--nginx-bin', default='')
+    parser.add_argument('--nginx-conf', default='')
+    parser.add_argument('--nginx-prefix', default='')
+    parser.add_argument('--persist', default='/var/lib/mediadeck/flowmeter.db', help='Read old connection identities once, never write the traffic DB')
+    parser.add_argument('--enable-nft', action='store_true', help='Retired compatibility argument; never enables nft')
     args = parser.parse_args()
-    token = ""
-    if args.token_file:
-        with open(args.token_file, encoding="utf-8") as fh:
-            token = fh.read().strip()
-    meter = FlowMeter(args.persist, node=args.node, enabled=args.enable_nft,
-                      deny_map_path=args.deny_map)
-    publisher = None
-    if args.nginx_bin:
-        publisher = DenyPublisher(
-            args.deny_map, nginx_bin=args.nginx_bin,
-            nginx_conf=args.nginx_conf or None,
-            nginx_prefix=args.nginx_prefix or None)
-    meter.write_deny_map()
-    daemon = Meterd(meter, panel=args.panel, node=args.node, token=token,
-                    interval=args.interval, publisher=publisher)
-    serve(daemon, args.bind, args.port)
-    print(f"meterd on {args.bind}:{args.port} nft={meter.enabled}", flush=True)
+    with open(args.token_file, encoding='utf-8') as f:
+        token = f.read().strip()
+    publisher = DenyPublisher(args.deny_map, nginx_bin=args.nginx_bin or None,
+                              nginx_conf=args.nginx_conf or None, nginx_prefix=args.nginx_prefix or None)
+    policy = AccessPolicy(args.state_file, args.deny_map, publisher, args.persist)
+    serve(policy, args.bind, args.port)
+    print('Access policy guard running; byte accounting/reporting disabled.', flush=True)
     try:
-        daemon.loop()
+        while True:
+            try:
+                policy.prune_connections()
+                policy.apply(fetch_policy(args.panel,args.node,token))
+            except Exception as exc:
+                print('Access policy refresh failed: '+type(exc).__name__, flush=True)
+            time.sleep(max(5,args.interval))
     except KeyboardInterrupt:
-        daemon.stop()
-    return 0
+        return 0
 
 
-# Imported as a sibling of flowmeter.py when deployed as a single-dir agent.
-if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    sys.exit(main())
+if __name__ == '__main__':
+    raise SystemExit(main())

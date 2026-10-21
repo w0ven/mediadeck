@@ -43,31 +43,30 @@ def records(db: Any, uid: str, since: float, until: float) -> list[dict[str, Any
     meta = """WITH info AS (
         SELECT watch_key,MAX(item_id) AS item_id,MAX(item_name) AS item_name,
                MAX(item_type) AS item_type,MAX(series_name) AS series_name,
-               MAX(client) AS client,MAX(play_method) AS play_method,MAX(node) AS node,
-               SUM(bytes) AS bytes
+               MAX(client) AS client,MAX(play_method) AS play_method,MAX(node) AS node
         FROM play_events WHERE emby_user_id=? AND sampled=1 AND watch_key<>'' GROUP BY watch_key
     ) """
     rows = db.query(meta + """
         SELECT v.run_key,v.item_id,v.item_name,v.item_type,v.series_name,v.client,v.play_method,
-               COALESCE(i.node,'') AS node,COALESCE(i.bytes,0) AS bytes,
+               COALESCE(i.node,'') AS node,
                v.started_at,v.ended_at,v.seconds,1 AS exact,'progress' AS source
         FROM watch_verified_samples v LEFT JOIN info i ON i.watch_key=v.run_key
         WHERE v.emby_user_id=? AND v.ended_at>? AND v.started_at<?
         UNION ALL
         SELECT s.session_key,COALESCE(i.item_id,''),COALESCE(i.item_name,''),
                COALESCE(i.item_type,''),COALESCE(i.series_name,''),COALESCE(i.client,''),
-               COALESCE(i.play_method,''),COALESCE(i.node,''),COALESCE(i.bytes,0),
+               COALESCE(i.play_method,''),COALESCE(i.node,''),
                s.started_at,s.ended_at,s.seconds,1,'sample'
         FROM watch_samples s LEFT JOIN info i ON i.watch_key=s.session_key
         WHERE s.emby_user_id=? AND s.ended_at>? AND s.started_at<? AND NOT EXISTS (
             SELECT 1 FROM watch_verified_samples v WHERE v.run_key=s.session_key
             AND v.emby_user_id=s.emby_user_id AND v.ended_at=s.ended_at)
         UNION ALL
-        SELECT 'event:'||id,item_id,item_name,item_type,series_name,client,play_method,node,bytes,
+        SELECT 'event:'||id,item_id,item_name,item_type,series_name,client,play_method,node,
                started_at,ended_at,seconds,seconds=ended_at-started_at,'event'
         FROM play_events WHERE emby_user_id=? AND sampled=0 AND ended_at>? AND started_at<?
         UNION ALL
-        SELECT 'legacy:'||event_id,'','','','','','','',0,
+        SELECT 'legacy:'||event_id,'','','','','','','',
                started_at,ended_at,seconds,seconds=ended_at-started_at,'import'
         FROM watch_legacy_events WHERE emby_user_id=? AND ended_at>? AND started_at<?
         ORDER BY started_at,ended_at

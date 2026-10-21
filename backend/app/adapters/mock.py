@@ -248,7 +248,8 @@ class MockEmby:
         ]
         return items[:max(1, limit)]
 
-    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None) -> list[dict[str, Any]]:
+    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None, *,
+                             include_episodes: bool = True) -> list[dict[str, Any]]:
         return []
 
     # -- intake observability ------------------------------------------------

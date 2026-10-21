@@ -256,16 +256,15 @@ def test_unknown_measured_never_uses_old_estimate_or_zero_percent():
         "measured_used_bytes": None,
         "metering": {"measurement_status": "no_usage_records", "coverage": {"degraded": False}},
     }
-    text = "\n".join(quota_lines(m))
-    assert "已用：<b>本周期暂无播放记录</b>" in text and "剩余：<b>1.0 KiB</b>" in text
+    # Byte usage is retired from Bot cards (docs/TRAFFIC_RETIREMENT.md): neither
+    # the archived estimate nor any measured/unknown placeholder is rendered.
+    assert quota_lines(m) == []
     assert m["measured_used_bytes"] is None
-    assert "%" not in text and "999" not in text and "估算" not in text
     m["metering"]["coverage"]["degraded"] = True
-    text = "\n".join(quota_lines(m))
-    assert "已用：<b>计量暂不可用</b>" in text and "剩余：<b>暂无法确认</b>" in text
+    assert quota_lines(m) == []
     m["measured_used_bytes"] = 512
-    text = "\n".join(quota_lines(m))
-    assert "已用：<b>512 B</b>" in text and "剩余：<b>512 B</b>" in text
+    assert quota_lines(m) == [] and quota_lines(m, public=True) == []
+    assert m["traffic_used_bytes"] == 999999
 
 
 def test_personal_and_admin_watch_totals_survive_prune(bot):

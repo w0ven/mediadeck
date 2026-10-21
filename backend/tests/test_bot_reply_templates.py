@@ -137,11 +137,13 @@ def test_checked_in_previews_are_rendered_by_current_templates():
         assert len(rows) <= (20 if name == '账号卡' else 18)
         assert all(sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
                        for c in row) <= 32 for row in rows)
-        for label in ('已用：', '剩余：', '近24小时：', '近30天：'):
+        for label in ('近24小时：', '近30天：'):
             matching = [row for row in rows if label in row]
             assert len(matching) == 1
             if name != '账号卡':
                 assert ' · ' not in matching[0]
+        # Byte usage rows are retired (docs/TRAFFIC_RETIREMENT.md).
+        assert not [row for row in rows if '已用：' in row or '剩余：' in row]
     for text in cards.values():
         for forbidden in ('历史未核验', '核验起点', '统计口径', '进度正常前进', '采样'):
             assert forbidden not in text
@@ -151,7 +153,9 @@ def test_checked_in_previews_are_rendered_by_current_templates():
     assert '接受后等待下载入库' not in cards['求片中心']
     assert '账号权益不变' not in cards['重置密码确认']
     assert '需在客户端更新密码' in cards['重置密码确认']
-    assert '遵守套餐的流量、带宽、同时播放限制' in cards['行为准则']
+    # Copy now names the account's limits; traffic is no longer one of them.
+    assert '遵守账号的带宽和同时播放限制' in cards['行为准则']
+    assert '流量' not in cards['行为准则']
     assert '设备超出套餐' not in cards['行为准则']
     assert '限速或暂停播放' not in cards['行为准则']
     assert '等待下载' in ACCEPT_NOTICE
@@ -159,9 +163,8 @@ def test_checked_in_previews_are_rendered_by_current_templates():
 
 def test_unknown_values_never_become_zero_or_unlimited():
     assert '暂不可用' in '\n'.join(bandwidth_lines({}))
-    quota = '\n'.join(quota_lines({'quota_source': 'measured'}))
-    assert '计量暂不可用' in quota and '暂无法确认' in quota and '0 B' not in quota
-    assert '不限' not in quota
+    # Retired byte usage renders nothing at all, so it can never read as 0 or unlimited.
+    assert quota_lines({'quota_source': 'measured'}) == []
     bot, _, _ = demo_bot()
     bot._stats = SimpleNamespace(watch_summary=lambda uid: {})
     body = bot._usage_text({'emby_user_id': 'demo', 'quota_source': 'measured'})
@@ -173,7 +176,7 @@ def test_unknown_values_never_become_zero_or_unlimited():
     assert '同播：暂不可用' in account and '设备分组：暂不可用' in account
     assert '累计观看：<b>暂不可用</b>' in account
     bot._points = SimpleNamespace(balance=lambda uid: (_ for _ in ()).throw(OSError()))
-    assert '余额：<b>暂不可用</b>' in bot._points_text({'emby_user_id': 'demo'})
+    assert '余额 <b>暂不可用</b>' in bot._points_text({'emby_user_id': 'demo'})
     assert '流水暂不可用' in bot._points_text({'emby_user_id': 'demo'})
 
 
@@ -200,14 +203,14 @@ def test_bandwidth_rounding_is_display_only(kbps, expected, compact):
     ({'traffic_used_bytes': 3 * 1024**3, 'traffic_quota_bytes': 2 * 1024**3},
      '本月流量（估算）', '3.0 GiB', '0 B'),
 ])
-def test_compact_quota_preserves_measurements_and_original_admin_layout(member, label, used, remaining):
+def test_retired_quota_renders_nothing_in_any_layout(member, label, used, remaining):
+    """Every former usage shape (measured, unknown, estimate) is retired: no
+    layout renders it, and rendering never mutates the member."""
     import copy
 
     before = copy.deepcopy(member)
-    original = [f'<b>{label}</b>', f'已用：<b>{used}</b>', f'剩余：<b>{remaining}</b>']
-    assert quota_lines(member) == original
-    assert quota_lines(member, compact=False) == original
-    assert quota_lines(member, compact=True) == ['📊 ' + original[0], original[1] + ' · ' + original[2]]
+    for kwargs in ({}, {'compact': False}, {'compact': True}, {'public': True}):
+        assert quota_lines(member, **kwargs) == [], (label, used, remaining)
     assert member == before
 
 

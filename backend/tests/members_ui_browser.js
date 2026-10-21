@@ -341,8 +341,8 @@
     assert(!/可正常播放|已启用/.test(carolText), 'missing Emby shown as playable');
     assert(carolText.includes('正常') || carolText.includes('权益'), 'carol entitlement missing');
     assert(carolRow.querySelector('[data-act="retry"]'), 'retry button missing for retryable carol');
-    assert(visibleText(document.querySelector('tr[data-id="u-bob"]')).includes('本月流量 未测'), 'missing measured quota fell back to legacy estimate or zero');
-    assert(carolText.includes('本月流量 0 B'), 'known measured zero was not distinguished from missing');
+    assert(!visibleText(document.querySelector('tr[data-id="u-bob"]')).includes('本月流量'), 'retired traffic still displayed');
+    assert(!carolText.includes('本月流量'), 'retired zero must not look like an active measurement');
 
     const aliceRow = document.querySelector('tr[data-id="u-alice"]');
     assert(aliceRow && /Emby 在线/.test(visibleText(aliceRow)), 'alice emby present not shown');
@@ -516,7 +516,7 @@
     }
     document.querySelector('#member-detail [data-tab="overview"]').click();
     await waitFor(() => document.getElementById('md-renew'), 'overview actions missing');
-    ['password','kick','actions/disable','actions/enable','reset-traffic','telegram/unbind'].forEach((action) =>
+    ['password','kick','actions/disable','actions/enable','telegram/unbind'].forEach((action) =>
       assert(document.querySelector(`[data-member-action="${action}"]`), 'account action removed: ' + action));
 
     const manualWrites = () => requests.filter(r=>/\/actions\/(disable|enable)$/.test(r.path));
@@ -684,20 +684,8 @@
     drawerEditor.blur();
     document.getElementById('md-close').click();
     await waitFor(() => document.getElementById('member-detail').classList.contains('hidden'), 'drawer close did not finish');
-    document.querySelector('[data-act="metering"]').click();
-    await waitFor(() => document.getElementById('meter-cutover'), 'metering preview missing');
-    document.getElementById('meter-cutover').click(); await tick();
-    assert(!requests.some((r) => r.path === '/api/metering/cutover'), 'cutover enabled without baseline confirmation');
-    document.getElementById('meter-baseline').checked = true;
-    confirmAnswers.splice(0, confirmAnswers.length, false);
-    document.getElementById('meter-cutover').click(); await tick();
-    assert(!requests.some((r) => r.path === '/api/metering/cutover'), 'cancelled cutover still wrote configuration');
-    confirmAnswers.splice(0, confirmAnswers.length, true);
-    document.getElementById('meter-cutover').click();
-    await waitFor(() => requests.some((r) => r.path === '/api/metering/cutover'), 'confirmed cutover not submitted');
-    const activation = requests.find((r) => r.path === '/api/metering/cutover').body;
-    assert(activation.cutover === true && activation.baseline_confirmed === true, 'cutover payload lost explicit confirmation');
-    await tick();
+    assert(!document.querySelector('[data-act="metering"]'), 'retired traffic control still exists');
+    assert(!requests.some(r => r.path === '/api/metering' || r.path === '/api/metering/cutover'), 'retired metering still requested');
     await go('groups'); await tick();
     assert(document.getElementById('new-bandwidth'), 'group page broke after removing shared bandwidth presets');
     await go('members?page_size=50'); await tick();

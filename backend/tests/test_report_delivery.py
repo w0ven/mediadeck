@@ -283,3 +283,29 @@ async def test_retries_cross_midnight_but_close_after_a_day_without_sending(repo
     assert r.calls == ['one', 'two', 'two']
     assert not registry._due('viewing_report', r.now[0] + 60)
     assert r.plugin.delivery_status()['recipients'][1]['state'] == 'failed'
+
+
+@pytest.mark.asyncio
+async def test_large_batch_yields_between_recipients_and_resumes_receipts(report, monkeypatch):
+    from app.modules import plugins_builtin
+    r = report
+    clock = [0]
+    # Replace only this module's time namespace, not asyncio's monotonic clock.
+    monkeypatch.setattr(plugins_builtin, 'time', SimpleNamespace(
+        time=time.time, strftime=time.strftime, localtime=time.localtime,
+        monotonic=lambda: clock[0]))
+    original = r.ctx.telegram.notify_member
+    async def slow_send(member, text):
+        result = await original(member, text)
+        clock[0] += 481
+        return result
+    r.ctx.telegram.notify_member = slow_send
+    result = await r.plugin.run(r.config)
+    assert r.calls == ['one']
+    rows = r.plugin.delivery_status()['recipients']
+    assert [row['state'] for row in rows] == ['sent', 'pending']
+    assert rows[1]['attempts'] == 0 and result['等待重试'] == 1
+    assert r.plugin.retry_due(r.now[0] + 60)
+    await r.plugin.run(r.config)
+    assert r.calls == ['one', 'two']
+    assert all(row['state'] == 'sent' for row in r.plugin.delivery_status()['recipients'])

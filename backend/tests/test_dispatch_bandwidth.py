@@ -35,10 +35,12 @@ def _state(name: str, *, streams: int = 0, egress: float = 0.0,
 
 # -- utilisation ------------------------------------------------------------
 
-def test_saturated_link_reads_as_busy_even_when_stream_count_is_low() -> None:
-    # 10 of 48 streams is 21% by count, but 760 of 800 Mbps is 95% of the wire.
+def test_reported_egress_no_longer_overrides_stream_count() -> None:
+    # Observed egress Mbps is retired as a dispatch signal
+    # (docs/TRAFFIC_RETIREMENT.md): 10 of 48 streams stays 10/48 even when an
+    # old agent still reports 760 of 800 Mbps.
     state = _state("ca1", streams=10, egress=760.0, capacity=48, bandwidth=800)
-    assert state.utilisation() > 0.9
+    assert state.utilisation() == 10 / 48
 
 
 def test_many_light_streams_are_not_mistaken_for_a_full_pipe() -> None:

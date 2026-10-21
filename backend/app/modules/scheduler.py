@@ -87,30 +87,8 @@ class NodeState:
             self.user_speeds = {}
 
     def utilisation(self) -> float:
-        """Fraction of this node's capacity currently in use (0.0 - 1.0+).
-
-        Takes the worse of two independent pressures:
-
-        - stream count against the node's configured capacity
-        - measured egress against the node's real link ceiling
-
-        Stream count on its own misreads a busy node. A 1 Gbit box showing 10
-        streams looks 20% loaded against a capacity of 48, while five
-        direct-play 4K clients on that same box have already filled the pipe.
-        Whichever limit sits closer to its ceiling is the one that decides,
-        so a node is never handed work its wire cannot carry.
-
-        Absolute, not relative: 0.8 means "80% full" on a small node and on a
-        large one alike, so one threshold works for a mixed fleet. Nodes with
-        no declared ceiling keep the stream-count-only behaviour.
-        """
-        capacity = max(self.node.capacity, 1.0)
-        stream_load = self.active_streams / capacity
-
-        ceiling = float(getattr(self.node, "bandwidth_mbps", 0) or 0)
-        if ceiling <= 0:
-            return stream_load
-        return max(stream_load, self.egress_mbps / ceiling)
+        """Node load uses concurrent stream capacity, not retired byte-rate telemetry."""
+        return self.active_streams / max(self.node.capacity, 1.0)
 
     def available(self) -> bool:
         return (
@@ -220,23 +198,9 @@ class Scheduler:
             st.last_success_ts = st.last_probe_ts
             st.consecutive_failures = 0
             st.active_streams = int(active)
-            rate = nonnegative(data.get('egress_mbps'))
-            st.egress_ok = rate is not None and bool(data.get('egress_ok', True))
-            if rate is not None:
-                st.egress_mbps = rate
-            st.egress_at, st.egress_time_basis = sample_time(data.get('egress_sampled_at'), st.last_probe_ts)
-            st.egress_window_seconds = nonnegative(data.get('egress_window_seconds'))
-            speeds = data.get('user_speeds')
-            valid_speeds = (isinstance(speeds, dict)
-                            and all(nonnegative(v) is not None for v in speeds.values()))
-            st.user_speeds_at, st.user_speeds_time_basis = sample_time(data.get('user_speeds_sampled_at'), st.last_probe_ts)
-            st.user_speeds_source = str(data.get('user_speeds_source') or 'legacy_socket')
-            st.user_speeds_window_seconds = nonnegative(data.get('user_speeds_window_seconds'))
-            st.user_speeds_ok = valid_speeds and bool(data.get('user_speeds_ok', True)) and st.user_speeds_source in ('socket','legacy_socket')
-            if st.user_speeds_ok:
-                st.user_speeds = {str(k): int(float(v)) for k, v in speeds.items()}
-            # Failed/missing samples retain the last tag set, not its rates:
-            # otherwise another node's partial reading appears account-wide.
+            # Discard byte-rate fields even from agents not yet upgraded.
+            st.egress_mbps, st.egress_ok = 0, False
+            st.user_speeds, st.user_speeds_ok = {}, False
             st.probe_error = None
         else:
             st.ok = False
@@ -247,7 +211,6 @@ class Scheduler:
         self._history[st.node.name].append({
             'ts': st.last_probe_ts, 'ok': st.ok,
             'active_streams': st.active_streams if st.ok else None,
-            'egress_mbps': st.egress_mbps if self._egress_fresh(st) else None,
         })
 
     @staticmethod
@@ -325,40 +288,11 @@ class Scheduler:
 
     # -- introspection -------------------------------------------------------
     def user_speeds(self) -> dict[str, int]:
-        """Anonymised user tag -> bytes/second, summed across fresh node samples."""
-        view = self.user_speed_view()
-        return {tag: int(v["bps"]) for tag, v in view.items()
-                if v.get("bps") is not None}
+        return {}
 
     def user_speed_view(self, *, stale_after: float = METRIC_STALE_AFTER) -> dict[str, dict[str, Any]]:
-        """Per-account TCP payload rate. Never substitute NIC traffic or media bitrate."""
-        now = time.time()
-        out: dict[str, dict[str, Any]] = {}
-        for st in self._states.values():
-            fresh = bool(st.user_speeds_ok) and 0 <= now - st.user_speeds_at <= stale_after
-            for tag, bps in (st.user_speeds or {}).items():
-                if not tag:
-                    continue
-                cur = out.setdefault(tag, {'bps': 0, 'collected_at': None, 'coverage': 'direct',
-                                          'source': 'node', 'nodes': [], 'unavailable_nodes': [],
-                                          'time_basis': 'collector', 'window_seconds': None})
-                if not fresh:
-                    cur['unavailable_nodes'].append(st.node.name)
-                    continue
-                cur['bps'] += int(bps)
-                cur['nodes'].append(st.node.name)
-                cur['collected_at'] = min(cur['collected_at'] or st.user_speeds_at, st.user_speeds_at)
-                if st.user_speeds_time_basis != 'collector':
-                    cur['time_basis'] = st.user_speeds_time_basis
-                if st.user_speeds_window_seconds is not None:
-                    cur['window_seconds'] = max(cur['window_seconds'] or 0, st.user_speeds_window_seconds)
-        for value in out.values():
-            if value['unavailable_nodes']:
-                value['bps'] = None
-                value['coverage'] = 'partial' if value['nodes'] else 'none'
-                value['source'] = 'unknown'
-                value['reason'] = 'stale_or_failed_node_sample'
-        return out
+        """No aggregate byte-rate telemetry is collected from nodes."""
+        return {}
 
     def history(self, name: str, limit: int = 240) -> list[dict[str, Any]]:
         entries = self._history.get(name)
@@ -388,11 +322,6 @@ class Scheduler:
                 "available": s.available(),
                 "manually_disabled": s.manually_disabled,
                 "active_streams": s.active_streams,
-                "egress_mbps": s.egress_mbps if self._egress_fresh(s) else None,
-                "egress_sampled_at": s.egress_at or None,
-                "egress_time_basis": s.egress_time_basis,
-                "egress_window_seconds": s.egress_window_seconds,
-                "egress_status": 'fresh' if self._egress_fresh(s) else 'unavailable',
                 "last_success_ts": s.last_success_ts,
                 "utilisation": round(s.utilisation(), 3),
                 "last_probe_ts": s.last_probe_ts,

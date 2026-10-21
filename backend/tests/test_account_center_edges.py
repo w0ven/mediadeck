@@ -4,53 +4,9 @@ import asyncio
 import time
 
 import pytest
-from fastapi.testclient import TestClient
 from test_bot_account_center import base_bot, bot, cb, msg, request  # noqa: F401
-from test_metering import _env, _svc
 
-from app.main import app
 from app.modules.stats import legacy_watch_fingerprint
-
-
-def test_retired_reporter_does_not_degrade_current_inventory(tmp_path):
-    now = time.time()
-    svc = _svc(tmp_path, expected=["active"])
-    svc.ingest(_env("active", "boot", 1, [], observed_at=now))
-    svc.ingest(_env("retired", "old", 1, [], observed_at=now - 86400))
-    snap = svc.snapshot("u", now=now)
-    assert not snap["coverage"]["degraded"]
-    assert [n["name"] for n in snap["coverage"]["nodes"]] == ["active"]
-    assert svc._db.one("SELECT COUNT(*) AS n FROM measured_node_seq WHERE node='retired'")["n"] == 1
-
-
-def test_healthy_expected_nodes_without_user_data_is_not_fake_zero(tmp_path):
-    now = time.time()
-    svc = _svc(tmp_path, expected=["de1", "nc1"])
-    for n in ("de1", "nc1"):
-        svc.ingest(_env(n, "boot", 1, [], observed_at=now))
-    snap = svc.snapshot("u", now=now)
-    assert not snap["coverage"]["degraded"]
-    assert snap["measurement_status"] == "no_usage_records"
-    assert snap["measured_used_bytes"] is None
-
-
-def test_main_expected_nodes_excludes_disabled_never_reporter(monkeypatch):
-    with TestClient(app) as client:
-        from types import SimpleNamespace
-
-        monkeypatch.setattr(
-            app.state.settings_service,
-            "nodes",
-            lambda: [
-                SimpleNamespace(name="ca1", enabled=False),
-                SimpleNamespace(name="de1", enabled=True),
-            ],
-        )
-        app.state.metering.ingest(_env("de1", "boot", 1, [], observed_at=time.time()))
-        rows = client.get("/api/metering", auth=("admin", "change-me")).json()["totals"][
-            "coverage"
-        ]["nodes"]
-        assert [r["name"] for r in rows] == ["de1"]
 
 
 def seed_watch(bot):  # noqa: F811 - pytest fixture injection

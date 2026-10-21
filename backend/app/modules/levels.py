@@ -25,7 +25,6 @@ def defaults():
     for i in range(7):
         rows.append({"level": i+1, "name": LEVEL_NAMES[i], "title": LEVEL_TITLES[i],
                      "icon": LEVEL_ICONS[i], "threshold": LEVEL_THRESHOLDS[i], "price": LEVEL_PRICES[i],
-                     "traffic_quota_bytes": int((1, 1, 1.2, 1.5, 2, 2.5, 3)[i] * 1024**4),
                      "bandwidth_limit_kbps": (120, 120, 140, 160, 180, 220, 280)[i]*1000,
                      "max_streams": (2, 2, 2, 2, 3, 3, 4)[i], "request_quota": (3, 3, 4, 5, 6, 8, 10)[i]})
     rows.append(dict(rows[-1], level=8, name="道祖", title="一炁化三清", icon="🪷", threshold=None, price=1))
@@ -43,7 +42,7 @@ def validate(config):
     previous = -1
     keys = set(defaults()["levels"][0])
     for i, row in enumerate(levels):
-        if not isinstance(row, dict) or set(row) != keys or type(row["level"]) is not int or row["level"] != i+1:
+        if not isinstance(row, dict) or set(row) - {"traffic_quota_bytes"} != keys or type(row["level"]) is not int or row["level"] != i+1:
             raise ValueError("等级顺序或字段无效")
         for key in ("name", "title", "icon"):
             if not isinstance(row[key], str) or not 1 <= len(row[key].strip()) <= 40:
@@ -55,7 +54,7 @@ def validate(config):
             previous = value
         elif row["threshold"] is not None:
             raise ValueError("Lv8为专属授予，不设置成长门槛")
-        for key, high in (("price", 10**9), ("traffic_quota_bytes", 2**62),
+        for key, high in (("price", 10**9),
                           ("bandwidth_limit_kbps", 10000000), ("max_streams", 100), ("request_quota", 10000)):
             if type(row[key]) is not int or not 1 <= row[key] <= high:
                 raise ValueError(f"{key}须为合法正整数")
@@ -63,7 +62,7 @@ def validate(config):
 
 
 def qualification(db, uid, now, days=30, required_seconds=4800, required_days=3):
-    """Verified evidence is sufficient even before reward cutover; no money here."""
+    """Legacy verified-watch statistics for API compatibility, never a renewal gate."""
     start = now-days*DAY
     rows = db.query("SELECT started_at,ended_at FROM watch_verified_samples "
                     "WHERE emby_user_id=? AND ended_at>? AND started_at<?", (uid, start, now))
@@ -148,8 +147,8 @@ class LevelService:
         member['activity_exempt'] = member.get('group_id') == WHITELIST_GROUP_ID
         if member['activity_exempt']:
             return group  # every whitelist/card right remains authoritative
-        return dict(group or {}, name=level['name'], billing_mode='both', duration_days=30,
-                    **{key: level[key] for key in ('traffic_quota_bytes', 'bandwidth_limit_kbps', 'max_streams', 'request_quota')})
+        return dict(group or {}, name=level['name'], billing_mode='time', duration_days=30,
+                    **{key: level[key] for key in ('bandwidth_limit_kbps', 'max_streams', 'request_quota')})
 
     def status(self, uid, now=None):
         now = time.time() if now is None else now
@@ -246,9 +245,7 @@ class LevelService:
             expiry = member.get('expires_at_effective')
             if not expiry or expiry-now > (DAY if automatic else 3*DAY):
                 raise ValueError("仅到期前72小时内可续30天，自动保号在24小时内检查")
-            active = qualification(self.db, uid, now)
-            if not active['eligible']:
-                raise ValueError(f"近30天有效观影{int(active['seconds'])}/4800秒，合格观看日{active['days']}/3，未达标")
+            # Viewing earns rewards independently; renewal spends the current level price.
             level = member['activity_level']
             cost = level['price']
             if intent is not None:

@@ -78,7 +78,7 @@ def test_bot_purchase_use_title_create_wear_cancel_and_repeat_callbacks(env):
         mid = env.bot._panel[env.bot._session_key(VIEWER, VIEWER, group=False)]
         await click(env, "titles", mid, chat=VIEWER, user=VIEWER)
         await click(env, f"wear:{rows[0]['id']}", mid, chat=VIEWER, user=VIEWER)
-        assert env.tags.tag == "观影达人" and "synced" in env.tg.text(VIEWER, mid)
+        assert env.tags.tag == "观影达人" and "已同步到群" in env.tg.text(VIEWER, mid)
         await click(env, "wear:none", mid, chat=VIEWER, user=VIEWER)
         assert env.tags.tag == ""
 
@@ -145,13 +145,13 @@ def test_owned_card_and_title_pagers_keep_old_items_reachable_and_messages_bound
     async def run():
         mid = await command(env, "/start", chat=VIEWER, user=VIEWER)
         await click(env, "inventory", mid, chat=VIEWER, user=VIEWER)
-        assert "1/3页" in env.tg.text(VIEWER, mid)
+        assert "第 1/3 页" in env.tg.text(VIEWER, mid)
         assert len(env.tg.text(VIEWER, mid).encode("utf-16-le")) // 2 < 4096
         await click(env, "invpage:2", mid, chat=VIEWER, user=VIEWER)
-        assert "3/3页" in env.tg.text(VIEWER, mid)
+        assert "第 3/3 页" in env.tg.text(VIEWER, mid)
         assert "card:1" in {b["callback_data"] for b in env.tg.actions(VIEWER, mid)}
         await click(env, "titlespage:1", mid, chat=VIEWER, user=VIEWER)
-        assert "2/2页" in env.tg.text(VIEWER, mid)
+        assert "第 2/2 页" in env.tg.text(VIEWER, mid)
         assert "wear:1" in {b["callback_data"] for b in env.tg.actions(VIEWER, mid)}
         await click(env, "wear:1", mid, chat=VIEWER, user=VIEWER)
         assert env.tags.tag == "称号0"
@@ -165,12 +165,12 @@ def test_bot_empty_state_and_failure_never_fake_success(env):
         # Empty inventory
         await click(env, "inventory", mid, chat=VIEWER, user=VIEWER)
         text = env.tg.text(VIEWER, mid)
-        assert "暂无道具" in text and "已使用" not in text
+        assert "还没有道具" in text and "已使用" not in text
 
         # Empty titles
         await click(env, "titles", mid, chat=VIEWER, user=VIEWER)
         text = env.tg.text(VIEWER, mid)
-        assert "暂无可用称号" in text
+        assert "还没有称号" in text
 
         # Transfer confirmation failure with timeout / cancelled state
         await click(env, "transfer", mid, chat=VIEWER, user=VIEWER)

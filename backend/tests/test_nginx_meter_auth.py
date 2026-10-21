@@ -41,9 +41,8 @@ def test_meterd_register_http_failopen_and_block(tmp_path: Path) -> None:
     flow = importlib.util.module_from_spec(flow_spec)
     assert flow_spec.loader is not None
     flow_spec.loader.exec_module(flow)
-    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a", enabled=False)
-    meter.apply_policy(["blockedtag"], terminate=False)
-    daemon = meterd_mod.Meterd(meter)
+    daemon = meterd_mod.AccessPolicy(str(tmp_path / "access.json"), str(tmp_path / "deny.map"))
+    daemon.apply({"ok": True, "policy": {"snapshot": True, "blocked_tags": ["blockedtag"]}})
     port = _port()
     httpd = meterd_mod.serve(daemon, "127.0.0.1", port)
     try:
@@ -62,7 +61,7 @@ def test_meterd_register_http_failopen_and_block(tmp_path: Path) -> None:
         assert ok.status == 204
     finally:
         httpd.shutdown()
-        meter.close()
+        httpd.server_close()
 
 
 def test_generated_site_contains_sync_auth_request_not_as_register() -> None:
@@ -88,7 +87,8 @@ def test_generated_site_contains_sync_auth_request_not_as_register() -> None:
     # also breaks `location =`.
     assert "auth_request /_mediadeck/register?" not in text
     # Billing stays synchronous; announce is a separate speed ping.
-    assert "mirror /_mediadeck/announce;" in text
+    assert "mirror /_mediadeck/announce;" not in text
+    assert "$bytes_sent" not in text
     assert "include /var/lib/mediadeck/deny.map;" in text
     assert "if ($md_denied)" in text
     assert "set $md_cid $pid.$connection;" in text
@@ -104,9 +104,8 @@ def test_auth_request_blocks_denied_and_failopens_unknown(tmp_path: Path) -> Non
     assert flow_spec.loader is not None
     flow_spec.loader.exec_module(flow)
 
-    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a", enabled=False)
-    meter.apply_policy(["blockedtag"], terminate=False)
-    daemon = meterd_mod.Meterd(meter)
+    daemon = meterd_mod.AccessPolicy(str(tmp_path / "access.json"), str(tmp_path / "deny.map"))
+    daemon.apply({"ok": True, "policy": {"snapshot": True, "blocked_tags": ["blockedtag"]}})
     meter_port = _port()
     httpd = meterd_mod.serve(daemon, "127.0.0.1", meter_port)
     time.sleep(0.1)
@@ -183,7 +182,7 @@ http {{
     finally:
         stop_proxy(proc, cmd)
         httpd.shutdown()
-        meter.close()
+        httpd.server_close()
 
 
 @pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")
@@ -195,11 +194,10 @@ def test_deny_map_blocks_when_meterd_is_down(tmp_path: Path) -> None:
     assert flow_spec.loader is not None
     flow_spec.loader.exec_module(flow)
     deny = tmp_path / "deny.map"
-    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a",
-                           deny_map_path=str(deny))
-    meter.apply_policy(["blockedtag"], terminate=False, snapshot=True)
+    guard = _load_meterd()
+    meter = guard.AccessPolicy(str(tmp_path / "access.json"), str(deny), guard.DenyPublisher(str(deny)))
+    meter.apply({"ok": True, "policy": {"snapshot": True, "blocked_tags": ["blockedtag"]}})
     assert deny.read_text(encoding="utf-8").find("blockedtag") >= 0
-    meter.close()
 
     media_port = _port()
     dead_port = _port()
@@ -339,12 +337,10 @@ http {{
                             timeout=10, check=False)
     assert check.returncode == 0, check.stderr + check.stdout
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    meter = flow.FlowMeter(str(tmp_path / "fm.db"), node="edge-a",
-                           deny_map_path=str(deny))
     publisher = flow.DenyPublisher(
         str(deny), nginx_bin=NGINX, nginx_conf=str(conf_dir / "nginx.conf"),
         nginx_prefix=str(conf_dir))
-    daemon = meterd_mod.Meterd(meter, publisher=publisher)
+    daemon = meterd_mod.AccessPolicy(str(tmp_path / "access.json"), str(deny), publisher)
     httpd = meterd_mod.serve(daemon, "127.0.0.1", meter_port)
     url = f"http://127.0.0.1:{media_port}/s/file.bin?u=blockedtag"
     other = f"http://127.0.0.1:{media_port}/s/file.bin?u=othertag"
@@ -353,7 +349,7 @@ http {{
         assert _get_code(url) == 200
         assert _get_code(other) == 200
 
-        published = daemon.apply_remote_policy({
+        published = daemon.apply({
             "ok": True,
             "policy": {"rev": 2, "blocked_tags": ["blockedtag"], "snapshot": True},
         })
@@ -363,7 +359,7 @@ http {{
         assert _get_code(url) == 403
         assert _get_code(other) == 200
 
-        again = daemon.publish_deny()
+        again = publisher.publish(sorted(daemon.blocked))
         assert again["ok"] is True
         assert again["changed"] is False
         assert again["reloaded"] is False
@@ -376,7 +372,7 @@ http {{
         assert _get_code(other) == 200
 
         httpd = meterd_mod.serve(daemon, "127.0.0.1", meter_port)
-        cleared = daemon.apply_remote_policy({
+        cleared = daemon.apply({
             "ok": True,
             "policy": {"rev": 3, "blocked_tags": [], "snapshot": True},
         })
@@ -384,7 +380,7 @@ http {{
         assert cleared["reloaded"] is True
         time.sleep(0.3)
         assert _get_code(url) == 200
-        assert daemon._applied_rev == 3
+        assert daemon.blocked == set()
     finally:
         try:
             httpd.shutdown()
@@ -392,7 +388,7 @@ http {{
         except OSError:
             pass
         stop_proxy(proc, cmd)
-        meter.close()
+        httpd.server_close()
 
 
 @pytest.mark.skipif(not NGINX_AVAILABLE, reason="nginx binary required")

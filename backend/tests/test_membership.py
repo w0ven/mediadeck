@@ -28,7 +28,6 @@ from app.modules.members import (
     MemberService,
     merge_effective,
     parse_roles,
-    period_start,
     rate_bytes_per_sec,
     validate_overrides,
 )
@@ -63,22 +62,26 @@ def stack():
 
 # ---- groups ----------------------------------------------------------------
 def test_seeded_groups_match_owner_model(stack) -> None:
-    """standard = time+traffic, vip = traffic only, standard is the default."""
+    """standard = timed, vip = never expires, standard is the default.
+
+    Byte quotas are retired (docs/TRAFFIC_RETIREMENT.md), so seeded groups
+    carry no traffic quota.
+    """
     groups = {g["id"]: g for g in stack["groups"].list()}
-    assert groups["standard"]["billing_mode"] == "both"
+    assert groups["standard"]["billing_mode"] == "time"
     assert groups["standard"]["is_default"] == 1
     assert groups["standard"]["duration_days"] == 30
-    assert groups["standard"]["traffic_quota_bytes"] == 1024 * GIB
-    assert groups["vip"]["billing_mode"] == "traffic"
+    assert groups["standard"]["traffic_quota_bytes"] == 0
+    assert groups["vip"]["billing_mode"] == "none"
     assert groups["vip"]["duration_days"] == 0
+    assert groups["vip"]["traffic_quota_bytes"] == 0
 
 
-def test_metered_group_must_have_a_meter(stack) -> None:
-    """A traffic group with no quota silently grants unlimited access."""
-    with pytest.raises(ConfigError):
-        stack["groups"].create({"id": "bad", "name": "x",
-                                "billing_mode": "traffic",
-                                "traffic_quota_bytes": 0})
+def test_timed_group_must_have_a_duration(stack) -> None:
+    """A timed group with no duration would expire every member at once.
+
+    (The old "traffic group needs a quota" rule went with byte quotas.)
+    """
     with pytest.raises(ConfigError):
         stack["groups"].create({"id": "bad2", "name": "x",
                                 "billing_mode": "time", "duration_days": 0})
@@ -136,7 +139,7 @@ def test_role_filter_in_list(stack) -> None:
 
 # ---- member state ----------------------------------------------------------
 def test_state_is_derived_not_stored(stack) -> None:
-    """Expiry and quota are time-dependent; a stale label would mis-bill."""
+    """Expiry is time-dependent; a stale label would mis-bill."""
     m = stack["members"]
     m.upsert("u1", "alice", {"group_id": "standard"})
     assert m.get("u1")["state"] == "active"
@@ -144,26 +147,32 @@ def test_state_is_derived_not_stored(stack) -> None:
     m.upsert("u1", "alice", {"expires_at": int(time.time()) - 10})
     assert m.get("u1")["state"] == "expired"
 
-    m.upsert("u1", "alice", {"expires_at": int(time.time()) + 86400,
-                             "traffic_used_bytes": 1024 * GIB})
-    assert m.get("u1")["state"] == "exhausted"
+    m.upsert("u1", "alice", {"expires_at": int(time.time()) + 86400})
+    assert m.get("u1")["state"] == "active"
+    # Usage never exhausts an account any more (byte quotas are retired).
+    stack["db"].execute("UPDATE members SET traffic_used_bytes=? WHERE emby_user_id='u1'",
+                        (1024 * GIB,))
+    assert m.get("u1")["state"] == "active"
 
 
-def test_vip_never_expires_but_still_exhausts(stack) -> None:
-    """The whole point of the vip group: no clock, but the meter still runs."""
+def test_vip_never_expires_and_usage_never_exhausts(stack) -> None:
+    """The vip group has no clock; the retired byte meter cannot block it either."""
     m = stack["members"]
     m.upsert("u1", "alice", {"group_id": "vip"})
     assert m.get("u1")["expires_at"] is None
-    m.upsert("u1", "alice", {"traffic_used_bytes": 2048 * GIB})
-    assert m.get("u1")["state"] == "exhausted"
+    stack["db"].execute("UPDATE members SET traffic_used_bytes=? WHERE emby_user_id='u1'",
+                        (2048 * GIB,))
+    assert m.get("u1")["state"] == "active"
 
 
 def test_manual_states_survive_automatic_recalculation(stack) -> None:
-    """A suspended account must not come back when its quota resets."""
+    """A suspended account must not come back through any retired quota path."""
     m = stack["members"]
     m.upsert("u1", "alice", {"group_id": "standard"})
     m.set_status("u1", "suspended")
-    m.reset_traffic("u1")
+    with pytest.raises(ConfigError):
+        m.reset_traffic("u1")
+    assert m.roll_periods() == 0
     assert m.get("u1")["state"] == "suspended"
 
 
@@ -186,34 +195,6 @@ def test_assigning_a_timed_group_sets_an_expiry(stack) -> None:
     stack["members"].upsert(
         "u1", "alice", {"group_id": "standard", "expiry_policy": "apply_group"})
     assert stack["members"].get("u1")["expires_at"] is not None
-
-
-def test_monthly_rollover_resets_quota_and_revives_exhausted(stack) -> None:
-    m = stack["members"]
-    m.upsert("u1", "alice", {"group_id": "standard",
-                             "traffic_used_bytes": 1024 * GIB})
-    assert m.get("u1")["state"] == "exhausted"
-    # Pretend the window closed long ago.
-    stack["db"].execute(
-        "UPDATE members SET traffic_period_start=? WHERE emby_user_id=?",
-        (1, "u1"))
-    assert m.roll_periods() == 1
-    after = m.get("u1")
-    assert after["traffic_used_bytes"] == 0 and after["state"] == "active"
-    assert after["traffic_period_start"] == period_start(int(time.time()))
-
-
-def test_rollover_drops_one_off_extra_traffic(stack) -> None:
-    """The monthly top-up is a this-month gift, not a permanent raise."""
-    m = stack["members"]
-    m.upsert("u1", "alice", {"group_id": "standard"})
-    m.add_extra_traffic("u1", 10 * GIB)
-    assert m.get("u1")["traffic_quota_bytes"] == 1034 * GIB
-    stack["db"].execute(
-        "UPDATE members SET traffic_period_start=? WHERE emby_user_id=?",
-        (1, "u1"))
-    m.roll_periods()
-    assert m.get("u1")["traffic_quota_bytes"] == 1024 * GIB
 
 
 def test_enroll_defaults_only_touches_unmanaged(stack) -> None:
@@ -251,15 +232,6 @@ def test_expiry_override_beats_stored_expiry_in_timed_group(stack) -> None:
     m.set_overrides("u1", {"expires_at_override": past})
     assert m.get("u1")["state"] == "expired"
     m.set_overrides("u1", {})
-    assert m.get("u1")["state"] == "active"
-
-
-def test_extra_traffic_extends_the_quota(stack) -> None:
-    m = stack["members"]
-    m.upsert("u1", "alice", {"group_id": "standard",
-                             "traffic_used_bytes": 1024 * GIB})
-    assert m.get("u1")["state"] == "exhausted"
-    m.add_extra_traffic("u1", 50 * GIB)
     assert m.get("u1")["state"] == "active"
 
 
@@ -384,62 +356,17 @@ def _session(sid: str, user: str, bitrate: int, paused: bool = False,
     }
 
 
-def test_paused_sessions_are_not_billed(stack) -> None:
-    """Charging for time a user did not watch is the worst kind of bug."""
-    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
-    stack["members"].upsert("u1", "alice", {"group_id": "standard"})
-    stack["emby"].set_sessions([_session("s1", "u1", 8_000_000, paused=True)])
-    asyncio.run(sampler.tick())
-    time.sleep(0.05)
-    asyncio.run(sampler.tick())
-    assert stack["members"].get("u1")["traffic_used_bytes"] == 0
-
-
-def test_first_sighting_bills_nothing(stack) -> None:
-    """Billing a full interval on first sight charges for playback that just began."""
-    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
-    stack["members"].upsert("u1", "alice", {"group_id": "standard"})
-    stack["emby"].set_sessions([_session("s1", "u1", 8_000_000)])
-    result = asyncio.run(sampler.tick())
-    assert result["billed_bytes"] == 0
-
-
-def test_traffic_accrues_while_playing(stack) -> None:
+def test_live_speed_is_no_longer_estimated_from_bitrate(stack) -> None:
+    """Byte-rate sampling is retired: playing sessions get no bitrate-derived speed."""
     sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
     stack["members"].upsert("u1", "alice", {"group_id": "standard"})
     stack["emby"].set_sessions([_session("s1", "u1", 8_000_000)])
     asyncio.run(sampler.tick())
     time.sleep(0.2)
     result = asyncio.run(sampler.tick())
-    assert result["billed_bytes"] > 0
-    assert stack["members"].get("u1")["traffic_used_bytes"] > 0
-
-
-def test_live_speed_reflects_last_window_and_pauses_to_zero(stack) -> None:
-    """The dashboard shows wire speed: playing = bytes/s, paused = 0."""
-    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
-    stack["members"].upsert("u1", "alice", {"group_id": "standard"})
-    stack["emby"].set_sessions([_session("s1", "u1", 8_000_000)])
-    asyncio.run(sampler.tick())
-    time.sleep(0.2)
-    asyncio.run(sampler.tick())
-    assert sampler.live_speeds()["s1"] > 0
-    stack["emby"].set_sessions([_session("s1", "u1", 8_000_000, paused=True)])
-    asyncio.run(sampler.tick())
-    assert sampler.live_speeds()["s1"] == 0
-
-
-def test_long_gaps_are_clamped(stack) -> None:
-    """A panel outage must not produce a surprise bill."""
-    sampler = UsageSampler(stack["db"], stack["members"], stack["emby"])
-    stack["members"].upsert("u1", "alice", {"group_id": "standard"})
-    stack["emby"].set_sessions([_session("s1", "u1", 8_000_000)])
-    asyncio.run(sampler.tick())
-    # Simulate the sampler having been down for a day.
-    sampler._live["s1"]["last_ts"] = time.time() - 86400
-    result = asyncio.run(sampler.tick())
-    max_possible = 8_000_000 / 8 * 121
-    assert 0 < result["billed_bytes"] <= max_possible
+    assert result["playing"] == 1 and result["traffic_tracking"] is False
+    assert "billed_bytes" not in result
+    assert sampler.live_speeds() == {}
 
 
 def test_bitrate_prefers_transcode_then_source_then_floor() -> None:
@@ -573,8 +500,9 @@ def test_device_registration_is_uncapped_and_blocked_still_refused(stack) -> Non
     assert rows == []
 
 
-def test_exhausted_member_is_cut_off_within_one_tick(stack) -> None:
-    """The gap between 'quota reached' and 'playback stops' is free traffic."""
+def test_legacy_quota_group_is_not_cut_off_by_playback(stack) -> None:
+    """Quota exhaustion is retired: playback on an old tiny-quota group never
+    disables the account or stops its session (docs/TRAFFIC_RETIREMENT.md)."""
     sampler = UsageSampler(stack["db"], stack["members"], stack["emby"],
                            stack["enforcement"])
     stack["groups"].create({"id": "tiny", "name": "Tiny",
@@ -585,10 +513,10 @@ def test_exhausted_member_is_cut_off_within_one_tick(stack) -> None:
     asyncio.run(sampler.tick())
     time.sleep(0.2)
     result = asyncio.run(sampler.tick())
-    assert result.get("enforced", 0) >= 1
-    assert stack["members"].get("u1")["state"] == "exhausted"
-    assert stack["emby"]._users["u1"]["Policy"]["IsDisabled"] is True
-    assert stack["emby"]._sessions == []
+    assert "enforced" not in result
+    assert stack["members"].get("u1")["state"] == "active"
+    assert stack["emby"]._users["u1"]["Policy"].get("IsDisabled") is not True
+    assert [s["Id"] for s in stack["emby"]._sessions] == ["s1"]
 
 
 def test_switching_title_records_two_plays(stack) -> None:
@@ -628,19 +556,21 @@ def test_overview_counts_by_group_state(stack) -> None:
 
 
 def test_daily_series_is_zero_filled(stack) -> None:
-    """Watch gaps are zero-filled; unavailable daily measured bytes stay unknown."""
+    """Watch gaps are zero-filled; retired daily bytes are not reported at all."""
     series = StatsService(stack["db"]).daily_series(7)
     assert len(series) == 7
-    assert all(p['hours'] == 0 and p['bytes'] is None for p in series)
+    assert all(p['hours'] == 0 and 'bytes' not in p for p in series)
     assert series[0]["day"] < series[-1]["day"]
 
 
-def test_prune_drops_old_history(stack) -> None:
+def test_prune_keeps_play_events_holding_archived_bytes(stack) -> None:
+    """Retirement keeps byte-bearing history: play_events are not aged out."""
     stack["db"].execute(
         "INSERT INTO play_events (emby_user_id,item_id,started_at,ended_at,"
         "bytes,seconds) VALUES ('u1','old',?,?,1,1)",
         (int(time.time()) - 500 * 86400, int(time.time()) - 500 * 86400))
-    assert StatsService(stack["db"]).prune(400)["play_events"] == 1
+    assert StatsService(stack["db"]).prune(400)["play_events"] == 0
+    assert len(stack["db"].query("SELECT * FROM play_events")) == 1
 
 
 # ---- image cache -----------------------------------------------------------
@@ -756,11 +686,12 @@ def test_enroll_defaults_endpoint() -> None:
         assert enrolled == {"u1", "u2"}
 
 
-def test_sessions_report_speed_not_bitrate() -> None:
+def test_sessions_report_neither_speed_nor_bitrate() -> None:
+    """Byte-rate display is retired; a media bitrate must not stand in for it."""
     with TestClient(app) as client:
         sessions = client.get("/api/emby/sessions", headers=_basic()).json()
-        assert sessions and "SpeedMBps" in sessions[0]
-        assert "BitrateMbps" not in sessions[0] and "SpeedSource" in sessions[0]
+        assert sessions and "BitrateMbps" not in sessions[0]
+        assert not [k for k in sessions[0] if k.startswith("Speed")]
 
 
 def test_group_in_use_delete_is_http_422() -> None:

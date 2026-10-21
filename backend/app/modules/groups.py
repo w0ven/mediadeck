@@ -1,19 +1,6 @@
-"""User groups — billing templates, not products.
-
-A group answers one question: *how is this account billed and limited by
-default?*  It is not something a user buys (that concept is gone); it is the
-operator's preset.  Every member belongs to exactly one group, and per-member
-overrides still win field by field, so moving someone between groups never
-wipes hand-tuned limits.
-
-billing_mode decides which meters are armed:
-  time    : account expires; traffic is recorded but never enforced
-  traffic : monthly quota enforced; account never expires
-  both    : expiry AND monthly quota
-  none    : record usage only, enforce nothing
-
-Traffic always resets on calendar-month boundaries (owner decision
-2026-08-30); the column stays so a future mode can change it per group.
+"""Membership templates: expiry, bandwidth and concurrent-play rights.
+Legacy traffic/both modes retain their original expiry semantics only. Quota columns
+are archives, not active rights; no monthly resets or byte enforcement remain.
 """
 from __future__ import annotations
 
@@ -35,7 +22,7 @@ _ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 
 
 def needs_traffic(mode: str) -> bool:
-    return mode in ("traffic", "both")
+    return False  # legacy function, byte quotas retired
 
 
 def needs_duration(mode: str) -> bool:
@@ -45,18 +32,18 @@ def needs_duration(mode: str) -> bool:
 DEFAULT_GROUPS: list[dict[str, Any]] = [
     {
         "id": "standard", "name": "普通用户",
-        "description": "有到期时间，按月流量计费",
-        "billing_mode": "both",
-        "duration_days": 30, "traffic_quota_bytes": 1024 * GIB,
+        "description": "有到期时间",
+        "billing_mode": "time",
+        "duration_days": 30, "traffic_quota_bytes": 0,
         "bandwidth_limit_kbps": 0, "max_streams": 2, "max_devices": 0,
         "allow_download": 0, "allow_transcode": 1,
         "is_default": 1,
     },
     {
         "id": "vip", "name": "白名单 VIP",
-        "description": "永不过期，按月流量计费",
-        "billing_mode": "traffic",
-        "duration_days": 0, "traffic_quota_bytes": 2048 * GIB,
+        "description": "永不过期",
+        "billing_mode": "none",
+        "duration_days": 0, "traffic_quota_bytes": 0,
         "bandwidth_limit_kbps": 0, "max_streams": 4, "max_devices": 0,
         "allow_download": 1, "allow_transcode": 1,
         "is_default": 0,
@@ -84,7 +71,6 @@ WHITELIST_GROUP: dict[str, Any] = {
 _INT_FIELDS = (
     # key, label, lo, hi
     ("duration_days", "默认时长(天)", 0, 36500),
-    ("traffic_quota_bytes", "月流量额度", 0, 1 << 62),
     ("bandwidth_limit_kbps", "带宽限速 kbps", 0, 10_000_000),
     ("max_streams", "并发路数", 0, 100),
     ("request_quota", "每月求片次数", 0, 10_000),
@@ -137,7 +123,7 @@ class GroupService:
         if not name:
             raise ConfigError("组名称不能为空")
 
-        mode = str(src.get("billing_mode") or "both")
+        mode = str(src.get("billing_mode") or "time")
         if mode not in BILLING_MODES:
             raise ConfigError(f"计费模式必须是 {'/'.join(BILLING_MODES)}")
 
@@ -165,8 +151,7 @@ class GroupService:
 
         if needs_duration(mode) and out["duration_days"] <= 0:
             raise ConfigError("计时组必须设置默认时长")
-        if needs_traffic(mode) and out["traffic_quota_bytes"] <= 0:
-            raise ConfigError("计流量组必须设置月流量额度")
+        out["traffic_quota_bytes"] = int((existing or {}).get("traffic_quota_bytes") or 0)
         # Device registration is uncapped. The column stays so existing rows
         # survive; writes always store 0 so a leftover form cannot restore a cap.
         out["max_devices"] = 0

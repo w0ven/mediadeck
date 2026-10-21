@@ -758,6 +758,8 @@ class Database:
                 "groups", "request_quota", "INTEGER NOT NULL DEFAULT 3")
             from app.modules.request_schema import migrate_requests
             migrate_requests(self)
+            from app.modules.invite_tree import migrate_invites
+            migrate_invites(self)
             # v0.28: when the Emby account behind a member row disappeared.
             # A separate column rather than a status: the billing state machine
             # describes what the operator owes this member, while this records
@@ -779,8 +781,7 @@ class Database:
             self._conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS idx_admin_gift_code "
                 "ON admin_grants(gift_code) WHERE gift_code IS NOT NULL")
-            self._reshape_measured_watermarks()
-            self._reshape_meter_policy_ack()
+            # Retired traffic tables are immutable archives, including older layouts.
             for field, ddl in (
                 ("emby_user_id", "TEXT NOT NULL DEFAULT ''"),
                 ("old_tg_user_id", "TEXT NOT NULL DEFAULT ''"),
@@ -853,65 +854,6 @@ class Database:
                     f"ALTER TABLE redeem_codes RENAME TO {archive}")
                 self._conn.commit()
                 return
-
-    def _reshape_measured_watermarks(self) -> None:
-        """Drop boot_id from the watermark key if an older table still has it.
-
-        Stream identity is (node, conn_id, generation). Keeping boot_id in
-        the PK double-counted a live connection after every agent restart.
-        """
-        cols = {r[1] for r in self._conn.execute(
-            "PRAGMA table_info(measured_watermarks)")}
-        if not cols or "boot_id" not in cols:
-            self._ensure_column(
-                "measured_watermarks", "observed_at", "REAL NOT NULL DEFAULT 0")
-            return
-        self._conn.execute(
-            "ALTER TABLE measured_watermarks RENAME TO measured_watermarks_boot")
-        self._conn.execute(
-            "CREATE TABLE measured_watermarks ("
-            "node TEXT NOT NULL, conn_id TEXT NOT NULL, generation INTEGER NOT NULL, "
-            "utag TEXT NOT NULL DEFAULT '', emby_user_id TEXT NOT NULL DEFAULT '', "
-            "counter_bytes INTEGER NOT NULL DEFAULT 0, "
-            "observed_at REAL NOT NULL DEFAULT 0, "
-            "updated_at REAL NOT NULL DEFAULT 0, "
-            "PRIMARY KEY (node, conn_id, generation))")
-        self._conn.execute(
-            "INSERT INTO measured_watermarks"
-            "(node,conn_id,generation,utag,emby_user_id,counter_bytes,observed_at,updated_at) "
-            "SELECT node, conn_id, generation, utag, emby_user_id, "
-            "MAX(counter_bytes), MAX(updated_at), MAX(updated_at) "
-            "FROM measured_watermarks_boot "
-            "GROUP BY node, conn_id, generation")
-        self._conn.execute("DROP TABLE measured_watermarks_boot")
-
-    def _reshape_meter_policy_ack(self) -> None:
-        """sent_rev is what we shipped; applied_rev is what the node confirmed."""
-        cols = {r[1] for r in self._conn.execute(
-            "PRAGMA table_info(meter_policy_ack)")}
-        if not cols:
-            return
-        if "sent_rev" in cols and "applied_rev" in cols:
-            return
-        if "rev" in cols:
-            self._conn.execute(
-                "ALTER TABLE meter_policy_ack RENAME TO meter_policy_ack_old")
-            self._conn.execute(
-                "CREATE TABLE meter_policy_ack ("
-                "node TEXT PRIMARY KEY, "
-                "sent_rev INTEGER NOT NULL DEFAULT 0, "
-                "applied_rev INTEGER NOT NULL DEFAULT 0, "
-                "sent_at REAL NOT NULL DEFAULT 0, "
-                "applied_at REAL NOT NULL DEFAULT 0)")
-            self._conn.execute(
-                "INSERT INTO meter_policy_ack(node,sent_rev,applied_rev,sent_at,applied_at) "
-                "SELECT node, rev, 0, acked_at, 0 FROM meter_policy_ack_old")
-            self._conn.execute("DROP TABLE meter_policy_ack_old")
-            return
-        self._ensure_column("meter_policy_ack", "sent_rev", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("meter_policy_ack", "applied_rev", "INTEGER NOT NULL DEFAULT 0")
-        self._ensure_column("meter_policy_ack", "sent_at", "REAL NOT NULL DEFAULT 0")
-        self._ensure_column("meter_policy_ack", "applied_at", "REAL NOT NULL DEFAULT 0")
 
     def _ensure_column(self, table: str, name: str, ddl: str) -> None:
         """Idempotent ADD COLUMN for databases created before the column existed.

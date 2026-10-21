@@ -28,7 +28,7 @@ from typing import Any
 from app.core.db import Database
 from app.core.errors import ConfigError
 from app.modules.device_groups import count_device_groups, group_device_records
-from app.modules.groups import GroupService, needs_duration, needs_traffic
+from app.modules.groups import GroupService, needs_duration
 
 # active    : normal
 # suspended : operator disabled by hand; never auto-cleared
@@ -217,15 +217,9 @@ def merge_effective(group: dict[str, Any] | None, overrides: dict[str, Any] | No
             and not (member or {}).get("preserve_account_expiry")):
         expires_at = None
 
-    extra = int(ov.get("extra_traffic_bytes") or 0)
-    base_quota = int(group.get("traffic_quota_bytes") or 0)
-    if group and needs_traffic(group.get("billing_mode") or "") and (
-            base_quota or extra):
-        quota = base_quota + extra
-    else:
-        quota = 0
-
-    overridden = [k for k in OVERRIDE_KEYS if k in ov]
+    # Legacy quota/credit values stay stored, but no longer grant or deny access.
+    quota = 0
+    overridden = [k for k in OVERRIDE_KEYS if k in ov and k != 'extra_traffic_bytes']
     return {
         "max_streams": int(streams),
         "bandwidth_limit_kbps": int(bandwidth),
@@ -397,44 +391,16 @@ class MemberService:
         out["libraries"] = list(effective["libraries"])
         out["expires_at_effective"] = effective["expires_at"]
 
-        snap = None
-        if self._metering is not None:
-            try:
-                snap = self._metering.snapshot(out["emby_user_id"])
-            except Exception:  # noqa: BLE001
-                snap = None
-        out["metering"] = snap
-        cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
-                       else self._metering_cutover)
-        out["quota_source"] = "measured" if cutover else "legacy_estimate"
-        # Always present under measured mode so UI/enforcement never fall
-        # through to the old estimate when the snapshot is missing.
-        if cutover:
-            out["measured_used_bytes"] = (
-                None if snap is None else snap.get("measured_used_bytes"))
-            out["measured_raw_bytes"] = (
-                None if snap is None else snap.get("measured_raw_bytes"))
-            out["credit_bytes"] = 0 if snap is None else int(snap.get("credit_bytes") or 0)
+        out.update(traffic_tracking=False, quota_source='retired', metering=None,
+                   measured_used_bytes=None, measured_raw_bytes=None, credit_bytes=None)
+        # Do not present archived counters as current usage or a zero measurement.
+        out['traffic_used_bytes'] = None
 
         state, reason = self.effective_state(out, group)
         out["state"] = state
         out["state_reason"] = reason
 
-        quota = int(effective.get("traffic_quota_bytes") or 0)
-        out["traffic_quota_bytes"] = quota
-        if cutover:
-            used_raw = out.get("measured_used_bytes")
-            if quota and used_raw is not None:
-                used = int(used_raw)
-                out["traffic_remaining_bytes"] = max(0, quota - used)
-                out["traffic_percent"] = round(used / quota * 100, 1)
-            else:
-                out["traffic_remaining_bytes"] = None
-                out["traffic_percent"] = None
-        else:
-            used = int(out.get("traffic_used_bytes") or 0)
-            out["traffic_remaining_bytes"] = max(0, quota - used) if quota else None
-            out["traffic_percent"] = round(used / quota * 100, 1) if quota else None
+        out.update(traffic_quota_bytes=0, traffic_remaining_bytes=None, traffic_percent=None)
 
         expires = effective.get("expires_at")
         out["days_remaining"] = (
@@ -497,16 +463,6 @@ class MemberService:
                 has_expiry_override or needs_duration(mode) or member.get('preserve_account_expiry')):
             return "expired", "已过期"
 
-        quota = int(effective.get("traffic_quota_bytes") or 0)
-        if member.get("quota_source") == "measured" or "measured_used_bytes" in member:
-            used_raw = member.get("measured_used_bytes")
-            if used_raw is None:
-                return "active", "正常"
-            used = int(used_raw or 0)
-        else:
-            used = int(member.get("traffic_used_bytes") or 0)
-        if needs_traffic(mode) and quota and used >= quota:
-            return "exhausted", "本月流量已用尽"
         return "active", "正常"
 
     # -- write ---------------------------------------------------------------
@@ -601,9 +557,8 @@ class MemberService:
         p_start = existing["traffic_period_start"] if existing else 0
         if not p_start:
             p_start = period_start(now)
-        used = int(payload.get(
-            "traffic_used_bytes",
-            existing["traffic_used_bytes"] if existing else 0))
+        # Archive values are immutable through normal account edits.
+        used = int(existing['traffic_used_bytes'] or 0) if existing else 0
 
         # Provenance is written once, at creation. An update that omitted these
         # would quietly relabel where a member came from, and the invite tree
@@ -975,7 +930,8 @@ class MemberService:
     def delete(self, user_id: str, actor: str = "system",
                cascade: bool = False, *,
                audit_action: str | None = None,
-               audit_detail: str | None = None) -> dict[str, Any]:
+               audit_detail: str | None = None,
+               source: str = "") -> dict[str, Any]:
         """Delete a member. Default is that member only.
 
         Cascade of the direct inviter is a separate explicit action and still
@@ -990,7 +946,9 @@ class MemberService:
             raise KeyError(user_id)
         target = self.get(user_id) or {}
         inviter = self.inviter_of(user_id) if cascade else None
+        departures: dict[str, int] = {}
 
+        departures[str(user_id)] = self._depart(user_id, source, actor)
         self._remove_rows(user_id)
         self.audit(actor, audit_action or "member.delete", user_id,
                    audit_detail or ("membership removed" + (
@@ -999,6 +957,7 @@ class MemberService:
 
         if inviter:
             inviter_id = str(inviter["emby_user_id"])
+            departures[inviter_id] = self._depart(inviter_id, "cascade", actor)
             self._remove_rows(inviter_id)
             # A distinct action, not another member.delete: the operator never
             # asked for this row, and the audit trail has to say whose deletion
@@ -1009,7 +968,13 @@ class MemberService:
             # Orphaned invitees keep their history: blanking inviter_id would
             # erase who brought them in, which is the one fact the tree exists
             # to record.
-        return {"deleted": deleted, "emby_deleted": []}
+        return {"deleted": deleted, "emby_deleted": [], "departures": departures}
+
+    def _depart(self, user_id: str, source: str, actor: str) -> int:
+        from app.modules.invite_tree import record_departure
+        row = self._db.one("SELECT * FROM members WHERE emby_user_id=?", (str(user_id),))
+        with self._db.write() as conn:
+            return record_departure(conn, row, source=source, actor=actor)
 
     def register_device(self, user_id: str, device_id: str, *,
                         device_name: str = "", client: str = "",
@@ -1107,26 +1072,7 @@ class MemberService:
         return self.get(user_id)  # type: ignore[return-value]
 
     def reset_traffic(self, user_id: str, actor: str = "operator") -> dict[str, Any]:
-        member = self.get(user_id)
-        if not member:
-            raise KeyError(user_id)
-        now = int(time.time())
-        used_before = int(member.get("traffic_used_bytes") or 0)
-        cutover = bool(self._metering_cutover() if callable(self._metering_cutover)
-                       else self._metering_cutover)
-        if cutover and self._metering is not None:
-            # Fail before touching the estimate so a half-reset cannot
-            # claim success while measured credit is unchanged.
-            self._metering.reset_credit(user_id, now=now)
-        self._db.execute(
-            "UPDATE members SET traffic_used_bytes=0,traffic_period_start=?,"
-            "status=CASE WHEN status='exhausted' THEN 'active' ELSE status END,"
-            "updated_at=? WHERE emby_user_id=?",
-            (period_start(now), now, user_id))
-        self.audit(actor, "member.reset_traffic", user_id, encode_audit_detail({
-            "traffic_used_bytes": {"from": used_before, "to": 0},
-        }))
-        return self.get(user_id)  # type: ignore[return-value]
+        raise ConfigError("流量统计已停用，历史记录不作重置")
 
     def set_status(self, user_id: str, status: str, actor: str = "operator"
                    ) -> dict[str, Any]:
@@ -1156,43 +1102,12 @@ class MemberService:
         return self.get(user_id)  # type: ignore[return-value]
 
     def roll_periods(self, now: int | None = None) -> int:
-        """Monthly reset: zero usage, drop one-off extra traffic, unblock
-        exhausted members. Manual states are never touched."""
-        now = now or int(time.time())
-        rolled = 0
-        current = period_start(now)
-        for member in self.list(limit=5000):
-            group = member.get("group")
-            if not group or not needs_traffic(group["billing_mode"]):
-                continue
-            if int(member.get("traffic_period_start") or 0) >= current:
-                continue
-            ov = dict(member.get("overrides") or {})
-            extra_before = int(ov.get("extra_traffic_bytes") or 0)
-            if extra_before:
-                ov.pop("extra_traffic_bytes", None)
-            self._db.execute(
-                "UPDATE members SET traffic_used_bytes=0,traffic_period_start=?,"
-                "status=CASE WHEN status='exhausted' THEN 'active' ELSE status END,"
-                "overrides_json=?,updated_at=? WHERE emby_user_id=?",
-                (current, json.dumps(ov, ensure_ascii=False, sort_keys=True),
-                 now, member["emby_user_id"]))
-            # Measured usage is already UTC-month bucketed. Do not reset_credit
-            # the new month — that would wipe the first reports of this period.
-            self.audit("system", "member.period_roll", member["emby_user_id"],
-                       encode_audit_detail({
-                           "extra_traffic_bytes": {"from": extra_before, "to": 0},
-                       }))
-            rolled += 1
-        return rolled
+        """Traffic accounting is retired; leave historical counters/credits intact."""
+        return 0
 
     def add_traffic(self, user_id: str, delta_bytes: int) -> None:
-        if delta_bytes <= 0:
-            return
-        self._db.execute(
-            "UPDATE members SET traffic_used_bytes=traffic_used_bytes+?,"
-            "last_seen_at=?,updated_at=? WHERE emby_user_id=?",
-            (int(delta_bytes), int(time.time()), int(time.time()), user_id))
+        """Compatibility no-op: never accumulate bytes or change historical usage."""
+        return
 
     def set_overrides(self, user_id: str, payload: dict[str, Any] | None,
                       actor: str = "operator") -> dict[str, Any]:
@@ -1202,6 +1117,11 @@ class MemberService:
             raise KeyError(user_id)
         cleaned = validate_overrides(payload or {})
         before = member.get("overrides") or {}
+        # Retired quota credits are archival, not an editable right.
+        if "extra_traffic_bytes" in before:
+            cleaned["extra_traffic_bytes"] = before["extra_traffic_bytes"]
+        else:
+            cleaned.pop("extra_traffic_bytes", None)
         self._db.execute(
             "UPDATE members SET overrides_json=?,updated_at=? WHERE emby_user_id=?",
             (json.dumps(cleaned, ensure_ascii=False, sort_keys=True),
@@ -1216,16 +1136,7 @@ class MemberService:
 
     def add_extra_traffic(self, user_id: str, delta_bytes: int,
                           actor: str = "operator") -> dict[str, Any]:
-        """Accumulate extra_traffic_bytes on the overlay (current month)."""
-        if delta_bytes < 0:
-            raise ConfigError("额外流量必须大于等于 0")
-        member = self.get(user_id)
-        if not member:
-            raise KeyError(user_id)
-        ov = dict(member.get("overrides") or {})
-        before = int(ov.get("extra_traffic_bytes") or 0)
-        ov["extra_traffic_bytes"] = before + int(delta_bytes)
-        return self.set_overrides(user_id, ov, actor=actor)
+        raise ConfigError("流量配额已停用，不再增加流量额度")
 
     def set_device_blocked(self, user_id: str, device_id: str, blocked: bool,
                            actor: str = "operator") -> dict[str, Any]:

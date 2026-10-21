@@ -111,15 +111,13 @@ def test_group_measurement_unknown_is_not_zero_or_legacy_estimate(env, used):
     env.members.add_traffic('u1', 987654)
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
-    assert '本月流量' in text and '数据不完整' not in text
+    # Byte usage is retired (docs/TRAFFIC_RETIREMENT.md): no usage block at all,
+    # so neither an unknown, a zero, a measurement nor the estimate can show.
+    assert '本月流量' not in text and '数据不完整' not in text
     assert '来源' not in text and 'private-node-label' not in text
     assert '987654' not in text and '估算' not in text
-    if used is None:
-        assert '计量暂不可用' in text and '剩余：<b>暂无法确认</b>' in text
-    elif used == 0:
-        assert '0 B' in text and '剩余：<b>1.0 TiB</b>' in text
-    else:
-        assert '1.0 KiB' in text
+    assert '计量暂不可用' not in text and '已用：' not in text and '剩余：' not in text
+    assert '0 B' not in text and '1.0 KiB' not in text
 
 
 @pytest.mark.parametrize('action', ['devices', 'invite_new', 'buyok:1', 'admin_code', 'resetpw', 'rebind', 'watch_recent', 'orders', 'me_nodes', 'transfer_ok'])

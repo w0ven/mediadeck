@@ -50,7 +50,8 @@ def test_emby_mock() -> None:
         users = client.get("/api/emby/users", headers=_basic()).json()
         assert any(u["Name"] == "demo-user-1" for u in users)
         sessions = client.get("/api/emby/sessions", headers=_basic()).json()
-        assert sessions and "SpeedMBps" in sessions[0]
+        # Byte-rate fields are retired from sessions (docs/TRAFFIC_RETIREMENT.md).
+        assert sessions and not [k for k in sessions[0] if k.startswith("Speed")]
 
 
 def test_pipeline_mock() -> None:
@@ -702,7 +703,8 @@ def test_enroll_script_is_token_authenticated_and_self_contained() -> None:
         assert "user_allow_other" in script            # else nginx 403s
         assert "certbot" in script
         assert "/agent/loadprobe.py" in script
-        assert "/agent/flowmeter.py" in script
+        # The byte flow meter is retired; meterd remains as the access guard.
+        assert "/agent/flowmeter.py" not in script
         assert "/agent/meterd.py" in script
         assert "auth_request /_mediadeck/verify;" in script
         assert "set $md_u $arg_u;" in script
@@ -760,12 +762,12 @@ def test_agent_is_downloadable() -> None:
         r = client.get("/agent/loadprobe.py")
         assert r.status_code == 200
         assert "active_streams" in r.text
-        flow = client.get("/agent/flowmeter.py")
-        assert flow.status_code == 200
-        assert "kernel_outbound_ip_bytes" in flow.text
+        # Retired byte collector: gone, not silently served (docs/TRAFFIC_RETIREMENT.md).
+        assert client.get("/agent/flowmeter.py").status_code == 410
         meterd = client.get("/agent/meterd.py")
         assert meterd.status_code == 200
-        assert "/api/edge/" in meterd.text and "measured" in meterd.text
+        assert "/api/edge/" in meterd.text and "/policy" in meterd.text
+        assert "AccessPolicy" in meterd.text
         proxy = client.get("/agent/stream_rate_proxy.py")
         assert proxy.status_code == 200
         assert "class AggregateLimiter" in proxy.text
@@ -1023,10 +1025,9 @@ def test_redirected_viewer_is_not_shown_as_estimate() -> None:
         assert r.status_code == 302 and "u=" in r.headers["location"]
         sessions = client.get("/api/emby/sessions", headers=_basic()).json()
         assert sessions
-        assert sessions[0]["SpeedSource"] != "estimate"
-        assert sessions[0]["SpeedBps"] is None
-        assert sessions[0]["SpeedMBps"] is None
-        assert sessions[0]["SpeedScope"] == "user"
+        # No rate is shown at all now, so a redirect can never look like an
+        # origin estimate or a fake node zero.
+        assert not [k for k in sessions[0] if k.startswith("Speed")]
 
 
 def test_real_client_path_shapes_reach_the_edge() -> None:

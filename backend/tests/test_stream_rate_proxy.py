@@ -222,14 +222,15 @@ def test_four_mixed_large_ranges_outlast_upstream_socket_timeout_without_disconn
     assert elapsed > 20 * 0.05  # wall time massively exceeds the upstream idle timeout
 
 
-def test_public_location_example_preserves_auth_and_metering_requirements():
+def test_public_location_example_preserves_access_safety_without_metering():
     snippet = (pathlib.Path(__file__).resolve().parents[2] /
                "deploy/nginx/stream-rate-locations.example.conf").read_text()
     for preserved in ("auth_request /__VERIFY_ENDPOINT__;", "limit_conn mediadeck_peruser 4;",
-                      "mirror /__ANNOUNCE_ENDPOINT__;", "__SPEED_LOG_PATH__ mediadeck_speed;",
-                      "__DISPATCH_LOG_PATH__ __DISPATCH_LOG_FORMAT__",
-                      "include __METERING_LOCATION_INCLUDE__;", "proxy_force_ranges on;"):
+                      "include __ACCESS_POLICY_LOCATION_INCLUDE__;", "proxy_force_ranges on;",
+                      "access_log off;"):
         assert snippet.count(preserved) == 2, preserved
+    for retired in ('mirror /__ANNOUNCE_ENDPOINT__;', '__SPEED_LOG_PATH__', 'mediadeck_speed;'):
+        assert retired not in snippet
     assert "limit_rate $mediadeck_rate;" not in snippet
     for index in (0, 1):
         assert snippet.count(f"proxy_pass http://__LOOPBACK_HOST__:__RELAY_PORT__/{index}/;") == 1

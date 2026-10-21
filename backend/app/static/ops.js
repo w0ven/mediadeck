@@ -16,8 +16,8 @@ function daysLeftHtml(m) {
   return `<span class="${n <= 3 ? 'danger-text' : ''}">${esc(n)} 天</span>`;
 }
 function billingLabel(t) {
-  return ({ none: '不计费', traffic: '仅流量', time: '仅时间',
-    both: '时间+流量' })[t] || t || '-';
+  return ({ none: '不限期', traffic: '不限期', time: '按时间',
+    both: '按时间' })[t] || t || '-';
 }
 function fmtExpiry(ts) {
   if (!ts) return '不限期';
@@ -112,7 +112,7 @@ async function testRemote(name) {
 async function deleteRemote(name) {
   const actionContext = pageContext('storage');
   name = uq(name);
-  if (!(await deckConfirm(`删除远程账号 ${name}？仍被挂载引用时会被拒绝。`))) return;
+  if (!(await deckConfirm(`删除远程账号 ${name}？仍被挂载引用时会被拒绝。`, {title: '删除远程账号', confirmText: '删除', danger: true}))) return;
   try {
     await api(`/api/storage/remotes/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('storage', false, false, actionContext);
@@ -139,7 +139,7 @@ async function ctlMount(name, action) {
 async function deleteMount(name) {
   const actionContext = pageContext('storage');
   name = uq(name);
-  if (!(await deckConfirm(`删除挂载点 ${name}？`))) return;
+  if (!(await deckConfirm(`删除挂载点 ${name}？该挂载点的配置会被移除。`, {title: '删除挂载点', confirmText: '删除', danger: true}))) return;
   try {
     await api(`/api/storage/mounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('storage', false, false, actionContext);
@@ -215,7 +215,6 @@ function overrideEditor(m, libs) {
   const mode = ov.libraries_mode || 'inherit';
   const exp = ov.expires_at_override ? localInputFromTs(ov.expires_at_override) : '';
   const expMode = Object.prototype.hasOwnProperty.call(ov, 'expires_at_override') ? (ov.expires_at_override == null ? 'forever' : 'date') : 'inherit';
-  const extraGib = ov.extra_traffic_bytes != null ? (ov.extra_traffic_bytes / (1024 ** 3)).toFixed(2) : '';
   return `
     <div class="ov-row"><div class="ov-label">并发</div>
       <div class="ov-src">${ovSource(m, 'max_streams', grp.max_streams || 0, eff.max_streams, (v) => v ? v + ' 路' : '不限')}</div>
@@ -249,11 +248,6 @@ function overrideEditor(m, libs) {
       <div class="ov-src">${ovSource(m, 'expires_at_override', grp.duration_days ? (grp.duration_days + ' 天') : '不限期', (m.expires_at_effective !== undefined ? m.expires_at_effective : m.expires_at), (v) => typeof v === 'string' ? v : v ? fmtExpiry(v) : '不限期')}</div>
       <div class="ov-controls"><select id="ov-exp-mode" aria-label="到期覆盖模式">${[['inherit','继承原期限'],['date','指定到期'],['forever','不限期覆盖']].map(([key,label]) => `<option value="${key}" ${expMode === key ? 'selected' : ''}>${label}</option>`).join('')}</select><input id="ov-exp" aria-label="指定到期时间" type="datetime-local" ${storedNumberAttrs(ov.expires_at_override ?? '', exp)}>
         <button class="btn sm" type="button" onclick="clearOverrideField('expires_at_override')">还原</button></div></div>
-    <div class="ov-row"><div class="ov-label">额外流量</div>
-      <div class="ov-src">${ovSource(m, 'extra_traffic_bytes', 0, (m.overrides || {}).extra_traffic_bytes || 0, fmtBytes)}</div>
-      <div class="ov-controls"><input id="ov-extra" aria-label="额外流量GiB" type="number" min="0" step="0.01" placeholder="0" ${storedNumberAttrs(ov.extra_traffic_bytes ?? '', extraGib)} style="width:110px">
-        <span class="muted">GiB，叠加在本月额度上，月初清零</span>
-        <button class="btn sm" type="button" onclick="clearOverrideField('extra_traffic_bytes')">还原</button></div></div>
     <div class="toolbar" style="margin-top:10px">
       <button class="btn primary" type="button" id="ov-save">保存覆盖</button>
       <button class="btn" type="button" id="ov-clear">全部还原</button>
@@ -293,9 +287,6 @@ function collectOverridesFromForm(existing) {
     if (!Number.isFinite(stamp)) throw new Error('请选择有效的到期时间');
     ov.expires_at_override = stamp;
   }
-  const extra = (($('#ov-extra') || {}).value || '').trim();
-  if (extra === '') delete ov.extra_traffic_bytes;
-  else ov.extra_traffic_bytes = readStoredNumber($('#ov-extra'), value => Math.round(parseFloat(value) * 1024 ** 3));
   return ov;
 }
 
@@ -313,7 +304,7 @@ PAGES.groups = async (context = pageContext('groups')) => {
     ${groups.filter(g=>isWhitelistGroup(g.id)).map(g=>`<section class="hg-whitelist-group">${whitelistEmblem()}<div><span class="hg-eyebrow">WHITELIST · 固定系统分组</span><h3>${esc(g.name)}</h3><p>${esc(g.description || '')}</p><p>${esc(billingLabel(g.billing_mode))} · ${esc(groupLimitsText(g))} · ${esc(g.member_count || 0)} 位成员</p></div><div class="toolbar"><a class="btn" href="#/members?group_id=whitelist">查看成员</a><button class="btn" onclick="editGroup('${q(g.id)}')">调整设置</button></div></section>`).join('')}
     <details class="hg-group-new"><summary>＋ 新建用户组</summary>${card('新建用户组', '组决定计费方式和默认限制；成员可在详情里逐项覆盖', `<div class="card-body">${groupForm('new', {})}
       <div class="toolbar"><button class="btn primary" id="group-create">创建</button></div></div>`)}</details>
-    ${tableCard('用户组', `${groups.length} 个`, ['名称', '计费', '默认额度', '限制', '用户', ''],
+    ${tableCard('用户组', `${groups.length} 个`, ['名称', '有效期模式', '默认时长', '权益与限制', '成员数', ''],
       groups.filter(g=>!isWhitelistGroup(g.id)).map((g) => `<tr>
         <td>${groupBadge(g.id,g.name)}${g.is_default ? ' <span class="tag idle">默认</span>' : ''}<div class="s muted">${esc(g.description)}</div></td>
         <td>${esc(billingLabel(g.billing_mode))}</td>
@@ -326,12 +317,10 @@ PAGES.groups = async (context = pageContext('groups')) => {
         </td></tr>`).join(''))}`;
   bindAsyncButton('group-create', () => submitGroup('new'));
 };
-function groupNeedsTraffic(m) { return m === 'traffic' || m === 'both'; }
 function groupNeedsTime(m) { return m === 'time' || m === 'both'; }
 function groupQuotaText(g) {
   const bits = [];
   if (groupNeedsTime(g.billing_mode)) bits.push(g.duration_days + ' 天');
-  if (groupNeedsTraffic(g.billing_mode)) bits.push(fmtBytes(g.traffic_quota_bytes) + '/月');
   return bits.join(' · ') || '-';
 }
 function groupLimitsText(g) {
@@ -354,22 +343,20 @@ function readStoredNumber(input, convert) {
 }
 function groupForm(prefix, g) {
   const v = (k, d) => esc(g[k] != null ? g[k] : d);
-  const gib = g.traffic_quota_bytes == null ? '1024' : String(g.traffic_quota_bytes / (1024 ** 3));
-  const mode = g.billing_mode || 'both';
+  const mode = groupNeedsTime(g.billing_mode || 'time') ? 'time' : 'none';
   return `
     <div class="form-row"><label for="${prefix}-id">ID</label><input id="${prefix}-id" value="${v('id', '')}" ${prefix === 'new' ? '' : 'disabled'} placeholder="standard"></div>
     <div class="form-row"><label for="${prefix}-name">名称</label><input id="${prefix}-name" value="${v('name', '')}" placeholder="普通用户"></div>
     <div class="form-row"><label for="${prefix}-description">描述</label><input id="${prefix}-description" value="${v('description', '')}"></div>
     <div class="form-row"><label for="${prefix}-default">默认组</label><input id="${prefix}-default" type="checkbox" ${g.is_default ? 'checked' : ''}>
       <span class="muted">新纳入的账号进这个组</span></div>
-    <div class="help">计费方式。时间=有到期日；流量=每月 1 日重置额度；两者可同时启用。</div>
-    <div class="form-row"><label for="${prefix}-billing">计费</label>
+    <div class="help">有效期模式：按时间（有具体到期日）；不限期（不设到期时间，长期有效）。</div>
+    <div class="form-row"><label for="${prefix}-billing">有效期模式</label>
       <select id="${prefix}-billing">
-        ${[['both', '时间+流量'], ['traffic', '仅流量'], ['time', '仅时间'], ['none', '不计费']].map(([val, label]) =>
+        ${[['time', '按时间'], ['none', '不限期']].map(([val, label]) =>
           `<option value="${val}" ${mode === val ? 'selected' : ''}>${label}</option>`).join('')}
       </select></div>
-    <div class="form-row"><label for="${prefix}-days">默认时长</label><input id="${prefix}-days" type="number" min="0" value="${v('duration_days', 30)}" style="width:100px"><span class="muted">天，计时间的组必填</span></div>
-    <div class="form-row"><label for="${prefix}-gib">月流量</label><input id="${prefix}-gib" type="number" min="0" step="any" ${storedNumberAttrs(g.traffic_quota_bytes ?? 1024 ** 4, gib)} style="width:110px"><span class="muted">GiB，计流量的组必填</span></div>
+    <div class="form-row"><label for="${prefix}-days">默认时长</label><input id="${prefix}-days" type="number" min="0" value="${v('duration_days', 30)}" style="width:100px"><span class="muted">天（按时间有效的分组必填）</span></div>
     <div class="help">默认限制。0 = 不限。成员详情里可以逐个覆盖。</div>
     <div class="form-row"><label for="${prefix}-bandwidth">带宽限速</label>
       <div><div style="margin-bottom:4px">${bwPresetButtons(prefix + '-bandwidth')}</div>
@@ -382,7 +369,6 @@ function groupForm(prefix, g) {
       <label><input id="${prefix}-download" type="checkbox" ${g.allow_download ? 'checked' : ''}> 下载</label></div>`;
 }
 function groupPayload(prefix) {
-  const gib = parseFloat($(`#${prefix}-gib`).value) || 0;
   return {
     id: $(`#${prefix}-id`).value.trim(),
     name: $(`#${prefix}-name`).value.trim(),
@@ -390,7 +376,6 @@ function groupPayload(prefix) {
     is_default: $(`#${prefix}-default`).checked,
     billing_mode: $(`#${prefix}-billing`).value,
     duration_days: parseInt($(`#${prefix}-days`).value, 10) || 0,
-    traffic_quota_bytes: readStoredNumber($(`#${prefix}-gib`), () => Math.round(gib * 1024 ** 3)),
     bandwidth_limit_kbps: readStoredNumber($(`#${prefix}-bandwidth`), value => mBpsToKbps(parseFloat(value) || 0)),
     max_streams: parseInt($(`#${prefix}-streams`).value, 10) || 0,
     request_quota: parseInt($(`#${prefix}-requests`).value, 10) || 0,
@@ -442,7 +427,7 @@ async function deleteGroup(id, count) {
   id = uq(id);
   if (isWhitelistGroup(id)) return toast('白名单是固定系统分组，不能删除', 1);
   if (count) return toast(`仍有 ${count} 个用户在该组，请先迁移`, 1);
-  if (!(await deckConfirm(`删除用户组 ${id}？`))) return;
+  if (!(await deckConfirm(`删除用户组 ${id}？`, {title: '删除用户组', confirmText: '删除', danger: true}))) return;
   try {
     await api(`/api/groups/${encodeURIComponent(id)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('groups', false, false, actionContext);
@@ -462,18 +447,16 @@ PAGES.stats = async (context = pageContext('stats')) => {
     api(`/api/stats/play-methods?days=${days}`),
   ]);
   if (!context.isCurrent()) return;
-  const trafficNow = (overview.traffic || {}).month_bytes;
-  const hoursNow = (overview.traffic || {}).window_hours || 0;
+  const hoursNow = (overview.viewing || {}).window_hours || 0;
   const playsNow = (overview.playback || {}).window_plays || 0;
   const activeNow = (overview.members || {}).active || 0;
   const usersByHours = (users || []).slice().sort((a, b) => (b.hours || 0) - (a.hours || 0));
   $('#view').innerHTML = `
-    <div class="filter-bar">
-      ${[7, 30, 90].map((n) => `<button class="btn ${n === days ? 'primary' : ''}" onclick="statsRange(${n})">${n} 天</button>`).join('')}
+    <div class="page-actions">
+      ${segmented([7, 30, 90].map((n) => ({label: `${n} 天`, active: n === days, attrs: `onclick="statsRange(${n})"`})), '统计时间范围')}
     </div>
     <div class="stat-grid">
-      ${stat('⇅', actualBytes(trafficNow), '本月实测流量', `${(overview.traffic || {}).period || ''} · UTC 自然月 · 不随观看窗口切换`)}
-      ${stat('▶', hoursNow + ' 小时', '已记录观看时长', overview.traffic.window_incomplete ? '已确认部分；跨界旧记录无法拆分' : `近 ${days} 天 · 实际采样`)}
+      ${stat('▶', hoursNow + ' 小时', '已记录观看时长', overview.viewing.window_incomplete ? '已确认部分；跨界旧记录无法拆分' : `近 ${days} 天 · 实际采样`)}
       ${stat('☺', activeNow, '活跃用户', '当前正常成员')}
       ${stat('▣', playsNow, '播放次数', `近 ${days} 天已结束会话`)}
     </div>
@@ -484,8 +467,8 @@ PAGES.stats = async (context = pageContext('stats')) => {
       ${tableCard('热门内容', `${titles.length} 条`, ['内容', '播放', '分钟'],
         titles.map((t) => `<tr><td>${esc(t.title || '(未命名)')}</td><td>${esc(t.plays)}</td>
           <td>${esc(Math.round((t.hours || 0) * 60))}</td></tr>`).join(''))}
-      ${tableCard('用户观看排行', `近 ${days} 天观看 · 流量为本月实测`, ['用户', '已记录观看', '本月流量'],
-        usersByHours.map(u => `<tr><td>${esc(u.username)}</td><td>${esc(fmtWatchSeconds(u.seconds))}${u.incomplete ? ' · 部分历史无法拆分' : ''}</td><td>${actualBytes(u.bytes)}</td></tr>`).join(''))}
+      ${tableCard('用户观看排行', `近 ${days} 天观看`, ['用户', '已记录观看'],
+        usersByHours.map(u => `<tr><td>${esc(u.username)}</td><td>${esc(fmtWatchSeconds(u.seconds))}${u.incomplete ? ' · 部分历史无法拆分' : ''}</td></tr>`).join(''))}
     </div>
     <div class="grid-2">
       ${card('客户端分布', '', barList((clients || []).map((c) => ({ label: c.client, pct: c.percent, extra: c.plays + ' 次' }))))}
@@ -533,11 +516,9 @@ function trendChart(daily) {
   if (!daily.length) {
     return `<svg viewBox="0 0 ${w} ${h}" class="chart-svg"><text x="20" y="100" fill="#8a93a3">暂无数据</text></svg>`;
   }
-  const maxB = Math.max(...daily.map((d) => d.bytes || 0), 1);
   const maxH = Math.max(...daily.map((d) => d.hours || 0), 0.01);
   const innerW = w - pad * 2; const innerH = h - pad * 2;
   const x = (i) => pad + (daily.length === 1 ? innerW / 2 : i * innerW / (daily.length - 1));
-  const yB = (v) => pad + innerH - (v / maxB) * innerH;
   const yH = (v) => pad + innerH - (v / maxH) * innerH;
   const line = (key, yn, color) => {
     const pts = daily.map((d, i) => `${x(i).toFixed(1)},${yn(d[key] || 0).toFixed(1)}`).join(' ');
@@ -564,71 +545,101 @@ function bindChartHover(daily) {
   });
 }
 
-/* ---------------- audit ---------------- */
-PAGES.audit = async (context = pageContext('audit')) => {
-  $('#view').innerHTML = pageLoading();
-  state.auditOffset = 0;
-  state.auditLimit = 50;
-  await loadAudit(context);
-};
-function auditQuery() {
+/* ---------------- audit ----------------
+   Filters and page live in the address (#/audit?action=member.renew&page=2):
+   they survive refresh and back, and a link can point at "everything done to
+   this account". The API matches exactly, so values in the table are
+   clickable shortcuts that fill the filter with the precise value. */
+const AUDIT_PAGE_SIZE = 50;
+function auditFilters(route) {
+  const p = routeParams(route);
+  return {actor: p.get('actor') || '', action: p.get('action') || '', subject: p.get('subject') || '',
+    page: Math.max(1, parseInt(p.get('page'), 10) || 1)};
+}
+function auditRoute(f) {
+  const p = new URLSearchParams();
+  for (const k of ['actor', 'action', 'subject']) if (f[k]) p.set(k, f[k]);
+  if (f.page > 1) p.set('page', String(f.page));
+  return 'audit' + (p.toString() ? '?' + p : '');
+}
+function auditQuery(f = auditFilters()) {
   const qs = new URLSearchParams();
-  qs.set('limit', String(state.auditLimit || 50));
-  qs.set('offset', String(state.auditOffset || 0));
-  const actor = (($('#au-actor') || {}).value || '').trim();
-  const action = (($('#au-action') || {}).value || '').trim();
-  const subject = (($('#au-subject') || {}).value || '').trim();
-  if (actor) qs.set('actor', actor);
-  if (action) qs.set('action', action);
-  if (subject) qs.set('subject', subject);
+  qs.set('limit', String(AUDIT_PAGE_SIZE));
+  qs.set('offset', String((f.page - 1) * AUDIT_PAGE_SIZE));
+  for (const k of ['actor', 'action', 'subject']) if (f[k]) qs.set(k, f[k]);
   return qs;
 }
+PAGES.audit = async (context = pageContext('audit')) => {
+  $('#view').innerHTML = pageLoading();
+  await loadAudit(context);
+};
 async function loadAudit(context = pageContext('audit')) {
   const generation = state.auditGeneration = (state.auditGeneration || 0) + 1;
   const current = () => context.isCurrent() && generation === state.auditGeneration;
+  const f = auditFilters(context.route);
   try {
-    const data = await api('/api/audit?' + auditQuery().toString());
+    const data = await api('/api/audit?' + auditQuery(f).toString());
     if (!current()) return;
     const items = Array.isArray(data) ? data : (data.items || []);
     const total = Array.isArray(data) ? items.length : (data.total || 0);
-    const limit = Array.isArray(data) ? items.length : (data.limit || 50);
+    const limit = Array.isArray(data) ? Math.max(items.length, 1) : (data.limit || AUDIT_PAGE_SIZE);
     const offset = Array.isArray(data) ? 0 : (data.offset || 0);
     state.audit = data;
     const page = Math.floor(offset / Math.max(limit, 1)) + 1;
     const pages = Math.max(1, Math.ceil(total / Math.max(limit, 1)));
-    $('#view').innerHTML = `
-      <div class="filter-bar">
-        <input id="au-actor" aria-label="操作者筛选" placeholder="操作者" style="width:120px" value="${esc((($('#au-actor') || {}).value || ''))}">
-        <input id="au-action" aria-label="动作筛选" placeholder="动作" style="width:140px" value="${esc((($('#au-action') || {}).value || ''))}">
-        <input id="au-subject" aria-label="对象筛选" placeholder="对象" style="width:140px" value="${esc((($('#au-subject') || {}).value || ''))}">
-        <button class="btn" id="au-go">筛选</button>
-      </div>
-      <div class="pager">
-        <span>共 ${esc(total)} 条 · 第 ${esc(page)}/${esc(pages)} 页</span>
-        <button class="btn sm" id="au-prev" ${offset <= 0 ? 'disabled' : ''}>上一页</button>
-        <button class="btn sm" id="au-next" ${offset + limit >= total ? 'disabled' : ''}>下一页</button>
-      </div>
-      ${tableCard('审计日志', `${items.length} 条`, ['时间', '操作者', '动作', '对象', '详情', '结果'],
-        auditRows(items))}`;
-    $('#au-go').onclick = () => { state.auditOffset = 0; loadAudit(); };
-    $('#au-prev').onclick = () => {
-      state.auditOffset = Math.max(0, offset - limit); loadAudit();
+    const filtered = !!(f.actor || f.action || f.subject);
+    const options = (key) => [...new Set(items.map((a) => a[key]).filter(Boolean))].slice(0, 40)
+      .map((v) => `<option value="${esc(v)}">`).join('');
+    $('#view').innerHTML = listCard({
+      title: '操作记录', key: 'audit',
+      sub: `共 ${total} 条${filtered ? ' · 已筛选' : ''} · 筛选为精确匹配，可点击表格中的操作者、动作或对象快速筛选`,
+      filters: `<form class="toolbar" id="au-form">
+        <label>操作者 <input id="au-actor" list="au-actor-list" autocomplete="off" value="${esc(f.actor)}" placeholder="例如 admin"></label>
+        <label>动作 <input id="au-action" list="au-action-list" autocomplete="off" value="${esc(f.action)}" placeholder="例如 member.renew"></label>
+        <label>对象 <input id="au-subject" autocomplete="off" value="${esc(f.subject)}" placeholder="用户 ID、节点名…"></label>
+        <datalist id="au-actor-list">${options('actor')}</datalist><datalist id="au-action-list">${options('action')}</datalist>
+        <button class="btn" type="submit" id="au-go">筛选</button>
+        ${filtered ? `<a class="btn" href="#/audit">清除筛选</a>` : ''}
+      </form>`,
+      cols: ['时间', '操作者', '动作', '对象', '详情', '结果'],
+      rows: auditRows(items),
+      empty: filtered ? '没有符合筛选的记录' : '暂无操作记录',
+      pager: `<button class="btn sm" id="au-prev" ${offset <= 0 ? 'disabled' : ''}>上一页</button>
+        <span class="muted">第 ${esc(page)} / ${esc(pages)} 页 · 共 ${esc(total)} 条</span>
+        <button class="btn sm" id="au-next" ${offset + limit >= total ? 'disabled' : ''}>下一页</button>`,
+    });
+    const goAudit = (patch) => go(auditRoute(Object.assign({}, f, patch)));
+    $('#au-form').onsubmit = (e) => {
+      e.preventDefault();
+      goAudit({actor: $('#au-actor').value.trim(), action: $('#au-action').value.trim(), subject: $('#au-subject').value.trim(), page: 1});
     };
-    $('#au-next').onclick = () => {
-      state.auditOffset = offset + limit; loadAudit();
-    };
+    $('#au-prev').onclick = () => goAudit({page: Math.max(1, page - 1)});
+    $('#au-next').onclick = () => goAudit({page: page + 1});
+    $('#view').querySelectorAll('[data-audit-filter]').forEach((b) => {
+      b.onclick = () => goAudit({[b.dataset.auditFilter]: b.dataset.value, page: 1});
+    });
   } catch (e) {
     if (!current()) return;
     $('#view').innerHTML = pageError(e);
-    if ($('#retry-page')) $('#retry-page').onclick = () => loadAudit();
+    if ($('#retry-page')) $('#retry-page').onclick = () => loadAudit(pageContext('audit'));
   }
 }
 function auditRows(rows) {
-  return rows.map((a) => `<tr>
-    <td>${esc(fmtAgeTs(a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action)}</td>
-    <td>${esc(a.subject)}</td><td>${esc(a.detail)}</td>
+  const pick = (key, value) => value
+    ? `<button type="button" class="linkish" data-audit-filter="${key}" data-value="${esc(value)}" title="只看 ${esc(value)}">${esc(value)}</button>` : '<span class="muted">—</span>';
+  return rows.map((a) => {
+    const detail = String(a.detail == null ? '' : a.detail);
+    const memberLink = /^members?\./.test(a.action || '') && a.subject
+      ? ` <a class="muted" href="#/members?id=${encodeURIComponent(a.subject)}" title="打开该用户详情">详情</a>` : '';
+    return `<tr>
+    <td><time title="${esc(a.ts ? new Date(a.ts * 1000).toLocaleString('zh-CN', {hour12: false}) : '')}">${esc(fmtAgeTs(a.ts))}</time></td>
+    <td>${pick('actor', a.actor)}</td><td>${pick('action', a.action)}</td>
+    <td>${pick('subject', a.subject)}${memberLink}</td>
+    <td class="audit-detail">${detail.length > 140
+      ? `<details><summary>${esc(detail.slice(0, 140))}…</summary><div>${esc(detail)}</div></details>` : esc(detail)}</td>
     <td>${a.ok ? '<span class="tag ok">成功</span>' : '<span class="tag bad">失败</span>'}</td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 /* bootPanel runs from members.js after the members page is registered. */
@@ -656,7 +667,7 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
       ${stat('☺', tg.max_users ? `上限 ${tg.max_users}` : '不限', '名额',
         (tg.membership_rules?.gate_enabled && (tg.membership_rules.targets||[]).some(t=>t.enabled))
           ? '需加入关联群组/频道' : '无群组要求')}
-      ${stat('⚡', '任务中心', '定时推送', '排行与到期提醒已迁至自动化')}
+      ${stat('⚡', '任务中心', '定时推送', '排行与到期提醒在「任务中心」配置')}
     </div>
     ${card('机器人对接', 'Token 仅保存在服务端，不会回传浏览器',
       `<div class="card-body">
@@ -741,7 +752,7 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
     ${card('通知与排行', '这两件事现在是定时任务',
       `<div class="card-body">
         <div class="muted" style="line-height:1.6">
-          <b>到期提醒</b>与<b>排行推送</b>已迁至「自动化 → 任务中心」，
+          <b>到期提醒</b>与<b>排行推送</b>已迁至「机器人 → 任务中心」，
           在那里配置目标群组、时间和开关。
           放在两个页面各有一个开关，先后保存会互相覆盖，也会让同一条消息发两遍。
         </div>
@@ -852,7 +863,7 @@ PAGES.redeem = async (context = pageContext('redeem')) => {
       </select>
       <select id="rd-f-batch" aria-label="卡密批次筛选"><option value="">全部批次</option>${
   (listing.batches || []).map((b) => `<option value="${esc(b)}">${esc(b)}</option>`).join('')}</select>
-      <button class="btn primary" id="rd-filter">筛选</button>
+      <button class="btn" id="rd-filter">筛选</button>
       <button class="btn" id="rd-export">导出 CSV</button>
     </div>
     <div id="redeem-table">${redeemTable(codes)}</div>`;
@@ -976,11 +987,11 @@ function exportRedeem() {
 async function revokeRedeem(value) {
   const actionContext = pageContext('redeem');
   value = uq(value);
-  if (!(await deckConfirm('作废这张卡密？作废后无法再用来注册。'))) return;
+  if (!(await deckConfirm(`作废卡密 ${value.length > 8 ? value.slice(0, 4) + '…' + value.slice(-4) : value}？作废后无法再用来注册。`, {title: '作废卡密', confirmText: '作废', danger: true}))) return;
   try {
     await api(`/api/redeem/${encodeURIComponent(value)}/revoke`, { method: 'POST' });
     toast('已作废');
-    renderPage('redeem', true, false, actionContext);
+    renderPage('redeem', false, false, actionContext);
   } catch (e) { toast('作废失败: ' + e.message, 1); }
 }
 
@@ -1022,6 +1033,7 @@ PAGES.invites = async (context = pageContext('invites')) => {
       ${stat('🌳', members.filter((m) => m.register_via === 'invite').length,
     '通过邀请加入', '占比按当前列表')}
     </div>
+    <div id="invite-cases"></div>
     ${card('注册通道', '三个通道各自独立；全部关闭等于停止注册',
     `<div class="card-body">
         <div class="form-row"><label for="ch-admin">管理员预授权</label>
@@ -1039,7 +1051,7 @@ PAGES.invites = async (context = pageContext('invites')) => {
     ${card('管理员预授权', '直接放行某个 Telegram 账号，不需要邀请码或卡密',
     `<div class="card-body">
         <div class="form-row"><label for="gr-id">Telegram ID</label>
-          <input id="gr-id" placeholder="纯数字，例如 6425070392" style="max-width:260px">
+          <input id="gr-id" placeholder="纯数字，例如 123456789" style="max-width:260px">
           <button class="btn primary" id="gr-add">授权</button></div>
         <div class="help">让对方发 /start 给机器人，机器人会回显他的数字 ID。</div>
         ${grants.length ? `<table><thead><tr><th>Telegram ID</th><th>状态</th><th>授权人</th><th>时间</th><th></th></tr></thead><tbody>
@@ -1071,6 +1083,7 @@ PAGES.invites = async (context = pageContext('invites')) => {
   bindAsyncButton('ch-save', saveChannels);
   bindAsyncButton('gr-add', addGrant);
   bindAsyncButton('iq-give', giveQuota);
+  if (window.renderInviteCases) window.renderInviteCases($('#invite-cases'));
 };
 async function saveChannels() {
   const actionContext = pageContext('invites');
@@ -1084,7 +1097,7 @@ async function saveChannels() {
         allow_redeem: (($('#ch-redeem') || {}).checked) || false,
       }) });
     toast('已保存');
-    renderPage('invites', true, false, actionContext);
+    renderPage('invites', false, false, actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 async function addGrant() {
@@ -1095,18 +1108,18 @@ async function addGrant() {
     await api('/api/registration/grants', {
       method: 'POST', body: JSON.stringify({ tg_user_id: value }) });
     toast('已授权');
-    renderPage('invites', true, false, actionContext);
+    renderPage('invites', false, false, actionContext);
   } catch (e) { toast('授权失败: ' + e.message, 1); }
 }
 async function revokeGrant(value) {
   const actionContext = pageContext('invites');
   value = uq(value);
-  if (!(await deckConfirm('撤销这条预授权？对方将无法直接注册。'))) return;
+  if (!(await deckConfirm(`撤销 TG ${value} 的预授权？对方将无法直接注册。`, {title: '撤销预授权', confirmText: '撤销', danger: true}))) return;
   try {
     await api(`/api/registration/grants/${encodeURIComponent(value)}`,
       { method: 'DELETE' });
     toast('已撤销');
-    renderPage('invites', true, false, actionContext);
+    renderPage('invites', false, false, actionContext);
   } catch (e) { toast('撤销失败: ' + e.message, 1); }
 }
 async function giveQuota() {
@@ -1118,7 +1131,7 @@ async function giveQuota() {
     const r = await api(`/api/members/${encodeURIComponent(id)}/invite-quota`, {
       method: 'POST', body: JSON.stringify({ delta }) });
     toast(`名额已更新为 ${r.quota}`);
-    renderPage('invites', true, false, actionContext);
+    renderPage('invites', false, false, actionContext);
   } catch (e) { toast('发放失败: ' + e.message, 1); }
 }
 async function showMemberInvites(id, username) {
@@ -1178,7 +1191,7 @@ PAGES.tggroup = async (context = pageContext('tggroup')) => {
     catch(err){if(context.isCurrent())$('#gm-scan-state').textContent='读取失败：'+err.message;}
   };
   $('#gm-scan').onclick=async()=>{
-    if(data?.rules?.delete_enabled&&!(await deckConfirm('删除开关已开启：本次检测会重新核实并删除不合规存量会员本人（含白名单），历史保留，不连带。继续？')))return;
+    if(data?.rules?.delete_enabled&&!(await deckConfirm('删除开关已开启：本次检测会重新核实并删除不合规存量会员本人（含白名单），历史保留，不连带。继续？',{title:'检测并删除',confirmText:'开始检测',danger:true})))return;
     $('#gm-scan').disabled=true;
     try{await api('/api/telegram/membership/scan',{method:'POST'});if(context.isCurrent())await refresh();}
     catch(err){if(context.isCurrent()){$('#gm-scan-state').textContent=err.message;$('#gm-scan').disabled=false;}}
@@ -1240,6 +1253,10 @@ const PLUGIN_CATEGORIES = [
 ];
 
 PAGES.automation = async (context = pageContext('automation')) => {
+  // A category in the route (e.g. a link to 积分 settings) wins; a bare route
+  // keeps the category the operator last opened.
+  const routeCategory = new URLSearchParams(String(context.route || '').split('?')[1] || '').get('category');
+  if (PLUGIN_CATEGORIES.some(c => c.id === routeCategory)) automation.category = routeCategory;
   $('#view').innerHTML = pageLoading();
   const [cards, items] = await Promise.all([
     api(`/api/plugins?category=${encodeURIComponent(automation.category)}`).catch(() => null),
@@ -1249,9 +1266,8 @@ PAGES.automation = async (context = pageContext('automation')) => {
   automation.itemSpecs = items || [];
   if (!cards) { $('#view').innerHTML = pageError('无法读取任务列表'); return; }
 
-  const tabs = PLUGIN_CATEGORIES.map((c) =>
-    `<button class="btn ${c.id === automation.category ? 'primary' : ''}"
-       onclick="switchPluginCategory('${c.id}')">${esc(c.label)}</button>`).join('');
+  const tabs = segmented(PLUGIN_CATEGORIES.map((c) => ({label: c.label, active: c.id === automation.category,
+    attrs: `onclick="switchPluginCategory('${c.id}')"`})), '任务分类');
 
   const emptyLabel = ({ points: '还没有已注册的积分功能',
     request: '还没有已注册的求片任务' })[automation.category]
@@ -1270,7 +1286,7 @@ PAGES.automation = async (context = pageContext('automation')) => {
     || `定时任务在这里统一开关和配置。<b>「立即运行」不看开关</b>：先试一次再决定要不要常开。
        任何一个任务出错都只影响它自己的卡片，不会影响其他任务。`}
     </div>
-    <div class="toolbar" style="margin-bottom:14px">${tabs}</div>
+    <div class="page-actions">${tabs}</div>
     ${body}`;
 
   cards.forEach(bindPluginCard);
@@ -1278,6 +1294,9 @@ PAGES.automation = async (context = pageContext('automation')) => {
 
 function switchPluginCategory(id) {
   automation.category = id;
+  // Keep the category in the address so refresh and back return here.
+  state.route = `automation?category=${encodeURIComponent(id)}`;
+  history.replaceState(null, '', '#/' + state.route);
   renderPage('automation');
 }
 
@@ -2018,7 +2037,7 @@ async function addAccessRule() {
       kind: $('#ac-kind').value, pattern, action: $('#ac-action').value,
       note: $('#ac-note').value.trim(), enabled: true }) });
     toast('规则已添加');
-    renderPage('access', true, false, actionContext);
+    renderPage('access', false, false, actionContext);
   } catch (e) {
     // A bad regex or netmask comes back as a 400 with the reason; showing it
     // verbatim is the difference between fixing it and guessing.
@@ -2041,11 +2060,11 @@ async function toggleAccessRule(id, enabled, input) {
 
 async function deleteAccessRule(id) {
   const actionContext = pageContext('access');
-  if (!(await deckConfirm('删除这条规则？'))) return;
+  if (!(await deckConfirm(`删除访问规则 #${id}？删除后该规则不再拦截或处罚。`, {title: '删除规则', confirmText: '删除', danger: true}))) return;
   try {
     await api(`/api/access/rules/${id}`, { method: 'DELETE' });
     toast('规则已删除');
-    renderPage('access', true, false, actionContext);
+    renderPage('access', false, false, actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 
@@ -2163,7 +2182,7 @@ PAGES.shop = async (context = pageContext('shop')) => {
         <td><div class="u-name">${esc(i.name)}</div>
           ${i.description ? `<div class="u-sub muted">${esc(i.description)}</div>` : ''}</td>
         <td>${esc(i.kind_label || i.kind)}</td>
-        <td><b>${esc(i.cost)}</b> 分</td>
+        <td><b>${esc(i.cost)}</b> 积分</td>
         <td>${esc(i.amount)} ${esc(i.unit || shopUnit(i.kind))}</td>
         <td>${i.per_user_limit ? esc(i.per_user_limit) + ' 次' : '<span class="muted">不限</span>'}</td>
         <td>${esc(i.sort)}</td>
@@ -2175,13 +2194,13 @@ PAGES.shop = async (context = pageContext('shop')) => {
             onclick="deleteShopItem(${Number(i.id)}, '${q(i.name)}')">🗑</button>
         </td></tr>`).join('')
       : '<tr><td colspan="8"><div class="empty">还没有商品</div></td></tr>')}
-    ${tableCard('兑换记录', '最近 50 条', ['时间', '用户', '商品', '发放', '消耗'],
+    ${tableCard('兑换记录', '最近 50 条', ['时间', '用户', '商品', '发放', '消耗积分'],
     orders.length ? orders.map((o) => `<tr>
         <td>${esc(fmtAgeTs(o.created_at))}</td>
         <td>${esc(o.username || o.emby_user_id || '-')}</td>
         <td>${esc(o.item_name || '-')}</td>
         <td>${esc(o.amount)} ${esc(o.unit || shopUnit(o.kind))}</td>
-        <td>-${esc(o.cost)} 分</td></tr>`).join('')
+        <td>-${esc(o.cost)} 积分</td></tr>`).join('')
       : '<tr><td colspan="5"><div class="empty">还没有人兑换过</div></td></tr>')}`;
   const kindSel = $('#sh-kind');
   if (kindSel) {
@@ -2290,17 +2309,21 @@ function editShopItem(id) {
 }
 async function deleteShopItem(id, name) {
   const actionContext = pageContext('shop');
-  if (!(await deckConfirm(`确定删除商品「${uq(name)}」？已产生的兑换记录会保留。`))) return;
+  if (!(await deckConfirm(`确定删除商品「${uq(name)}」？已产生的兑换记录会保留。`, {title: '删除商品', confirmText: '删除', danger: true}))) return;
   try {
     await api(`/api/shop/items/${Number(id)}`, { method: 'DELETE' });
     toast('已删除'); renderPage('shop', false, false, actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 
-/* ---------- 求片中心：接受即终结，后续由上片员手动安排下载 ---------- */
+/* ---------- 求片中心：接受即终结，后续由上片员手动安排下载 ----------
+   Status, filters, page and the opened ticket all live in the address
+   (#/requests?status=open&q=…&id=12). Refresh, browser back and a shared link
+   return to the same list or ticket; back from a ticket returns to the list
+   with its filters instead of leaving the page. */
 const REQUEST_STATUS_TABS = [
   {id:'open',label:'待处理'}, {id:'accepted',label:'已接受'},
-  {id:'rejected',label:'已拒绝'}, {id:'cancelled',label:'已取消'}, {id:'',label:'全部'},
+  {id:'rejected',label:'已拒绝'}, {id:'cancelled',label:'已取消'}, {id:'all',label:'全部'},
 ];
 const requestsView = {status:'open', type:'', search:'', page:0, selected:null, eventPage:0};
 const requestRows = new Map();
@@ -2312,13 +2335,41 @@ function requestPoster(row) {
   const src = String(row.poster_path).startsWith('https://') ? row.poster_path : `https://image.tmdb.org/t/p/w92${row.poster_path}`;
   return `<img src="${esc(src)}" alt="海报" loading="lazy" style="width:42px;height:63px;object-fit:cover;border-radius:4px">`;
 }
-function requestActions(row) {
+// "工单 #12《片名》" — every dialog about a ticket names it.
+function requestName(row) {
+  return `工单 #${Number(row.id)}《${row.display_title || row.title || 'TMDB ' + (row.tmdb_id || '')}》`;
+}
+function requestActions(row, withDetail = true) {
   const id = Number(row.id);
   return (row.status === 'open' ? `<button class="btn sm primary" onclick="requestAction(${id},'accept')">接受请求</button>
     <button class="btn sm danger" onclick="requestAction(${id},'reject')">拒绝</button>` : '') +
-    ` <button class="btn sm" onclick="openRequest(${id})">详情</button>`;
+    (withDetail ? ` <button class="btn sm" onclick="openRequest(${id})">详情</button>` : '');
+}
+function syncRequestsView(route) {
+  const p = routeParams(route);
+  const status = p.get('status');
+  Object.assign(requestsView, {
+    status: status === 'all' ? '' : (REQUEST_STATUS_TABS.some(t => t.id === status) ? status : 'open'),
+    type: ['movie','tv'].includes(p.get('type')) ? p.get('type') : '',
+    search: p.get('q') || '',
+    page: Math.max(0, (parseInt(p.get('page'), 10) || 1) - 1),
+    selected: Number(p.get('id')) || null,
+    eventPage: Math.max(0, (parseInt(p.get('ev'), 10) || 1) - 1),
+  });
+}
+function requestsRoute(patch = {}) {
+  const v = Object.assign({}, requestsView, patch);
+  const p = new URLSearchParams();
+  if (v.status !== 'open') p.set('status', v.status || 'all');
+  if (v.type) p.set('type', v.type);
+  if (v.search) p.set('q', v.search);
+  if (v.page) p.set('page', String(v.page + 1));
+  if (v.selected) p.set('id', String(v.selected));
+  if (v.selected && v.eventPage) p.set('ev', String(v.eventPage + 1));
+  return 'requests' + (p.toString() ? '?' + p : '');
 }
 PAGES.requests = async (context = pageContext('requests')) => {
+  syncRequestsView(context.route);
   $('#view').innerHTML = pageLoading();
   if (requestsView.selected) return renderRequestDetail(context);
   const q = new URLSearchParams({limit:'11',offset:String(requestsView.page*10),search:requestsView.search});
@@ -2328,69 +2379,93 @@ PAGES.requests = async (context = pageContext('requests')) => {
   if (!context.isCurrent()) return;
   if (!rows) { $('#view').innerHTML = pageError('无法读取求片列表'); return; }
   rows.forEach(r=>requestRows.set(Number(r.id),r));
+  const counts = {open: stats.open, accepted: stats.accepted, rejected: stats.rejected};
+  const filtered = !!(requestsView.type || requestsView.search);
+  const statusLabel = (REQUEST_STATUS_TABS.find(t => t.id === (requestsView.status || 'all')) || {}).label || '全部';
   $('#view').innerHTML = `<div class="help">提交为<b>待处理</b>；上片员点<b>接受请求</b>即终结，之后手动安排下载。
     不自动下载、不检查入库。询问用户仍待处理；拒绝理由选填，普通拒绝/撤回不自动退额度。Bot 私聊使用 /requests 或 /uploader。</div>
     <div class="stat-grid">${stat('🕓',stats.open||0,'待处理','可直接接受或拒绝')}${stat('✅',stats.accepted||0,'已接受','不代表已下载或入库')}${stat('❌',stats.rejected||0,'已拒绝','累计')}${stat('📅',stats.month_total||0,'本月求片',stats.period||'')}</div>
-    <div class="toolbar">${REQUEST_STATUS_TABS.map(t=>`<button class="btn ${t.id===requestsView.status?'primary':''}" onclick="switchRequestStatus('${t.id}')">${esc(t.label)}</button>`).join('')}</div>
-    <form class="toolbar" onsubmit="event.preventDefault();filterRequests()" style="margin:14px 0;flex-wrap:wrap">
-      <label>类型 <select id="request-type"><option value="">电影与剧集</option><option value="movie" ${requestsView.type==='movie'?'selected':''}>电影</option><option value="tv" ${requestsView.type==='tv'?'selected':''}>剧集</option></select></label>
-      <input id="request-search" aria-label="搜索工单" placeholder="片名 / TMDB编号 / 工单号" value="${esc(requestsView.search)}"><button class="btn" type="submit">搜索 / 筛选</button>
-    </form>
-    ${tableCard('求片列表',`第 ${requestsView.page+1} 页`,['编号','海报','片名 / 需求','类型','求片人','状态','操作人','时间','操作'],rows.slice(0,10).map(r=>`<tr>
-    <td>#${Number(r.id)}</td><td>${requestPoster(r)}</td><td><div class="u-name">${esc(r.display_title)}</div><div class="u-sub muted" style="white-space:pre-line">${esc(r.demand_text || '')}</div>${r.note?`<div class="u-sub">备注：${esc(r.note)}</div>`:''}${r.status==='rejected'&&r.result_note?`<div class="u-sub">理由：${esc(r.result_note)}</div>`:''}</td>
-    <td>${esc(r.media_label)}</td><td>${esc(r.username)}</td><td>${requestStatusTag(r)}</td><td>${esc(r.claimed_by_name || '—')}</td><td>${esc(fmtAgeTs(r.created_at))}</td><td class="row-actions">${requestActions(r)}</td></tr>`).join(''))}
-    <div class="toolbar"><button class="btn" onclick="pageRequests(-1)" ${requestsView.page===0?'disabled':''}>上一页</button><span>第 ${requestsView.page+1} 页</span><button class="btn" onclick="pageRequests(1)" ${rows.length<=10?'disabled':''}>下一页</button></div>`;
+    <div class="page-actions">${segmented(REQUEST_STATUS_TABS.map(t => ({label: t.label, count: counts[t.id],
+      active: t.id === (requestsView.status || 'all'), href: '#/' + requestsRoute({status: t.id === 'all' ? '' : t.id, page: 0, selected: null})})), '工单状态')}</div>
+    ${listCard({
+      title: '求片列表', key: 'requests',
+      sub: `${statusLabel}${filtered ? ' · 已筛选' : ''} · 第 ${requestsView.page+1} 页`,
+      filters: `<form class="toolbar" onsubmit="event.preventDefault();filterRequests()">
+        <label>类型 <select id="request-type"><option value="">电影与剧集</option><option value="movie" ${requestsView.type==='movie'?'selected':''}>电影</option><option value="tv" ${requestsView.type==='tv'?'selected':''}>剧集</option></select></label>
+        <label class="grow">搜索 <input id="request-search" type="search" aria-label="搜索工单" placeholder="片名 / TMDB编号 / 工单号" value="${esc(requestsView.search)}"></label>
+        <button class="btn" type="submit">搜索 / 筛选</button>
+        ${filtered ? `<a class="btn" href="#/${esc(requestsRoute({type:'', search:'', page:0}))}">清除筛选</a>` : ''}
+      </form>`,
+      cols: ['编号','海报','片名 / 需求','类型','求片人','状态','操作人','时间','操作'],
+      rows: rows.slice(0,10).map(r=>`<tr>
+    <td>#${Number(r.id)}</td><td class="hide-sm">${requestPoster(r)}</td><td><div class="u-name">${esc(r.display_title)}</div><div class="u-sub muted" style="white-space:pre-line">${esc(r.demand_text || '')}</div>${r.note?`<div class="u-sub">备注：${esc(r.note)}</div>`:''}${r.status==='rejected'&&r.result_note?`<div class="u-sub">理由：${esc(r.result_note)}</div>`:''}</td>
+    <td>${esc(r.media_label)}</td><td>${esc(r.username)}</td><td>${requestStatusTag(r)}</td><td${r.claimed_by_name ? '' : ' class="hide-sm"'}>${esc(r.claimed_by_name || '—')}</td><td>${esc(fmtAgeTs(r.created_at))}</td><td class="row-actions">${requestActions(r)}</td></tr>`).join(''),
+      empty: filtered ? '没有符合筛选的工单' : `没有${statusLabel === '全部' ? '' : statusLabel}工单`,
+      pager: `<button class="btn sm" onclick="pageRequests(-1)" ${requestsView.page===0?'disabled':''}>上一页</button><span class="muted">第 ${requestsView.page+1} 页</span><button class="btn sm" onclick="pageRequests(1)" ${rows.length<=10?'disabled':''}>下一页</button>`,
+    })}`;
 };
-function switchRequestStatus(status) { Object.assign(requestsView,{status,page:0,selected:null}); renderPage('requests'); }
-function filterRequests() { Object.assign(requestsView,{type:$('#request-type').value,search:$('#request-search').value.trim(),page:0}); renderPage('requests'); }
-function pageRequests(delta) { requestsView.page=Math.max(0,requestsView.page+delta); renderPage('requests'); }
-function openRequest(id) { requestsView.selected=id; requestsView.eventPage=0; renderPage('requests'); }
-function requestEventPage(delta) { requestsView.eventPage=Math.max(0,requestsView.eventPage+delta); renderPage('requests'); }
+function switchRequestStatus(status) { go(requestsRoute({status, page:0, selected:null})); }
+function filterRequests() { go(requestsRoute({type:$('#request-type').value, search:$('#request-search').value.trim(), page:0, selected:null})); }
+function pageRequests(delta) { go(requestsRoute({page:Math.max(0,requestsView.page+delta)})); }
+function openRequest(id) { go(requestsRoute({selected:id || null, eventPage:0})); }
+function requestEventPage(delta) { go(requestsRoute({eventPage:Math.max(0,requestsView.eventPage+delta)})); }
 async function renderRequestDetail(context) {
   const row = await api(`/api/requests/${Number(requestsView.selected)}?offset=${requestsView.eventPage*20}`).catch(()=>null);
   if (!context.isCurrent()) return;
-  if (!row) { $('#view').innerHTML=pageError('工单不存在或读取失败'); return; }
+  const back = `<a class="btn" href="#/${esc(requestsRoute({selected:null, eventPage:0}))}">◀ 返回列表</a>`;
+  if (!row) { $('#view').innerHTML=`<div class="page-actions">${back}</div>${pageError('工单不存在或读取失败')}`; return; }
   const id=Number(row.id); requestRows.set(id,row);
   const eventLabel = {created:'提交',modified:'修改需求',accepted:'已接受',rejected:'已拒绝',cancelled:'已取消',question:'上片员询问',reply:'用户回复',internal:'内部备注',correction:'管理员纠错',refund:'额度退回'};
-  $('#view').innerHTML = `<div class="toolbar"><button class="btn" onclick="openRequest(null)">◀ 返回列表</button><button class="btn" onclick="openRequest(${id})">刷新</button></div>
-    <div class="card"><h2>工单 #${id} · ${esc(row.display_title)} ${requestStatusTag(row)}</h2><p>${requestPoster(row)} ${esc(row.media_label)} · <a href="https://www.themoviedb.org/${esc(row.media_type)}/${Number(row.tmdb_id)}" target="_blank" rel="noopener">TMDB 详情 ↗</a> · 求片人 ${esc(row.username)}</p><p class="muted">${esc(row.original_title||'')}</p><p>${esc((row.overview||'').slice(0,250))}</p>
+  $('#view').innerHTML = `<div class="page-actions">${back}<button class="btn" onclick="renderPage('requests', true)">刷新</button></div>
+    <div class="card request-detail"><div class="card-body">
+    <h2>工单 #${id} · ${esc(row.display_title)} ${requestStatusTag(row)}</h2><p>${requestPoster(row)} ${esc(row.media_label)} · <a href="https://www.themoviedb.org/${esc(row.media_type)}/${Number(row.tmdb_id)}" target="_blank" rel="noopener">TMDB 详情 ↗</a> · 求片人 ${esc(row.username)}</p><p class="muted">${esc(row.original_title||'')}</p><p>${esc((row.overview||'').slice(0,250))}</p>
     <p style="white-space:pre-line">${esc(row.demand_text)}\n备注：${esc(row.note||'无要求')}</p>
     ${row.status==='accepted'?'<div class="help">上片员已接受你的请求，将安排下载，请耐心等待下载完成并入库</div>':''}
     ${row.status==='rejected'&&row.result_note?`<p>拒绝理由：${esc(row.result_note)}</p>`:''}
     ${row.legacy_status?`<p class="muted">历史状态 ${esc(row.legacy_status)} 已兼容为已接受；不表示已上架。</p>`:''}
-    <div class="toolbar" style="flex-wrap:wrap">${requestActions(row)}${row.status==='open'?`<button class="btn" onclick="requestAction(${id},'ask')">询问用户</button><button class="btn" onclick="requestAction(${id},'internal')">内部备注</button>`:''}
-    <button class="btn" onclick="requestAction(${id},'correct')">管理员纠错</button><button class="btn" onclick="requestAction(${id},'refund')" ${row.refund_at?'disabled':''}>${row.refund_at?'额度已退回':'人工退回额度'}</button><button class="btn" onclick="requestAction(${id},'retry')">重试失败通知</button></div></div>
-    <div class="card"><h3>沟通 / 操作记录（🔒 仅管理可见的记录不会发给用户）</h3>${(row.events||[]).slice(0,20).map(e=>`<div style="border-bottom:1px solid var(--border);padding:12px 0"><b>${e.internal?'🔒 ':''}${esc(eventLabel[e.kind]||e.kind)}</b> · ${esc(e.actor)} · ${esc(fmtAgeTs(e.created_at))}<p style="white-space:pre-wrap">${esc(e.body||'（无附言）')}</p></div>`).join('')}
-    <button class="btn" onclick="requestEventPage(-1)" ${requestsView.eventPage===0?'disabled':''}>较新记录</button><button class="btn" onclick="requestEventPage(1)" ${(row.events||[]).length<=20?'disabled':''}>较早记录</button></div>
-    <div class="card"><h3>通知投递</h3>${(row.notifications||[]).map(n=>`<p>#${n.id} ${esc(n.kind)} · ${esc(({sent:'已送达',pending:'待重试',sending:'发送中'})[n.state]||n.state)} · 尝试 ${Number(n.attempts)} 次 ${esc(n.error||'')}</p>`).join('')||'暂无通知'}</div>`;
+    ${row.status==='open'?`<h4 class="action-group-title">处理</h4><div class="toolbar">${requestActions(row, false)}<button class="btn" onclick="requestAction(${id},'ask')">询问用户</button><button class="btn" onclick="requestAction(${id},'internal')">内部备注</button></div>`:''}
+    <h4 class="action-group-title">管理操作</h4>
+    <div class="toolbar"><button class="btn" onclick="requestAction(${id},'correct')">管理员纠错</button><button class="btn" onclick="requestAction(${id},'refund')" ${row.refund_at?'disabled':''}>${row.refund_at?'额度已退回':'人工退回额度'}</button><button class="btn" onclick="requestAction(${id},'retry')">重试失败通知</button></div>
+    </div></div>
+    <div class="card"><div class="card-head"><div><h3>沟通 / 操作记录</h3><div class="sub">🔒 标记的内部记录不会发给用户</div></div></div><div class="card-body">${(row.events||[]).slice(0,20).map(e=>`<div class="event-row"><b>${e.internal?'🔒 ':''}${esc(eventLabel[e.kind]||e.kind)}</b> · ${esc(e.actor)} · ${esc(fmtAgeTs(e.created_at))}<p style="white-space:pre-wrap">${esc(e.body||'（无附言）')}</p></div>`).join('') || '<div class="empty">暂无记录</div>'}
+    <div class="toolbar"><button class="btn sm" onclick="requestEventPage(-1)" ${requestsView.eventPage===0?'disabled':''}>较新记录</button><button class="btn sm" onclick="requestEventPage(1)" ${(row.events||[]).length<=20?'disabled':''}>较早记录</button></div></div></div>
+    <div class="card"><div class="card-head"><div><h3>通知投递</h3></div></div><div class="card-body">${(row.notifications||[]).map(n=>`<p>#${n.id} ${esc(n.kind)} · ${esc(({sent:'已送达',pending:'待重试',sending:'发送中'})[n.state]||n.state)} · 尝试 ${Number(n.attempts)} 次 ${esc(n.error||'')}</p>`).join('')||'<div class="muted">暂无通知</div>'}</div></div>`;
 }
 const requestBusy = new Set();
 async function requestAction(id, action) {
   if (requestBusy.has(id)) return;
   const row=requestRows.get(Number(id)); if (!row) return;
   const ctx=pageContext('requests'); let endpoint=action, payload={revision:row.revision};
+  const name = requestName(row);
+  const who = `${row.media_label || ''}${row.username ? `，求片人 ${row.username}` : ''}`;
   if (action==='reject') {
-    const note=await deckPrompt('拒绝理由（完全选填；留空直接拒绝，不会向用户编造理由）','');
+    const note=await deckPrompt(`拒绝${name}（${who}）？\n用户会收到拒绝通知；普通拒绝不会自动退回求片额度。\n拒绝理由（完全选填；留空直接拒绝，不会向用户编造理由）：`,'',
+      {title:'拒绝求片', confirmText:'拒绝', danger:true, placeholder:'选填'});
     if (note===null) return; payload.note=note;
   } else if (action==='accept') {
-    if (!(await deckConfirm('接受请求即终结。之后由上片员手动安排下载；不会自动下载或检查入库。确认接受？'))) return;
+    if (!(await deckConfirm(`接受${name}（${who}）？\n接受请求即终结。之后由上片员手动安排下载；不会自动下载或检查入库。`,
+      {title:'接受求片', confirmText:'接受请求'}))) return;
   } else if (action==='ask'||action==='internal') {
-    const body=await deckPrompt(action==='internal'?'内部备注（仅上片员/管理员可见）':'询问用户（工单仍待处理，消息通过 Bot 发送）','');
+    const body=await deckPrompt(action==='internal'?`为${name}添加内部备注（仅上片员/管理员可见）`:`向求片人询问${name}（工单仍待处理，消息通过 Bot 发送）`,'',
+      {title: action==='internal' ? '内部备注' : '询问用户', confirmText: action==='internal' ? '保存备注' : '发送'});
     if (body===null) return;
     endpoint='messages'; Object.assign(payload,{body,internal:action==='internal',key:crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`});
   } else if (action==='correct') {
-    const status=await deckPrompt('纠正为 open / accepted / rejected / cancelled（不会自动退额度）',row.status);
+    const status=await deckPrompt(`把${name}的状态纠正为（不会自动退额度；用户会收到纠正后的状态通知）：`,row.status,
+      {title:'管理员纠错', confirmText:'下一步', choices:[['open','待处理'],['accepted','已接受'],['rejected','已拒绝'],['cancelled','已取消']]});
     if (status===null) return;
-    const reason=await deckPrompt('请填写纠错原因（仅管理记录；用户收到纠正后的状态通知）',''); if(reason===null)return;
+    const reason=await deckPrompt(`请填写纠错原因（仅管理记录）：\n${name} 将改为「${({open:'待处理',accepted:'已接受',rejected:'已拒绝',cancelled:'已取消'})[status]||status}」`,'',
+      {title:'管理员纠错', confirmText:'确认纠错', danger:true}); if(reason===null)return;
     Object.assign(payload,{status,reason});
   } else if (action==='refund') {
-    const reason=await deckPrompt('人工退回一次月额度：仅原扣次月份有效，每单一次。请填写原因',''); if(reason===null)return;
+    const reason=await deckPrompt(`人工退回${name}的一次月额度（求片人 ${row.username || '—'}）：仅原扣次月份有效，每单一次。请填写原因：`,'',
+      {title:'人工退回额度', confirmText:'退回额度'}); if(reason===null)return;
     payload.reason=reason;
   } else if (action==='retry') endpoint='notifications/retry';
   requestBusy.add(id);
   try {
     await api(`/api/requests/${Number(id)}/${endpoint}`,{method:'POST',body:JSON.stringify(payload)});
-    toast(action==='accept'?'请求已接受，将由上片员手动安排下载':'操作已记录');
+    toast(action==='accept'?`${name} 已接受，将由上片员手动安排下载`:action==='reject'?`${name} 已拒绝`:'操作已记录');
     renderPage('requests',false,false,ctx);
   } catch(e) {toast('未执行或未确认：'+e.message,1); renderPage('requests',false,false,ctx);}
   finally {requestBusy.delete(id);}
@@ -2491,7 +2566,7 @@ async function loadEconomyMember() {
     };
     document.querySelectorAll('[data-title-revoke]').forEach(button => {
       button.onclick = async () => {
-        if (!(await deckConfirm('撤销此称号？系统会核对后清除对应标签，手改标签保留。'))) return;
+        if (!(await deckConfirm(`撤销 ${user} 的称号 #${button.dataset.titleRevoke}？系统会核对后清除对应标签，手改标签保留。`, {title: '撤销称号', confirmText: '撤销', danger: true}))) return;
         try {await api(base+'/titles/'+button.dataset.titleRevoke,{method:'DELETE'});await loadEconomyMember();}
         catch(e) {toast(e.message,1);}
       };

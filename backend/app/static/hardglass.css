@@ -364,10 +364,121 @@ body.member-drawer-open{overflow:hidden}#member-detail:not(.hidden){position:fix
 .item-entry > .help { margin:0; padding:0 10px 10px; }
 .editor-error:not(:empty) { color:#daa1ae; }
 .item-editor-container[inert] { opacity:.5; }
-@media(max-width:600px) {
+@media(max-width:600px){
+  .toolbar { flex-wrap: wrap; gap: 8px; }
+  .toolbar input:not([type=checkbox]), .toolbar select { max-width: 100%; min-width: 0; }
+  .table-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  .table-scroll table { min-width: 520px; }
   .entry-fields, .drop-spec-fields { grid-template-columns:minmax(0,1fr); }
   .item-entry > summary { flex-wrap:wrap; }
   .entry-actions { margin-left:auto; }
   .item-editor-table td { padding:5px 3px; }
   .plugin-json-smart textarea { min-width:0 !important; }
 }
+
+/* ---------- Deck interaction layer: one look for feedback, confirmation,
+   page actions, lists and the mobile shell. Visual language stays Hard Glass. */
+/* Feedback: success and failure are distinguishable at a glance; failures can be dismissed. */
+#toast{align-items:flex-start;gap:12px;max-width:min(560px,calc(100vw - 32px));padding:11px 12px 11px 16px;line-height:1.6;font-size:12px}
+#toast .toast-text{flex:1;min-width:0;overflow-wrap:anywhere}
+#toast .toast-close{flex:none;background:none;border:0;color:inherit;opacity:.7;font-size:16px;line-height:1;padding:2px 4px;cursor:pointer;border-radius:5px}
+#toast .toast-close:hover{opacity:1;background:#ffffff12}
+#toast.is-ok{border-color:#93d7b455!important;box-shadow:inset 3px 0 0 #81ceaf,var(--shadow-card)}
+#toast.is-bad{background:#3a2229f7!important;border-color:#df9ba580!important;color:#f3d5db;box-shadow:inset 3px 0 0 #df9ba5,0 12px 30px #0006}
+/* Destructive confirmations read as such: warm accent, confirm button in warning colour. */
+.deck-dialog-card.is-danger{border-color:rgba(223,155,165,.42);border-top-color:rgba(240,190,198,.55)}
+.deck-dialog-card.is-danger .deck-dialog-glow{background:linear-gradient(90deg,transparent,rgba(223,155,165,.85),rgba(214,187,137,.55),transparent)}
+.deck-dialog-card.is-danger .deck-dialog-icon{background:rgba(223,155,165,.14);border-color:rgba(223,155,165,.45);color:#f0bec6}
+.deck-dialog-btn-confirm.is-danger{background:linear-gradient(135deg,rgba(223,155,165,.3),rgba(196,119,130,.22));border-color:rgba(240,190,198,.6);color:#fde8ec;box-shadow:inset 0 1px 0 rgba(255,255,255,.2)}
+.deck-dialog-btn-confirm.is-danger:hover{background:linear-gradient(135deg,rgba(223,155,165,.42),rgba(196,119,130,.32));border-color:#f0bec6;color:#fff;box-shadow:0 0 18px rgba(223,155,165,.25)}
+select.deck-dialog-input{appearance:auto}
+/* Page action row: view switch or hint on the left, page-level actions on the right. */
+.page-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:0 0 18px}
+.page-actions>p{margin:0;font-size:11px;flex:1;min-width:200px}
+.page-actions .toolbar{margin-left:auto}
+/* Segmented view switch: never styled like a primary action. */
+.seg{display:inline-flex;flex-wrap:wrap;gap:2px;padding:3px;border:1px solid #acbae329;border-radius:9px;background:#0d132166}
+.seg-btn{display:inline-flex;align-items:center;gap:6px;min-height:30px;padding:5px 12px;border:0;border-radius:7px;background:transparent;color:#9fb0cc;font-size:11px;text-decoration:none;cursor:pointer}
+.seg-btn:hover{background:#c3d2ff0d;color:#e3eafa}
+.seg-btn.active{background:linear-gradient(110deg,#b3c7ff22,#7281ad10);color:#e6ecff;box-shadow:inset 0 1px #eaf1ff1c,inset 0 0 0 1px #aebfe03a}
+.seg-count{font-size:10px;color:#8796b2;font-variant-numeric:tabular-nums}
+.seg-btn.active .seg-count{color:#c3d0ee}
+/* Shared list skeleton: filters under the title, paging in the card footer. */
+.list-card .list-filters{padding:14px 20px;border-bottom:1px solid #bacbec0e}
+.list-card .list-filters .toolbar{gap:10px;align-items:center}
+.list-card .list-filters label{display:inline-flex;align-items:center;gap:7px;font-size:10px;color:#8b9db8}
+.list-card .list-filters label.grow{flex:1;min-width:200px}
+.list-card .list-filters label.grow input{flex:1;min-width:0}
+.list-card .list-filters input,.list-card .list-filters select{min-height:33px;font-size:11px;padding:6px 9px}
+.list-pager{display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid #b8c9ed1c;font-size:10px}
+.list-card .linkish{font-size:inherit;text-align:left}
+.audit-detail{max-width:420px;overflow-wrap:anywhere}
+.audit-detail summary{cursor:pointer;list-style:none}
+.audit-detail summary::-webkit-details-marker{display:none}
+.audit-detail details[open] summary{display:none}
+.request-detail h2{font-size:18px;font-weight:520;margin-bottom:10px;display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.action-group-title{font-size:11px;font-weight:500;color:#a6b8d8;letter-spacing:.5px;margin:18px 0 10px}
+.event-row{border-bottom:1px solid #a2b3df18;padding:12px 0}
+.event-row:last-of-type{margin-bottom:12px}
+/* Unsaved object cards (node storage, node pool) carry the same marker as settings sections. */
+.card.unsaved{border-color:#b4955c80!important}
+.node-draft-hint,.np-result{font-size:11px}
+.card.unsaved .node-draft-hint,.card.unsaved .np-result{color:#dec18d}
+#view[aria-busy="true"]{opacity:.72;transition:opacity .15s}
+/* Navigation: desktop shows workspaces in the sidebar and their pages in one strip;
+   the phone drawer lists every page so nothing needs two taps and a guess. */
+.nav-sub{display:none}
+@media(max-width:900px){
+  #nav{padding:10px 8px;overflow-y:auto;max-height:calc(100dvh - 170px)}
+  .nav-group{margin-bottom:6px}
+  #nav .nav-item{margin-bottom:2px}
+  .nav-sub{display:grid;gap:1px;padding:0 0 6px 44px}
+  .nav-sub a{display:block;padding:7px 10px;border-radius:7px;font-size:12px;color:#93a1bb;text-decoration:none}
+  .nav-sub a:hover{background:#c3d2ff09;color:#e7ecfa}
+  .nav-sub a.active{color:#e6ecff;background:#b3c7ff12}
+  .side-note{display:none}
+  #subnav{flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;-webkit-overflow-scrolling:touch}
+  #subnav::-webkit-scrollbar{display:none}
+  #subnav a{flex:none;white-space:nowrap}
+}
+/* Members drawer: decision facts first, then everyday actions, then the record. */
+.md-facts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin:0 0 20px}
+.md-facts>div{border:1px solid #aec5f322;border-radius:9px;background:linear-gradient(145deg,#cedcff09,#7b96ce03);padding:10px 12px;min-width:0}
+.md-facts span{display:block;font-size:10px;color:#8c9fbe;margin-bottom:5px}
+.md-facts b{font-size:12px;font-weight:500;color:#d6e2f8;overflow-wrap:anywhere}
+#md-actions .md-action-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;font-size:11px;color:#aebdda}
+.md-action-label{min-width:34px;color:#8c9fbe;font-size:10px}
+#md-actions .md-action-row #md-renew,#md-actions .md-action-row #md-group-go{margin-left:auto}
+.md-danger-zone{margin-top:22px;padding:14px 16px;border:1px solid #d399a42e;border-radius:10px;background:#c898a10a}
+.md-danger-zone .hg-section-title{margin-top:0!important;color:#dfaab4!important}
+.hg-drawer-footer{align-items:center;justify-content:space-between}
+.hg-drawer-footer>.muted{flex:1}
+.hg-drawer-footer #md-close-foot{flex:none;height:auto}
+.md-ext-sections:empty{display:none}
+@media(max-width:600px){
+  .page-actions{margin-bottom:14px}
+  .page-actions>p{display:none}
+  .seg{display:flex;width:100%;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}
+  .seg::-webkit-scrollbar{display:none}
+  .seg-btn{flex:none}
+  .list-card .list-filters{padding:12px 14px}
+  .list-card .list-filters label{flex:1 1 100%}
+  .list-card .list-filters label input,.list-card .list-filters label select{flex:1;min-width:0}
+  .list-pager{padding:10px 14px}
+  #toast{left:16px;right:16px;transform:none;max-width:none;bottom:calc(14px + env(safe-area-inset-bottom))}
+  /* Data tables become one card per row; each value keeps its column name. */
+  table.stack{min-width:0!important;display:block}
+  table.stack thead{display:none}
+  table.stack tbody{display:block}
+  table.stack tr{display:block;padding:10px 14px;border-bottom:1px solid #9babd51a}
+  table.stack tr:last-child{border-bottom:0}
+  table.stack td{display:flex;gap:12px;align-items:flex-start;padding:4px 0!important;border:0;min-width:0;overflow-wrap:anywhere;height:auto!important}
+  table.stack td[data-label]::before{content:attr(data-label);flex:0 0 72px;color:#8494b1;font-size:10px;padding-top:2px}
+  table.stack td>*{min-width:0}
+  table.stack td.row-actions{flex-wrap:wrap;padding-top:8px!important}
+  table.stack td:empty,table.stack td.hide-sm{display:none}
+  .audit-detail{max-width:none}
+  .md-facts{gap:7px}
+}
+/* Phone top bar stays one line: long page titles truncate instead of pushing content down. */
+@media(max-width:600px){#topbar>div:not(.top-actions){min-width:0;flex:1}#topbar h1{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.top-actions{flex:none}}

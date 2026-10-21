@@ -194,11 +194,13 @@ def test_redeem_nonempty_filter_and_draft(page):
 
 
 def test_group_round_trip_preserves_limits(page):
+    # The retired quota is no longer a form field; the server keeps the archived
+    # value, so the payload must not carry (or reset) it.
     got = page.evaluate("""()=>{const g={id:'demo',name:'Demo',traffic_quota_bytes:0,bandwidth_limit_kbps:20000};openModal('Edit',groupForm('edit',g));return groupPayload('edit')}""")
-    assert got["traffic_quota_bytes"] == 0
+    assert "traffic_quota_bytes" not in got
     assert got["bandwidth_limit_kbps"] == 20000
     got = page.evaluate("""()=>{closeModal();openModal('Edit',groupForm('edit',{traffic_quota_bytes:123456789,bandwidth_limit_kbps:1}));return groupPayload('edit')}""")
-    assert got["traffic_quota_bytes"] == 123456789
+    assert "traffic_quota_bytes" not in got
     assert got["bandwidth_limit_kbps"] == 1
 
 
@@ -527,12 +529,11 @@ def test_visible_form_controls_have_names(page):
     ('actions/enable','/api/members/audit-viewer/actions/enable',''),
     ('password','/api/members/audit-viewer/password','demo-pass-only'),
     ('kick','/api/members/audit-viewer/kick',''),
-    ('reset-traffic','/api/members/audit-viewer/reset-traffic',''),
 ])
 @pytest.mark.parametrize('accept',[False,True])
 def test_member_actions_cancel_failure_keep_ui(page,action,path,answer,accept):
     go(page,'members?id=audit-viewer&tab=overview')
-    page.locator('.hg-account-more>summary').click()
+    # Account maintenance actions are visible in the drawer, not behind a "more" toggle.
     sent=[]
     page.route('**'+path,lambda r:(sent.append(r.request.post_data_json),r.fulfill(status=503,json={'detail':'demo unavailable'})))
     page.on('dialog',lambda d:d.accept(answer) if accept and d.type=='prompt' else d.accept() if accept else d.dismiss())
@@ -613,13 +614,14 @@ def test_failed_member_renew_keeps_draft(page):
     expect(page.locator('#md-days')).to_have_value('41')
 
 
-def test_node_rates_expire_including_card_subtitle(page):
+def test_node_cards_never_render_retired_egress_rates(page):
+    # Byte-rate display is retired (docs/TRAFFIC_RETIREMENT.md): even a payload
+    # from an old agent with fresh egress fields renders no rate.
     go(page,'nodes')
     page.evaluate('''()=>{const n=PAGE_MODELS.nodes.ns[0];Object.assign(n,{egress_mbps:8.388608,egress_sampled_at:Date.now()/1000,egress_status:'fresh',ok:true});paintNodes(PAGE_MODELS.nodes,pageContext('nodes'));}''')
-    assert '1.00 MiB/s' in page.locator('#view').inner_text()
-    page.evaluate('''()=>{document.querySelectorAll('[data-rate-at]').forEach(el=>el.dataset.rateAt=Date.now()/1000-30);ageLiveRates();}''')
-    assert '1.00 MiB/s' not in page.locator('#view').inner_text()
-    assert not page.evaluate("egressValid({egress_mbps:1,egress_sampled_at:Date.now()/1000+60,ok:true})")
+    text = page.locator('#view').inner_text()
+    assert 'MiB/s' not in text and '8.39' not in text
+    assert page.locator('[data-rate-at]').count() == 0
 
 
 def test_clear_overrides_preserves_new_inflight_edit(page):

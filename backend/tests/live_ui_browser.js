@@ -143,8 +143,9 @@
     location.hash = '#/members?q=second'; await tick();
     assert(state.page === 'members' && state.route === 'members?q=second', 'query-only hash navigation failed');
 
-    assert(!sessionSpeedCell({Paused:true,SpeedSource:'node',SpeedBps:1048576,SpeedMBps:1}).startsWith('<span class="muted">0'), 'paused playback hid measured traffic');
-    assert(!sessionSpeedCell({SpeedSource:'unknown',SpeedBps:null,SpeedMBps:null}).includes('0.0'), 'unknown measurement shown as zero');
+    // Byte-rate display is retired (docs/TRAFFIC_RETIREMENT.md): the per-session
+    // speed cell is gone rather than rendering measured, zero or unknown rates.
+    assert(typeof sessionSpeedCell === 'undefined', 'retired session speed cell is back');
     report.textContent = JSON.stringify({ok:true,checks});
   } catch (error) {
     report.textContent = JSON.stringify({ok:false,checks,error:String(error.stack || error)});

@@ -9,7 +9,6 @@ from app.core.config import NodePool, StreamNode
 from app.core.db import Database
 from app.modules.edgelog import aggregate, parse_line
 from app.modules.imagecache import ImageCache
-from app.modules.metering import UNIT, MeasuredMeteringService
 from app.modules.playback import PlaybackRouter
 from app.modules.scheduler import Scheduler
 from app.modules.sharing import SharingDetector
@@ -101,64 +100,7 @@ def test_anonymous_edge_bytes_are_retained_as_unknown():
     assert aggregate([event]) == {("2027-01-15", "unknown"): {"bytes": 100, "requests": 1, "seconds": 1}}
 
 
-def envelope(boot, seq, at, counter=100, **kwargs):
-    return {"node": "node-a", "boot_id": boot, "seq": seq, "observed_at": at,
-            "nft_ok": True, "unit": UNIT, "samples": [
-                {"conn_id": "conn", "generation": 1, "utag": "tag", "coverage": "observed",
-                 "counter_bytes": counter, "observed_at": at}], **kwargs}
-
-
-def test_meter_coverage_uses_latest_observation_across_epochs_and_replays(tmp_path):
-    db = Database(tmp_path / "meter.db")
-    service = MeasuredMeteringService(db, lambda: {"tag": "u1"})
-    service.ingest(envelope("old", 10, 1800000000))
-    service.ingest(envelope("new", 1, 1800000300, 200))
-    service.ingest(envelope("old", 10, 1800000000))
-    coverage = service.snapshot("u1", now=1800000301)["coverage"]["nodes"][0]
-    assert coverage["ok"] and coverage["boot_id"] == "new"
-    service.ingest(envelope("new", 0, 1800000001, 100, nft_ok=False))
-    assert service.snapshot("u1", now=1800000301)["coverage"]["nodes"][0]["ok"]
-    db.close()
-
-
-def test_equal_late_counter_cannot_move_month_gap_anchor_backwards(tmp_path):
-    db = Database(tmp_path / "meter.db")
-    service = MeasuredMeteringService(db, lambda: {"tag": "u1"})
-    service.ingest(envelope("epoch", 2, 1800000500))
-    service.ingest(envelope("epoch", 1, 1800000000))
-    assert db.one("SELECT observed_at FROM measured_watermarks")["observed_at"] == 1800000500
-    db.close()
-
-
-@pytest.mark.parametrize("stamp", ["bad", float("nan"), float("inf"), 1e300])
-def test_invalid_meter_timestamp_cannot_poison_ledger(tmp_path, stamp):
-    db = Database(tmp_path / "meter.db")
-    service = MeasuredMeteringService(db)
-    out = service.ingest(envelope("epoch", 1, stamp))
-    assert not out["ok"]
-    assert not db.query("SELECT * FROM measured_envelopes")
-    db.close()
-
-
-def test_invalid_sample_does_not_abort_other_measured_connections(tmp_path):
-    db = Database(tmp_path / "meter.db")
-    service = MeasuredMeteringService(db, lambda: {"tag": "u1"})
-    env = envelope("epoch", 1, 1800000000)
-    env["samples"].extend([None, {"conn_id": "bad", "generation": 1, "coverage": "observed",
-                                  "counter_bytes": float("inf")}])
-    assert service.ingest(env)["credited"] == 100
-    db.close()
-
-
-def test_meter_future_observation_is_not_fresh(tmp_path):
-    db = Database(tmp_path / "meter.db")
-    service = MeasuredMeteringService(db)
-    service.ingest(envelope("epoch", 1, 1800000300))
-    assert not service.snapshot("u1", now=1800000000)["coverage"]["nodes"][0]["ok"]
-    db.close()
-
-
-def test_malformed_probe_is_isolated_and_failed_rate_keeps_partial_coverage(monkeypatch):
+def test_malformed_probe_is_isolated_and_rate_fields_are_discarded(monkeypatch):
     async def check():
         clock = 1800000000
         monkeypatch.setattr("app.modules.scheduler.time.time", lambda: clock)
@@ -167,11 +109,15 @@ def test_malformed_probe_is_isolated_and_failed_rate_keeps_partial_coverage(monk
         scheduler = Scheduler([StreamNode(name=n, base_url=f"https://{n}.example.com", probe_url="http://127.0.0.1/load")
                                for n in ("node-a", "node-b")], probe)
         await scheduler.refresh()
-        probe.load.side_effect = [{"ok": True, "active_streams": 1, "user_speeds": None,
-                                   "user_speeds_ok": False},
-                                  {"ok": True, "active_streams": 1, "user_speeds": {"tag": 10}}]
+        assert all(row["ok"] for row in scheduler.snapshot())
+        # Byte-rate telemetry from not-yet-upgraded agents is ignored.
+        assert scheduler.user_speed_view() == {}
+        probe.load.side_effect = [{"ok": True, "active_streams": "invalid"},
+                                  {"ok": True, "active_streams": 2}]
         await scheduler.refresh()
-        assert scheduler.user_speed_view()["tag"]["bps"] is None
+        rows = {row["name"]: row for row in scheduler.snapshot()}
+        assert not rows["node-a"]["ok"]
+        assert rows["node-b"]["ok"] and rows["node-b"]["active_streams"] == 2
         probe.load.side_effect = [{"ok": True, "active_streams": "invalid"}, None]
         await scheduler.refresh()
         assert not any(row["ok"] for row in scheduler.snapshot())

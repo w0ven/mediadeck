@@ -69,7 +69,7 @@ def test_kk_visible_explicit_buttons_confirmation_and_roundtrip(bot, group):
         await bot._handle_callback(callback("admin_disable", group, mid=first))
         assert bot._members.get("u1")["status"] == "active"  # preview only
         key = nonce(bot, group, first)
-        assert "不重置用量" in str(bot.calls)
+        assert "解除不会续期" in str(bot.calls)
         await bot._handle_callback(callback("admin_access_ok:" + key, group, mid=first))
         assert bot._members.get("u1")["status"] == "suspended"
         assert bot._emby._users["u1"]["Policy"]["IsDisabled"] is True
@@ -268,7 +268,7 @@ def test_known_independent_disable_sources_have_enable_button_and_confirmed_exec
         assert '一致前不可操作' not in str(bot.calls) and '未知或不一致' not in str(bot.calls)
         await bot._handle_callback(callback('admin_enable', group, mid=first))
         assert not bot._restrictions.events()  # necessary confirmation is retained
-        assert '到期、耗尽、待开通限制仍适用' in str(bot.calls)
+        assert '到期、待开通的限制仍然有效' in str(bot.calls)
         key = nonce(bot, group, first)
         await bot._handle_callback(callback('admin_access_ok:' + key, group, mid=first))
         after = bot._members.get('u1')
@@ -276,7 +276,10 @@ def test_known_independent_disable_sources_have_enable_button_and_confirmed_exec
         for field in ('expires_at', 'traffic_used_bytes', 'group_id', 'roles', 'overrides'):
             assert after[field] == before[field]
         assert len(bot._restrictions.events()) == 1
-        if limit:
+        # Expiry and pending still keep the account unusable. Archived byte usage
+        # no longer exhausts anyone (docs/TRAFFIC_RETIREMENT.md), so 'exhausted'
+        # releases like an unrestricted account.
+        if limit in ('expired', 'pending'):
             assert bot._emby._users['u1']['Policy']['IsDisabled'] is True
             assert '仍不可用' in str(bot.calls) and '账号已可用' not in str(bot.calls)
         else:

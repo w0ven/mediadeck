@@ -1,6 +1,6 @@
 # Dedicated transparent edge. Render fixed hosts/addresses and private key.
 upstream md_wl_origin { server __ORIGIN_IP__:8443; keepalive 16; }
-# Do not pool node sockets across members: existing metering owns each socket.
+# Do not pool node sockets across members: access-policy identity is bound to each socket.
 upstream md_wl_node { server __NODE_IP__:443; }
 map $http_upgrade $md_wl_upgrade { default upgrade; '' ''; }
 map $request_uri $md_wl_node_target {
@@ -11,7 +11,7 @@ map $request_uri $md_wl_dot_segment {
     default 0;
     "~*^[^?]*(?:/|%2f)(?:\.|%2e){1,2}(?:/|%2f|\?|$)" 1;
 }
-log_format md_whitelist_edge '$time_iso8601 $remote_addr $request_method $uri $status $body_bytes_sent $upstream_addr';
+log_format md_whitelist_edge '$time_iso8601 $remote_addr $request_method $uri $status $upstream_addr';
 server {
     listen 80 default_server;
     server_name _;

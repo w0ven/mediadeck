@@ -121,15 +121,13 @@ async def test_remote_only_disable_can_be_released_without_enrolment(service):
     assert (await manual(service, "enable"))["access"]["account_available"]
 
 
-@pytest.mark.parametrize("limit", ["expired", "exhausted", "pending"])
+@pytest.mark.parametrize("limit", ["expired", "pending"])
 @pytest.mark.asyncio
 async def test_release_does_not_bypass_entitlements_or_change_other_facts(service, limit):
     members = service.members
     members.set_status("u1", "pending" if limit == "pending" else "suspended")
     if limit == "expired":
         members.upsert("u1", "alice", {"expires_at": int(time.time()) - 10})
-    elif limit == "exhausted":
-        service.db.execute("UPDATE members SET traffic_used_bytes=9999999999999 WHERE emby_user_id='u1'")
     before = members.get("u1")
     service.emby._users["u1"]["Policy"].update({"IsDisabled": True, "IsHidden": True, "EnableRemoteAccess": False})
     policy = dict(service.emby._users["u1"]["Policy"])
@@ -345,17 +343,20 @@ async def test_release_reports_other_remote_limits_and_preserves_policy(service)
 
 
 @pytest.mark.asyncio
-async def test_measured_exhaustion_survives_release_without_reset(service):
+async def test_archived_or_measured_usage_no_longer_blocks_release(service):
+    """Quota exhaustion is retired (docs/TRAFFIC_RETIREMENT.md): neither an old
+    measured ledger nor an archived estimate keeps a released account disabled."""
     class Ledger:
         def snapshot(self, uid):
             return {'measured_used_bytes': 9999999999999, 'measured_raw_bytes': 9999999999999}
-    # Use the actual measured decorator, not a legacy-usage fallback.
     service.members.bind_metering(Ledger(), cutover=True)
+    service.db.execute("UPDATE members SET traffic_used_bytes=9999999999999 WHERE emby_user_id='u1'")
     service.members.set_status('u1', 'suspended')
     result = await manual(service, 'enable')
-    assert result['access']['state'] == 'exhausted'
-    assert result['access']['measured_used_bytes'] == 9999999999999
-    assert result['access']['emby_disabled'] is True
+    assert result['ok'] and result['access']['state'] == 'active'
+    assert result['access']['account_available']
+    assert result['access'].get('measured_used_bytes') is None
+    assert result['access']['emby_disabled'] is False
 
 
 @pytest.mark.asyncio

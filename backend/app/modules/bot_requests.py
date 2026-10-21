@@ -259,7 +259,7 @@ class RequestBotMixin:
         ]
         if self._rq_staff(member):
             rows[0].append(button("📥 上片员工作台", "list:staff"))
-        rows.append([{"text": "◀ 主菜单", "callback_data": "home"}])
+        rows.append([{"text": "◀ 返回首页", "callback_data": "home"}])
         await self._rq_render(
             chat,
             mid,

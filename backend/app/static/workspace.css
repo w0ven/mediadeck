@@ -145,3 +145,11 @@ body.modal-open { overflow:hidden; }
 .live-rate > b {font-weight:600;font-size:14px;white-space:nowrap;}.live-rate > small {display:block;font-size:10px;font-weight:400;color:var(--muted);line-height:1.6;margin-top:4px;letter-spacing:0;}
 .rate-unknown {font-size:12px!important;font-weight:400;color:var(--muted);letter-spacing:0;}.stat .live-rate > b {font-size:23px;}
 @media(max-width:600px) { .play-grid{padding:12px;}.play-card{padding:14px;gap:14px;}.play-card .pc-poster{width:88px;flex-basis:88px;}.play-card .pc-bd{min-height:150px;}.play-card .pc-title{font-size:14px;}.play-card .pc-ov{-webkit-line-clamp:2;font-size:11px;}.stat .live-rate > b{font-size:18px;} }
+
+/* Invite tree in the member drawer (invites.js). */
+.invite-chain { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:4px 0 8px; }
+.invite-tree { list-style:none; margin:6px 0 0; padding:0 0 0 14px; border-left:1px dashed var(--line, rgba(255,255,255,.15)); }
+.invite-tree:first-of-type { border-left:0; padding-left:0; }
+.invite-tree li { margin:6px 0; }
+.invite-node { display:flex; flex-wrap:wrap; align-items:center; gap:6px; }
+.invite-tree .invite-tree .invite-node::before { content:"└"; opacity:.45; margin-right:2px; }

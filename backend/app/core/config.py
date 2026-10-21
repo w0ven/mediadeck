@@ -104,6 +104,7 @@ class Settings(BaseSettings):
     pipeline_snapshot_path: str = ""
     mounts_snapshot_path: str = ""
     tasks_snapshot_path: str = ""
+    intake_snapshot_path: str = ""
 
     # -- intake pipeline observability ---------------------------------------
     # Where the intake stages keep their state on this host. All optional and
@@ -167,7 +168,7 @@ class Settings(BaseSettings):
         return {
             name[len(prefix):]: getattr(self, name)
             for name in type(self).model_fields
-            if name.startswith(prefix) and name != "intake_downloaders"
+            if name.startswith(prefix) and name not in {"intake_downloaders", "intake_snapshot_path"}
         }
 
     def intake_downloader_specs(self) -> list[dict[str, str]]:

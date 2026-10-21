@@ -167,6 +167,9 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     "emby_public_url": "",
     # Public artwork URL only; Telegram fetches it. Empty keeps text-only menus.
     "menu_logo_url": "",
+    # HTTPS address of the member Mini App (served at /app). Empty hides the
+    # Bot entry button and refuses Mini App API calls.
+    "miniapp_url": "",
     # Addresses shown to members on 「播放线路」. Empty keeps the previous
     # fallback: the Emby public URL plus node utilisation. These are the
     # member-facing ingress names, not the internal node pool.
@@ -345,7 +348,6 @@ class SettingsService:
         self._store.set_section("integration", dict(INTEGRATION_DEFAULTS), persist=False)
         self._store.set_section("image_cache", dict(IMAGE_CACHE_DEFAULTS), persist=False)
         self._store.set_section("membership", dict(MEMBERSHIP_DEFAULTS), persist=False)
-        self._store.set_section("metering", dict(METERING_DEFAULTS), persist=False)
         seed = cfg.nodes() or (demo_nodes() if cfg.mediadeck_mock else [])
         self._store.set("nodes", [n.model_dump() for n in seed], persist=False)
         self._store.save()
@@ -615,46 +617,10 @@ class SettingsService:
         return self.membership_config()
 
     def metering_config(self) -> dict[str, Any]:
-        section = self._store.section("metering")
-        cfg = dict(METERING_DEFAULTS)
-        for key in cfg:
-            if key in section:
-                cfg[key] = section[key]
-        cfg["cutover"] = bool(cfg["cutover"])
-        cfg["baseline_confirmed"] = bool(cfg["baseline_confirmed"])
-        try:
-            cfg["report_interval_seconds"] = max(5, int(cfg["report_interval_seconds"]))
-        except (TypeError, ValueError, OverflowError):
-            cfg["report_interval_seconds"] = 15
-        # Cutover requires an explicit baseline confirmation. A lone True
-        # in a hand-edited document must not start blocking accounts.
-        if cfg["cutover"] and not cfg["baseline_confirmed"]:
-            cfg["cutover"] = False
-        cfg["status"] = (
-            "active" if cfg["cutover"] and cfg["baseline_confirmed"]
-            else "not_enabled"
-        )
-        return cfg
+        return {'cutover': False, 'baseline_confirmed': False, 'status': 'retired', 'traffic_tracking': False}
 
     def save_metering(self, payload: dict[str, Any]) -> dict[str, Any]:
-        current = self.metering_config()
-        confirm = _bool(payload.get("baseline_confirmed", current["baseline_confirmed"]))
-        want_cutover = _bool(payload.get("cutover", current["cutover"]))
-        if want_cutover and not confirm:
-            raise ConfigError("启用实测配额前必须确认计费基线（baseline_confirmed）")
-        try:
-            interval = int(payload.get(
-                "report_interval_seconds", current["report_interval_seconds"]))
-        except (TypeError, ValueError, OverflowError):
-            raise ConfigError("上报间隔必须是整数") from None
-        if not 5 <= interval <= 120:
-            raise ConfigError("上报间隔必须在 5–120 秒之间")
-        self._store.set_section("metering", {
-            "cutover": want_cutover,
-            "baseline_confirmed": confirm,
-            "report_interval_seconds": interval,
-        })
-        return self.metering_config()
+        raise ConfigError("流量统计已停用，不能重新开启流量配额或上报")
 
     # -- telegram -------------------------------------------------------------
     def telegram_config(self) -> dict[str, Any]:
@@ -693,7 +659,7 @@ class SettingsService:
         except (TypeError, ValueError, OverflowError):
             cfg["max_users"] = 0
         for key in ("default_group_id", "require_group", "emby_public_url", "menu_logo_url",
-                    "registration_notify_chat_id"):
+                    "miniapp_url", "registration_notify_chat_id"):
             cfg[key] = str(cfg[key] or "").strip()
         try:
             topic = cfg.get("registration_notify_thread_id")
@@ -793,6 +759,13 @@ class SettingsService:
                     or parsed.username or parsed.password or parsed.fragment):
                 raise ConfigError("Logo 请填写不含凭据的 HTTPS 图片直链，留空关闭")
 
+        miniapp = str(payload.get("miniapp_url", current["miniapp_url"]) or "").strip()
+        if miniapp:
+            parsed = urlsplit(miniapp)
+            if (len(miniapp) > 512 or parsed.scheme != "https" or not parsed.hostname
+                    or parsed.username or parsed.password or parsed.query or parsed.fragment):
+                raise ConfigError("会员面板地址须为不含凭据和参数的 HTTPS 地址，留空关闭")
+
         if "playback_lines" in payload:
             lines = normalize_playback_lines(payload.get("playback_lines"))
         else:
@@ -859,6 +832,7 @@ class SettingsService:
             "registration_notify_thread_id": topic,
             "emby_public_url": emby_url,
             "menu_logo_url": logo,
+            "miniapp_url": miniapp,
             "playback_lines": lines,
             "playback_lines_note": lines_note,
             "playback_routing_rules": routing_rules,

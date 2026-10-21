@@ -1,108 +1,103 @@
-"""Authoritative deny snapshot: both nodes converge, empty is real, restart keeps it."""
+"""Authoritative deny snapshot: both nodes converge, empty is real, restart keeps it.
+
+Byte quotas are retired (docs/TRAFFIC_RETIREMENT.md): the snapshot now only
+carries manual disable, pending and expiry. These tests keep the access-denial
+guarantees on the panel endpoint and the node guard that replaced the meter.
+"""
 from __future__ import annotations
 
 import importlib.util
-import time
 from pathlib import Path
 
-from test_metering import _env, _sample
+import pytest
+from fastapi.testclient import TestClient
 
 from app.core.db import Database
+from app.core.errors import ConfigError
+from app.main import app
 from app.modules.groups import GroupService
 from app.modules.members import MemberService
 from app.modules.metering import MeasuredMeteringService
 from app.modules.signing import user_tag
 
 AGENT = Path(__file__).resolve().parents[2] / "agent"
+ADMIN = ("admin", "change-me")
 
 
-def _flow():
-    spec = importlib.util.spec_from_file_location("flowmeter", AGENT / "flowmeter.py")
+def _guard_module():
+    spec = importlib.util.spec_from_file_location("meterd", AGENT / "meterd.py")
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
 
 
-def test_two_nodes_share_snapshot_and_panel_restart_keeps_it(tmp_path: Path) -> None:
-    db = Database(tmp_path / "panel.db")
-    groups = GroupService(db)
-    groups.seed_defaults()
-    members = MemberService(db, groups)
+def _policy(client, node: str = "mock-a") -> dict:
+    token = client.get(f"/api/nodes/{node}/report-token", auth=ADMIN).json()["report_token"]
+    response = client.get(f"/api/edge/{node}/policy",
+                          headers={"Authorization": f"Bearer {token}"})
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_two_nodes_share_snapshot_and_guard_restart_keeps_it(tmp_path: Path) -> None:
+    mod = _guard_module()
     tag = user_tag("u1")
-    meter = MeasuredMeteringService(db, tag_to_user=lambda: {tag: "u1"})
-    members.bind_metering(meter, cutover=lambda: True)
-    members.upsert("u1", "alice", {"group_id": "standard"})
-    now = time.time()
-    meter.ingest(_env("n1", "b", 1, [_sample("c1", tag, 1024 ** 4, observed_at=now)],
-                      observed_at=now))
-    assert members.get("u1")["state"] == "exhausted"
+    n1 = mod.AccessPolicy(str(tmp_path / "n1.json"), str(tmp_path / "n1.map"),
+                          mod.DenyPublisher(str(tmp_path / "n1.map")))
+    n2 = mod.AccessPolicy(str(tmp_path / "n2.json"), str(tmp_path / "n2.map"),
+                          mod.DenyPublisher(str(tmp_path / "n2.map")))
+    with TestClient(app) as client:
+        members = app.state.members
+        members.upsert("u1", "demo-user-1", {"group_id": "standard"})
+        members.set_status("u1", "suspended")
+        policy = _policy(client)
+        assert policy["policy"]["snapshot"] is True
+        assert tag in policy["policy"]["blocked_tags"]
+        n1.apply(policy)
+        n2.apply(policy)
+        assert tag in n1.blocked and tag in n2.blocked
 
-    policy = meter.publish_policy([tag])
-    assert policy["snapshot"] is True
-    flow = _flow()
-    n1 = flow.FlowMeter(str(tmp_path / "n1.db"), node="n1",
-                        deny_map_path=str(tmp_path / "n1.map"))
-    n2 = flow.FlowMeter(str(tmp_path / "n2.db"), node="n2",
-                        deny_map_path=str(tmp_path / "n2.map"))
-    n1.apply_policy(policy["blocked_tags"], snapshot=True, terminate=False)
-    n2.apply_policy(policy["blocked_tags"], snapshot=True, terminate=False)
-    assert tag in n1.blocked_tags() and tag in n2.blocked_tags()
-    meter.ack_policy("n1", policy["rev"])
-    meter.ack_policy("n2", policy["rev"])
+        # Disconnect / empty merge must not clear known deny.
+        with pytest.raises(ValueError):
+            n1.apply({"ok": True, "policy": {"blocked_tags": []}})
+        with pytest.raises(ValueError):
+            n1.apply({"ok": False, "policy": {"snapshot": True, "blocked_tags": []}})
+        assert tag in n1.blocked
 
-    # Disconnect / empty merge must not clear known deny.
-    n1.apply_policy([], snapshot=False, terminate=False)
-    assert tag in n1.blocked_tags()
+        members.set_status("u1", "active")
+        cleared = _policy(client)
+        assert tag not in cleared["policy"]["blocked_tags"]
+        n1.apply(cleared)
+        n2.apply(cleared)
+        assert tag not in n1.blocked and tag not in n2.blocked
+        assert n1.blocked == n2.blocked
 
-    members.reset_traffic("u1")
-    assert members.get("u1")["state"] == "active"
-    cleared = meter.publish_policy([])
-    n1.apply_policy(cleared["blocked_tags"], snapshot=True, terminate=False)
-    n2.apply_policy(cleared["blocked_tags"], snapshot=True, terminate=False)
-    assert tag not in n1.blocked_tags() and tag not in n2.blocked_tags()
-
-    # Extra traffic / group change: recompute snapshot, both nodes match.
-    members.add_extra_traffic("u1", 10)
-    again = meter.publish_policy([])
-    n1.apply_policy(again["blocked_tags"], snapshot=True, terminate=False)
-    n2.apply_policy(again["blocked_tags"], snapshot=True, terminate=False)
-    assert n1.blocked_tags() == n2.blocked_tags()
-
-    members.upsert("u1", "alice", {"group_id": "whitelist"})
-    none_pol = meter.publish_policy([])
-    n1.apply_policy(none_pol["blocked_tags"], snapshot=True, terminate=False)
-    n2.apply_policy(none_pol["blocked_tags"], snapshot=True, terminate=False)
-    assert n1.blocked_tags() == [] and n2.blocked_tags() == []
-
-    # Panel process restart: load_policy still has the last snapshot.
-    meter2 = MeasuredMeteringService(db, tag_to_user=lambda: {tag: "u1"})
-    loaded = meter2.load_policy()
-    assert loaded["rev"] == none_pol["rev"]
-    assert loaded["blocked_tags"] == []
-    n1.close()
-    n2.close()
+        members.set_status("u1", "suspended")
+        again = _policy(client)
+        n1.apply(again)
+        n2.apply(again)
+    # Guard process restart: the last authoritative snapshot is reloaded.
+    restored = mod.AccessPolicy(str(tmp_path / "n1.json"), str(tmp_path / "n1.map"))
+    assert tag in restored.blocked
+    assert '"' + tag + '" 1;' in (tmp_path / "n2.map").read_text()
 
 
-def test_suspended_is_not_unblocked_by_reset_or_extra(tmp_path: Path) -> None:
-    db = Database(tmp_path / "panel.db")
-    groups = GroupService(db)
-    groups.seed_defaults()
-    members = MemberService(db, groups)
+def test_suspended_is_not_unblocked_by_retired_reset_or_extra() -> None:
     tag = user_tag("u1")
-    meter = MeasuredMeteringService(db, tag_to_user=lambda: {tag: "u1"})
-    members.bind_metering(meter, cutover=lambda: True)
-    members.upsert("u1", "alice", {"group_id": "standard"})
-    members.set_status("u1", "suspended")
-    members.reset_traffic("u1")
-    members.add_extra_traffic("u1", 99)
-    after = members.get("u1")
-    assert after["state"] == "suspended"
-    policy = meter.publish_policy([tag])
-    assert tag in policy["blocked_tags"]
+    with TestClient(app) as client:
+        members = app.state.members
+        members.upsert("u1", "demo-user-1", {"group_id": "standard"})
+        members.set_status("u1", "suspended")
+        with pytest.raises(ConfigError):
+            members.reset_traffic("u1")
+        with pytest.raises(ConfigError):
+            members.add_extra_traffic("u1", 99)
+        assert members.get("u1")["state"] == "suspended"
+        assert tag in _policy(client)["policy"]["blocked_tags"]
 
 
-def test_cutover_unknown_does_not_fall_back_to_estimate(tmp_path: Path) -> None:
+def test_archived_estimate_never_becomes_a_quota_or_usage(tmp_path: Path) -> None:
     db = Database(tmp_path / "m.db")
     groups = GroupService(db)
     groups.seed_defaults()
@@ -114,9 +109,13 @@ def test_cutover_unknown_does_not_fall_back_to_estimate(tmp_path: Path) -> None:
     db.execute("UPDATE members SET traffic_used_bytes=? WHERE emby_user_id='u1'",
                (10 * 1024 ** 4,))
     row = members.get("u1")
-    assert row["quota_source"] == "measured"
-    assert "measured_used_bytes" in row
+    assert row["quota_source"] == "retired"
+    assert row["traffic_tracking"] is False
     assert row["measured_used_bytes"] is None
+    assert row["traffic_used_bytes"] is None
     assert row["state"] == "active"
     assert row["traffic_remaining_bytes"] is None
     assert row["traffic_percent"] is None
+    # The archived counter itself is preserved, only no longer presented.
+    assert db.one("SELECT traffic_used_bytes FROM members WHERE emby_user_id='u1'")[
+        "traffic_used_bytes"] == 10 * 1024 ** 4

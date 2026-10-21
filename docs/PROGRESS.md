@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.47.0: member Mini App, invite accountability, Deck/Bot UX, green suite
+
+- Member Mini App (`/app`, `/api/app/*`, docs/MINIAPP.md): Telegram-signed identity;
+  renewals, auto-renew, shop, cards, titles, requests and invite codes reuse the Bot's
+  services, intents and idempotency keys. Bot entry button only in private chats and
+  only when an HTTPS address is configured.
+- Invite accountability: admin or rule deletions open a case for the direct inviter
+  (group card and Deck); one level only; inviters see two levels of invitees.
+- Deck interaction layer: grouped navigation, typed feedback, named/graded
+  confirmations, route-backed list state, member drawer extension points, drafts.
+- Bot copy and menus tidied (account card, levels, renewals, bag, help).
+- Skip Emby policy writes when nothing changes (stalls under bulk enforcement).
+- Operator tools read host layout from the environment (docs/OPERATIONS-ENV.md);
+  fixtures and placeholders no longer carry real identifiers.
+- Tests: 202 stale failures from the byte-accounting retirement resolved (118 removed
+  as retired-only, 79 rewritten to post-retirement behaviour, 5 stale copy); no
+  product defects found. Full suite 4906 passed, 79 optional skips; ruff clean.
+- Open: bulk `reset-traffic` still answers 200 with per-member failures while the
+  single-member endpoint answers 410; harmless (no writes) but inconsistent.
+
 ## 2026-10-21 — Preserve final deployed Bot UX in integration PR #159
 
 - Include the final deployed independent check-in entry, account renewal controls,

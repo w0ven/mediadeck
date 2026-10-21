@@ -20,6 +20,14 @@ One panel to operate what is usually scattered across many tools:
 - **Identify & scrape review** — AI identification audit queue, manual TMDB
   correction.
 
+## Traffic accounting retired
+
+Byte-flow collection/reporting, quota enforcement and traffic displays are removed.
+Verified viewing, points/check-in rewards, playback history, aggregate bandwidth
+pacing and concurrency/security gates remain. Historical traffic data is preserved.
+See [retirement and deployment checklist](docs/TRAFFIC_RETIREMENT.md); source changes
+do not stop existing production agents or change live nginx/nft configuration.
+
 ## Telegram ranking commands
 
 - `/rank`: yesterday's user viewing-time ranking.

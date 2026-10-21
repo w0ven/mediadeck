@@ -90,7 +90,8 @@ def test_admin_shop_cards_title_controls_and_plugin_config_in_chromium(tmp_path,
             assert app.state.titles.titles("u")[0]["tag"] == "浏览器授予"
             # Real custom confirmation modal, not window.confirm.
             page.locator("[data-title-revoke]").click()
-            page.get_by_role("button", name="确认", exact=True).click()
+            # The confirmation names the action on its button.
+            page.locator(".deck-dialog-card").get_by_role("button", name="撤销", exact=True).click()
             page.wait_for_function(
                 "document.querySelector('#ec-member').textContent.includes('已撤销')"
             )

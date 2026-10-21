@@ -3,7 +3,7 @@ import asyncio
 import contextvars
 import threading
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -98,21 +98,25 @@ def test_member_list_db_work_does_not_stall_other_pages(monkeypatch, slow_stage)
     asyncio.run(check())
 
 
-def test_periodic_measured_write_keeps_health_responsive_and_policy_order(monkeypatch):
-    slow = SlowOperation({"ok": True, "credited": 5})
-    sent = Mock()
-    applied = Mock()
+def test_retired_measured_and_policy_routes_keep_health_responsive(monkeypatch):
+    """Byte ingest/ack is retired; the access-policy snapshot (a member scan) the
+    node routes still compute must not occupy the event loop."""
+    policy = {"snapshot": True, "rev": 3, "blocked_tags": []}
     monkeypatch.setattr(main, "_edge_node_or_401", lambda *a: object())
-    monkeypatch.setattr(main, "_meter_policy_snapshot", lambda: {"rev": 3, "blocked_tags": []})
-    monkeypatch.setattr(main.app.state, "metering", SimpleNamespace(ingest=slow, note_policy_sent=sent, note_policy_applied=applied), raising=False)
 
     async def check():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
-            response = await assert_loop_free(client.post("/api/edge/node-a/measured", json={"policy_applied_rev": 2}), slow)
-            assert response.status_code == 200 and response.json()["credited"] == 5
-            assert response.json()["policy_rev"] == 3
-            sent.assert_called_once_with("node-a", 3)
-            applied.assert_called_once_with("node-a", 2)
+            slow = SlowOperation(policy)
+            monkeypatch.setattr(main, "_meter_policy_snapshot", slow)
+            response = await assert_loop_free(
+                client.post("/api/edge/node-a/measured", json={"node": "node-a", "boot_id": "b", "seq": 1}), slow)
+            body = response.json()
+            assert response.status_code == 200 and body["retired"] and body["accepted"] is False
+            assert body["policy_rev"] == 3 and "credited" not in body
+            slow = SlowOperation(policy)
+            monkeypatch.setattr(main, "_meter_policy_snapshot", slow)
+            response = await assert_loop_free(client.get("/api/edge/node-a/policy"), slow)
+            assert response.status_code == 200 and response.json()["policy"] == policy
     asyncio.run(check())
 
 
@@ -218,43 +222,4 @@ def test_admin_cache_still_checks_active_role_without_blocking_loop(monkeypatch)
         slow.result = []
         assert await main._role_admin_auth("operator", "local-test") is None
         emby.authenticate_user.assert_not_awaited()
-    asyncio.run(check())
-
-
-def test_concurrent_measured_reports_keep_ingest_policy_ack_serial(monkeypatch):
-    slow = SlowOperation(None)
-    steps = []
-
-    def ingest(payload):
-        if payload["node"] == "node-a":
-            slow()
-        steps.append((payload["node"], "ingest"))
-        return {"ok": True}
-
-    def policy():
-        steps.append((steps[-1][0], "policy"))
-        return {"rev": 3, "blocked_tags": []}
-
-    monkeypatch.setattr(main, "_edge_node_or_401", lambda *a: object())
-    monkeypatch.setattr(main, "_meter_policy_snapshot", policy)
-    monkeypatch.setattr(main.app.state, "metering", SimpleNamespace(
-        ingest=ingest,
-        note_policy_sent=lambda node, rev: steps.append((node, "sent")),
-        note_policy_applied=lambda node, rev: steps.append((node, "applied"))), raising=False)
-
-    async def check():
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=main.app), base_url="http://test") as client:
-            first = asyncio.create_task(client.post("/api/edge/node-a/measured", json={"policy_applied_rev": 2}))
-            assert await asyncio.to_thread(slow.entered.wait, 2)
-            second = asyncio.create_task(client.post("/api/edge/node-b/measured", json={"policy_applied_rev": 2}))
-            try:
-                await asyncio.sleep(0.02)
-                assert not second.done() and steps == []
-                assert (await client.get("/healthz")).status_code == 200
-            finally:
-                slow.release.set()
-                results = await asyncio.gather(first, second)
-            assert all(r.status_code == 200 for r in results)
-            assert steps == [(node, step) for node in ("node-a", "node-b")
-                             for step in ("ingest", "policy", "sent", "applied")]
     asyncio.run(check())

@@ -75,8 +75,9 @@
       }
 
       if (resp.ok && data && (data.ok === true || data.user)) {
-        // 登录成功，跳转根路径面板
-        location.href = '/';
+        // 登录成功，跳转根路径面板；会话过期跳来时带着原页面路由，登录后回到原处
+        const route = /^#\/[\w?=&%.,:+-]*$/.test(location.hash || '') ? location.hash : '';
+        location.href = '/' + route;
         return;
       }
 

@@ -428,6 +428,10 @@ class ViewingReportPlugin(Plugin):
         days = 30 if config.get("period") == "monthly" else 7
         label = "月报" if days == 30 else "周报"
         sent = empty = 0
+        # Yield between recipients before the registry's 600s hard cutoff.
+        # Pending rows retain their existing receipts and resume next tick;
+        # never cancel an in-flight send merely because the batch is large.
+        deadline = time.monotonic() + 480
         self.ctx.set_state(self.spec.id, delivery)
         for uid, row in delivery["recipients"].items():
             if row["state"] == "sending":
@@ -446,6 +450,8 @@ class ViewingReportPlugin(Plugin):
                 row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
                 self.ctx.set_state(self.spec.id, delivery)
                 continue
+            if time.monotonic() >= deadline:
+                break
             row["attempts"] += 1
             try:
                 report_detail = getattr(self.ctx.stats, 'report_detail', None)
@@ -469,6 +475,10 @@ class ViewingReportPlugin(Plugin):
                 continue
             if plays <= 0:
                 empty += 1
+            if time.monotonic() >= deadline:
+                row["attempts"] -= 1
+                self.ctx.set_state(self.spec.id, delivery)
+                break
             row.update(state="sending", updated_at=int(time.time()))
             self.ctx.set_state(self.spec.id, delivery)  # crash-safe: uncertain != unsent
             ok = False
@@ -506,11 +516,10 @@ class ViewingReportPlugin(Plugin):
               total_bytes: int | None, detail: dict[str, Any]) -> str:
         stamp = (detail.get('viewing') or {}).get('label') or f'近 {days} 天'
         lines = [f"📊 <b>你的{label}</b>（{stamp}）\n",
-                 f"观看：{hours:.1f} 小时 · 播放：{plays} 次",
-                 f"消耗流量：{_fmt_bytes(total_bytes)}"]
+                 f"观看 {hours:.1f} 小时 · 播放 {plays} 次"]
         watch = detail.get('watch') or {}
         if watch.get('recorded_seconds') is not None:
-            lines.append(f"累计观看：{float(watch['recorded_seconds'])/3600:.1f} 小时")
+            lines.append(f"累计观看 {float(watch['recorded_seconds'])/3600:.1f} 小时")
         if (detail.get('viewing') or {}).get('incomplete'):
             lines.append('部分记录无法精确定位到本期，时长未补算。')
         titles = _top_titles(detail)
@@ -540,7 +549,7 @@ class ViewingReportPlugin(Plugin):
         try:
             return await asyncio.to_thread(render_viewing_poster,
                 name=name, label=label, days=days, hours=hours, plays=plays,
-                traffic=_fmt_bytes(total_bytes), titles=titles, covers=covers, backdrops=backdrops,
+                works=len(_top_titles(detail, 1000)), titles=titles, covers=covers, backdrops=backdrops,
                 window_label=(detail.get('viewing') or {}).get('label', ''),
                 whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID)
         except Exception:  # noqa: BLE001 - caption still goes out

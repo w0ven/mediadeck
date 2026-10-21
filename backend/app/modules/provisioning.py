@@ -187,8 +187,8 @@ def nginx_site(node: Any) -> str:
         # loopback relay paces the aggregate at the signed r budget.
         limit_conn mediadeck_peruser 4;
 
-        # Real transfer bytes per user for the panel's live-speed display.
-        access_log /var/log/nginx/mediadeck-speed.log mediadeck_speed;
+        # No request byte logging; pacing and access checks are independent.
+        access_log off;
 
         # Synchronous register-then-allow. mirror is fire-and-forget and
         # cannot promise the nft element exists before the first payload.
@@ -206,11 +206,10 @@ def nginx_site(node: Any) -> str:
         set $md_p $remote_port;
         set $md_cid $pid.$connection;
         # Known deny is an nginx map file written by meterd. It survives a
-        # dead HTTP process, so 502 fail-open cannot admit an exhausted tag.
+        # dead HTTP process, so 502 fail-open cannot admit an blocked tag.
         if ($md_denied) {{ return 403; }}
         {nginx_signing_guard() if secret else 'auth_request /_mediadeck/register;'}
-        # Speed attribution is independent of billing register.
-        mirror /_mediadeck/announce;
+
 
         # Emby clients seek constantly; byte ranges are mandatory.
         add_header Accept-Ranges bytes;
@@ -240,17 +239,7 @@ map $arg_u $mediadeck_user_key {{
     default $arg_u;
 }}
 
-# One line per completed request: unix-time, peer address, anonymised user
-# tag, rate cap, bytes, request seconds. The loadprobe agent uses the address
-# to map live sockets to a member, because a request is only logged when it
-# *ends* -- most playback requests run for minutes, so completed lines alone
-# cannot show what a viewer is doing right now. Tags are hashes, so the log
-# never names an account.
-log_format mediadeck_speed
-    '$msec a=$remote_addr p=$remote_port u=$arg_u r=$arg_r '
-    '$bytes_sent $request_time';
-
-# Known exhausted / denied tags. Default 0 = unknown, fail-open for new
+# Known denied tags (manual suspension, expiry, pending). Default 0 = unknown, fail-open for new
 # decisions. Meterd rewrites the include atomically; nginx reloads it.
 map $md_u $md_denied {{
     default 0;
@@ -318,17 +307,6 @@ server {{
         internal;
         access_log off;
         return 204;
-    }}
-
-    # Optional speed-map ping; must not be treated as the billing register.
-    location = /_mediadeck/announce {{
-        internal;
-        proxy_pass http://127.0.0.1:{LOADPROBE_PORT}/announce?a=$md_a&p=$md_p&u=$md_u;
-        proxy_connect_timeout 300ms;
-        proxy_read_timeout 500ms;
-        proxy_pass_request_body off;
-        proxy_set_header Content-Length "";
-        access_log off;
     }}
 
     location = /healthz {{
@@ -455,15 +433,14 @@ WantedBy=multi-user.target
 
 
 def meterd_unit(node: Any, panel_url: str) -> str:
-    """systemd unit for the measured-flow agent. Generated text only."""
+    """systemd unit for the access-policy guard (no byte accounting). Generated text only."""
     _config_name(node.name)
     panel = (panel_url or "").rstrip("/")
     return f"""# /etc/systemd/system/mediadeck-meterd.service
-# Synchronous register (nginx auth_request) + measured envelope reports.
-# --enable-nft is the production switch; importing the module never
-# touches host tables.
+# Synchronous access checks + security policy pull, no byte reporting.
+# Legacy service name retained for existing nginx endpoints. No nft collector.
 [Unit]
-Description=mediadeck measured-flow agent ({node.name})
+Description=mediadeck access-policy guard (no byte accounting) ({node.name})
 After=network-online.target nginx.service
 Wants=network-online.target
 
@@ -473,12 +450,11 @@ ExecStart=/usr/bin/python3 /opt/mediadeck-agent/meterd.py \\
     --panel {_systemd_quote(panel)} \\
     --node {_systemd_quote(node.name)} \\
     --token-file /etc/mediadeck/report.token \\
-    --persist /var/lib/mediadeck/flowmeter.db \\
+    --state-file /var/lib/mediadeck/access-policy.json \\
     --deny-map /var/lib/mediadeck/deny.map \\
     --nginx-bin /usr/sbin/nginx \\
     --nginx-conf /etc/nginx/nginx.conf \\
-    --bind 127.0.0.1 --port {METERD_PORT} \\
-    --enable-nft
+    --bind 127.0.0.1 --port {METERD_PORT}
 Restart=always
 RestartSec=5
 
@@ -652,7 +628,7 @@ systemctl enable --now mediadeck-stream-rate.service
 python3 -c 'import socket; s=socket.create_connection(("127.0.0.1", {RATE_PROXY_PORT}), timeout=3); s.close()'
 ''' if rate_config else ''}
 mkdir -p /var/lib/mediadeck /var/www/html
-# Re-enrollment must not erase an existing exhausted-member deny snapshot.
+# Re-enrollment must not erase an existing access-policy deny snapshot.
 [ -e /var/lib/mediadeck/deny.map ] || printf '%s\\n' '# none' > /var/lib/mediadeck/deny.map
 # Bootstrap HTTP only. certbot --nginx validates the installed config first,
 # so installing ssl_certificate paths before they exist cannot bootstrap TLS.
@@ -680,9 +656,8 @@ rm -f /etc/nginx/sites-enabled/default
 {readers_install}
 nginx -t && systemctl reload nginx
 
-echo "==> 6/6 安装负载探针与计量代理"
+echo "==> 6/6 安装负载探针与访问控制守卫"
 curl -fsSL {shlex.quote(panel + '/agent/loadprobe.py')} -o /opt/mediadeck-agent/loadprobe.py
-curl -fsSL {shlex.quote(panel + '/agent/flowmeter.py')} -o /opt/mediadeck-agent/flowmeter.py
 curl -fsSL {shlex.quote(panel + '/agent/meterd.py')} -o /opt/mediadeck-agent/meterd.py
 mkdir -p /etc/mediadeck /var/lib/mediadeck
 install -m 600 /dev/stdin /etc/mediadeck/signing.json <<'{sign_end}'
@@ -705,7 +680,7 @@ sleep 2
 echo
 echo "==> 自检"
 curl -fsS http://127.0.0.1:{LOADPROBE_PORT}/load | python3 -c 'import json,sys; sys.exit(not json.load(sys.stdin).get("ok"))' && echo "    [OK] 负载与媒体读取探测" || echo "    [!!] 节点尚未就绪：检查媒体探测样本 /etc/mediadeck/media-probes.json"
-curl -fsS http://127.0.0.1:{METERD_PORT}/healthz >/dev/null && echo "    [OK] 计量代理" || echo "    [!!] 计量代理未响应"
+curl -fsS http://127.0.0.1:{METERD_PORT}/healthz >/dev/null && echo "    [OK] 访问控制守卫" || echo "    [!!] 访问控制守卫未响应"
 curl -fsS {shlex.quote(f'https://{host}/healthz')} >/dev/null && echo "    [OK] nginx 对外服务" || echo "    [!!] nginx 未响应"
 echo
 echo "==========================================================="

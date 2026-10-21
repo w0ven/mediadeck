@@ -60,7 +60,7 @@ def test_upgrade_changes_only_base_rights_preserves_personal_cards_and_special(e
     member = env.members.get('u')
     assert member['activity_level']['level'] == 7
     assert member['bandwidth_limit_kbps'] == 130000 and member['max_streams'] == 5
-    assert member['traffic_quota_bytes'] == 3*1024**4
+    assert member['traffic_quota_bytes'] == 0  # retired, level keeps bandwidth/concurrency only
     assert not member['allow_download'] and member['allow_transcode'] == before['allow_transcode']
     env.levels.grant_special('u', 'test')
     env.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u',-7200,'test','reset',?)", (NOW,))
@@ -68,18 +68,17 @@ def test_upgrade_changes_only_base_rights_preserves_personal_cards_and_special(e
     assert env.members.get('u')['activity_level']['price'] == 1
 
 
-def test_no_spend_without_qualification_or_funds_and_exact_extension(env):
+def test_zero_viewing_can_renew_but_funds_window_and_manual_restrictions_remain(env):
     env.points.add('u', 100, 'admin.adjust')
-    with pytest.raises(ValueError, match='未达标'): env.levels.renew('u', 'request')
-    assert env.points.balance('u') == 100
-    qualify(env)
-    env.members.upsert('u', '', {'traffic_used_bytes': 12345, 'status': 'suspended'})
+    assert not env.db.query('SELECT * FROM watch_verified_samples')
+    env.members.upsert('u', '', {'status': 'suspended'})
+    env.db.execute("UPDATE members SET traffic_used_bytes=12345 WHERE emby_user_id='u'")
     env.db.execute("UPDATE members SET request_used=2 WHERE emby_user_id='u'")
     result = env.levels.renew('u', 'request')
     assert result['expires_at'] == NOW+31*DAY and result['cost'] == 80
     assert env.levels.renew('u', 'request') == result
     member = env.members.get('u')
-    assert member['status'] == 'suspended' and member['traffic_used_bytes'] == 12345 and member['request_used'] == 2
+    assert member['status'] == 'suspended' and env.db.one("SELECT traffic_used_bytes FROM members WHERE emby_user_id='u'")['traffic_used_bytes'] == 12345 and member['request_used'] == 2
     assert env.points.balance('u') == 20
     with pytest.raises(ValueError, match='72小时'): env.levels.renew('u', 'another')
     env.members.upsert('u', '', {'expires_at': NOW-1})
@@ -87,8 +86,8 @@ def test_no_spend_without_qualification_or_funds_and_exact_extension(env):
     assert env.members.get('u')['expires_at_effective'] == NOW-1
 
 
-def test_concurrent_renew_is_one_charge(env):
-    qualify(env)
+def test_concurrent_renew_without_viewing_is_one_charge(env):
+    assert not env.db.query('SELECT * FROM watch_verified_samples')
     env.points.add('u', 200, 'admin.adjust')
     db2 = Database(env.db.path)
     try:
@@ -102,8 +101,8 @@ def test_concurrent_renew_is_one_charge(env):
         db2.close()
 
 
-def test_auto_opt_in_and_new_activation_only_once(env):
-    qualify(env)
+def test_auto_opt_in_without_viewing_and_new_activation_only_once(env):
+    assert not env.db.query('SELECT * FROM watch_verified_samples')
     env.points.add('u', 100, 'admin.adjust')
     with pytest.raises(ValueError, match='未开启'): env.levels.renew('u', 'auto', automatic=True)
     env.levels.set_auto('u', True)
@@ -300,13 +299,14 @@ async def test_scheduled_auto_renew_notices_and_old_cleanup_exemption(env):
 
     from app.modules.economy_rules import BEIJING
     text = ctx.telegram.send.call_args.args[1]
-    assert '合格日' in text and text.count('北京时间') == 2
+    assert '续费30天需80积分，余额缺口80' in text and text.count('北京时间') == 2
+    assert not any(word in text for word in ('80分钟', '合格日', '达标续费'))
     expiry = env.members.get('u')['expires_at_effective']
     assert datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M') in text
     assert (await plugin.run({}))['已提醒'] == 0
     await env.registry.get('inactive_cleanup').run({'days':7})
     assert env.members.get('u')['status'] == 'active'
-    qualify(env)
+    assert not env.db.query('SELECT * FROM watch_verified_samples')
     env.points.add('u', 100, 'admin.adjust')
     env.levels.set_auto('u', True)
     assert (await plugin.run({}))['已续期'] == 1

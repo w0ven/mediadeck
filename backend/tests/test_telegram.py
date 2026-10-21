@@ -973,23 +973,23 @@ def _actions(keyboard) -> set:
 
 
 def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
-    """Check-in is independent; account/backpack details retain their submenus."""
+    """Check-in is command-only; account/backpack details retain their submenus."""
     bot = _points_bot(enabled={"checkin", "points_transfer"})
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
-                              "help", "checkin"}
+                              "help"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
         "devices", "resetpw", "delete_account", "home", "rebind", "me"}
-    assert _actions(bot.bag_menu()) == {"invites", "shop", "bag_records", "home", "transfer", "inventory", "titles"}
+    assert _actions(bot.bag_menu()) == {"invites", "shop", "me_points", "home", "transfer", "inventory", "titles"}
 
 
 def test_the_backpack_holds_invites_shop_and_history() -> None:
     bot = _points_bot()
     labels = [b["text"] for row in bot.bag_menu() for b in row]
-    assert any("邀请码" in t for t in labels)
+    assert any("邀请" in t for t in labels)
     assert any("商城" in t for t in labels)
     assert any("流水" in t for t in labels)
 
@@ -1217,8 +1217,8 @@ def test_a_failed_redemption_explains_why(transactional_bot) -> None:
     bot._members.bind_telegram('u1', '1')
     item = bot._shop.create({'kind': 'invite_card', 'name': 'Bundle', 'cost': 100, 'amount': 1})
     asyncio.run(bot._shop_confirm(1, 2, str(item['id'])))
+    assert '积分不足' in bot.edits[-1] and '还差 100 积分' in bot.edits[-1]
     asyncio.run(bot._shop_redeem(1, 2, bot._members.get('u1'), str(item['id'])))
-    assert '兑换失败' in bot.edits[-1] and '积分不足' in bot.edits[-1]
     assert bot._points.balance('u1') == 0 and not bot._shop.orders('u1')
     assert not bot._db.query('SELECT * FROM inventory')
     assert bot._members.get('u1')['invite_quota'] == 0
@@ -1483,7 +1483,7 @@ def test_member_help_is_not_a_permission_error() -> None:
     bot = _bot(_FakeMembers({"999": member}))
     asyncio.run(bot._handle_command(1, "999", "someone", "/help"))
     assert "无权限" not in bot.sent[-1]  # type: ignore[attr-defined]
-    assert "使用说明" in bot.sent[-1]  # type: ignore[attr-defined]
+    assert "使用帮助" in bot.sent[-1]  # type: ignore[attr-defined]
 
 
 def test_unknown_member_commands_open_the_menu_instead_of_refusing() -> None:
@@ -1507,12 +1507,14 @@ def test_usage_shows_separate_traffic_and_bandwidth_sections() -> None:
     }
     bot = _bot(_FakeMembers({"999": member}))
     text = bot._usage_text(member)
-    assert "本月流量（估算）" in text
-    assert "已用：<b>5.0 GiB</b>" in text and "剩余：<b>5.0 GiB</b>" in text
+    # The traffic section is retired (docs/TRAFFIC_RETIREMENT.md); the archived
+    # estimate must not reappear as usage.
+    assert "本月流量" not in text and "估算" not in text
+    assert "已用：" not in text and "剩余：" not in text and "5.0 GiB" not in text
     assert "带宽：<b>20.0 Mbps</b>" in text
     assert "同时播放：2" in text
     assert "设备分组：1 组" in text
-    assert "按设备名称归并" in text and "非硬件唯一识别" in text
+    assert "按设备名称合并，非硬件识别" in text
     assert "设备分组：1 /" not in text
 
 
