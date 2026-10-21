@@ -250,7 +250,7 @@ def test_personal_weekly_reports_share_brand_and_preserve_real_empty_state(drawn
     titles = [] if empty else [{'title': '本周喜欢的电影', 'plays': 2, 'item_id': 'x'}]
     data = render_viewing_poster(name='示例会员', label='周报', days=7,
                                  hours=0 if empty else 4.5, plays=0 if empty else 3,
-                                 traffic='暂无实测', titles=titles, whitelist=True)
+                                 works=len(titles), titles=titles, whitelist=True)
     decoded(data, (1200, 1500 if empty else 1440))
     assert BRAND in drawn and '我的观影周报' in drawn
     assert '私人观影报告 · 仅发送给本人' in drawn

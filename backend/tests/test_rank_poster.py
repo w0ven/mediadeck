@@ -46,7 +46,7 @@ def test_ranking_bounds_are_complete_local_days() -> None:
 def test_viewing_poster_renders_jpeg() -> None:
     data = render_viewing_poster(
         name="@kele", label="周报", days=7, hours=3.5, plays=12,
-        traffic="1.2 GB", titles=[{"title": "剧集甲", "plays": 4}])
+        works=1, titles=[{"title": "剧集甲", "plays": 4}])
     assert data[:2] == b"\xff\xd8"
     assert len(data) > 4000
 

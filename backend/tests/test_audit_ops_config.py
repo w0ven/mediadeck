@@ -163,13 +163,16 @@ def test_updater_process_errors_are_bounded_and_safe(monkeypatch, tmp_path):
 
 
 def test_settings_false_strings_cannot_enable_billing_or_dispatch(service):
-    assert service.save_metering({"baseline_confirmed": "false", "cutover": "false"})["cutover"] is False
+    # Metering is retired: no payload, not even an all-false one, re-enables it.
+    for payload in ({"baseline_confirmed": "false", "cutover": "false"},
+                    {"cutover": "unexpected"}, {"cutover": True, "baseline_confirmed": True}):
+        with pytest.raises(ConfigError):
+            service.save_metering(payload)
+    assert service.metering_config()["cutover"] is False
     assert service.save_playback({"enabled": "false"})["enabled"] is False
     service.save_emby({"url": "https://media.invalid", "enabled": "false", "verify_ssl": "false"})
     assert service.emby_config()["enabled"] is False
     assert service.emby_config()["verify_ssl"] is False
-    with pytest.raises(ConfigError):
-        service.save_metering({"cutover": "unexpected"})
 
 
 def test_node_opaque_secret_keep_and_mount_ids_validation(service):

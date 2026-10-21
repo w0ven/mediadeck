@@ -1,35 +1,4 @@
-"""Usage sampling — turn live Emby sessions into billable traffic.
-
-How traffic is measured, and why this way
------------------------------------------
-Emby does not report bytes served per user, so consumption has to be inferred.
-Three approaches were possible:
-
-1. **Position delta x bitrate.**  Wrong: seeking forward advances position
-   without transferring the skipped bytes, so a user who skips an intro gets
-   billed for it.
-2. **Node access logs.**  Most accurate, but the signed URLs handed to clients
-   deliberately carry no user identity, and adding one would leak who is
-   watching what into every node's log file.
-3. **Wall-clock playing time x bitrate.**  What this uses.  While a session is
-   actually playing, bytes leave the server at roughly the media bitrate, and
-   pausing stops the transfer once the client buffer fills.
-
-So: sample every N seconds, and for each session that is playing, bill
-`bitrate/8 x seconds_since_last_sample`.
-
-The accuracy caveats are deliberate and bounded:
-
-* A paused session still fills its buffer for a few seconds; undercounting
-  there is preferred over charging a user for time they did not watch.
-* Client-side buffering means bytes can be pulled ahead of playback; over a
-  whole session this averages out.
-* A restart makes the gap since the last sample unbounded, so deltas are
-  clamped: a panel outage must never produce a surprise bill.
-
-Everything here is idempotent per sample tick and safe to run concurrently with
-readers, because writes go through the shared SQLite connection lock.
-"""
+"""Verified viewing and playback safety sampling. No byte-flow accounting."""
 from __future__ import annotations
 
 import asyncio
@@ -537,14 +506,12 @@ class UsageSampler:
             return {"ok": False, "error": self._last_error}
 
         now = time.time()  # timestamp the returned snapshot, not request issuance
-        result, billed_users = await run_usage_io(self._sample, sessions, now, node_of)
+        result, _billed_users = await run_usage_io(self._sample, sessions, now, node_of)
         if self.session_client_handler:
             try:
                 result["session_clients"] = await self.session_client_handler(sessions)
             except Exception:  # noqa: BLE001 - metering continues, failure stays explicit
                 result["session_clients"] = {"ok": False, "error": "session client verification unavailable"}
-        if billed_users and self._enforcement:
-            result["enforced"] = await self._enforce_exhausted(billed_users)
         if self._pending_kicks and self._enforcement:
             result["stream_kicks"] = await self._kick_overflow_streams()
         return result
@@ -555,7 +522,6 @@ class UsageSampler:
         self._ticks += 1
         self._last_error = None
         seen: set[str] = set()
-        billed_bytes = 0
         billed_users: dict[str, int] = {}
         self._pending_kicks = []
 
@@ -709,14 +675,13 @@ class UsageSampler:
             # watched continuously through it.
             delta = min(delta, MAX_BILLABLE_GAP_SECONDS)
 
-            rate = session_bitrate(session)
-            chunk = int(rate / 8 * delta)
+            # Playback evidence is independent of bytes served. Never estimate traffic.
             # Sample and resumable state commit together: a crash cannot leave
             # totals newer than the corresponding session history.
             updated = {**state, 'last_verified_end': proof_state.get('last_verified_end') or 0,
                        'seconds': float(state['seconds']) + watch_delta,
                        'verified_seconds': float(state.get('verified_seconds') or 0) + watch_delta,
-                       'bytes': int(state['bytes']) + chunk}
+                       'bytes': 0}
             self._record_watch(sid, updated, start if watch_delta else now, end if watch_delta else now,
                                evidence=(before, observation) if watch_delta else None)
             state.update(updated)
@@ -729,16 +694,14 @@ class UsageSampler:
                     state['playback_attempt_at'] = observation['activity']
                 self._diagnose(user_id, observation, now, 'poll', reason, watch_delta,
                                observation['activity'] if advanced else 0)
-            # Bytes/second over the last sampled window: what the dashboard
-            # shows as the session's live bandwidth.
-            state["speed_bps"] = int(chunk / delta) if delta else 0
+            state.pop('speed_bps', None)
             if session.get("TranscodingInfo"):
                 state["transcoded"] = True
             if node_of:
                 state["node"] = node_of(state.get("item_id")) or state.get("node", "")
 
-            billed_bytes += chunk
-            billed_users[user_id] = billed_users.get(user_id, 0) + chunk
+            # Keep the watched users for expiry/concurrency enforcement, not billing.
+            billed_users[user_id] = 0
 
         self._collect_overflow_kicks(sessions, now)
 
@@ -778,7 +741,7 @@ class UsageSampler:
             "ok": True,
             "sessions": len(seen),
             "playing": sum(1 for s in self._live.values() if s.get("was_playing")),
-            "billed_bytes": billed_bytes,
+            "traffic_tracking": False,
             "users": len(billed_users),
         }
         if self._sharing is not None:
@@ -837,20 +800,8 @@ class UsageSampler:
         return True
 
     def _commit(self, per_user: dict[str, int], now: float) -> None:
-        day = day_key(now)
-        with self._db.write() as conn:
-            for user_id, chunk in per_user.items():
-                conn.execute(
-                    "INSERT INTO usage_daily (day,emby_user_id,bytes,seconds,plays,"
-                    "transcodes) VALUES (?,?,?,0,0,0) "
-                    "ON CONFLICT(day,emby_user_id) DO UPDATE SET bytes=bytes+?",
-                    (day, user_id, chunk, chunk))
-                # Only members are metered; non-members are still recorded in
-                # usage_daily for statistics, but never billed.
-                conn.execute(
-                    "UPDATE members SET traffic_used_bytes=traffic_used_bytes+?,"
-                    "last_seen_at=? WHERE emby_user_id=?",
-                    (chunk, int(now), user_id))
+        """Legacy byte-accounting entry point: retired without touching history."""
+        return
 
     def _publish_live(self) -> None:
         # Readers must never iterate the worker's mutable session dictionary
@@ -858,15 +809,15 @@ class UsageSampler:
         self._watch_view = tuple(
             {k: state.get(k) for k in ('user_id', 'username', 'started_at', 'seconds', 'sampled', 'verified_seconds', 'watch_reason', 'watch_source', 'playback_attempt_at')}
             for state in self._live.values())
-        self._speed_view = {sid: int(s.get("speed_bps") or 0) for sid, s in self._live.items()}
+        self._speed_view = {}
 
     def live_watch(self) -> list[dict[str, Any]]:
         """Already committed sampled time; querying does not advance clocks."""
         return [dict(row) for row in self._watch_view]
 
     def live_speeds(self) -> dict[str, int]:
-        """session id -> bytes/second over the last committed sample window."""
-        return dict(self._speed_view)
+        """Byte-rate sampling is retired; watch sampling continues independently."""
+        return {}
 
     def _finish(self, sid: str, state: dict[str, Any], now: float) -> None:
         seconds = int(state.get("seconds") or 0)
@@ -889,7 +840,7 @@ class UsageSampler:
                  state.get("series_name", ""), state.get("device_id", ""),
                  state.get("client", ""), state.get("play_method", ""),
                  state.get("node", ""), state.get("remote_ip", ""),
-                 int(state.get("bytes") or 0), seconds,
+                 0, seconds,
                  int(state.get("started_at") or now), int(now), int(bool(state.get('sampled'))),
                  state.get('watch_key') or ''))
             conn.execute(
@@ -980,27 +931,6 @@ class UsageSampler:
         self._pending_kicks = []
         self._concurrency_kicks.clear()
         return kicked
-
-    async def _enforce_exhausted(self, user_ids: list[str]) -> int:
-        """Disable and disconnect members who just ran out.
-
-        Checked here rather than on a slow timer because the gap between
-        "quota reached" and "playback stops" is exactly the amount of traffic
-        given away for free.
-        """
-        acted = 0
-        for user_id in user_ids:
-            member = await run_usage_io(self._members.get, user_id)
-            if not member or member["state"] != "exhausted":
-                continue
-            # Already enforced recently; avoid hammering Emby every tick.
-            applied_at = member.get("applied_at")
-            if applied_at and int(time.time()) - int(applied_at) < 300:
-                continue
-            await self._enforcement.enforce_now(user_id, "quota exhausted")
-            await self._enforcement.terminate_sessions(user_id, "流量配额已用尽")
-            acted += 1
-        return acted
 
     # -- introspection -------------------------------------------------------
     def status(self) -> dict[str, Any]:

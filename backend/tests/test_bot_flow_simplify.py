@@ -405,9 +405,12 @@ def test_account_actually_merges_usage_fields_permissions_note_and_unknowns(bot)
     member.update(allow_download=True, allow_transcode=False, note='<合成备注>')
     card = plain(local._account_card(member))
     usage = plain(local._usage_text(member))
-    for label in ('已用：', '剩余：', '带宽：', '同播：', '设备分组：', '近24小时：', '近30天：', '累计观看：'):
+    for label in ('带宽：', '同播：', '设备分组：', '近24小时：', '近30天：', '累计观看：'):
         value = next(line for line in usage.replace('同时播放：', '同播：').splitlines() if line.startswith(label))
         assert value in card and card.count(label) == 1
+    # Byte usage (已用/剩余) is retired from both views (docs/TRAFFIC_RETIREMENT.md).
+    assert '已用：' not in card and '剩余：' not in card
+    assert '已用：' not in usage and '剩余：' not in usage
     assert '下载：允许' in card and '转码：不允许' in card and '备注：<合成备注>' in card
     assert '备注' not in plain(local._account_card(member, public=True))
     assert '统计口径' not in card and '历史未核验' not in card

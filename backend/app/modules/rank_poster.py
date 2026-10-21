@@ -374,7 +374,7 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
 
 
 def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
-                          plays: int, traffic: str,
+                          plays: int, works: int = 0,
                           titles: list[dict[str, Any]] | None = None,
                           covers: dict[str, bytes] | None = None,
                           whitelist: bool = False, window_label: str = '',
@@ -387,7 +387,7 @@ def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
                   _heroes(titles, covers, backdrops))
     if whitelist:
         poster.badge(998, 54)
-    metrics = ((225, f'{hours:g}', '小时观影'), (600, str(int(plays)), '次播放'), (975, traffic or '暂无实测', '流量用量'))
+    metrics = ((225, f'{hours:g}', '小时观影'), (600, str(int(plays)), '次播放'), (975, str(int(works)), '部作品'))
     for x, value, caption in metrics:
         size = 60
         while size > 32 and _font(size).getlength(value) > 320:

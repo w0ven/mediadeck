@@ -95,29 +95,16 @@ def bytes_label(value: int | None) -> str:
 
 
 def quota_lines(member: dict[str, Any], *, public: bool = False, compact: bool = False) -> list[str]:
-    measured = member.get("quota_source") == "measured"
-    sample = member.get("metering") or {}
-    used = member.get("measured_used_bytes") if measured else member.get("traffic_used_bytes")
-    raw_quota = member.get("traffic_quota_bytes")
-    quota = int(raw_quota) if raw_quota is not None else None
-    label = '本月流量' + ('' if measured else '（估算）')
-    no_records = (measured and used is None and sample.get('measurement_status') == 'no_usage_records'
-                  and (sample.get('coverage') or {}).get('degraded') is False)
-    used_text = (bytes_label(int(used)) if used is not None else
-                 '本周期暂无播放记录' if no_records else '计量暂不可用')
-    remaining = ('暂无法确认' if quota is None else '不限' if not quota else
-                 bytes_label(quota) if no_records else
-                 bytes_label(max(0, quota - int(used))) if used is not None else '暂无法确认')
-    # Opt in only on member pages; admin cards retain their original layout.
-    if compact:
-        return [f'📊 <b>{label}</b>', f'已用：<b>{used_text}</b> · 剩余：<b>{remaining}</b>']
-    lines = [f'<b>{label}</b>', f'已用：<b>{used_text}</b>', f'剩余：<b>{remaining}</b>']
-    return lines
+    """Traffic accounting and quota display have been retired."""
+    return []
+
+
+def bandwidth_value(member: dict[str, Any]) -> str:
+    raw = member.get('bandwidth_limit_kbps')
+    bw = int(raw) if raw is not None else None
+    return ('暂不可用' if bw is None else
+            f'{bw / 1000:.1f} Mbps' if bw >= 1000 else f'{bw} kbps' if bw else '不限')
 
 
 def bandwidth_lines(member: dict[str, Any], *, compact: bool = False) -> list[str]:
-    raw = member.get('bandwidth_limit_kbps')
-    bw = int(raw) if raw is not None else None
-    cap = ('暂不可用' if bw is None else
-           f'{bw / 1000:.1f} Mbps' if bw >= 1000 else f'{bw} kbps' if bw else '不限')
-    return [('🚀 ' if compact else '') + f'带宽：<b>{cap}</b>']
+    return [('🚀 ' if compact else '') + f'带宽：<b>{bandwidth_value(member)}</b>']

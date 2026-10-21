@@ -28,6 +28,15 @@ def normalize_base_url(url: str) -> str:
     return (url or "").strip().rstrip("/")
 
 
+def _same_policy_value(current: Any, wanted: Any) -> bool:
+    # Emby returns lists (EnabledFolders...) in arbitrary order.
+    if isinstance(current, list) and isinstance(wanted, list):
+        return sorted(str(v) for v in current) == sorted(str(v) for v in wanted)
+    if isinstance(current, bool) or isinstance(wanted, bool):
+        return isinstance(current, bool) and isinstance(wanted, bool) and current == wanted
+    return current == wanted
+
+
 async def probe_emby(
     url: str, api_key: str, timeout: float = 15.0, verify_ssl: bool = True
 ) -> dict[str, Any]:
@@ -250,6 +259,10 @@ class LiveEmby:
                     return {'status': 'skipped_authority'}
                 if policy_patch.get('IsDisabled') is True and policy.get('IsAdministrator') is not False:
                     return {'status': 'failed'}
+            if all(_same_policy_value(policy.get(k), v) for k, v in policy_patch.items()):
+                # Every policy POST makes Emby recompute this user's library access; a bulk
+                # enforcement of unchanged values stalls the whole server.
+                return {'status': 'applied'}
             policy.update(policy_patch)
             pr = self._check(
                 await client.post(
@@ -805,7 +818,8 @@ class LiveEmby:
                 out.append(row)
             return out
 
-    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None) -> list[dict[str, Any]]:
+    async def request_lookup(self, media_type: str, tmdb_id: int, user_id: str | None = None, *,
+                             include_episodes: bool = True) -> list[dict[str, Any]]:
         """Read-only advisory lookup, scoped to the requester's accessible library."""
         from urllib.parse import quote
         base, headers, timeout, verify = self._conn()
@@ -829,7 +843,7 @@ class LiveEmby:
                     continue
                 row = {'id': str(item['Id']), 'name': str(item.get('Name') or ''),
                        'url': f"{base}/web/index.html#!/item?id={quote(str(item['Id']), safe='')}", 'episodes': []}
-                if media_type == 'tv':
+                if media_type == 'tv' and include_episodes:
                     ep_params = {'ParentId': str(item['Id']), 'Recursive': 'true',
                                  'IncludeItemTypes': 'Episode', 'Fields': 'ParentIndexNumber,IndexNumber', 'Limit': '500'}
                     if user_id:

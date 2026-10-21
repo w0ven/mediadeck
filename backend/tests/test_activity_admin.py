@@ -86,7 +86,8 @@ def test_admin_browser_config_and_migration(client, tmp_path, monkeypatch):
         assert page.evaluate('activityBeijingStamp(0)') == '1970/1/1 08:00:00 北京时间'
         page.screenshot(path=str(output/'levels-migration-mobile.png'), full_page=True)
         page.click('#level-migrate-confirm')
-        page.get_by_role('button', name='确认', exact=True).click()
+        # The confirmation names the action on its button.
+        page.get_by_role('button', name='执行迁移', exact=True).click()
         page.wait_for_function("document.querySelector('#level-feedback').textContent.includes('迁移完成')")
         assert app.state.points.balance('other') == before
         assert app.state.members.get('other')['activity_level']['level'] == 1

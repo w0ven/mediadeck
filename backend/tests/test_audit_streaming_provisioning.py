@@ -78,9 +78,11 @@ def test_nginx_literals_do_not_become_directives_or_recursive_variables():
     assert '""      15000000;' in text and '"0"     15000000;' in text
     assert '15728640' not in text and '36700160' not in text
     for preserved in ('limit_conn mediadeck_peruser 4;', 'proxy_force_ranges on;',
-                      'mirror /_mediadeck/announce;', 'mediadeck-speed.log mediadeck_speed;',
                       'proxy_buffering off;', 'proxy_read_timeout 30s;'):
         assert preserved in text
+    # The byte speed log and announce mirror are retired (docs/TRAFFIC_RETIREMENT.md).
+    for retired in ('mirror /_mediadeck/announce;', 'mediadeck-speed.log', 'mediadeck_speed'):
+        assert retired not in text
 
 
 @pytest.mark.skipif(not shutil.which("nginx"), reason="nginx parser unavailable")

@@ -137,8 +137,10 @@ def test_session_keeps_the_fields_the_old_table_renders() -> None:
     """The card did not replace the table; both read the same payload."""
     with TestClient(app) as client:
         s = client.get("/api/emby/sessions", headers=_basic()).json()[0]
-        for field in ("UserName", "Client", "PlayMethod", "Item", "SpeedMBps"):
+        for field in ("UserName", "Client", "PlayMethod", "Item"):
             assert field in s, f"{field} disappeared from the session payload"
+        # The speed column is retired with byte-rate sampling (docs/TRAFFIC_RETIREMENT.md).
+        assert not [k for k in s if k.startswith("Speed")]
 
 
 def test_progress_is_computed_from_position_and_runtime() -> None:

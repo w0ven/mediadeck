@@ -41,8 +41,11 @@ def stack(tmp_path):
     m.upsert(
         "u",
         "alice",
-        {"group_id": "standard", "expires_at": now + 180 * 86400, "traffic_used_bytes": 987654},
+        {"group_id": "standard", "expires_at": now + 180 * 86400},
     )
+    # Archived byte counter: account edits can no longer write it, so seed it
+    # directly and check that group changes never wipe it.
+    db.execute("UPDATE members SET traffic_used_bytes=987654 WHERE emby_user_id='u'")
     ov = {
         "expires_at_override": now + 90 * 86400,
         "bandwidth_limit_kbps": 777,
@@ -51,6 +54,10 @@ def stack(tmp_path):
     }
     db.execute("UPDATE members SET overrides_json=? WHERE emby_user_id=?", (json.dumps(ov), "u"))
     return db, g, m, now, ov
+
+
+def _archived_bytes(m):
+    return m._db.one("SELECT traffic_used_bytes FROM members WHERE emby_user_id='u'")["traffic_used_bytes"]
 
 
 @pytest.mark.parametrize("policy,days", [("apply_group", 7), ("clear", None), ("set", 60)])
@@ -66,7 +73,7 @@ def test_explicit_date_actions_replace_effective_overlay(stack, policy, days):
     else:
         assert abs(after["expires_at_effective"] - (now + days * 86400)) <= 2
     assert after["bandwidth_limit_kbps"] == 777 and after["max_streams"] == 9
-    assert after["traffic_used_bytes"] == 987654
+    assert _archived_bytes(m) == 987654
 
 
 def test_timed_to_timed_keep_preserves_effective_term(stack):
@@ -78,16 +85,18 @@ def test_timed_to_timed_keep_preserves_effective_term(stack):
     assert p["policies"]["keep"]["expires_at"] == out["expires_at_effective"]
 
 
-@pytest.mark.parametrize("group_id,traffic_billed", [("vip", True), (WHITELIST_GROUP_ID, False)])
-def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id, traffic_billed):
+@pytest.mark.parametrize("group_id", ["vip", WHITELIST_GROUP_ID])
+def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id):
     _db, _g, m, _now, _ov = stack
     p = group_preview(m, "u", group_id)
     assert p["policies"]["keep"]["expires_at"] is None
     out = m.upsert("u", "alice", {"group_id": group_id, "expiry_policy": "keep"})
     assert out["expires_at"] is None and out["expires_at_effective"] is None
     assert "expires_at_override" not in out["overrides"]
-    assert out["traffic_used_bytes"] == 987654
-    assert (out["traffic_quota_bytes"] > 0) == traffic_billed
+    assert _archived_bytes(m) == 987654
+    # No group bills traffic any more (docs/TRAFFIC_RETIREMENT.md); the archived
+    # one-off credit is kept but grants nothing.
+    assert out["traffic_quota_bytes"] == 0
     assert out["overrides"]["extra_traffic_bytes"] == 333
     assert out["bandwidth_limit_kbps"] == 777 and out["max_streams"] == 9
 
@@ -95,7 +104,7 @@ def test_non_time_target_clears_expiry_even_when_keep_selected(stack, group_id, 
 def test_time_only_disables_quota_without_wiping_ledger(stack):
     _db, _g, m, now, _ov = stack
     out = m.upsert("u", "alice", {"group_id": "timeonly"})
-    assert out["traffic_quota_bytes"] == 0 and out["traffic_used_bytes"] == 987654
+    assert out["traffic_quota_bytes"] == 0 and _archived_bytes(m) == 987654
     assert out["expires_at_effective"] == now + 90 * 86400
 
 

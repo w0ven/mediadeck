@@ -18,10 +18,8 @@ Unknown title counts are stated, not assigned to invented movies.
 Personal weekly reports cover the previous complete Beijing week: Monday 00:00
 to the following Monday 00:00. The batch's creation time fixes this week for
 retries. Seconds, unique recorded session counts and title detail come from one
-read snapshot and window; formatting happens after summing raw seconds. The
-existing UTC daily traffic ledger cannot be precisely split at Beijing's eight
-hour boundary, so such a report does not fabricate a weekly traffic value.
-Monthly scheduling and the underlying traffic accounting are unchanged.
+read snapshot and window; formatting happens after summing raw seconds. Byte traffic accounting is retired; reports contain viewing evidence only.
+Historical traffic rows remain archived and are never mixed into viewing/rewards.
 
 New effective viewing still requires two same-title/user/device/play observations,
 explicitly unpaused, finite advancing position, fresh evidence and unchanged

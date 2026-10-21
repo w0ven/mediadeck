@@ -117,7 +117,9 @@ function initSystemSettings() {
   configWorkspace([
     {id:'connections',label:'服务连接',keys:['Emby 对接','接入方式','Telegram 机器人']},
     {id:'playback',label:'播放与节点',keys:['播放调度策略','播放分流（Emby 接管）','推流节点']},
-    {id:'membership',label:'会员与计费',keys:['会员与计费']},
+    // The card is titled 会员与观看; a stale key used to leave this tab empty
+    // and pin the card above every other section.
+    {id:'membership',label:'会员与观看',keys:['会员与观看']},
     {id:'cache',label:'图片缓存',keys:['图片缓存']},
     {id:'entries',label:'外部入口',keys:['外部反代入口']},
   ]);
@@ -282,9 +284,10 @@ function initPlaybackLinesEditor() {
 }
 function initTelegramSettings(tg) {
   const logoRow = $('#tg-logo').closest('.form-row'), help = logoRow.nextElementSibling, preview = $('#tg-logo-preview-box');
-  const box = document.createElement('div'); box.innerHTML = card('首页外观','只改变 Bot 首页图片，不影响注册和群组', '<div class="card-body logo-body"></div>');
+  const box = document.createElement('div'); box.innerHTML = card('首页外观','Bot 首页的图片和会员面板入口，不影响注册和群组', '<div class="card-body logo-body"></div>');
   const appearance = box.firstElementChild; appearance.querySelector('.logo-body').append(logoRow,help,preview);
   const save = document.createElement('button'); save.type = 'button'; save.className = 'btn primary'; save.id = 'tg-save-logo'; save.textContent = '保存首页外观'; appearance.querySelector('.logo-body').append(save);
+  appearance.querySelector('.logo-body').insertAdjacentHTML('beforeend', `<div class="form-row" style="margin-top:16px"><label for="tg-miniapp">会员面板地址</label><input id="tg-miniapp" type="url" value="${esc(tg.miniapp_url || '')}" placeholder="https://app.example.com/app" autocomplete="off"></div><p class="help">填写指向本服务 <code>/app</code> 的 HTTPS 地址后，Bot 私聊首页会出现「📱 会员面板」按钮；留空则隐藏按钮并停用面板接口。</p><button class="btn primary" type="button" id="tg-save-miniapp">保存会员面板</button>`);
   $('#view').append(appearance);
   const groupBox = document.createElement('div'); groupBox.innerHTML = card('群内交互','换绑只在这里配置的群中审核，群管理员还需具备 Deck 管理员角色', `<div class="card-body"><div class="form-row"><label for="tg-reviewgroups">审核与交互群</label><textarea id="tg-reviewgroups" rows="3" placeholder="-100xxxxxxxxx，每行一个群">${esc((tg.group_interaction_chats || []).join('\n'))}</textarea></div><p class="help">Bot 需要加入这些群。原 TG 失效的用户可用新 TG 验证 Emby 密码申请换绑，无需旧 TG 确认。</p><label class="check"><input id="tg-shop-notice" type="checkbox" ${tg.shop_purchase_broadcast ? 'checked' : ''}> 成功购买群播报</label><p class="help">只向以上互动群展示购买者公开名字和商品名；关闭时不记录待发播报，之后也不补发。</p><button class="btn primary" id="tg-save-groups">保存交互群</button></div>`);
   $('#view').append(groupBox.firstElementChild);
@@ -295,6 +298,7 @@ function initTelegramSettings(tg) {
   configureSave('tg-save','/api/settings/telegram','POST',() => payloadKeys(['bot_token','enabled','emby_public_url']));
   configureSave('tg-save2','/api/settings/telegram','POST',() => payloadKeys(['allow_admin_grant','allow_invite','allow_redeem','register_days','max_users','default_group_id','registration_notify_chat_id','registration_notify_thread_id']));
   configureSave('tg-save-logo','/api/settings/telegram','POST',() => ({menu_logo_url:$('#tg-logo').value.trim()}));
+  configureSave('tg-save-miniapp','/api/settings/telegram','POST',() => ({miniapp_url:$('#tg-miniapp').value.trim()}));
   configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean),shop_purchase_broadcast:$('#tg-shop-notice').checked}));
   initPlaybackLinesEditor();
   initMembershipSettings(tg);
@@ -402,9 +406,18 @@ function installWorkspaceNavigation() {
     else if (!e.shiftKey && document.activeElement === links.at(-1)) { e.preventDefault(); links[0]?.focus(); }
   });
   const search = document.getElementById('nav-search'), results = document.getElementById('nav-results');
+  // Besides pages, the box offers the two most common lookups directly: a user
+  // and a request, so "找一个用户" is type-and-Enter from any page.
   search.addEventListener('input', () => {
-    const query = search.value.trim().toLowerCase(); results.hidden = !query;
-    results.innerHTML = query ? NAV.flatMap(g => g.items).filter(it => `${it.label} ${it.sub}`.toLowerCase().includes(query)).map(it => `<a href="#/${it.id}">${esc(it.label)}<small>${esc(it.sub)}</small></a>`).join('') || '<p>没有匹配的页面</p>' : '';
+    const raw = search.value.trim(), query = raw.toLowerCase(); results.hidden = !query;
+    const pages = query ? NAV.flatMap(g => g.items).filter(it => `${it.label} ${it.sub}`.toLowerCase().includes(query)).map(it => `<a href="#/${it.id}">${esc(it.label)}<small>${esc(it.sub)}</small></a>`).join('') : '';
+    const lookups = query ? `<a href="#/members?q=${encodeURIComponent(raw)}" class="nav-lookup">在用户管理中搜索「${esc(raw)}」<small>按账号、TG、备注或联系方式查找用户</small></a><a href="#/requests?status=all&q=${encodeURIComponent(raw)}" class="nav-lookup">在求片管理中搜索「${esc(raw)}」<small>按片名、TMDB 编号或工单号查找</small></a>` : '';
+    results.innerHTML = query ? (pages || '<p>没有匹配的页面</p>') + lookups : '';
+  });
+  search.addEventListener('keydown', e => {
+    if (e.key !== 'Enter' || results.hidden) return;
+    const first = results.querySelector('a');
+    if (first) { e.preventDefault(); first.click(); location.hash = first.getAttribute('href'); search.blur(); }
   });
   results.addEventListener('click', () => { results.hidden = true; search.value = ''; });
   document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'k') { e.preventDefault(); search.focus(); } if (e.key === 'Escape') { results.hidden = true; if (document.body.classList.contains('nav-open')) setWorkspaceMenu(false, true); } });
@@ -423,41 +436,10 @@ function groupBadge(id, name) {
   return isWhitelistGroup(id) ? `<span class="whitelist-badge">${whitelistEmblem()}<span>${esc(name || '白名单')}</span><small>专属</small></span>` : `<span class="hg-group-badge">${esc(name || '未分组')}</span>`;
 }
 function workspaceIcon(name) {
-  const paths={dashboard:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',members:'<circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m2 3a5 5 0 0 1 3 4v2"/>',library:'<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 3v18M17 3v18M3 8h4m-4 8h4M17 8h4m-4 8h4"/>',tgbot:'<rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4M1 12v4m22-4v4M8 12v2m8-2v2m-7 3h6"/>',nodes:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5m-5 11h5"/>',settings:'<path d="M4 7h16M4 17h16M8 4v6m8 4v6"/>',more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',close:'<path d="m6 6 12 12M6 18 18 6"/>',filter:'<path d="M4 5h16l-6 7v7l-4-2v-5L4 5"/>'};
+  const paths={dashboard:'<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',members:'<circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m2 3a5 5 0 0 1 3 4v2"/>',library:'<rect x="3" y="3" width="18" height="18" rx="3"/><path d="M7 3v18M17 3v18M3 8h4m-4 8h4M17 8h4m-4 8h4"/>',tgbot:'<rect x="4" y="7" width="16" height="13" rx="4"/><path d="M12 3v4M1 12v4m22-4v4M8 12v2m8-2v2m-7 3h6"/>',nodes:'<rect x="3" y="3" width="18" height="7" rx="2"/><rect x="3" y="14" width="18" height="7" rx="2"/><path d="M7 6.5h.01M7 17.5h.01M12 6.5h5m-5 11h5"/>',settings:'<path d="M4 7h16M4 17h16M8 4v6m8 4v6"/>',audit:'<path d="M12 3 4.5 6v5.5c0 4.6 3.1 8 7.5 9.5 4.4-1.5 7.5-4.9 7.5-9.5V6Z"/><path d="M9 11.5h6M9 15h4"/>',more:'<circle cx="5" cy="12" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="19" cy="12" r="1"/>',close:'<path d="m6 6 12 12M6 18 18 6"/>',filter:'<path d="M4 5h16l-6 7v7l-4-2v-5L4 5"/>'};
   return `<svg class="hg-icon" viewBox="0 0 24 24" aria-hidden="true">${paths[name] || paths.settings}</svg>`;
 }
 
-/* Rates are observations, not guesses from media bitrate. One binary byte unit everywhere. */
-const RATE_STALE_SECONDS = 15;
-function rateMarkup(bps, at, basis, windowSeconds, scope = '') {
-  const stamp = Number(at || 0), age = Date.now()/1000 - stamp;
-  if (bps == null || !Number.isFinite(Number(bps)) || Number(bps) < 0 || !stamp || age < -5 || age > RATE_STALE_SECONDS) {
-    return `<span class="rate-unknown">${stamp ? '采样已过期' : '未实测'}</span>`;
-  }
-  const details = [scope, windowSeconds ? `约 ${Number(windowSeconds).toFixed(0)} 秒平均` : '采样窗口未提供', basis === 'collector' ? '源采样' : '探针读取（源时间未提供）'].filter(Boolean).join(' · ');
-  return `<span class="live-rate" data-rate-at="${stamp}" title="${esc(details)}"><b>${(Number(bps)/1048576).toFixed(2)} MiB/s</b><small>${esc(details)} · <span class="rate-age">${Math.max(0,Math.floor(age))} 秒前</span></small></span>`;
-}
-function egressValid(n) {
-  const stamp = Number(n.egress_sampled_at || n.last_success_ts || n.last_probe_ts || 0);
-  return n.ok !== false && n.egress_status !== 'unavailable' && n.egress_mbps != null && Number.isFinite(Number(n.egress_mbps)) && Number(n.egress_mbps) >= 0 && stamp && Date.now()/1000-stamp >= -5 && Date.now()/1000-stamp <= RATE_STALE_SECONDS;
-}
-function egressCell(n) {
-  if (!egressValid(n)) return '<span class="rate-unknown">出口未实测／采样失效</span>';
-  return rateMarkup(Number(n.egress_mbps)*1000000/8, n.egress_sampled_at || n.last_success_ts || n.last_probe_ts, n.egress_time_basis, n.egress_window_seconds, '整网卡出口');
-}
-function egressSummary(nodes) {
-  const wanted = nodes.filter(n => n.enabled !== false), known = wanted.filter(egressValid);
-  const text = !wanted.length ? '无启用节点' : !known.length ? '暂无有效实测' : rateMarkup(known.reduce((a,n)=>a+Number(n.egress_mbps)*1000000/8,0), Math.min(...known.map(n=>Number(n.egress_sampled_at || n.last_success_ts || n.last_probe_ts))), known.every(n=>n.egress_time_basis==='collector') ? 'collector' : 'probe_received', null);
-  return {text, sub: `启用节点整网卡 · ${known.length}/${wanted.length} 有效${known.length < wanted.length ? ' · 仅已知部分' : ''}；不等于播放之和`};
-}
-function ageLiveRates() {
-  document.querySelectorAll('.live-rate[data-rate-at]').forEach(el => {
-    const age = Math.max(0, Math.floor(Date.now()/1000-Number(el.dataset.rateAt)));
-    if (age > RATE_STALE_SECONDS) { el.textContent = '采样已过期'; el.classList.add('rate-unknown'); }
-    else { const label = el.querySelector('.rate-age'); if (label) label.textContent = `${age} 秒前`; }
-  });
-}
-setInterval(ageLiveRates, 1000);
 // Keep loaded artwork/failure fallback on SSE patches; a changed artwork key gets a new image.
 document.addEventListener('load', e => {
   const img = e.target;

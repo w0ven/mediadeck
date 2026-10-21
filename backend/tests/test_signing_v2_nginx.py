@@ -13,7 +13,6 @@ import os
 import shutil
 import signal
 import socket
-import sqlite3
 import ssl
 import subprocess
 import sys
@@ -101,7 +100,9 @@ def exercise(root, args):
                       sign_arg_digest=args[0], sign_arg_expires=args[1], pools=[
                           NodePool(name="main", emby_prefix="/media", url_prefix="/s/main", node_path=str(pool_main)),
                           NodePool(name="gd3", emby_prefix="/archive", url_prefix="/s/gd3", node_path=str(pool_other))])
-    config_path, meter_db, deny = root / "signing.json", root / "meter.db", root / "deny.map"
+    config_path, meter_db, deny = root / "signing.json", root / "access.json", root / "deny.map"
+    token_file = root / "token"
+    token_file.write_text("isolated-test-token")
     deny.write_text("# none\n")
     probe_process = meter_process = nginx_process = relay_process = None
     readers = []
@@ -129,8 +130,7 @@ def exercise(root, args):
         return parsed.path + "?" + parsed.query
 
     def conn_count():
-        with sqlite3.connect(meter_db) as db:
-            return db.execute("SELECT COUNT(*) FROM conns").fetchone()[0]
+        return len(json.loads(meter_db.read_text())["connections"]) if meter_db.exists() else 0
 
     try:
         for index, media in enumerate((pool_main, pool_other)):
@@ -146,9 +146,10 @@ def exercise(root, args):
                                "--port", str(RATE_PROXY_PORT),
                                "--pool", "/0/:9810", "--pool", "/1/:9811"], "rate-relay")
         wait_port(RATE_PROXY_PORT, relay_process)
-        meter_process = spawn([sys.executable, str(ROOT / "agent/meterd.py"), "--bind", "127.0.0.1",
-                               "--port", str(meter_port), "--persist", str(meter_db),
-                               "--deny-map", str(deny), "--interval", "3600", "--enable-nft"], "meter")
+        meter_command = [sys.executable, str(ROOT / "agent/meterd.py"), "--bind", "127.0.0.1",
+                         "--port", str(meter_port), "--state-file", str(meter_db), "--persist", str(root / "flowmeter.db"),
+                         "--token-file", str(token_file), "--deny-map", str(deny), "--interval", "3600"]
+        meter_process = spawn(meter_command, "access-policy")
         wait_port(meter_port, meter_process)
         probe_process = start_probe(False)
         text = nginx_site(node)
@@ -233,8 +234,12 @@ def exercise(root, args):
         for raw in tampered:
             assert request(node_port, raw, context)[0] in (400, 403)
         assert conn_count() == before, "invalid signatures must not reach meterd"
-        with sqlite3.connect(meter_db) as db:
-            db.execute("INSERT INTO denied VALUES(?,?)", (TAG, time.time()))
+        stop(meter_process)
+        state = json.loads(meter_db.read_text())
+        state["blocked"] = [TAG]
+        meter_db.write_text(json.dumps(state))
+        meter_process = spawn(meter_command, "access-policy-denied")
+        wait_port(meter_port, meter_process)
         assert request(node_port, good, context)[0] == 403
         stop(meter_process)
         assert request(node_port, good, context)[:2] == (200, BODY), "optional meter outage only fails open after valid signature"
@@ -260,7 +265,7 @@ def exercise(root, args):
             stop(reader)
         for log in logs:
             log.close()
-        subprocess.run(["nft", "delete", "table", "inet", "mediadeck_meter"], capture_output=True, check=False)
+        assert not (root / "flowmeter.db").exists()
 
 
 def test_real_nginx_v2_and_optional_metering_in_isolated_netns(tmp_path):

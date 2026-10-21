@@ -153,8 +153,10 @@ def test_group_me_has_useful_public_data_and_no_private_fields(env):
     asyncio.run(command(env, '/me', user=VIEWER))
     mid = next(mid for (chat, mid), p in reversed(list(env.tg.messages.items())) if chat == str(GROUP) and 'ViewerA' in p.get('text', ''))
     text = env.tg.text(GROUP, mid)
-    for expected in ('ViewerA', '白名单', '永久', '积分', '50', '近24小时', '本月流量', '带宽'):
+    for expected in ('ViewerA', '白名单', '永久', '积分', '50', '近24小时', '带宽'):
         assert expected in text
+    # Byte usage is retired from the public card (docs/TRAFFIC_RETIREMENT.md).
+    assert '本月流量' not in text
     for forbidden in ('private-note', 'private-contact', '邀请码', '密码：', 'device_id', 'token', '来源', '采集', '《'):
         assert forbidden not in text
     assert env.tg.actions(GROUP, mid) == []

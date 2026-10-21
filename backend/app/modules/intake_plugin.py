@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
+import math
 import time
+from pathlib import Path
 from typing import Any
 
 from app.modules.intake import (
@@ -79,6 +82,32 @@ class IntakeStore:
         return out
 
 
+class IntakeSnapshotReader:
+    """Read an externally owned snapshot; generation, never copy time, defines age."""
+
+    def __init__(self, path: str) -> None:
+        self.path = Path(path)
+
+    def get(self) -> dict[str, Any]:
+        try:
+            with self.path.open(encoding="utf-8") as handle:
+                raw = handle.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError("oversized snapshot")
+            data = json.loads(raw)
+            stamp = float(data["generated_at"])
+            if not math.isfinite(stamp) or stamp > time.time() + 30:
+                raise ValueError("invalid generation")
+            if any(not isinstance(data.get(k), dict) for k in
+                   ("emby", "refresh", "notify", "upload", "cloud", "downloader", "health")):
+                raise ValueError("invalid sections")
+            age = max(0, time.time() - stamp)
+            return {"available": True, "snapshot_age_seconds": round(age, 1),
+                    "stale": age > STALE_AFTER, "data": data}
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            return unavailable(f"external snapshot unavailable: {type(exc).__name__}")
+
+
 class IntakePipelinePlugin(Plugin):
     """Collects the intake snapshot on a timer."""
 
@@ -129,6 +158,8 @@ class IntakePipelinePlugin(Plugin):
         store = getattr(self.ctx, "intake_store", None)
         if store is None:
             return {"ok": False, "error": "采集存储未初始化"}
+        if isinstance(store, IntakeSnapshotReader):
+            return {"ok": False, "error": "由外部现役采集调度管理，请等待下个自动周期"}
         collector = IntakeCollector(
             paths=getattr(self.ctx, "intake_paths", None) or IntakePaths(),
             fs=getattr(self.ctx, "intake_fs", None) or FsReader(),

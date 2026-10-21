@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>会员面板</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<link rel="stylesheet" href="/app/assets/app.css">
+</head>
+<body>
+<div id="app">
+  <main id="screen" class="screen" aria-live="polite"><div class="loading"><span class="spin"></span>加载中…</div></main>
+  <nav id="tabbar" class="tabbar" hidden>
+    <button type="button" data-tab="me"><i>👤</i>我的</button>
+    <button type="button" data-tab="rank"><i>🏆</i>排行</button>
+    <button type="button" data-tab="req"><i>🎬</i>求片</button>
+    <button type="button" data-tab="bag"><i>🎒</i>背包</button>
+  </nav>
+</div>
+<div id="layer" hidden></div>
+<div id="toast" role="status" hidden></div>
+<script src="/app/assets/app.js"></script>
+</body>
+</html>

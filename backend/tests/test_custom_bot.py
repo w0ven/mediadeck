@@ -33,7 +33,7 @@ def test_custom_actual_purchase_privately_delivers_or_preserves_failure_once_and
         await click(env, 'shop', mid, chat=VIEWER, user=VIEWER)
         assert '购买后私密内容' not in env.tg.text(VIEWER, mid)
         await click(env, f"buy:{item['id']}", mid, chat=VIEWER, user=VIEWER)
-        assert '保留7天' in env.tg.text(VIEWER, mid) and '购买后私密内容' not in env.tg.text(VIEWER, mid)
+        assert '保留 7 天' in env.tg.text(VIEWER, mid) and '购买后私密内容' not in env.tg.text(VIEWER, mid)
         await click(env, f"buyok:{item['id']}", mid, chat=VIEWER, user=VIEWER)
         await click(env, f"buyok:{item['id']}", mid, chat=VIEWER, user=VIEWER)
         card = env.services.bag.items('u1')[0]
@@ -44,7 +44,7 @@ def test_custom_actual_purchase_privately_delivers_or_preserves_failure_once_and
         assert '&lt;&amp;&gt;' in private[0]['text']
         feedback = [p for method, p in env.tg.calls if method == 'sendMessage' and '兑换成功' in p.get('text', '')][-1]
         assert feedback['reply_parameters']['message_id'] == mid
-        assert ('私聊说明发送未确认' in feedback['text']) is fail_notice
+        assert ('使用说明未确认送达' in feedback['text']) is fail_notice
         mid = await click(env, 'inventory', mid, chat=VIEWER, user=VIEWER)
         assert f"notice:{card['id']}" in {b['callback_data'] for b in env.tg.actions(VIEWER, mid)}
         assert '购买后私密内容' not in env.tg.text(VIEWER, mid)

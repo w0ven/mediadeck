@@ -161,12 +161,10 @@ class LevelLifecyclePlugin(Plugin):
                 conn.execute('INSERT INTO activity_notices VALUES(?,?,?,NULL,?) ON CONFLICT(user_id,expiry,stage) DO UPDATE SET retry_at=excluded.retry_at',
                              (uid, expiry, stage, now+300))
             info = levels.status(uid, now)
-            q = info['qualification']
-            body = (f"保号提醒：近30天核验{int(q['seconds']//60)}/80分钟，{q['days']}/3合格日。\n"
-                    f"续费{info['renewal_price']}积分，余额缺口{info['shortfall']}。\n"
+            body = (f"保号提醒：续费30天需{info['renewal_price']}积分，余额缺口{info['shortfall']}。\n"
                     f"到期：{datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
                     f"删除候选时间：{datetime.fromtimestamp(expiry+3*DAY, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
-                    '到期停止播放，保留期间仍可查看/达标续费。/activity 查看，/renew30 续30天；自动保号需主动开启。')
+                    '到期停止播放，保留期间仍可查看/积分续费。/activity 查看，/renew30 续30天；自动保号需主动开启。')
             try:
                 acknowledged = await bot.send(chat, body)
             except Exception:  # noqa: BLE001 - retain retry without claiming delivery

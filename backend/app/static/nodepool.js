@@ -38,7 +38,6 @@ function nodePoolCard(n) {
     <div class="card-body">
       <div class="stat-grid">
         ${stat('▶', n.active_streams || 0, '活跃流', '探针实时值')}
-        ${stat('⇅', egressCell(n), '出口带宽', `占用率 ${util}% · 包含非播放流量`)}
         ${stat('◔', poolProbeAge(n), '探针', n.ok ? '最近一次成功' : '当前失败')}
       </div>
       <div class="form-row"><label for="np-enabled-${id}">参与调度</label>
@@ -54,8 +53,8 @@ function nodePoolCard(n) {
           value="${esc(n.bandwidth_mbps)}" style="width:110px">
         <span class="muted">Mbps，0 表示未知（只按路数判断负载）</span></div>
       <div class="toolbar">
-        <button class="btn primary np-save" data-node="${id}">保存</button>
-        <span class="np-result muted" data-node="${id}"></span>
+        <button class="btn primary np-save" data-node="${id}">保存调度参数</button>
+        <span class="np-result muted" data-live-preserve data-node="${id}"></span>
       </div>
     </div>
   </div>`;
@@ -77,14 +76,12 @@ function paintNodePool(model, context) {
   const enabled = nodes.filter((n) => n.enabled);
   const online = nodes.filter((n) => n.available).length;
   const streams = nodes.reduce((a, n) => a + (n.active_streams || 0), 0);
-  const egress = egressSummary(nodes);
 
   renderView(`
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${nodes.length}`, '在线节点',
     `${enabled.length} 个参与调度`)}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
-      ${stat('⇅', egress.text, '出口带宽', egress.sub)}
       ${stat('⚖', dispatch.policy === 'affinity' ? '文件亲和' : '最低负载', '调度策略',
     `阈值 ${Math.round(Number(dispatch.load_threshold || 0) * 100)}%`)}
     </div>
@@ -95,6 +92,7 @@ function paintNodePool(model, context) {
 
   document.querySelectorAll('.np-save').forEach((btn) => {
     btn.onclick = () => saveNodePool(btn.dataset.node);
+    btn.closest('.card')?.classList.toggle('unsaved', hasDraft('nodepool', btn.dataset.node));
   });
 }
 registerLiveUpdater('nodepool', ['nodes'], (topic, payload, context) => {
@@ -106,6 +104,20 @@ registerLiveUpdater('nodepool', ['nodes'], (topic, payload, context) => {
   }
   if (topic === 'nodes') paintNodePool(model, context);
 });
+
+// Edits are per node card; mark the card until its own save succeeds so a
+// draft is visible and navigation asks before discarding it.
+function nodePoolDraft(e) {
+  if (state.page !== 'nodepool') return;
+  const input = e.target.closest?.('.np-enabled,.np-weight,.np-bandwidth');
+  if (!input) return;
+  markDraft('nodepool', input.dataset.node);
+  const result = document.querySelector(`.np-result[data-node="${CSS.escape(input.dataset.node)}"]`);
+  if (result) { result.textContent = '有未保存的修改'; result.className = 'np-result muted'; }
+  input.closest('.card')?.classList.add('unsaved');
+}
+document.addEventListener('input', nodePoolDraft);
+document.addEventListener('change', nodePoolDraft);
 
 async function saveNodePool(name) {
   const pick = (cls) => document.querySelector(`.${cls}[data-node="${CSS.escape(name)}"]`);
@@ -119,6 +131,10 @@ async function saveNodePool(name) {
     weight: Number(pick('np-weight').value),
     bandwidth_mbps: Number(pick('np-bandwidth').value),
   };
+  const node = (PAGE_MODELS.nodepool?.nodes || []).find((n) => n.name === name);
+  if (node && node.enabled && !payload.enabled && !(await deckConfirm(
+    `停止调度节点 ${name}？\n保存后调度不再选中该节点，新的播放不会分配给它，直到重新勾选「参与调度」。`,
+    {title: '停止调度', confirmText: '停止调度', danger: true}))) return;
   btn.disabled = true;
   if (result) { result.textContent = '保存中…'; result.className = 'np-result muted'; }
   try {
@@ -126,8 +142,10 @@ async function saveNodePool(name) {
       method: 'PUT', body: JSON.stringify(payload),
     });
     const changed = Object.keys(saved.changed || {});
-    toast(changed.length ? `已保存并生效：${changed.join(', ')}` : '没有变化');
-    if (result?.isConnected) result.textContent = '已保存；其他输入仍保留。';
+    markDraft('nodepool', name, false);
+    btn.closest('.card')?.classList.remove('unsaved');
+    toast(changed.length ? `${name} 已保存并生效：${changed.join(', ')}` : `${name} 没有变化`);
+    if (result?.isConnected) result.textContent = '已保存；其他节点的输入仍保留。';
   } catch (e) {
     toast('保存失败: ' + e.message, 1);
     if (result) {

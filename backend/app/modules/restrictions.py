@@ -216,9 +216,16 @@ class RestrictionService:
                     if not current or self.exempt(uid, current):
                         status, result = "failed", "账号权限已变化，未执行删除"
                     elif await self.emby.delete_user(uid):
+                        case_id = None
                         if member:
-                            self.members.delete(uid, actor="restriction", cascade=False)
-                        result = "账号已删除（不连带删除其他账号）"
+                            gone = self.members.delete(uid, actor="restriction", cascade=False, source="violation")
+                            try:
+                                from app.modules.invite_tree import InviteTree
+                                case_id = InviteTree(self.members._db, self.members).open_case(
+                                    (gone or {}).get("departures", {}).get(uid), "violation", "restriction")
+                            except Exception:  # noqa: BLE001 - the deletion itself already happened
+                                case_id = None
+                        result = "账号已删除；邀请人待管理员处理" if case_id else "账号已删除（不连带删除其他账号）"
                     else:
                         status, result = "failed", "删除未确认成功；本次请求已拒绝，需管理员核实"
                 if (safe.get("playing") or client_rule) and status == "done":
@@ -246,7 +253,7 @@ class RestrictionService:
         limits = []
         if member.get("status") == "pending":
             limits.append("待开通")
-        if state in ("expired", "exhausted"):
+        if state == "expired":
             limits.append(reason)
         policy = (user or {}).get("Policy") or {}
         if policy.get("EnableRemoteAccess") is False:

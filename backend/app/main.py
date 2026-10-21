@@ -32,10 +32,9 @@ from app.core.config import settings
 from app.core.db import Database
 from app.core.errors import ConfigError, ConflictError, NotConfigured, UpstreamError
 from app.core.store import SettingsStore
-from app.modules import activity_api, member_ops
+from app.modules import activity_api, member_ops, miniapp
 from app.modules.access import AccessRules
 from app.modules.downloaders import MockDownloader, QbittorrentClient
-from app.modules.edgelog import MAX_LINES_PER_INGEST, TrafficLedger
 from app.modules.enforcement import EnforcementService
 from app.modules.entries import entry_target, identify_entry
 from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
@@ -45,12 +44,10 @@ from app.modules.groups import WHITELIST_GROUP_ID, GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
 from app.modules.imports import ImportManager, JobKind, MockExecutor
 from app.modules.intake import FsReader, IntakePaths
-from app.modules.intake_plugin import IntakeStore
+from app.modules.intake_plugin import IntakeSnapshotReader, IntakeStore
 from app.modules.inventory import InventoryService
 from app.modules.levels import LevelService
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
-from app.modules.metering import UNIT as METER_UNIT
-from app.modules.metering import MeasuredMeteringService
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
 from app.modules.playback import (
@@ -286,7 +283,10 @@ async def _startup() -> None:
     # Assembled here so the collector's three seams (paths, filesystem, media
     # server) are all injected from one place, and so mock mode gets a fully
     # populated page without touching a real host.
-    app.state.intake_store = IntakeStore()
+    app.state.intake_store = (
+        IntakeSnapshotReader(cfg.intake_snapshot_path)
+        if cfg.intake_snapshot_path and not cfg.mediadeck_mock else IntakeStore()
+    )
     app.state.intake_paths = IntakePaths.from_mapping(cfg.intake_paths())
     app.state.intake_downloaders = _build_downloaders(cfg)
     if cfg.mediadeck_mock or not cfg.repo_root:
@@ -355,9 +355,7 @@ async def _startup() -> None:
     )
 
     # ---- membership, billing, statistics --------------------------------
-    # Operational data lives in SQLite rather than the settings JSON: traffic
-    # accounting appends continuously and has to answer aggregate questions,
-    # which a rewritten-in-full document cannot do safely.
+    # Playback evidence and membership remain in SQLite; traffic archives are untouched.
     app.state.db = Database(cfg.data_dir / "mediadeck.db")
     app.state.groups = GroupService(app.state.db)
     app.state.groups.seed_defaults()
@@ -367,22 +365,6 @@ async def _startup() -> None:
     app.state.stats = StatsService(
         app.state.db, history_path='' if cfg.mediadeck_mock else cfg.mediadeck_playback_history_db,
         history_timezone=cfg.mediadeck_playback_history_timezone,
-        measured_cutover=lambda: bool(
-            app.state.settings_service.metering_config().get("cutover")),
-    )
-    # Bytes measured on the edge. Kept separate from the sampled estimate in
-    # usage_daily: conflating a measurement with a guess is what made the old
-    # traffic figure unsafe to act on.
-    app.state.ledger = TrafficLedger(app.state.db)
-    app.state.metering = MeasuredMeteringService(
-        app.state.db,
-        tag_to_user=_tag_map,
-        expected_nodes=lambda: [n.name for n in app.state.settings_service.nodes() if n.enabled],
-    )
-    app.state.members.bind_metering(
-        app.state.metering,
-        cutover=lambda: bool(
-            app.state.settings_service.metering_config().get("cutover")),
     )
     # Points are a ledger, so the service is a thin wrapper over the database
     # and can be built as soon as it exists. The shop is what spends them.
@@ -433,15 +415,10 @@ async def _startup() -> None:
         return ""
 
     async def usage_loop() -> None:
-        """Sample playback, roll billing periods, and keep caches bounded.
+        """Verified viewing/rewards, playback safety and bounded cache housekeeping.
 
-        One loop rather than several timers: these steps must not interleave
-        (rolling a period while sampling could reset a quota mid-write), and
-        serialising them keeps the ordering obvious.
-
-        Every step is individually guarded: a failure in housekeeping must not
-        stop metering, because unmetered playback is the one outcome that
-        costs money.
+        Traffic accounting, monthly quota resets and byte reporting are retired.
+        Viewing evidence must continue even if an unrelated housekeeping step fails.
         """
         housekeeping_due = 0.0
         prune_due = 0.0
@@ -472,8 +449,6 @@ async def _startup() -> None:
                     await run_usage_io(app.state.members.sync_emby, users, apply=True)
             if now >= housekeeping_due:
                 housekeeping_due = now + 600
-                with contextlib.suppress(Exception):
-                    await run_usage_io(app.state.members.roll_periods)
                 # Enforcement only writes to Emby once the operator has
                 # switched it on; until then the panel observes and reports.
                 if membership["enforcement_enabled"]:
@@ -588,8 +563,9 @@ async def _startup() -> None:
         Off the startup path: a slow or unreachable media server must delay a
         diagnostic page, never the panel itself.
         """
-        with contextlib.suppress(Exception):
-            await app.state.plugins.run_now("intake_pipeline", trigger="startup")
+        if not isinstance(app.state.intake_store, IntakeSnapshotReader):
+            with contextlib.suppress(Exception):
+                await app.state.plugins.run_now("intake_pipeline", trigger="startup")
 
     app.state.intake_prime_task = asyncio.create_task(_prime_intake())
 
@@ -711,7 +687,7 @@ async def root(request: Request,
     if ver:
         for asset in ("app.css", "app.js", "intake.js", "nodepool.js", "ops.js",
                       "members.js", "workspace.js", "workspace.css", "hardglass.css",
-                      "dialog.js", "activity_admin.js"):
+                      "dialog.js", "activity_admin.js", "invites.js"):
             html = html.replace(f"/static/{asset}", f"/static/{asset}?v={ver}")
     return HTMLResponse(html)
 
@@ -764,7 +740,7 @@ async def agent_loadprobe() -> FileResponse:
 
 @app.get("/agent/flowmeter.py", include_in_schema=False)
 async def agent_flowmeter() -> FileResponse:
-    return _agent_file("flowmeter.py")
+    raise HTTPException(410, 'Byte-flow collection is retired; update the access-policy agent instead')
 
 
 @app.get("/agent/meterd.py", include_in_schema=False)
@@ -992,7 +968,7 @@ async def intake() -> dict[str, Any]:
     the collection walks thousands of files and tails a large log, and this
     page auto-refreshes.
     """
-    return app.state.intake_store.get()
+    return await asyncio.to_thread(app.state.intake_store.get)
 
 
 @app.post("/api/intake/refresh", dependencies=[Depends(_auth)])
@@ -1278,22 +1254,10 @@ async def node_install_script(name: str) -> dict[str, Any]:
 
 # ---- edge traffic ingestion ------------------------------------------------
 def _meter_policy_snapshot() -> dict[str, Any]:
-    """Authoritative deny set. Empty list is a real snapshot, not 'keep last'.
-
-    Quota-exhausted tags are blocked under cutover. Manual suspended/pending
-    and expired members stay blocked so a reset or extra-traffic grant cannot
-    reopen them. Nodes apply this only on a successful ingest.
-    """
-    cutover = bool(app.state.settings_service.metering_config().get("cutover"))
-    blocked: list[str] = []
-    if cutover:
-        for member in app.state.members.list(limit=5000):
-            state = str(member.get("state") or "")
-            stored = str(member.get("status") or "")
-            if stored in ("suspended", "pending") or state in (
-                    "exhausted", "suspended", "pending", "expired"):
-                blocked.append(user_tag(member["emby_user_id"]))
-    return app.state.metering.publish_policy(blocked)
+    """Access policy only: no byte counters, quota decisions or policy ledger writes."""
+    blocked = [user_tag(m['emby_user_id']) for m in app.state.members.list(limit=None)
+               if m.get('state') in ('suspended', 'pending', 'expired')]
+    return {'snapshot': True, 'rev': int(time.time()), 'blocked_tags': sorted(blocked)}
 
 
 def _tag_map() -> dict[str, str]:
@@ -1322,115 +1286,58 @@ def _edge_node_or_401(name: str, request: Request) -> Any:
 
 @app.get("/api/edge/{name}/cursors", include_in_schema=False)
 def edge_cursors(name: str, request: Request) -> dict[str, Any]:
-    """Where this node's logs have been consumed to.
-
-    The panel owns the cursors because it is the party that must not double
-    count; a node-side copy would diverge after any restore.
-    """
     _edge_node_or_401(name, request)
-    rows = app.state.db.query(
-        "SELECT path, inode, offset, updated_at FROM edge_cursors WHERE node=?",
-        (name,))
-    return {"node": name, "cursors": [dict(r) for r in rows]}
+    return {'ok': True, 'retired': True, 'reason': 'traffic_accounting_retired', 'node': name, 'cursors': []}
 
 
 @app.post("/api/edge/{name}/report", include_in_schema=False)
-def edge_report(name: str, request: Request,
-                payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    """Accept one batch of access-log lines from a node.
-
-    Authenticated by the node's own long-lived credential rather than the
-    panel admin login: this runs unattended on the node, and giving it an
-    operator credential would put a far more powerful secret on every edge.
-    """
+def edge_report(name: str, request: Request) -> dict[str, Any]:
+    """Acknowledge old reporters without parsing, retaining or accounting their bytes."""
     _edge_node_or_401(name, request)
-    lines = payload.get("lines")
-    if not isinstance(lines, list):
-        raise HTTPException(422, "lines must be a list")
-    if len(lines) > MAX_LINES_PER_INGEST:
-        raise HTTPException(413, "batch too large")
-
-    ledger: TrafficLedger = app.state.ledger
-    try:
-        result = ledger.ingest_batch(name, payload, _tag_map())
-    except (ValueError, TypeError, OverflowError):
-        raise HTTPException(422, "invalid log cursor or batch; refresh cursors") from None
-    return {"ok": True, "node": name, "lines": len(lines),
-            "events": result["rows"], "bytes": result["bytes"],
-            "unknown_bytes": result["unknown_bytes"]}
-
-
-# Preserve ingest -> policy publish -> sent/applied ordering across requests,
-# now that their blocking database work runs in FastAPI's worker pool.
-_measured_report_lock = threading.Lock()
+    return {'ok': True, 'retired': True, 'reason': 'traffic_accounting_retired', 'node': name,
+            'accepted': False, 'events': 0, 'bytes': None, 'unknown_bytes': None}
 
 
 @app.post("/api/edge/{name}/measured", include_in_schema=False)
 def edge_measured(name: str, request: Request,
                   payload: dict[str, Any] = Body(...)) -> dict[str, Any]:  # noqa: B008
-    """Idempotent measured-flow envelope from meterd."""
+    """Legacy acknowledgement only; policy remains independent of traffic."""
     _edge_node_or_401(name, request)
-    if str(payload.get("node") or name) != name:
-        raise HTTPException(422, "node mismatch")
-    if payload.get("unit") not in (None, "", METER_UNIT) and payload.get("unit") != METER_UNIT:
-        raise HTTPException(422, "unsupported unit")
-    payload["node"] = name
-    with _measured_report_lock:
-        result = app.state.metering.ingest(payload)
-        policy = _meter_policy_snapshot()
-        app.state.metering.note_policy_sent(name, int(policy["rev"]))
-        applied = payload.get("policy_applied_rev")
-        if applied is not None:
-            try:
-                app.state.metering.note_policy_applied(name, int(applied))
-            except (TypeError, ValueError):
-                pass
-    result["blocked_tags"] = policy["blocked_tags"]
-    result["unblock_tags"] = []
-    result["policy"] = policy
-    result["policy_rev"] = policy["rev"]
-    result["policy_sent_rev"] = policy["rev"]
-    return result
+    if str(payload.get('node') or name) != name:
+        raise HTTPException(422, 'node mismatch')
+    policy = _meter_policy_snapshot()
+    return {'ok': True, 'retired': True, 'reason': 'traffic_accounting_retired', 'accepted': False,
+            'ack': {'boot_id': payload.get('boot_id'), 'seq': payload.get('seq')},
+            'policy': policy, 'blocked_tags': policy['blocked_tags'], 'policy_rev': policy['rev']}
+
+
+@app.get("/api/edge/{name}/policy", include_in_schema=False)
+def edge_access_policy(name: str, request: Request) -> dict[str, Any]:
+    """Node security snapshot, intentionally independent of byte reporting."""
+    _edge_node_or_401(name, request)
+    return {'ok': True, 'traffic_tracking': False, 'policy': _meter_policy_snapshot()}
 
 
 @app.get("/api/metering", dependencies=[Depends(_auth)])
 async def metering_status() -> dict[str, Any]:
-    cfg = app.state.settings_service.metering_config()
-    totals = await asyncio.to_thread(app.state.metering.totals)
-    return {
-        "config": cfg,
-        "totals": totals,
-        "cutover": cfg.get("cutover"),
-        "status": cfg.get("status"),
-    }
+    return {'retired': True, 'status': 'retired', 'cutover': False, 'totals': None,
+            'reason': 'traffic_accounting_retired', 'history_preserved': True}
 
 
 @app.post("/api/metering/cutover", dependencies=[Depends(_auth)])
 async def metering_cutover(payload: dict[str, Any] = Body(...),  # noqa: B008
                            user: str = Depends(_auth)) -> dict[str, Any]:
-    saved = app.state.settings_service.save_metering(payload)
-    app.state.members.audit(user, "metering.cutover", "",
-                            f"cutover={saved.get('cutover')} confirmed={saved.get('baseline_confirmed')}")
-    return saved
+    raise HTTPException(410, '流量统计与流量配额已停用，历史记录保留')
 
 
 @app.get("/api/edge/status", dependencies=[Depends(_auth)])
 def edge_status(days: int = 30) -> dict[str, Any]:
-    """Ledger health: coverage, per-node totals and unattributed bytes."""
-    days = max(1, min(int(days or 30), 400))
-    ledger: TrafficLedger = app.state.ledger
-    return {
-        **ledger.status(),
-        "nodes": ledger.node_totals(days),
-        "unattributed": ledger.unattributed(days),
-        "days": days,
-    }
+    return {'retired': True, 'status': 'retired', 'nodes': [], 'unattributed': [], 'history_preserved': True}
 
 
 @app.post("/api/edge/relink", dependencies=[Depends(_auth)])
 async def edge_relink() -> dict[str, int]:
-    """Attach tags to rows ingested before their member was known."""
-    return {"updated": app.state.ledger.relink(_tag_map())}
+    raise HTTPException(410, '流量上报已退役，不再改写历史归属')
 
 
 @app.get("/api/nodes/{name}/report-token", dependencies=[Depends(_auth)])
@@ -2018,56 +1925,9 @@ async def emby_latest(limit: int = 12) -> list[dict[str, Any]]:
 
 
 async def _sessions_with_speed() -> list[dict[str, Any]]:
-    """Active sessions annotated with live bandwidth.
-
-    Shared by the REST endpoint and the SSE topic on purpose: when only the
-    REST path decorated the payload, speeds appeared on manual refresh and
-    vanished on every live push, which reads as "the number is frozen".
-
-    Only node-measured TCP payload is a live rate. Missing attribution or
-    origin traffic remains unknown; media bitrate is not a network measurement.
-    """
-    # Short TTL: sessions must still feel live, but a 30s auto-refresh plus
-    # page switches should not hammer Emby.
-    sessions = await app.state.cache.resolve(
-        "emby:sessions", app.state.emby.active_sessions, ttl=5
-    )
-    speed_view = app.state.scheduler.user_speed_view()
-    out = []
-    for session in sessions:
-        s = dict(session)
-        tag = user_tag(str(s.get("UserId") or ""))
-        sample = speed_view.get(tag) if tag else None
-        if sample is not None and sample.get("bps") is not None:
-            # Node rates are per user tag, not per Emby session row.
-            s["SpeedScope"] = "user"
-            s["SpeedBps"] = int(sample["bps"])
-            s["SpeedSource"] = sample.get("source") or "node"
-            s["SpeedReason"] = None
-            s["SpeedCollectedAt"] = sample.get("collected_at")
-            s["SpeedCoverage"] = sample.get("coverage")
-        elif sample is not None:
-            s["SpeedScope"] = "user"
-            s["SpeedBps"] = None
-            s["SpeedSource"] = "unknown"
-            s["SpeedReason"] = sample.get("reason") or "unmeasured"
-            s["SpeedCollectedAt"] = sample.get("collected_at")
-            s["SpeedCoverage"] = sample.get("coverage")
-        else:
-            s['SpeedScope'] = 'user'
-            s['SpeedBps'] = None
-            s['SpeedSource'] = 'unknown'
-            s['SpeedReason'] = 'no_measured_sample'
-            s['SpeedCollectedAt'] = None
-            s['SpeedCoverage'] = 'none'
-        s['SpeedTimeBasis'] = sample.get('time_basis') if sample else None
-        s['SpeedWindowSeconds'] = sample.get('window_seconds') if sample else None
-        s['SpeedNodes'] = sample.get('nodes', []) if sample else []
-        s['SpeedAccountSessions'] = sum(1 for other in sessions if other.get('UserId') == s.get('UserId'))
-        s["SpeedMBps"] = (
-            round(s["SpeedBps"] / 1048576, 1) if s["SpeedBps"] is not None else None)
-        out.append(s)
-    return out
+    """Live playback sessions; no user/network byte-rate observation."""
+    sessions = await app.state.cache.resolve('emby:sessions', app.state.emby.active_sessions, ttl=5)
+    return [{k: v for k, v in session.items() if not k.startswith('Speed')} for session in sessions]
 
 
 @app.get("/api/emby/sessions", dependencies=[Depends(_auth)])
@@ -2326,16 +2186,10 @@ async def members_list(status: str | None = None, group_id: str | None = None,
     balances = {}
     with contextlib.suppress(Exception):
         balances = await asyncio.to_thread(app.state.points.balances)
-    edge = {}
-    with contextlib.suppress(Exception):
-        edge = await asyncio.to_thread(app.state.ledger.summary_for_users)
     for member in members:
         member.update(playback[member['emby_user_id']])
         member["watch_hours"] = hours.get(member["emby_user_id"], 0.0)
         member["points"] = balances.get(member["emby_user_id"], 0)
-        member["edge"] = edge.get(member["emby_user_id"],
-                                  {"bytes_7d": 0, "bytes_30d": 0,
-                                   "bytes_total": 0})
     known = await asyncio.to_thread(member_ops.known_member_ids, app.state.members)
     emby_users, unmanaged_error = await _member_emby_snapshot()
     if emby_users:
@@ -2476,7 +2330,6 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
     series = stats.get("series") or []
     usage = {
         "days": days,
-        "bytes": sum(int(p.get("bytes") or 0) for p in series),
         "hours": round(float((stats.get('viewing') or {}).get('seconds') or 0) / 3600, 2),
         "plays": int((stats.get('viewing') or {}).get('plays') or 0),
         "series": series,
@@ -2485,12 +2338,9 @@ async def members_get(user_id: str, days: int = 30) -> dict[str, Any]:
     sessions = []
     with contextlib.suppress(Exception):
         sessions = await app.state.emby.sessions_for_user(user_id)
-    edge_detail = {}
-    with contextlib.suppress(Exception):
-        edge_detail = app.state.ledger.member_detail(user_id, days)
     return {
         **detail,
-        "edge": edge_detail,
+        "traffic_tracking": False,
         "points": app.state.points.balance(user_id),
         "points_ledger": app.state.points.ledger(user_id, 20),
         "activity_levels": await asyncio.to_thread(app.state.levels.status, user_id),
@@ -2588,12 +2438,70 @@ async def members_delete(user_id: str, request: Request, delete_emby: bool = Tru
     if "delete_emby" in payload:
         delete_emby = bool(payload["delete_emby"])
     try:
-        return await member_ops.execute_delete(
+        result = await member_ops.execute_delete(
             app.state.members, app.state.emby, user_id, actor=user,
             cascade=cascade, delete_emby=delete_emby,
-            confirm_ids=payload.get("confirm_ids"))
+            confirm_ids=payload.get("confirm_ids"), review_source="admin")
     except KeyError:
         raise HTTPException(404, "unknown member") from None
+    _announce_invite_cases()
+    return result
+
+
+def _announce_invite_cases() -> None:
+    bot = getattr(app.state, "telegram", None)
+    if bot is not None and hasattr(bot, "announce_invite_cases"):
+        bot.announce_invite_cases()
+
+
+def _invite_tree() -> Any:
+    from app.modules.invite_tree import InviteTree
+    return InviteTree(app.state.members._db, app.state.members)
+
+
+@app.get("/api/members/{user_id}/invite-tree", dependencies=[Depends(_auth)])
+async def member_invite_tree(user_id: str) -> dict[str, Any]:
+    from app.modules.invite_tree import active_suspension
+    tree = _invite_tree()
+    if app.state.members.get(user_id) is None:
+        raise HTTPException(404, "unknown member")
+    def build() -> dict[str, Any]:
+        return {"upstream": tree.upstream(user_id),
+                "downstream": tree.downstream(user_id, depth=4),
+                "descendants": tree.count_descendants(user_id),
+                "suspension": active_suspension(tree.db, user_id),
+                "cases": tree.cases_for(user_id)}
+    return await asyncio.to_thread(build)
+
+
+@app.delete("/api/members/{user_id}/invite-suspension", dependencies=[Depends(_auth)])
+async def member_invite_unsuspend(user_id: str, user: str = Depends(_auth)) -> dict[str, Any]:
+    return {"lifted": _invite_tree().lift(user_id, actor=user)}
+
+
+@app.get("/api/invite-cases", dependencies=[Depends(_auth)])
+async def invite_cases(status: str = "pending") -> dict[str, Any]:
+    tree = _invite_tree()
+    return {"cases": await asyncio.to_thread(tree.cases, "pending" if status == "pending" else None)}
+
+
+@app.post("/api/invite-cases/{case_id}/decide", dependencies=[Depends(_auth)])
+async def invite_case_decide(case_id: int, request: Request, user: str = Depends(_auth)) -> dict[str, Any]:
+    from app.modules.invite_tree import CASE_ACTIONS, decide_case
+    body = await request.json()
+    action = str((body or {}).get("action") or "")
+    if action not in CASE_ACTIONS:
+        raise HTTPException(400, "未知操作")
+    if action == "delete" and (body or {}).get("confirm") is not True:
+        raise HTTPException(400, "删除邀请人需要明确确认")
+    try:
+        case = await decide_case(_invite_tree(), app.state.emby, case_id, action, actor=user)
+    except KeyError:
+        raise HTTPException(404, "unknown case") from None
+    bot = getattr(app.state, "telegram", None)
+    if bot is not None and hasattr(bot, "refresh_invite_case"):
+        await bot.refresh_invite_case(case_id)
+    return case
 
 
 @app.get("/api/members/{user_id}/group-preview", dependencies=[Depends(_auth)])
@@ -2855,16 +2763,7 @@ async def members_bulk(payload: dict[str, Any] = Body(...),  # noqa: B008
 
 @app.post("/api/members/{user_id}/reset-traffic", dependencies=[Depends(_auth)])
 async def members_reset_traffic(user_id: str, user: str = Depends(_auth)) -> dict[str, Any]:
-    try:
-        member = app.state.members.reset_traffic(user_id, actor=user)
-        _meter_policy_snapshot()
-    except KeyError:
-        raise HTTPException(404, "unknown member") from None
-    if app.state.settings_service.membership_config()["enforcement_enabled"]:
-        remote = await app.state.enforcement.enforce_now(user_id, "traffic reset")
-        return member_ops.merge_action(member, remote)
-    return member_ops.merge_action(member, member_ops.action_result(
-        local_ok=True, remote_ok=None))
+    raise HTTPException(410, '流量统计已停用，历史记录保留且不可重置')
 
 
 async def _manual_account_action(user_id: str, action: str, payload: dict[str, Any],
@@ -3765,3 +3664,4 @@ async def cached_image(item_id: str, image_type: str, request: Request) -> Respo
 
 
 activity_api.register(app, _auth)
+miniapp.register(app)

@@ -408,12 +408,10 @@ def test_real_snapshot_none_is_presented_without_mutating_usage(env, health, cha
     async def run():
         mid = await command(env, '/me', chat=chat, user=VIEWER)
         text = env.tg.text(chat, mid)
-        if health == 'healthy':
-            assert '暂无记录' in text and '剩余：<b>1.0 TiB</b>' in text
-            assert '0 B' not in text
-        else:
-            assert '计量暂不可用' in text and '剩余：<b>暂无法确认</b>' in text
-            assert '剩余：<b>1.0 TiB</b>' not in text
+        # Byte usage is retired (docs/TRAFFIC_RETIREMENT.md): whatever the old
+        # node health, the card shows no usage block, zero or unknown placeholder.
+        assert '本月流量' not in text and '计量暂不可用' not in text
+        assert '已用：' not in text and '剩余：' not in text and '0 B' not in text
         for hidden in ('采集', '来源', 'local', 'boot'):
             assert hidden not in text
     asyncio.run(run())
@@ -429,8 +427,10 @@ def test_unlimited_and_numeric_measurement_text_remain_truthful(env, used):
     env.members.upsert('u1', 'ViewerA', {'group_id': 'whitelist'})
     mid = asyncio.run(command(env, '/me', user=VIEWER))
     text = env.tg.text(GROUP, mid)
-    assert '剩余：<b>不限</b>' in text
-    assert ('暂无记录' if used is None else '0 B' if used == 0 else '1.0 KiB') in text
+    # Retired usage: a bound legacy ledger can no longer surface any figure.
+    assert '剩余：' not in text and '已用：' not in text
+    assert '0 B' not in text and '1.0 KiB' not in text
+    assert '有效期' in text and '带宽' in text
 
 
 def test_receipt_label_uses_registration_handle(env):

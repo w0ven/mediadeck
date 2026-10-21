@@ -10,7 +10,7 @@ field that actually enforces it, so limits hold even when the panel is down:
     allow_transcode      -> Enable{Video,Audio}PlaybackTranscoding + Remuxing
     allow_download       -> EnableContentDownloading + sync conversion
     libraries            -> EnableAllFolders / EnabledFolders
-    expired/exhausted    -> IsDisabled
+    expired             -> IsDisabled
 
 Three rules keep this safe on a server with hundreds of pre-existing accounts:
 
@@ -37,7 +37,7 @@ from app.core.db import Database
 from app.modules.members import MemberService
 
 # States in which the account must not be able to play.
-BLOCKING_STATES = ("expired", "exhausted", "suspended", "pending")
+BLOCKING_STATES = ("expired", "suspended", "pending")
 
 # Policy keys this module owns. Anything outside this set is left exactly as
 # the operator configured it in Emby -- the panel manages access, not every
@@ -334,7 +334,7 @@ class EnforcementService:
                                        "error": err, "retryable": True}]),
         }
 
-    async def terminate_sessions(self, user_id: str, reason: str = "配额已用尽"
+    async def terminate_sessions(self, user_id: str, reason: str = "账号访问受限"
                                  ) -> int:
         """Stop this member's active playback.
 

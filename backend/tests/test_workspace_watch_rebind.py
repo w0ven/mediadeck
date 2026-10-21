@@ -154,15 +154,18 @@ def test_watch_queries_do_not_grow_with_member_count(rb):
     assert len([s for s in statements if s.startswith('SELECT')]) <= 5
 
 
-def test_measured_month_ignores_estimates_and_applies_credit_once(rb):
+def test_measured_month_is_retired_and_leaves_archived_rows_untouched(rb):
+    """Byte statistics are retired (docs/TRAFFIC_RETIREMENT.md): archived
+    measured rows stay in place but no longer surface as monthly usage."""
     month = datetime.now(UTC).strftime('%Y-%m')
     rb.db.execute('INSERT INTO measured_usage_monthly(node,emby_user_id,month,bytes,utag) VALUES(?,?,?,?,?)', ('n1','u1',month,1000,1))
     rb.db.execute('INSERT INTO measured_usage_monthly(node,emby_user_id,month,bytes,utag) VALUES(?,?,?,?,?)', ('n2','u1',month,2000,1))
     rb.db.execute('INSERT INTO measured_credits(emby_user_id,month,credit_bytes,updated_at) VALUES(?,?,?,?)', ('u1',month,500,1))
-    assert rb._stats.measured_month()['by_user']['u1'] == 2500
+    assert rb._stats.measured_month() == {'retired': True, 'period': None, 'by_user': {}}
     out = rb._stats.overview()
-    assert out['traffic']['month_bytes'] == 2500
-    assert out['traffic']['window_bytes'] is None
+    assert 'traffic' not in out and out['traffic_tracking'] is False
+    assert rb.db.one('SELECT SUM(bytes) AS b FROM measured_usage_monthly')['b'] == 3000
+    assert rb.db.one('SELECT credit_bytes FROM measured_credits')['credit_bytes'] == 500
 
 
 def test_member_entry_handoff_password_then_group_approval(rb):

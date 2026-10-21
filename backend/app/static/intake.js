@@ -168,11 +168,30 @@ function intakeUploadCard(upload) {
     ${card('本地缓冲区', '暂存、应急与隔离目录占用',
     buffers ? `<div class="card-body"><div class="stat-grid">${buffers}</div></div>`
       : intakeNA('未配置'))}
-    ${card('上传限速', '云端配额限制标记', limitBody)}`;
+    ${card('上传限速', '云端 API 调用频次与限速标记', limitBody)}`;
 }
 
 function intakeCloudCard(cloud) {
   if (!cloud) return card('云端拉取', '', intakeNA('未采集'));
+  if (cloud.source && cloud.source.role === 'cloud-download-owner') {
+    const source = `现役来源 ${cloud.source.host || '未知'}`;
+    const legacy = cloud.legacy_owner || {};
+    const note = legacy.status === 'disabled' && legacy.applicable === false
+      ? `<div class="muted">旧后端：停用 / 不适用（不计入现役健康）</div>` : '';
+    if (cloud.available === false) {
+      return card('云端拉取', source, intakeNA(cloud.reason) + note);
+    }
+    const stamp = cloud.generated_at == null ? '未知'
+      : new Date(cloud.generated_at * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'});
+    const gd = cloud.gd_upload || {};
+    return card('云端拉取', `${source} · 源状态 ${stamp}（北京时间）`,
+      `<div class="card-body"><div class="stat-grid">
+        ${stat('⇩', cloud.jobs, '现役115任务', 'dl job队列')}
+        ${stat('▶', cloud.active_files, '活动文件', '现役progress快照')}
+        ${stat('↥', gd.pending, 'GD待上传事件', 'dl实时计数')}
+        ${stat('✓', gd.done, 'GD完成事件', '历史累计回执，不是本轮完成量')}
+      </div><div>已识别待派发：${esc(cloud.backlog && cloud.backlog.rows)} · 实时下载：${esc(cloud.live_mibs)} MiB/s</div>${note}</div>`);
+  }
   const claims = cloud.claims;
   /* outstanding is null when the listing was capped: a partial listing cannot
      support claims-minus-receipts, and a fabricated backlog is worse than an

@@ -126,14 +126,29 @@ def test_bulk_writes_one_summary_line_for_the_whole_batch() -> None:
         ids = _enrol(client)
         before = len(_audit_items(client))
 
+        # reset-traffic used to be the example here; it is retired, so use a
+        # live bulk action (docs/TRAFFIC_RETIREMENT.md).
         client.post("/api/members/bulk", auth=ADMIN,
-                    json={"action": "reset-traffic", "user_ids": ids})
+                    json={"action": "renew", "user_ids": ids, "days": 7})
 
         entries = _audit_items(client)
         assert len(entries) > before
         summary = [e for e in entries
-                   if e.get("action") == "member.bulk.reset-traffic"]
+                   if e.get("action") == "member.bulk.renew"]
         assert len(summary) == 1, "exactly one summary line per batch"
         # The summary has to carry the outcome, otherwise it says nothing that
         # the per-member rows do not already say.
         assert f"ok={len(ids)}" in str(summary[0].get("detail", ""))
+
+
+def test_bulk_reset_traffic_never_rewrites_archived_usage() -> None:
+    """Retired traffic resets must not write to the archive through bulk either."""
+    with TestClient(app) as client:
+        ids = _enrol(client)
+        db = app.state.db
+        db.execute("UPDATE members SET traffic_used_bytes=4321")
+        r = client.post("/api/members/bulk", auth=ADMIN,
+                        json={"action": "reset-traffic", "user_ids": ids})
+        assert r.json()["ok"] == 0
+        rows = db.query("SELECT traffic_used_bytes FROM members")
+        assert rows and all(row["traffic_used_bytes"] == 4321 for row in rows)

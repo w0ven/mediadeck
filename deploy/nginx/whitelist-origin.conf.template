@@ -6,7 +6,7 @@ map "$uri:$arg_static" $md_wl_direct {
     ~*^/(?:emby/)?Videos/[^/]+/original(?:\.[A-Za-z0-9]+)?: 1;
     ~*^/(?:emby/)?Videos/[^/]+/stream(?:\.[A-Za-z0-9]+)?:(?:true|1)$ 1;
 }
-log_format md_whitelist '$time_iso8601 $remote_addr $request_method $uri $status $body_bytes_sent';
+log_format md_whitelist '$time_iso8601 $remote_addr $request_method $uri $status';
 server {
     listen __ORIGIN_IP__:8443 ssl http2;
     server_name __OFFICIAL_HOST__;

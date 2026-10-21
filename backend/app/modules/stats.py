@@ -235,17 +235,11 @@ class StatsService:
         members = self._db.query("SELECT * FROM members")
         groups = {g["id"]: g for g in self._db.query("SELECT * FROM groups")}
 
-        measured = self.measured_month()
-        cutover = bool(self._measured_cutover() if callable(self._measured_cutover)
-                       else self._measured_cutover)
         active = expired = exhausted = suspended = 0
         expiring_7d = []
         for m in members:
             group = groups.get(m.get("group_id") or "")
             m["effective"] = merge_effective(group, parse_overrides(m.get("overrides_json")), m)
-            if cutover:
-                m["quota_source"] = "measured"
-                m["measured_used_bytes"] = measured["by_user"].get(m["emby_user_id"])
             state, _reason = MemberService.effective_state(m, group, now)
             if state in ("suspended", "pending"):
                 suspended += 1
@@ -267,12 +261,12 @@ class StatsService:
                 })
 
         totals = self._db.one(
-            "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(seconds),0) AS secs,"
+            "SELECT COALESCE(SUM(seconds),0) AS secs,"
             " COALESCE(SUM(plays),0) AS plays, COALESCE(SUM(transcodes),0) AS trans"
             " FROM usage_daily WHERE day >= ?",
             (datetime.fromtimestamp(since, UTC).strftime("%Y-%m-%d"),)) or {}
         today_row = self._db.one(
-            "SELECT COALESCE(SUM(bytes),0) AS bytes, COALESCE(SUM(seconds),0) AS secs,"
+            "SELECT COALESCE(SUM(seconds),0) AS secs,"
             " COALESCE(SUM(plays),0) AS plays FROM usage_daily WHERE day = ?",
             (today,)) or {}
 
@@ -289,11 +283,8 @@ class StatsService:
                 "exhausted": exhausted,
                 "suspended": suspended,
             },
-            "traffic": {
-                "window_bytes": None,
-                "today_bytes": None,
-                "month_bytes": sum(measured['by_user'].values()) if measured['by_user'] else None,
-                "period": measured['period'],
+            "traffic_tracking": False,
+            "viewing": {
                 "window_hours": round(window['seconds']/3600, 1),
                 "today_hours": round(today_watch['seconds']/3600, 1),
                 "window_incomplete": window['incomplete'],
@@ -318,7 +309,7 @@ class StatsService:
         wanted = _day_list(days)
         rows = {
             r["day"]: r for r in self._db.query(
-                "SELECT day, SUM(bytes) AS bytes, SUM(seconds) AS secs,"
+                "SELECT day, SUM(seconds) AS secs,"
                 " SUM(plays) AS plays, COUNT(DISTINCT emby_user_id) AS users"
                 " FROM usage_daily WHERE day >= ? GROUP BY day", (wanted[0],))
         }
@@ -326,16 +317,15 @@ class StatsService:
         for d in wanted:
             start = datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()
             watch = self.watch_window(start, min(start+86400,time.time()))
-            series.append({'day':d,'bytes':None,'hours':round(watch['seconds']/3600,2),
+            series.append({'day':d,'hours':round(watch['seconds']/3600,2),
                            'incomplete':watch['incomplete'],'plays':int((rows.get(d) or {}).get('plays') or 0),
                            'users':int((rows.get(d) or {}).get('users') or 0)})
         return series
 
     # -- leaderboards --------------------------------------------------------
     def measured_month(self) -> dict[str, Any]:
-        month = datetime.now(UTC).strftime('%Y-%m')
-        rows = self._db.query("SELECT u.emby_user_id,MAX(0,SUM(u.bytes)-COALESCE(c.credit_bytes,0)) AS bytes FROM measured_usage_monthly u LEFT JOIN measured_credits c ON c.emby_user_id=u.emby_user_id AND c.month=u.month WHERE u.month=? AND u.emby_user_id<>'' GROUP BY u.emby_user_id", (month,))
-        return {'period': month, 'by_user': {r['emby_user_id']: int(r['bytes']) for r in rows}}
+        """Retired byte statistic. Historical rows remain untouched."""
+        return {'retired': True, 'period': None, 'by_user': {}}
 
     def today_snapshot(self, *, now: float | None = None) -> dict[str, Any]:
         """Freeze one evidence snapshot for a today's caption, poster and pager.
@@ -353,16 +343,12 @@ class StatsService:
     def top_users(self, days: int = 30, limit: int = 20, *,
                   calendar: bool = False, now: float | None = None,
                   today: bool = False) -> list[dict[str, Any]]:
-        values = self.measured_month()
         days = max(1, min(int(days or 1), MAX_DAYS))
         if calendar or today:
             since, until = ranking_bounds(days, now=now, today=today)
             rows = self.top_watchers(hours=days * 24, limit=limit, since=since, until=until)
         else:
             rows = self.top_watchers(hours=days * 24, limit=limit)
-        for row in rows:
-            row['bytes'] = values['by_user'].get(row['user_id'])
-            row['traffic_period'] = values['period']
         return rows[:max(1, min(int(limit), 5000))]
 
     def top_watchers(self, hours: int = 24, limit: int = 10, *,
@@ -435,7 +421,6 @@ class StatsService:
             'FROM watch_verified_samples WHERE ' + where + ' GROUP BY run_key) '
             f'SELECT {title} AS title, MAX(item_type) AS item_type, COUNT(*) AS plays,'
             'COUNT(DISTINCT NULLIF(emby_user_id,\'\')) AS viewers, SUM(seconds) AS secs,'
-            'SUM(COALESCE((SELECT SUM(bytes) FROM play_events e WHERE e.watch_key=runs.run_key AND e.watch_key<>\'\'),0)) AS bytes,'
             f'MAX(item_id) AS item_id FROM runs WHERE COALESCE({title},\'\')<>\'\' '
             f'GROUP BY {family}, {title} ORDER BY {order} LIMIT ?',
             (until, since, *args, max(1, min(limit, 200))))
@@ -447,7 +432,6 @@ class StatsService:
             "viewers": int(r["viewers"] or 0),
             "seconds": int(r["secs"] or 0),
             "hours": round(int(r["secs"] or 0) / 3600, 1),
-            "bytes": int(r["bytes"] or 0),
         } for r in rows]
 
     def top_titles_split(self, days: int = 1, limit: int = 10, *,
@@ -501,22 +485,17 @@ class StatsService:
 
     def node_breakdown(self, days: int = 30) -> list[dict[str, Any]]:
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400
-        rows = self._db.query(
-            "SELECT COALESCE(NULLIF(node,''),'(origin)') AS node, COUNT(*) AS plays,"
-            " SUM(bytes) AS bytes FROM play_events WHERE started_at >= ?"
-            " GROUP BY node ORDER BY bytes DESC LIMIT 20", (since,))
-        total = sum(int(r["plays"] or 0) for r in rows) or 1
-        return [{"node": r["node"], "plays": int(r["plays"] or 0),
-                 "bytes": int(r["bytes"] or 0),
-                 "percent": round(int(r["plays"] or 0) / total * 100, 1)}
-                for r in rows]
+        rows = self._db.query("SELECT COALESCE(NULLIF(node,''),'(origin)') AS node, COUNT(*) AS plays "
+                              "FROM play_events WHERE started_at >= ? GROUP BY node ORDER BY plays DESC LIMIT 20", (since,))
+        total = sum(int(r['plays'] or 0) for r in rows) or 1
+        return [{'node':r['node'], 'plays':int(r['plays'] or 0), 'percent':round(int(r['plays'] or 0)/total*100,1)} for r in rows]
 
     def play_method_breakdown(self, days: int = 30) -> dict[str, Any]:
         """Direct play vs transcode: the cost signal that actually matters."""
         since = int(time.time()) - max(1, min(days, MAX_DAYS)) * 86400
         rows = self._db.query(
             "SELECT LOWER(COALESCE(NULLIF(play_method,''),'(unknown)')) AS method,"
-            " COUNT(*) AS plays, SUM(COALESCE(v.seconds,0)) AS secs, SUM(bytes) AS bytes"
+            " COUNT(*) AS plays, SUM(COALESCE(v.seconds,0)) AS secs"
             " FROM play_events e LEFT JOIN (SELECT run_key,SUM(seconds) AS seconds"
             " FROM watch_verified_samples GROUP BY run_key) v ON v.run_key=e.watch_key"
             " WHERE e.started_at >= ? GROUP BY method", (since,))
@@ -531,8 +510,7 @@ class StatsService:
                 "method": method,
                 "plays": plays,
                 "hours": round(int(r["secs"] or 0) / 3600, 1),
-                "bytes": int(r["bytes"] or 0),
-            })
+                })
             if "transcode" in method:
                 transcode += plays
             elif method in ("directplay", "directstream", "direct"):
@@ -574,16 +552,6 @@ class StatsService:
         with self._db.snapshot():
             rows = viewing.records(self._db, user_id, since, until)
             data = viewing.window(rows, since, until, tz=tz)
-            since_day = datetime.fromtimestamp(since, UTC).strftime('%Y-%m-%d')
-            until_day = datetime.fromtimestamp(until, UTC).strftime('%Y-%m-%d')
-            traffic = {r['day']: r for r in self._db.query(
-                'SELECT day,bytes FROM usage_daily WHERE emby_user_id=? AND day>=? AND day<=?',
-                (user_id, since_day, until_day))}
-            # The original traffic ledger has UTC daily buckets, not intervals.
-            # A Beijing week cuts those buckets: do not invent an hourly split.
-            for point in data['series']:
-                point['bytes'] = (int((traffic.get(point['day']) or {}).get('bytes') or 0)
-                                  if tz == UTC else None)
             return {'series': data['series'], 'watch': self._watch_summary(user_id, now),
                     'viewing': {k: v for k, v in data.items() if k not in ('series', 'recent_plays')},
                     'recent_plays': data['recent_plays'][:50],
@@ -598,11 +566,8 @@ class StatsService:
         stats queries degrade steadily and the database grows without bound.
         """
         cutoff_ts = int(time.time()) - max(30, keep_days) * 86400
-        cutoff_day = datetime.fromtimestamp(cutoff_ts, UTC).strftime("%Y-%m-%d")
-        events = self._db.execute(
-            "DELETE FROM play_events WHERE ended_at < ?", (cutoff_ts,))
-        usage = self._db.execute(
-            "DELETE FROM usage_daily WHERE day < ?", (cutoff_day,))
+        # These tables also hold archived byte counters: never purge them on retirement.
+        events = usage = 0
         self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_verified_samples WHERE ended_at < ?', (cutoff_ts,))

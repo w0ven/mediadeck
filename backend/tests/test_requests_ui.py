@@ -100,7 +100,12 @@ def test_request_center_real_browser(tmp_path):
             assert service.get(rid)['result_note']==''
             assert page.get_by_role('button',name='接受请求',exact=True).count()==0
             checks.append('无理由直接拒绝，终态无重复处理按钮')
-            page.get_by_role('button',name='管理员纠错',exact=True).click();prompt('open');prompt('本地验收纠错')
+            page.get_by_role('button',name='管理员纠错',exact=True).click()
+            # The target status is a fixed choice list, not free text.
+            page.wait_for_selector('.deck-dialog-card:not(.deck-dialog-closing) select.deck-dialog-input')
+            page.locator('select.deck-dialog-input').last.select_option('open')
+            page.locator('.deck-dialog-btn-confirm').last.click();page.wait_for_timeout(220)
+            prompt('本地验收纠错')
             page.wait_for_function("document.querySelector('#view h2').textContent.includes('待处理')")
             page.get_by_role('button',name='接受请求',exact=True).click()
             page.wait_for_selector('.deck-dialog-btn-confirm');page.locator('.deck-dialog-btn-confirm').last.click();page.wait_for_timeout(220)

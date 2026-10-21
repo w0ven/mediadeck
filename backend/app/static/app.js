@@ -11,46 +11,55 @@ const $ = (s) => document.querySelector(s);
    them, and requests under "operations" because they are a business feature --
    which meant finding either one required knowing the implementation first.
    Everything about *who may watch* is now in one place, everything about
-   *what there is to watch* in another. */
+   *what there is to watch* in another.
+   Within a group the most frequent daily task comes first: the sidebar entry
+   opens it directly. The former nine-entry "运行维护" group mixed node work,
+   storage health and the audit trail; audit and access control now form their
+   own group so "看审计" is one click, and no group needs more than one row of
+   sub-navigation. `icon` names a shared SVG mark in workspaceIcon(). */
 const NAV = [
-  { group: '总览', icon: '▦', items: [
+  { group: '总览', icon: 'dashboard', items: [
     { id: 'dashboard', icon: '▦', label: '仪表盘', sub: '集中查看系统运行、播放使用和待处理事项' },
-    { id: 'stats', icon: '📈', label: '运营统计', sub: '流量、时长与热门内容' },
+    { id: 'stats', icon: '📈', label: '运营统计', sub: '观看时长与热门内容' },
   ]},
-  { group: '用户', icon: '☺', items: [
-    { id: 'members', icon: '☺', label: '用户管理', sub: '账号、套餐、邀请关系与积分' },
-    { id: 'groups', icon: '▣', label: '等级与权益', sub: '成长、保号、流量与并发权益' },
+  { group: '用户', icon: 'members', items: [
+    { id: 'members', icon: '☺', label: '用户管理', sub: '账号、用户组、邀请关系与积分' },
+    { id: 'groups', icon: '▣', label: '等级与权益', sub: '成长等级、保号、带宽与并发权益' },
     { id: 'invites', icon: '🎫', label: '邀请与授权', sub: '预授权名单、邀请名额与邀请树' },
     { id: 'redeem', icon: '🎟', label: '卡密管理', sub: '生成、发放与作废注册卡密' },
   ]},
-  { group: '内容', icon: '▤', items: [
+  { group: '内容', icon: 'library', items: [
+    { id: 'requests', icon: '🎬', label: '求片管理', sub: '待处理请求、审批与工单沟通' },
+    { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看清扫描、刷新、通知、上传与拉取' },
+    { id: 'pipeline', icon: '⇄', label: '管线状态', sub: '整理、上传队列与接口限额' },
     { id: 'library', icon: '▤', label: '媒体库', sub: '媒体库分布与条目统计' },
-    { id: 'requests', icon: '🎬', label: '求片', sub: '待处理请求、接受/拒绝与工单沟通' },
-    { id: 'imports', icon: '⇪', label: '网盘上片', sub: '网盘链接与云盘目录导入' },
-    { id: 'intake', icon: '⇉', label: '入库流水线', sub: '一屏看完扫描、刷新、通知、上传与拉取' },
+    { id: 'imports', icon: '⇪', label: '网盘导入', sub: '网盘链接与云盘目录导入' },
   ]},
-  { group: '机器人', icon: '✈', items: [
-    { id: 'tgbot', icon: '✈', label: '机器人', sub: '注册通道、播放线路与运行状态' },
-    { id: 'shop', icon: '🎁', label: '兑换商城', sub: '积分商品、限购与兑换记录' },
-    { id: 'tggroup', icon: '⚑', label: '群组核查', sub: '已关联成员的群成员状态' },
+  { group: '机器人', icon: 'tgbot', items: [
+    { id: 'tgbot', icon: '✈', label: '机器人设置', sub: '注册通道、播放线路与运行状态' },
     { id: 'automation', icon: '⚡', label: '任务中心', sub: '任务与玩法插件的开关、配置与运行结果' },
+    { id: 'shop', icon: '🎁', label: '兑换商城', sub: '积分商品、限购与兑换记录' },
+    { id: 'tggroup', icon: '⚑', label: '群组核查', sub: '已关联成员的群内状态检测' },
   ]},
-  { group: '运行维护', icon: '⛁', items: [
-    { id: 'nodes', icon: '⛁', label: '节点管理', sub: '推流节点负载与调度' },
-    { id: 'nodepool', icon: '⚖', label: '节点池', sub: '启停、权重、带宽与实时负载' },
-    { id: 'pipeline', icon: '⇄', label: '管线状态', sub: '整理、上传队列与配额' },
-    { id: 'storage', icon: '☁', label: '存储管理', sub: '云盘账号与挂载点' },
-    { id: 'mounts', icon: '⛃', label: '挂载管理', sub: '存储挂载健康与缓存占用' },
-    { id: 'tasks', icon: '⏱', label: '调度中心', sub: '主机定时任务运行状态与失败追踪' },
+  { group: '节点与存储', icon: 'nodes', items: [
+    { id: 'nodes', icon: '⛁', label: '节点管理', sub: '推流节点、媒体根、缓存与安装命令' },
+    { id: 'nodepool', icon: '⚖', label: '节点池', sub: '启停、权重、带宽与实时负载调度' },
+    { id: 'storage', icon: '☁', label: '存储管理', sub: '云盘账号与存储挂载点' },
+    { id: 'mounts', icon: '⛃', label: '挂载状态', sub: '存储挂载健康与本地缓存占用' },
+    { id: 'tasks', icon: '⏱', label: '调度中心', sub: '定时任务运行状态与失败追踪' },
+  ]},
+  { group: '安全与审计', icon: 'audit', items: [
+    { id: 'audit', icon: '☰', label: '审计日志', sub: '管理员操作记录与系统变更追踪' },
     { id: 'access', icon: '🛡', label: '访问拦截', sub: '客户端与网段规则，以及被拒记录' },
-    { id: 'sharing', icon: '👥', label: '共享检测', sub: '同时多地播放的账号，只记录不处理' },
-    { id: 'audit', icon: '☰', label: '审计日志', sub: '操作记录与变更追踪' },
+    { id: 'sharing', icon: '👥', label: '共享检测', sub: '同时多地播放的账号（只记录，不自动处理）' },
   ]},
-  { group: '设置', icon: '⚙', items: [
+  { group: '设置', icon: 'settings', items: [
     { id: 'settings', icon: '⚙', label: '系统设置', sub: '对接 Emby、TMDB、调度策略与节点配置' },
     { id: 'update', icon: '⟳', label: '版本更新', sub: '检查并应用新版本' },
   ]},
 ];
+/* Old or shortened routes that still appear in bookmarks and in-page links. */
+const ROUTE_ALIASES = { plugins: 'automation?category=points' };
 
 /* Sentinel understood by the backend as "keep the stored secret". Lets the
    operator edit a URL without re-typing the API key. */
@@ -59,13 +68,38 @@ const SECRET_KEEP = '__KEEP__';
 const PAGES = {};
 
 /* ---------------- helpers ---------------- */
+/* One feedback channel for the whole panel. Success and failure must be told
+   apart at a glance (the colour used to be overridden by the theme, so both
+   looked identical); failures stay longer, are announced assertively and can
+   be dismissed. A page change clears success notes so they never describe a
+   page the operator already left. */
 function toast(msg, bad) {
   const t = $('#toast');
-  t.textContent = msg;
-  t.style.background = bad ? '#e5484d' : '#1f2937';
-  t.style.display = 'block';
+  if (!t) return;
+  t.textContent = '';
+  const text = document.createElement('span');
+  text.className = 'toast-text';
+  text.textContent = String(msg == null ? '' : msg);
+  const close = document.createElement('button');
+  close.type = 'button';
+  close.className = 'toast-close';
+  close.setAttribute('aria-label', '关闭提示');
+  close.textContent = '×';
+  close.onclick = () => hideToast();
+  t.append(text, close);
+  t.classList.toggle('is-bad', !!bad);
+  t.classList.toggle('is-ok', !bad);
+  t.setAttribute('role', bad ? 'alert' : 'status');
+  t.setAttribute('aria-live', bad ? 'assertive' : 'polite');
+  t.style.display = 'flex';
   clearTimeout(t._h);
-  t._h = setTimeout(() => (t.style.display = 'none'), 3200);
+  t._h = setTimeout(hideToast, bad ? 8000 : 3200);
+}
+function hideToast(onlySuccess) {
+  const t = $('#toast');
+  if (!t || (onlySuccess && t.classList.contains('is-bad'))) return;
+  clearTimeout(t._h);
+  t.style.display = 'none';
 }
 function bindAsyncButton(id, action) {
   const button = document.getElementById(id);
@@ -83,9 +117,20 @@ async function api(path, opts) {
   if (!r.ok) {
     let d = '';
     try { d = (await r.json()).detail || ''; } catch (e) { /* non-json error */ }
+    if (r.status === 401) sessionExpired();
     throw new Error(`${r.status} ${d}`);
   }
   return r.json();
+}
+/* The panel session lives in the server cache; when it is gone every request
+   fails with 401 and pages used to show a bare "加载失败 401". Say what
+   happened once and return to the login page, keeping the current route so
+   the operator lands back where they were. */
+function sessionExpired() {
+  if (sessionExpired.done || !document.getElementById('layout')) return;
+  sessionExpired.done = true;
+  toast('登录状态已失效，正在返回登录页…', 1);
+  setTimeout(() => { location.href = '/login' + (location.hash || ''); }, 1500);
 }
 function fmtBytes(n) {
   if (!n) return '0';
@@ -121,9 +166,84 @@ const card = (title, sub, body, actions) => `
 const tableCard = (title, sub, cols, rowsHtml, actions) => card(
   title, sub,
   `<div class="card-body flush">${rowsHtml
-    ? `<table><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${rowsHtml}</tbody></table>`
+    ? `<table class="stack"><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${labelCells(rowsHtml, cols)}</tbody></table>`
     : `<div class="empty">暂无数据</div>`}</div>`,
   actions);
+/* Data tables collapse into one card per row on phones (see .stack in
+   hardglass.css). Each cell carries its column name so the stacked row still
+   reads "状态：已接受" instead of a bare value. Labels are part of the markup,
+   so live DOM patches keep them. */
+function labelCells(rowsHtml, cols) {
+  const t = document.createElement('template');
+  t.innerHTML = `<table><tbody>${rowsHtml}</tbody></table>`;
+  const table = t.content.querySelector('table');
+  const body = table && table.querySelector(':scope > tbody');
+  // Anything the parser had to move out of the table stays exactly as given.
+  const moved = [...t.content.childNodes].some((n) => n !== table && !(n.nodeType === 3 && !n.textContent.trim()));
+  if (!body || moved || table.tBodies.length !== 1) return rowsHtml;
+  body.querySelectorAll(':scope > tr').forEach((tr) => {
+    let i = 0;
+    [...tr.children].forEach((td) => {
+      const label = String(cols[i] || '').replace(/<[^>]*>/g, '').trim();
+      if (label && !td.hasAttribute('data-label')) td.setAttribute('data-label', label);
+      i += Number(td.colSpan || 1);
+    });
+  });
+  return body.innerHTML;
+}
+/* One switch for "which subset am I looking at" on every page (request
+   status, task category …). Links keep the choice in the address; buttons are
+   for views that have no route of their own. Never styled as a primary
+   action: a highlighted filter used to look like the button to press. */
+function segmented(items, label) {
+  return `<div class="seg" role="group" aria-label="${esc(label || '视图')}">${items.map((it) => {
+    const inner = `${esc(it.label)}${it.count != null ? `<span class="seg-count">${esc(it.count)}</span>` : ''}`;
+    return it.href
+      ? `<a class="seg-btn${it.active ? ' active' : ''}" href="${esc(it.href)}"${it.active ? ' aria-current="true"' : ''}>${inner}</a>`
+      : `<button type="button" class="seg-btn${it.active ? ' active' : ''}" aria-pressed="${it.active ? 'true' : 'false'}" ${it.attrs || ''}>${inner}</button>`;
+  }).join('')}</div>`;
+}
+/* The shared list skeleton: title and count, filters, rows, then paging in
+   the card footer, in that order on every list page. */
+function listCard({title, sub, filters, cols, rows, empty, pager, actions, key}) {
+  return `<div class="card list-card" data-live-key="card:${esc(key || title)}">
+    <div class="card-head"><div><h3>${esc(title)}</h3>${sub ? `<div class="sub">${esc(sub)}</div>` : ''}</div>
+      <div class="toolbar">${actions || ''}</div></div>
+    ${filters ? `<div class="list-filters">${filters}</div>` : ''}
+    <div class="card-body flush">${rows
+      ? `<table class="stack"><thead><tr>${cols.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${labelCells(rows, cols)}</tbody></table>`
+      : `<div class="empty">${esc(empty || '暂无数据')}</div>`}</div>
+    ${pager ? `<div class="list-pager">${pager}</div>` : ''}
+  </div>`;
+}
+function routeParams(route) {
+  return new URLSearchParams(String(route == null ? (state.route || '') : route).split('?')[1] || '');
+}
+/* Unsaved edits on card-per-object pages (node storage settings, node pool
+   weights) that have no config workspace of their own. A page marks a key
+   on input and clears it after that object's save succeeds; navigation asks
+   before discarding, like the settings pages already do. */
+const pageDrafts = new Map();
+function markDraft(page, key, dirty = true) {
+  if (!pageDrafts.has(page)) pageDrafts.set(page, new Set());
+  pageDrafts.get(page)[dirty ? 'add' : 'delete'](String(key));
+}
+function hasDraft(page, key) { return !!pageDrafts.get(page)?.has(String(key)); }
+async function draftsCanLeave() {
+  const drafts = pageDrafts.get(state.page);
+  if (!drafts || !drafts.size) return true;
+  if (!(await deckConfirm(`以下对象有未保存的修改：${[...drafts].join('、')}。\n离开会丢弃这些修改，仍要离开吗？`,
+    {title: '未保存的修改', confirmText: '放弃修改并离开', cancelText: '留在本页'}))) return false;
+  drafts.clear();
+  return true;
+}
+async function pageCanLeave() {
+  return (await configCanLeave()) && (await draftsCanLeave())
+    && (typeof membersCanLeave !== 'function' || (await membersCanLeave()));
+}
+window.addEventListener('beforeunload', (e) => {
+  if (pageDrafts.get(state.page)?.size) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function fmtAgeTs(ts) {
   if (!ts) return '-';
@@ -203,7 +323,6 @@ const playCard = (s) => {
         <div class="avatar">${esc((s.UserName || '?').slice(0, 1).toUpperCase())}</div>
         <div><b>${esc(s.UserName || '-')}</b><span>${esc(s.Client || '-')}</span></div>
       </div>
-      <div class="pc-speed">${sessionSpeedCell(s)}</div>
       ${known ? `<div class="bar wide"><i style="width:${Math.min(100, pct)}%"></i></div>
       <div class="pc-time"><span>${esc(ticksToClock(s.PositionTicks))}</span>
         <b>${esc(pct)}%</b><span>${esc(ticksToClock(s.RunTimeTicks))}</span></div>`
@@ -212,12 +331,6 @@ const playCard = (s) => {
   </article>`;
 };
 
-function sessionSpeedCell(s) {
-  if (s.SpeedSource !== 'node') return '<span class="rate-unknown" title="没有有效节点实测；不使用媒体码率代替">未实测</span>';
-  const count = Number(s.SpeedAccountSessions || 1);
-  const scope = s.SpeedScope === 'user' ? `账号合计${count > 1 ? ` · ${count} 个会话共享，不可相加` : ''}` : '当前会话';
-  return rateMarkup(s.SpeedBps, s.SpeedCollectedAt, s.SpeedTimeBasis, s.SpeedWindowSeconds, scope);
-}
 function pageError(err) {
   return `<div class="card"><div class="page-error">
     <div class="t">加载失败</div>
@@ -226,14 +339,14 @@ function pageError(err) {
   </div></div>`;
 }
 function pageLoading() {
-  return '<div class="card"><div class="page-loading">加载中…</div></div>';
-}
-function trafficBar(used, quota) {
-  if (!quota) return `<span class="muted">${fmtBytes(used)} / 不限</span>`;
-  const pct = Math.max(0, Math.min(100, Math.round(used / quota * 100)));
-  const cls = pct >= 100 ? 'bad' : pct >= 80 ? 'warn' : '';
-  return `<div>${fmtBytes(used)} / ${fmtBytes(quota)}
-    <span class="bar ${cls}"><i style="width:${pct}%"></i></span></div>`;
+  // A soft refresh repaints what is already on screen (marked busy) instead
+  // of collapsing the page to a placeholder; see renderPage().
+  const view = $('#view');
+  if (state.softRefresh && view && view.children.length && !view.querySelector('.page-loading, .page-error')) {
+    view.setAttribute('aria-busy', 'true');
+    return view.innerHTML;
+  }
+  return '<div class="card"><div class="page-loading" role="status">加载中…</div></div>';
 }
 function stateTag(st) {
   const map = { active: ['ok', '正常'], suspended: ['warn', '已停用'], expired: ['bad', '已过期'],
@@ -297,17 +410,32 @@ function openModal(title, bodyHtml, opts) {
 }
 
 /* ---------------- shell ---------------- */
+/* Desktop: the sidebar lists the seven workspaces and the strip under the
+   title lists the pages inside the current one, so each label appears once.
+   The mobile drawer has room for the full tree, so it also lists every page
+   of the workspaces: finding a page no longer takes two taps and a guess. */
 function buildNav() {
-  $('#nav').innerHTML = NAV.map(g => `<a class="nav-item" href="#/${g.items[0].id}" data-page="${g.items[0].id}"><span class="ic" aria-hidden="true">${workspaceIcon(g.items[0].id)}</span><span>${esc(g.group)}</span></a>`).join('');
+  $('#nav').innerHTML = NAV.map(g => `<div class="nav-group" data-group="${esc(g.group)}"><a class="nav-item" href="#/${g.items[0].id}" data-page="${g.items[0].id}"><span class="ic" aria-hidden="true">${workspaceIcon(g.icon || g.items[0].id)}</span><span>${esc(g.group)}</span></a>${g.items.length > 1 ? `<div class="nav-sub">${g.items.map(it => `<a href="#/${it.id}" data-subpage="${it.id}">${esc(it.label)}</a>`).join('')}</div>` : ''}</div>`).join('');
 }
 function updateWorkspaceNav(page) {
   const group = NAV.find(g => g.items.some(it => it.id === page)) || NAV[0];
   document.querySelectorAll('#nav .nav-item').forEach(n => {
     const active = n.dataset.page === group.items[0].id;
     n.classList.toggle('active', active);
+    n.closest('.nav-group')?.classList.toggle('active', active);
     if (active) n.setAttribute('aria-current','page'); else n.removeAttribute('aria-current');
   });
-  $('#subnav').innerHTML = group.items.map(it => `<a href="#/${it.id}" ${it.id === page ? 'class="active" aria-current="page"' : ''}>${esc(it.label)}</a>`).join('');
+  document.querySelectorAll('#nav [data-subpage]').forEach(a => {
+    a.classList.toggle('active', a.dataset.subpage === page);
+    if (a.dataset.subpage === page) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current');
+  });
+  const subnav = $('#subnav');
+  subnav.innerHTML = group.items.length > 1 ? group.items.map(it => `<a href="#/${it.id}" ${it.id === page ? 'class="active" aria-current="page"' : ''}>${esc(it.label)}</a>`).join('') : '';
+  subnav.hidden = group.items.length < 2;
+  // On phones the strip scrolls sideways; keep the current page in view
+  // without moving the window.
+  const current = subnav.querySelector('.active');
+  if (current && subnav.scrollWidth > subnav.clientWidth) subnav.scrollLeft = Math.max(0, current.offsetLeft - 16);
   setWorkspaceMenu(false);
 }
 function navMeta(id) {
@@ -319,24 +447,30 @@ function routeFromHash() {
 }
 async function go(route) {
   route = String(route || 'dashboard').replace(/^#\/?/, '');
+  let notice = '';
   if (route.split('?')[0] === 'tgrequests') {
     route = 'tgbot?section=groups';
-    toast('Web 关联审核已移除；TG 换绑在绑定群中审核');
+    notice = 'Web 关联审核已移除；TG 换绑在绑定群中审核';
   }
+  if (ROUTE_ALIASES[route.split('?')[0]]) route = ROUTE_ALIASES[route.split('?')[0]];
   const page = route.split('?')[0] || 'dashboard';
   if (page === state.page && state.pageReady && ['settings','tgbot'].includes(page) && document.querySelector('.config-workspace')) {
     state.route = route;
     setWorkspaceMenu(false);
     activateConfigSection(new URLSearchParams(route.split('?')[1]).get('section'));
+    if (notice) toast(notice);
     return;
   }
-  if (!(await configCanLeave()) || (typeof membersCanLeave === 'function' && !(await membersCanLeave()))) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
+  if (!(await pageCanLeave())) { history.replaceState(null, '', '#/' + (state.route || state.page)); return; }
   if (typeof membersDispose === 'function') membersDispose();
+  const changedPage = page !== state.page;
   state.page = page;
   state.route = route;
   state.pageReady = false;
   stopEnrollPoll();
   closeModal();
+  if (changedPage) { hideToast(true); window.scrollTo(0, 0); }
+  if (notice) toast(notice);
   const meta = navMeta(page);
   updateWorkspaceNav(page);
   $('#page-title').textContent = meta.label;
@@ -354,16 +488,24 @@ async function renderPage(page, manual, liveUpdate, sourceContext) {
   // Completion of an old action must not repaint the workspace we left.
   if (page !== state.page || (sourceContext && !sourceContext.isCurrent())) return;
   if (liveUpdate) { scheduleLiveFlush(); return; }
-  if (manual && (!(await configCanLeave()) || (typeof membersCanLeave === 'function' && !(await membersCanLeave())))) return;
+  if (manual && !(await pageCanLeave())) return;
   if (manual && typeof membersDispose === 'function') membersDispose();
   const fn = PAGES[page];
-  if (!fn) { $('#view').innerHTML = '<div class="empty">页面不存在</div>'; return; }
+  if (!fn) { $('#view').innerHTML = `<div class="card"><div class="empty">页面不存在。<a href="#/dashboard">返回仪表盘</a>或使用右上角搜索查找功能。</div></div>`; return; }
   state.renderVersion = (state.renderVersion || 0) + 1;
   state.pageReady = false;
   const context = pageContext(page);
+  /* Refreshing the page the operator is already looking at (after an action
+     or the refresh button) keeps the current content on screen until the new
+     data arrives and returns to the same scroll position, instead of
+     flashing "加载中" and jumping back to the top. */
+  const soft = !!(manual || sourceContext) && !!$('#view')?.children.length;
+  const scrollY = soft ? window.scrollY : null;
+  state.softRefresh = soft;
   try {
     await fn(context);
     if (!context.isCurrent()) return;
+    if (scrollY !== null) window.scrollTo(0, Math.min(scrollY, document.documentElement.scrollHeight));
     state.pageReady = true;
     const retry = $('#retry-page');
     if (retry) retry.onclick = () => renderPage(page, true);
@@ -376,6 +518,8 @@ async function renderPage(page, manual, liveUpdate, sourceContext) {
     const btn = $('#retry-page');
     if (btn) btn.onclick = () => renderPage(page, true);
     toast('加载失败: ' + e.message, 1);
+  } finally {
+    if (state.renderVersion === context.version) { state.softRefresh = false; $('#view')?.removeAttribute('aria-busy'); }
   }
 }
 
@@ -407,7 +551,6 @@ function paintDashboard(model, context) {
   const alerts = d.alerts || [];
   const mem = (overview && overview.members) || {};
   const expiring = (overview && overview.expiring_7d) || [];
-  const exhaustedN = mem.exhausted || 0;
 
   renderView(`
     <div class="stat-grid">
@@ -415,19 +558,19 @@ function paintDashboard(model, context) {
       ${stat('⛁', `${online} / ${nodes.length}`, '在线节点', nodes.length ? '推流节点健康状态' : '尚未配置节点')}
       ${stat('▶', sessions.length, '当前播放', sessions.length ? '正在进行的会话' : '暂无活跃会话')}
       ${stat('⇄', queued, '管线待处理', pipe.available ? '整理与上传队列' : '快照不可用')}
-      ${stat('⚠', alerts.length + limited + expiring.length + exhaustedN, '待处理事项', limited ? `${limited} 个上传身份受限` : '系统关键状态')}
+      ${stat('⚠', alerts.length + limited + expiring.length, '待处理事项', limited ? `${limited} 个上传身份受限` : '系统关键状态')}
     </div>
     <div class="dashboard-shortcuts"><a class="btn" href="#/members">管理用户</a><a class="btn" href="#/requests">处理求片</a><a class="btn" href="#/pipeline">查看管线</a></div>
     <div class="dashboard-focus">
-      ${card('正在播放', sessions.length ? `${sessions.length} 个会话 · 节点实测速率` : '暂无活跃会话',
+      ${card('正在播放', sessions.length ? `${sessions.length} 个会话` : '暂无活跃会话',
         sessions.length ? `<div class="play-grid">${sessions.map(playCard).join('')}</div>` : '<div class="empty">当前没有播放会话</div>')}
       ${card('待处理事项', '账号与系统异常优先', `<div class="card-body">
         ${alerts.map(a => `<p><span class="tag warn">${esc(a.level)}</span> ${esc(a.message)}</p>`).join('')}
         ${limited ? `<p><a href="#/pipeline">${limited} 个上传身份受限 →</a></p>` : ''}
         ${queued ? `<p><a href="#/pipeline">管线队列 ${queued} 项 →</a></p>` : ''}
         ${expiring.length ? `<p><a href="#/members?expiring=soon">7 天内到期 ${expiring.length} 人 →</a></p>` : ''}
-        ${mem.exhausted || mem.expired ? `<p><a href="#/members">超额 ${esc(mem.exhausted || 0)} · 过期 ${esc(mem.expired || 0)} →</a></p>` : ''}
-        ${!alerts.length && !limited && !queued && !expiring.length && !mem.exhausted && !mem.expired ? '<p class="muted">当前没有待处理事项</p>' : ''}
+        ${mem.expired ? `<p><a href="#/members?status=expired">过期 ${esc(mem.expired || 0)} →</a></p>` : ''}
+        ${!alerts.length && !limited && !queued && !expiring.length && !mem.expired ? '<p class="muted">当前没有待处理事项</p>' : ''}
         <a href="#/nodes">节点状态</a> · <a href="#/audit">审计日志</a>
       </div>`)}
     </div>`, context);
@@ -465,7 +608,7 @@ PAGES.imports = async (context = pageContext('imports')) => {
         <input id="imp-cat" aria-label="导入分类" placeholder="分类(可选)" style="width:120px">
         <button class="btn primary" id="imp-go">提交</button>
       </div></div>`)}
-    ${tableCard('导入任务', `${js.length} 个`, ['ID', '类型', '来源', '状态', '进度', ''],
+    ${tableCard('导入任务', `${js.length} 个`, ['任务 ID', '导入类型', '资源来源', '任务状态', '处理进度', '操作'],
       js.map((j) => {
         const p = Math.round((j.progress || 0) * 100);
         const cls = j.state === 'done' ? 'ok' : (j.state === 'failed' ? 'bad' : 'idle');
@@ -519,7 +662,6 @@ function paintNodes(model, context) {
   state.nodes = ns;
   const online = ns.filter((n) => n.available).length;
   const streams = ns.reduce((a, n) => a + (n.active_streams || 0), 0);
-  const egress = egressSummary(ns);
   const policyLabel = dispatch.policy === 'affinity' ? '文件亲和' : '最低负载';
   const panelSet = !!(st.integration || {}).panel_public_url;
 
@@ -527,7 +669,6 @@ function paintNodes(model, context) {
     <div class="stat-grid">
       ${stat('⛁', `${online} / ${ns.length}`, '在线节点', '可用于分发')}
       ${stat('▶', streams, '活跃流', '所有节点合计')}
-      ${stat('⇅', egress.text, '出口带宽', egress.sub)}
       ${stat('⚖', policyLabel, '调度策略', dispatch.policy === 'affinity'
         ? `占用率阈值 ${Math.round(dispatch.load_threshold * 100)}%` : '按容量占用率择优')}
     </div>
@@ -552,6 +693,7 @@ function paintNodes(model, context) {
         <td>${esc((e.context || '').slice(0, 44))}</td></tr>`).join(''))}`, context);
   bindAsyncButton('nd-go', addNode);
   ns.filter((n) => !context.live || !previous.has(n.name)).forEach((n) => fillNodeMounts(n));
+  paintNodeDrafts();
 }
 
 /* 一个节点 = 一张卡：健康、媒体根、缓存、签名、安装命令全在这里。
@@ -571,11 +713,10 @@ function nodeCard(n) {
       </tr>`).join('')
     : '';
   return card(`⛁ ${n.name}`,
-    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}% · 整网卡出口以实测采样为准`,
+    `${n.active_streams}/${n.capacity} 路 · ${Math.round((n.utilisation || 0) * 100)}%`,
     `<div class="card-body">
       <div class="toolbar" style="margin-bottom:10px">
         ${health}
-        ${egressCell(n)}
         <span class="muted">${esc(n.base_url)}</span>
         <span style="flex:1"></span>
         <button class="btn sm" onclick="nodeCtl(${jsArg(n.name)},'${n.manually_disabled ? 'enable' : 'disable'}')">${n.manually_disabled ? '上线' : '下线'}</button>
@@ -622,13 +763,55 @@ function nodeCard(n) {
         ${n.enrolled ? `<span class="tag ok">已接入</span> <span class="muted">${esc(fmtAgeTs(n.first_seen_at))} · ${esc(n.enrolled_host || n.base_url)}</span>`
                       : '<span class="tag warn">待接入</span>'}</div>
       <div class="toolbar">
-        <button class="btn primary" onclick="saveNodeStorage(${jsArg(n.name)})">保存</button>
+        <button class="btn primary" onclick="saveNodeStorage(${jsArg(n.name)})">保存存储与安全</button>
+        <span class="muted node-draft-hint" data-live-preserve data-node-draft="${esc(n.name)}"></span>
+        <span style="flex:1"></span>
         <button class="btn" onclick="showEnroll(${jsArg(n.name)})">获取安装命令</button>
       </div>
       <div id="enroll-${esc(n.name)}" data-live-preserve style="margin-top:10px"></div>
     </div>`);
 }
 
+/* Node cards are edited independently. After an action only the data is
+   refreshed and patched into the page (the same path live updates use), so
+   a half-edited card for another node keeps its input and its unsaved
+   marker instead of being wiped by a full repaint. */
+async function refreshNodesInPlace(actionContext) {
+  if (!actionContext.isCurrent()) return;
+  let model;
+  try {
+    const [ns, log, dispatch, st] = await Promise.all([
+      api('/api/nodes'), api('/api/dispatch/log?limit=20'), api('/api/settings/dispatch'), api('/api/settings'),
+    ]);
+    model = {ns, log, dispatch, st};
+  } catch (e) {
+    // The action itself succeeded; a failed re-read falls back to the
+    // ordinary page load and its error/retry state.
+    return renderPage('nodes', false, false, actionContext);
+  }
+  if (!actionContext.isCurrent()) return;
+  PAGE_MODELS.nodes = model;
+  paintNodes(PAGE_MODELS.nodes, pageContext('nodes', true));
+}
+function nodeDraftInput(e) {
+  if (state.page !== 'nodes') return;
+  const el = e.target;
+  const field = /^nc-(?:dir|size|argd|arge|ttl)-(.+)$/.exec(el.id || '');
+  const mount = String(el.className || '').match(/(?:^|\s)nmount-(\S+)/);
+  const name = field ? field[1] : mount && mount[1];
+  if (!name || !(state.nodes || []).some((n) => n.name === name)) return;
+  markDraft('nodes', name);
+  paintNodeDrafts();
+}
+document.addEventListener('input', nodeDraftInput);
+document.addEventListener('change', nodeDraftInput);
+function paintNodeDrafts() {
+  document.querySelectorAll('[data-node-draft]').forEach((hint) => {
+    const dirty = hasDraft('nodes', hint.dataset.nodeDraft);
+    hint.textContent = dirty ? '有未保存的修改' : '';
+    hint.closest('.card')?.classList.toggle('unsaved', dirty);
+  });
+}
 async function addPool(name) {
   const actionContext = pageContext('nodes');
   const g = (k) => ($(`#pl-${k}-${CSS.escape(name)}`) || {}).value || '';
@@ -643,7 +826,9 @@ async function addPool(name) {
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ pools }) });
-    toast('媒体根已添加'); renderPage('nodes', false, false, actionContext);
+    toast(`已为 ${name} 添加媒体根`);
+    for (const k of ['name','emby','path','remote','url']) { const el = $(`#pl-${k}-${CSS.escape(name)}`); if (el) el.value = ''; }
+    await refreshNodesInPlace(actionContext);
   } catch (e) { toast('添加失败: ' + e.message, 1); }
 }
 async function delPool(name, index) {
@@ -651,12 +836,13 @@ async function delPool(name, index) {
   const node = (state.nodes || []).find((n) => n.name === name);
   if (!node) return;
   const target = (node.pools || [])[index];
-  if (!target || !(await deckConfirm(`删除节点 ${name} 的媒体根 ${target.name || index + 1}（${target.emby_prefix || ''}）？该路径将不再由此节点提供播放。`))) return;
+  if (!target || !(await deckConfirm(`删除节点 ${name} 的媒体根 ${target.name || index + 1}（${target.emby_prefix || ''}）？该路径将不再由此节点提供播放。`,
+    {title: '删除媒体根', confirmText: '删除', danger: true}))) return;
   const pools = (node.pools || []).filter((_, i) => i !== index);
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ pools }) });
-    toast('已删除'); renderPage('nodes', false, false, actionContext);
+    toast(`已删除 ${name} 的媒体根`); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 async function saveNodeStorage(name) {
@@ -670,25 +856,27 @@ async function saveNodeStorage(name) {
       sign_ttl_seconds: parseInt(g('ttl'), 10) || 21600,
       ...($(`#nmounts-${CSS.escape(name)}`)?.dataset.loaded === 'true' ? {mount_ids: mountIds} : {}),
     }) });
-    toast('已保存'); renderPage('nodes', false, false, actionContext);
-  } catch (e) { toast('保存失败: ' + e.message, 1); }
+    markDraft('nodes', name, false);
+    toast(`${name} 的存储与安全设置已保存`); await refreshNodesInPlace(actionContext); paintNodeDrafts();
+  } catch (e) { toast('保存失败: ' + e.message + '。输入已保留，可修改后重试。', 1); }
 }
 async function rotateNodeSecret(name) {
   const actionContext = pageContext('nodes');
-  if (!(await deckConfirm(`重置 ${name} 的签名密钥？\n\n已发出的播放链接会立即失效，且必须重新在节点上执行安装命令。`))) return;
+  if (!(await deckConfirm(`重置 ${name} 的签名密钥？\n\n已发出的播放链接会立即失效，且必须重新在节点上执行安装命令。`,
+    {title: '重置签名密钥', confirmText: '重置密钥', danger: true}))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}/rotate-secret`, { method: 'POST' });
-    toast('密钥已重置，请重新部署该节点'); renderPage('nodes', false, false, actionContext);
+    toast('密钥已重置，请重新部署该节点'); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function editRcloneConf(name) {
   const actionContext = pageContext('nodes');
-  const text = await deckPrompt(`粘贴该节点使用的 rclone.conf 全文\n（建议为节点单独建 OAuth 身份，避免和主机抢配额）`);
+  const text = await deckPrompt(`粘贴该节点使用的 rclone.conf 全文\n（建议为节点配置独立的云盘 OAuth 客户端，避免与主机共享 API 请求限额）`);
   if (text === null) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ rclone_conf: text }) });
-    toast('已保存'); renderPage('nodes', false, false, actionContext);
+    toast('已保存'); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('保存失败: ' + e.message, 1); }
 }
 function stopEnrollPoll() {
@@ -736,7 +924,7 @@ async function showEnroll(name) {
   if (current()) state.enrollTimer = setInterval(paint, 4000);
 }
 async function rotateEnroll(name) {
-  if (!(await deckConfirm('重新生成后，旧的安装命令立即失效。继续？'))) return;
+  if (!(await deckConfirm(`重新生成 ${name} 的安装命令？旧的安装命令立即失效。`, {title: '重新生成安装命令', confirmText: '重新生成', danger: true}))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}/rotate-enroll`, { method: 'POST' });
     toast('已重新生成');
@@ -745,8 +933,11 @@ async function rotateEnroll(name) {
 }
 async function nodeCtl(name, action) {
   const actionContext = pageContext('nodes');
+  // Taking a node out of rotation affects every new playback; say so first.
+  if (action === 'disable' && !(await deckConfirm(`下线节点 ${name}？\n下线后调度不再把新的播放分配给该节点，直到重新上线。`,
+    {title: '下线节点', confirmText: '下线', danger: true}))) return;
   try { await api(`/api/nodes/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
-    toast(action === 'disable' ? '已下线' : '已上线'); renderPage('nodes', false, false, actionContext);
+    toast(action === 'disable' ? `${name} 已下线` : `${name} 已上线`); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('操作失败: ' + e.message, 1); }
 }
 async function addNode() {
@@ -758,8 +949,9 @@ async function addNode() {
   if (!body.name) return toast('请填写节点名称', 1);
   try {
     const created = await api('/api/nodes', { method: 'POST', body: JSON.stringify(body) });
-    toast('节点已登记');
-    await renderPage('nodes', false, false, actionContext);
+    toast(`节点 ${created.name || body.name} 已登记，请在新机器上执行安装命令`);
+    $('#nd-name').value = '';
+    await refreshNodesInPlace(actionContext);
     if (actionContext.isCurrent()) showEnroll(created.name);
   } catch (e) { toast('添加失败: ' + e.message, 1); }
 }
@@ -785,7 +977,7 @@ async function migrateNodeStorage(name) {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ mount_ids: [] }) });
     toast('已切换为全局挂载模式（旧配置仍保留，不会静默删除）');
-    renderPage('nodes', false, false, actionContext);
+    await refreshNodesInPlace(actionContext);
   } catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function editNodeCapacity(name, current) {
@@ -795,15 +987,20 @@ async function editNodeCapacity(name, current) {
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, {
       method: 'PUT', body: JSON.stringify({ capacity: parseFloat(value) }) });
-    toast('容量已更新'); renderPage('nodes', false, false, actionContext);
+    toast(`${name} 的容量已更新`); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('更新失败: ' + e.message, 1); }
 }
 async function deleteNode(name) {
   const actionContext = pageContext('nodes');
-  if (!(await deckConfirm(`确认删除节点 ${name}？该节点将不再参与播放分发。`))) return;
+  if (!(await deckConfirm(`确认删除节点 ${name}？该节点将不再参与播放分发，其媒体根、缓存与签名配置一并移除。`,
+    {title: '删除节点', confirmText: '删除节点', danger: true}))) return;
   try {
     await api(`/api/nodes/${encodeURIComponent(name)}`, { method: 'DELETE' });
-    toast('节点已删除'); renderPage('nodes', false, false, actionContext);
+    markDraft('nodes', name, false);
+    // Focus returns to the delete button after the dialog; a focused card is
+    // kept by the live patch, so release it before the card is removed.
+    if (document.activeElement?.closest?.('#view .card')) document.activeElement.blur();
+    toast(`节点 ${name} 已删除`); await refreshNodesInPlace(actionContext);
   } catch (e) { toast('删除失败: ' + e.message, 1); }
 }
 
@@ -833,8 +1030,8 @@ function paintPipeline(p, context) {
       ${(d.queues || []).map((q) => stat('⇄', q.items, q.name, `${fmtBytes(q.bytes)} · 最老 ${fmtAge(q.oldest_age_seconds)}`)).join('')}
       ${stat('⛃', fmtBytes(f.bytes), '本地应急仓', `${f.items || 0} 个文件 · ${pct}% 容量`)}
     </div>
-    ${tableCard('上传身份配额', `文件更新时间 ${fileAge} 前${stale ? ' · 已过期' : ''}`,
-      ['身份', '状态', '受限起始'],
+    ${tableCard('云端上传身份与 API 配额', `文件更新时间 ${fileAge} 前${stale ? ' · 已过期' : ''}`,
+      ['上传身份', '接口状态', '受限起始时间'],
       (d.quota || []).map((q) => `<tr data-live-key="quota:${esc(q.identity)}"><td>${esc(q.identity)}</td>
         <td><span class="tag ${q.state === 'ok' ? 'ok' : 'bad'}">${esc(q.state)}</span></td>
         <td>${esc(q.limited_since || '-')}</td></tr>`).join(''))}
@@ -1087,7 +1284,7 @@ PAGES.settings = async (context = pageContext('settings')) => {
       : '未配置 — 用于成员绑定与到期提醒',
       `<div class="card-body">
         <div class="muted">
-          机器人的 Token、注册开关与群组要求都在「Telegram → 机器人」页配置。
+          机器人的 Token、注册开关与群组要求都在「机器人 → 机器人设置」页配置。
           这里只显示当前状态：同一份配置放两个表单，先后保存会互相覆盖。
         </div>
         <div class="toolbar" style="margin-top:12px">
@@ -1095,7 +1292,7 @@ PAGES.settings = async (context = pageContext('settings')) => {
           <button class="btn" onclick="go('tgbot')">前往配置</button>
         </div>
       </div>`)}
-    ${card('会员与计费', '流量采样与 Emby 策略下发',
+    ${card('会员与观看', '观影采样与 Emby 策略下发',
       `<div class="card-body">
         <div class="form-row"><label for="mb-enforcement">自动下发</label>
           <input id="mb-enforcement" type="checkbox" ${s.membership && s.membership.enforcement_enabled ? 'checked' : ''}>
@@ -1105,7 +1302,7 @@ PAGES.settings = async (context = pageContext('settings')) => {
           <span class="muted">秒（5–60）</span></div>
         <div class="form-row"><label for="mb-keep">保留天数</label>
           <input id="mb-keep" type="number" min="30" value="${esc((s.membership || {}).retention_days || 400)}" style="width:90px">
-          <span class="muted">播放记录与审计</span></div>
+          <span class="muted">观影留痕与系统审计记录保留天数</span></div>
         <div class="toolbar"><button class="btn primary" id="mb-save">保存会员设置</button></div>
       </div>`)}
     ${card('图片缓存', '海报走本地磁盘，减轻 Emby CPU',
@@ -1236,11 +1433,11 @@ async function addEntry() {
   await changeEntries((entries) => entries.concat([row]), '入口已登记，可以生成配置了');
 }
 async function removeEntry(id) {
-  if (!(await deckConfirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`))) return;
+  if (!(await deckConfirm(`删除入口 ${id}？该域名的播放将不再留在它自己的域名上。`, {title: '删除入口', confirmText: '删除', danger: true}))) return;
   await changeEntries((entries) => entries.filter((e) => e.id !== id), '入口已删除');
 }
 async function rotateEntry(id) {
-  if (!(await deckConfirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`))) return;
+  if (!(await deckConfirm(`给 ${id} 换新凭据？对方手上的旧配置会立刻失效，必须重新发送。`, {title: '更换入口凭据', confirmText: '更换凭据', danger: true}))) return;
   await changeEntries((entries) => {
     if (!entries.some((e) => e.id === id)) throw new Error('入口已删除，请刷新页面');
     return entries.map((e) => ({ ...e, rotate_proxy_key: e.id === id }));
@@ -1407,7 +1604,7 @@ async function sweepImageCache() {
   catch (e) { toast('失败: ' + e.message, 1); }
 }
 async function clearImageCache() {
-  if (!(await deckConfirm('清空全部海报缓存？下次打开媒体库会重新拉取。'))) return;
+  if (!(await deckConfirm('清空全部海报缓存？下次打开媒体库会重新拉取。', {title: '清空图片缓存', confirmText: '清空缓存', danger: true}))) return;
   try { await api('/api/settings/image-cache/clear', { method: 'POST' }); toast('已清空'); refreshImageCacheStats(); }
   catch (e) { toast('失败: ' + e.message, 1); }
 }
@@ -1443,7 +1640,7 @@ async function checkUpdate() {
   } catch (e) { toast('检查失败: ' + e.message, 1); }
 }
 async function applyUpdate() {
-  if (!(await deckConfirm('确认更新？服务将自动重启。'))) return;
+  if (!(await deckConfirm('确认更新到最新版本？服务将自动重启，期间面板和播放分流短暂不可用。', {title: '一键更新', confirmText: '更新并重启', danger: true}))) return;
   try {
     const r = await api('/api/update/apply', { method: 'POST', body: JSON.stringify({}) });
     toast(`正在更新到 ${r.target}，请稍候…`);
@@ -1463,7 +1660,7 @@ const live = {src: null, data: {}, page: null, retry: 0, retryTimer: null,
 function pageContext(page = state.page, liveUpdate = false) {
   const version = state.renderVersion || 0;
   const route = state.route || page;
-  return {page, route, live: liveUpdate,
+  return {page, route, live: liveUpdate, version,
     isCurrent: () => state.page === page && (state.renderVersion || 0) === version
       && (state.route || state.page) === route};
 }

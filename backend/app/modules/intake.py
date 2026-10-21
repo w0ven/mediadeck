@@ -45,6 +45,7 @@ import re
 import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -348,30 +349,43 @@ def parse_probe_hotspots(log_text: str, limit: int = MAX_PROBE_LINES,
 
 NOTIFY_SENT_MARKERS = ("sent final=removed", "sent and removed")
 # Leading "[YYYY-MM-DD HH:MM:SS]" stamp written by the notifier.
-NOTIFY_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})")
+NOTIFY_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})\]")
+# This notifier writes Beijing wall time without an offset. Do not let a
+# collector's process TZ reinterpret the same receipt eight hours later.
+NOTIFY_TZ = timezone(timedelta(hours=8))
+NOTIFY_ACK_RE = re.compile(
+    r"^\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}\]\s+"
+    r"->\s+-?[1-9]\d*\s+OK(?:\s+message_id=[1-9]\d*)?\s*$"
+)
 
 
 def parse_notify_tail(text: str) -> dict[str, Any]:
     """Most recent delivered notification from the notifier's log tail.
 
-    Only lines carrying a completion marker count. A log full of retry chatter
+    Only legacy completion markers or a full notifier destination ACK count.
+    An Emby lookup's OK, a request or a FAIL is not a delivery. Retry chatter
     with no completion line means nothing has actually been delivered, and
     reporting the newest line regardless would hide precisely that.
     """
     if not text:
         return {"available": False, "reason": "日志为空"}
     for line in reversed(text.splitlines()):
-        if not any(marker in line for marker in NOTIFY_SENT_MARKERS):
+        line = line.strip()
+        ack = NOTIFY_ACK_RE.fullmatch(line)
+        if not ack and not any(marker in line for marker in NOTIFY_SENT_MARKERS):
             continue
-        match = NOTIFY_TS_RE.match(line.strip())
+        match = NOTIFY_TS_RE.match(line)
         ts = None
         if match:
             stamp = match.group(1).replace("T", " ")
             try:
-                ts = time.mktime(time.strptime(stamp, "%Y-%m-%d %H:%M:%S"))
+                ts = datetime.strptime(stamp, "%Y-%m-%d %H:%M:%S").replace(
+                    tzinfo=NOTIFY_TZ).timestamp()
             except ValueError:
                 ts = None
-        return {"available": True, "line": line.strip()[:300], "ts": ts,
+        if ack and ts is None:
+            continue  # A malformed date cannot establish a dated ACK.
+        return {"available": True, "line": line[:300], "ts": ts,
                 "age_seconds": round(time.time() - ts, 1) if ts else None}
     return {"available": False, "reason": "日志尾部没有已发送记录"}
 

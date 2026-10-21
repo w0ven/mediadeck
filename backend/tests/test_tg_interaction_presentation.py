@@ -181,17 +181,15 @@ def test_card_has_compact_sections_and_truthful_unknown(env, chat, used):
     env.members.bind_metering(Metering(), cutover=True)
     asyncio.run(dispatch(env, '/me', chat=chat, user=VIEWER))
     text = next(p['text'] for m, p in env.tg.calls if m == 'sendMessage')
-    for section in ('<b>本月流量</b>\n已用：', '带宽：<b>', '<b>观看记录</b>\n近24小时：', '<b>积分：50</b>'):
+    for section in ('带宽：<b>', '<b>观看记录</b>\n近24小时：', '<b>积分：50</b>'):
         assert section in text
     assert '数据不完整' not in text
     for forbidden in ('来源', '采集', '更新于', 'hidden-node', '这是本人', '请选择', '《'):
         assert forbidden not in text
-    if used is None:
-        assert '已用：<b>计量暂不可用</b>' in text and '剩余：<b>暂无法确认</b>' in text
-    elif used == 0:
-        assert '已用：<b>0 B</b>' in text and '剩余：<b>1.0 TiB</b>' in text
-    else:
-        assert '已用：<b>128.0 GiB</b>' in text and '剩余：<b>896.0 GiB</b>' in text
+    # The traffic section is retired (docs/TRAFFIC_RETIREMENT.md): a bound legacy
+    # ledger can surface neither an unknown placeholder nor any figure.
+    for retired in ('本月流量', '已用：', '剩余：', '计量暂不可用', '0 B', '128.0 GiB'):
+        assert retired not in text
 
 
 def test_whitelist_poetry_removed_from_all_cards_and_home(env):

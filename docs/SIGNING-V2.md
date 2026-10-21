@@ -30,8 +30,8 @@ Create a private mode-600 JSON file:
 
 Default: `/etc/mediadeck/signing.json`. An explicit `--signing-config` or `LOADPROBE_SIGNING_CONFIG` selects another private path. Pass only the file path via CLI/environment, never the secret. Configuration is read at startup; restart the existing probe after atomically installing it. Missing/invalid configuration leaves load reporting available but verification fails closed.
 
-- `metering:false`: valid signatures return 204 without contacting meterd. Do not enable a collector solely to support signatures.
-- `metering:true`: only after HMAC verification succeeds, the probe sends the authenticated user tag and nginx-captured connection tuple to the existing loopback meterd. Explicit meterd denials remain denials; its previous network/502/503/504 failure tolerance applies only to already-authenticated requests.
+- Legacy key `metering:false`: valid signatures return 204 without contacting meterd. Do not enable a collector solely to support signatures.
+- Legacy key `metering:true` (access-policy checks only, **not** accounting): only after HMAC verification succeeds, the probe sends the authenticated user tag and nginx-captured connection tuple to the existing loopback meterd. Explicit meterd denials remain denials; its previous network/502/503/504 failure tolerance applies only to already-authenticated requests.
 
 ## Nginx integration
 
@@ -59,6 +59,8 @@ Do not roll verification back to v1 to recover availability. Keep v2 fail-closed
 
 ## Regression evidence
 
-`tests/test_signing_v2.py` contains independent HMAC/v1 vectors. `tests/test_signing_v2_nginx.py` runs real TLS nginx, standalone probe, optional meterd/nft and the existing transparent nginx entry template in an isolated network namespace. It covers both standard argument-name pairs, media roots, encoded/Unicode paths, GET/HEAD/Range, field tampering, v1 rejection, disabled/enabled/down collectors, missing configuration, unavailable verification, forged internal headers and POST rejection.
+`tests/test_signing_v2.py` contains independent HMAC/v1 vectors. `tests/test_signing_v2_nginx.py` runs real TLS nginx, standalone probe, optional access-policy guard (no nft) and the existing transparent nginx entry template in an isolated network namespace. It covers both standard argument-name pairs, media roots, encoded/Unicode paths, GET/HEAD/Range, field tampering, v1 rejection, disabled/enabled/down access-policy transport, missing configuration, unavailable verification, forged internal headers and POST rejection.
 
 The former audit security XFAIL is now a normal passing regression. Unavailable Caddy environments and unexecuted external integrations remain explicit limits; template/unit checks are not a claim that every third-party deployment was tested.
+
+Byte counters/reporting are retired. `meterd` now pulls the authenticated `/api/edge/{node}/policy` snapshot; it neither opens the traffic ledger for writing nor collects kernel bytes. The existing signing configuration key name is accepted for compatibility only. See [TRAFFIC_RETIREMENT.md](TRAFFIC_RETIREMENT.md).

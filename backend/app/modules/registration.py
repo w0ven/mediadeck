@@ -236,6 +236,11 @@ class RegistrationService:
         The slot is debited first: if minting somehow failed after the code was
         already handed out, the member would get an unlimited supply.
         """
+        from app.modules.invite_tree import active_suspension
+        paused = active_suspension(self._db, owner_user_id)
+        if paused:
+            until = time.strftime('%Y-%m-%d %H:%M', time.localtime(int(paused['until'])))
+            raise ConfigError(f'你的邀请资格已暂停至 {until}，期间不能生成邀请码。')
         with self._db.write() as conn:
             changed = conn.execute(
                 'UPDATE members SET invite_quota=invite_quota-1,updated_at=? WHERE emby_user_id=? AND invite_quota>0',
@@ -493,6 +498,10 @@ class RegistrationService:
         invite = self.get_invite(cred) if self.channel_enabled("invite") else None
         if invite:
             problem = self._invite_usable(invite, now)
+            if not problem:
+                from app.modules.invite_tree import active_suspension
+                if active_suspension(self._db, str(invite.get("owner_user_id") or ""), now):
+                    problem = "这个邀请码暂时不可用，请联系邀请你的人。"
             if problem:
                 return Admission(allowed=False, tg_user_id=tg_user_id,
                                  reason=problem)

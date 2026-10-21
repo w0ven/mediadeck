@@ -26,7 +26,7 @@ import pytest
 
 from app.core.db import Database
 from app.modules.groups import GroupService
-from app.modules.member_rewards import GB, KBPS_PER_MBPS
+from app.modules.member_rewards import KBPS_PER_MBPS
 from app.modules.members import MemberService
 from app.modules.points import PointsService
 from app.modules.registration import RegistrationService
@@ -157,7 +157,7 @@ def test_a_non_admin_is_refused_every_command(bot, command) -> None:
     if command == "/req":
         assert "不是上片员" in reply
     elif command == "/help":
-        assert "使用说明" in reply
+        assert "使用帮助" in reply
     else:
         # Ordinary members are pointed at the buttons, not told they lack power.
         assert "无权限" not in reply
@@ -219,8 +219,10 @@ def test_help_lists_every_command(bot) -> None:
 def test_kk_reports_the_account_at_a_glance(bot) -> None:
     bot.points.add("u1", 120, "test", actor="test")
     reply = _run(bot, "/kk alice")
-    for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "本月流量", "带宽", "积分：120"):
+    for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "带宽", "积分：120"):
         assert fragment in reply
+    # Byte usage is retired from the admin card (docs/TRAFFIC_RETIREMENT.md).
+    assert "本月流量" not in reply
     assert len(reply.splitlines()) <= 12
     for text in ('按设备名称归并', '非硬件唯一识别', '观看记录', '核验', '发奖依据'):
         assert text not in reply
@@ -254,7 +256,8 @@ def test_kk_short_card_preserves_escaping_unknowns_and_access_warning(bot) -> No
     body = bot._user_card(member)
     assert '&lt;User&amp;&gt;' in body and '&lt;Group&amp;&gt;' in body
     assert '有效期：暂不可用' in body and '积分：暂不可用' in body
-    assert '计量暂不可用' in body and '暂无法确认' in body
+    # The retired usage block is gone rather than shown as unknown.
+    assert '计量暂不可用' not in body and '本月流量' not in body
     assert 'Emby：未知，请刷新核实' in body
     assert '<User&>' in plain(body)
 
@@ -459,12 +462,12 @@ def test_scoreall_can_be_cancelled(bot) -> None:
 
 # -- /gift -------------------------------------------------------------------
 
-def test_gift_traffic_adds_the_same_bytes_the_shop_would(bot) -> None:
-    """A gift and a purchase must be the same write, or the two paths drift."""
+def test_gift_traffic_is_refused_now_that_quotas_are_retired(bot) -> None:
+    """Traffic gifts went with byte quotas: refused, nothing written or audited."""
     reply = _run(bot, "/gift alice traffic 50")
-    assert "50GB" in reply
-    overrides = bot.members.get("u1")["overrides"]
-    assert overrides["extra_traffic_bytes"] == 50 * GB
+    assert "类型必须是" in reply and "traffic" not in reply.split("类型必须是", 1)[1]
+    assert "extra_traffic_bytes" not in bot.members.get("u1")["overrides"]
+    assert not [r for r in bot.members.audit_log(limit=50) if r["action"] == "member.reward"]
 
 
 def test_gift_days_extends_the_term(bot) -> None:
@@ -488,7 +491,7 @@ def test_gift_invite_adds_quota(bot) -> None:
 
 def test_gift_never_charges_points(bot) -> None:
     bot.points.add("u1", 100, "test", actor="test")
-    _run(bot, "/gift alice traffic 10")
+    _run(bot, "/gift alice days 10")
     assert bot.points.balance("u1") == 100
 
 
@@ -594,7 +597,7 @@ def test_req_reports_the_totals(bot) -> None:
     ("/invite alice 2", "member.invite_quota"),
     ("/auth 123456", "registration.grant"),
     ("/code standard 30 1", "redeem.generate"),
-    ("/gift alice traffic 5", "member.reward"),
+    ("/gift alice days 5", "member.reward"),
 ])
 def test_commands_are_written_to_the_audit_trail_naming_the_admin(
         bot, command, action) -> None:

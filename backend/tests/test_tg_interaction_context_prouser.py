@@ -19,7 +19,8 @@ def test_prouser_direct_issue_preserves_state_privileges_and_history(env, select
     env.members.set_status('u1', 'suspended')
     env.members.set_roles('u1', ['uploader'])
     env.members.set_overrides('u1', {'max_streams': 3, 'allow_download': 1})
-    env.members.add_traffic('u1', 1234)
+    # add_traffic is a retired no-op; seed the archived counter directly.
+    env.db.execute("UPDATE members SET traffic_used_bytes=1234 WHERE emby_user_id='u1'")
     async def run():
         if selector == 'reply':
             await env.bot._dispatch_update({'message': {
@@ -32,7 +33,10 @@ def test_prouser_direct_issue_preserves_state_privileges_and_history(env, select
     assert target['group_id'] == 'whitelist'
     assert target['roles'] == ['uploader'] and target['status'] == 'suspended'
     assert target['overrides'] == {'max_streams': 3, 'allow_download': 1}
-    assert target['traffic_used_bytes'] == 1234 and env.bot._points.balance('u1') == 50
+    # History is preserved in storage; the retired counter is no longer presented.
+    assert env.db.one("SELECT traffic_used_bytes FROM members WHERE emby_user_id='u1'")[
+        'traffic_used_bytes'] == 1234
+    assert target['traffic_used_bytes'] is None and env.bot._points.balance('u1') == 50
     assert target['expires_at_effective'] is None
     text = '\n'.join(p.get('text', '') for m, p in env.tg.calls if m == 'sendMessage')
     assert 'ViewerA' in text and '白名单' in text and '签发' in text

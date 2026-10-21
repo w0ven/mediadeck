@@ -9,10 +9,12 @@ from test_activity_bot import (  # noqa: F401
     env,
     find_action,
     interaction_env,
+    message,
     private_command,
     tap,
 )
 from test_bot_reply_templates import plain
+from test_economy import proof
 from test_tg_interaction_context import VIEWER
 
 from app.modules.economy_rules import DEFAULT_CARDS, economy_write
@@ -35,9 +37,6 @@ def render_ux_previews(e):
         item = e.tg.message(VIEWER, mid)
         page(title, e.tg.text(VIEWER, mid), item.get('reply_markup', {}).get('inline_keyboard', []))
 
-    cfg = e.levels.config()
-    cfg['config']['levels'][1].update(name='听风', icon='🍃', title='🍂 风止星归')
-    e.levels.save_config(cfg['config'], cfg['revision'])
     e.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u1',120,'test','preview',?)", (int(time.time()),))
     item = e.services.shop.create(dict(DEFAULT_CARDS[0], enabled=True))
     with economy_write(e.db) as conn:
@@ -46,7 +45,7 @@ def render_ux_previews(e):
 
     async def run():
         mid = await private_command(e, '/start')
-        snapshot('首页 · 签到独立首行', mid)
+        snapshot('首页 · 无签到按钮', mid)
         await tap(e, 'me', mid)
         snapshot('我的账号 · 完整等级与直接保号入口', mid)
         await tap(e, 'activity:status', mid)
@@ -66,7 +65,7 @@ def render_ux_previews(e):
             snapshot(title, mid)
         assert e.services.points.balance('u1') == before
         await tap(e, 'home', mid)
-        await tap(e, 'checkin', mid)
+        await e.bot._dispatch_update({'message':message('/checkin')})
         receipt = [p for method, p in e.tg.calls if method == 'sendMessage'][-1]
         page('签到回执 · 运气覆盖风险保留', receipt['text'], receipt.get('reply_markup', {}).get('inline_keyboard', []))
     asyncio.run(run())
@@ -76,6 +75,14 @@ def render_ux_previews(e):
              'shows': [{'title':'合成剧集', 'seconds':7200, 'plays':4}]}
     page('影片榜', e.bot._rankings_text(today=True, board=board))
     page('观影榜', e.bot._watch_rank_pages(today=True, board=board)[0])
+    now = int(time.time())
+    e.levels.activity.activate(now-300)
+    proof(e.db, 'u1', now=now, seconds=300, key='preview-paid')
+    e.levels.activity.settle(now)
+    async def settled_account():
+        mid = await private_command(e, '/me')
+        snapshot('我的账号 · 今日观影奖励', mid)
+    asyncio.run(settled_account())
     e.members.upsert('u1', '', {'group_id':'whitelist'})
     member = e.members.get('u1')
     member.update(quota_source='measured', measured_used_bytes=int(43.4*1024**3),
@@ -89,7 +96,7 @@ def render_ux_previews(e):
 def preview_document(pages):
     lines = ['# 用户 Bot 统一展示预览', '',
              '真实源码模板/本地回调生成；合成账号及本地临时数据库，不是线上截图，未发送到 Telegram。',
-             'Lv2 示例名称由测试配置设置，不修改生产等级配置。按钮沿用现有 callback。', '']
+             '等级名称采用源码默认配置（与本轮只读核对的现网名称一致）；仅模拟账号，不修改生产配置。', '']
     for title, (body, rows) in pages.items():
         lines += [f'## {title}', '', '```text', plain(body), '```', '', '按钮：']
         lines += ['- ' + ' ｜ '.join(row) for row in rows] or ['- 无']
@@ -103,8 +110,13 @@ def test_current_user_ux_previews(request, monkeypatch):
     pages = render_ux_previews(e)
     assert PREVIEW.read_text() == preview_document(pages)
     account, rows = pages['我的账号 · 完整等级与直接保号入口']
-    assert 'Lv2. 🍃 听风 🍂 风止星归' in account
-    assert rows[0] == ['🤖 开启自动保号', '⏳ 续期30天']
-    assert all('签到' not in label for row in pages['背包 · 物品与消费入口'][1] for label in row)
+    assert '🗡 Lv2 游侠「一身侠气走江湖」' in account
+    assert '观影奖励' not in account
+    assert '今日观影奖励 +8 积分 · +5 成长' in pages['我的账号 · 今日观影奖励'][0]
+    assert rows[0] == ['⏳ 续期 30 天', '🤖 开启自动保号']
+    assert all('签到' not in label for body, rows in pages.values() for row in rows for label in row)
+    assert all('删除候选' not in body and '保留至：' not in body for body, rows in pages.values())
+    assert all(not any(text in body for text in ('80分钟', '有效日', '合格日', '资格已达标'))
+               for body, rows in pages.values())
     assert not any(text in pages['白名单完整账号卡 · 无续期缺口'][0]
                    for text in ('续期', '缺口', '近30天核验', '有效日', '删除候选'))

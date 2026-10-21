@@ -23,7 +23,7 @@ from app.core.db import Database
 from app.main import app
 from app.modules.groups import GroupService
 from app.modules.inventory import InventoryService
-from app.modules.member_rewards import GB, KBPS_PER_MBPS, grant_reward
+from app.modules.member_rewards import KBPS_PER_MBPS, RewardError, grant_reward
 from app.modules.members import MemberService
 from app.modules.points import PointsService
 from app.modules.shop import ShopError, ShopService
@@ -91,11 +91,13 @@ def test_seeding_does_not_undo_a_deliberately_emptied_shop(stack) -> None:
 
 # -- the four kinds, delivered -----------------------------------------------
 
-def test_traffic_admin_reward_preserves_shared_capability(stack, member):
+def test_traffic_admin_reward_is_refused_after_quota_retirement(stack, member):
+    """Traffic rewards went with byte quotas (docs/TRAFFIC_RETIREMENT.md)."""
     db, members, points, shop = stack
-    note = grant_reward(db, members, member, "traffic", 50)
-    assert members.get(member)["overrides"]["extra_traffic_bytes"] == 50 * GB
-    assert "50GB" in note and points.balance(member) == 0 and not shop.orders()
+    with pytest.raises(RewardError):
+        grant_reward(db, members, member, "traffic", 50)
+    assert "extra_traffic_bytes" not in members.get(member)["overrides"]
+    assert points.balance(member) == 0 and not shop.orders()
 
 
 def test_days_admin_reward_extends_the_term(stack, member):

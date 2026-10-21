@@ -14,7 +14,7 @@ from typing import Any
 
 from app.core.errors import ConfigError, ConflictError
 from app.modules.enforcement import MANAGED_KEYS, _normalise, desired_policy, fingerprint
-from app.modules.groups import needs_duration, needs_traffic
+from app.modules.groups import needs_duration
 
 # Never persist secrets into last_remote_error / audit / task tables.
 _SECRET_RE = re.compile(
@@ -38,9 +38,6 @@ SORTS = {
     "state": lambda m: m.get("entitlement_state") or m.get("state") or "",
     "emby": lambda m: m.get("emby_status") or "",
     "sync": lambda m: m.get("sync_status") or "",
-    "used": lambda m: int(m.get("traffic_used_bytes") or 0),
-    "traffic": lambda m: int(m.get('measured_used_bytes') if m.get('measured_used_bytes') is not None else -1),
-    "edge30": lambda m: int((m.get("edge") or {}).get("bytes_30d") or 0),
     "last_seen": activity_timestamp,
     "last_played": activity_timestamp,
 }
@@ -292,8 +289,6 @@ def group_preview(members: Any, user_id: str, group_id: str) -> dict[str, Any]:
         warnings.append("切到目标组若套用 duration_days 会缩短现有有效期；默认保留")
     if not to_timed:
         warnings.append("目标组不计时：到期改为不限，并清除个人到期覆盖")
-    if not needs_traffic(to_group.get('billing_mode') or ''):
-        warnings.append("目标组不计流量：有效配额不限，历史用量保留")
     return {
         "from_group": {
             "id": from_group.get("id") or member.get("group_id"),
@@ -377,7 +372,9 @@ async def delete_emby_one(emby: Any, user_id: str,
 async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
                          actor: str, cascade: bool = False,
                          delete_emby: bool = True,
-                         confirm_ids: Any = None, authorize: Any = None) -> dict[str, Any]:
+                         confirm_ids: Any = None, authorize: Any = None,
+                         review_source: str = "") -> dict[str, Any]:
+    """review_source ('admin' / 'violation') asks about the direct inviter afterwards."""
     preview = members.delete_preview(user_id, cascade=cascade)
     validate_confirm_ids(preview, confirm_ids, cascade=cascade)
     objects = list(preview.get("objects") or [])
@@ -391,6 +388,7 @@ async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
         except Exception:  # noqa: BLE001
             live_ids = None
 
+    departures: dict[str, int | None] = {}
     emby_deleted: list[str] = []
     emby_already_gone: list[str] = []
     emby_failed: list[dict[str, Any]] = []
@@ -441,11 +439,13 @@ async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
             continue
 
         if members.get(uid):
-            members.delete(uid, actor=actor, cascade=False,
-                           audit_action=("member.delete.cascade"
-                                         if role == "inviter" else "member.delete"),
-                           audit_detail=(f"cascaded from {user_id}"
-                                         if role == "inviter" else "membership removed"))
+            gone = members.delete(uid, actor=actor, cascade=False,
+                                  audit_action=("member.delete.cascade"
+                                                if role == "inviter" else "member.delete"),
+                                  audit_detail=(f"cascaded from {user_id}"
+                                                if role == "inviter" else "membership removed"),
+                                  source=("cascade" if role == "inviter" else review_source or "other"))
+            departures[uid] = (gone or {}).get("departures", {}).get(uid)
         removed.append(uid)
 
     remote_ok: bool | None
@@ -466,6 +466,12 @@ async def execute_delete(members: Any, emby: Any | None, user_id: str, *,
     )
     # deleted only means local rows are gone; ok reflects remote too.
     result["deleted"] = not retained and user_id in removed
+    result["invite_case_id"] = None
+    if (review_source and user_id in removed
+            and not any(o.get("role") == "inviter" for o in objects)):
+        from app.modules.invite_tree import InviteTree
+        result["invite_case_id"] = InviteTree(members._db, members).open_case(
+            departures.get(user_id), review_source, actor)
     return result
 
 
@@ -478,15 +484,7 @@ def live_pulse(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "emby_status": r.get("emby_status"),
         "sync_status": r.get("sync_status"),
         "last_seen_at": r.get("last_seen_at"),
-        "traffic_used_bytes": r.get("traffic_used_bytes") or 0,
-        "measured_used_bytes": r.get("measured_used_bytes")
-        if "measured_used_bytes" in r
-        else ((r.get("metering") or {}).get("measured_used_bytes")
-              if isinstance(r.get("metering"), dict) else None),
-        "quota_source": r.get("quota_source"),
-        "metering_source": (r.get("metering") or {}).get("source")
-        if isinstance(r.get("metering"), dict) else None,
-        "edge_30d": int((r.get("edge") or {}).get("bytes_30d") or 0),
+        "traffic_tracking": False,
         "last_remote_ok": r.get("last_remote_ok"),
         "last_remote_at": r.get("last_remote_at"),
         "retryable": bool(r.get("retryable")),
