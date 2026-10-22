@@ -54,6 +54,7 @@ def test_all_registration_channels_announce_committed_accounts_once(env, channel
         posts = public_receipts(env)
         assert len(posts) == 1 and posts[0].get('message_thread_id') == topic
         assert 'ChannelReceipt' in posts[0]['text'] and '密码' not in posts[0]['text']
+        assert ('邀请人' in posts[0]['text']) == (channel == 'invite')
         if credential:
             assert credential not in posts[0]['text']
         with env.db.write() as conn:
@@ -61,6 +62,40 @@ def test_all_registration_channels_announce_committed_accounts_once(env, channel
         await env.bot._gift_receipts.recover()
         assert len(public_receipts(env)) == 1 and len(receipts(env)) == 1
         assert receipts(env)[0]['status'] == 'sent'
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(('handle', 'display', 'shown'), [
+    ('@inviter_a', '', '@inviter_a'),
+    ('', 'Inviter <A>', 'Inviter &lt;A&gt;'),
+    ('', '', f'TG {VIEWER}'),
+])
+def test_invite_receipt_mentions_the_inviter(env, handle, display, shown):
+    env.cfg.update(registration_notify_chat_id=str(GROUP), allow_invite=True)
+    env.db.execute('UPDATE members SET tg_username=?,tg_display_name=? WHERE emby_user_id=?', (handle, display, 'u1'))
+    code = env.bot._registration.issue_invite('u1')['code']
+
+    async def run():
+        await env.bot._start_registration(TARGET, str(TARGET), credential=code)
+        await command(env, 'InvitedReceipt', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
+        posts = public_receipts(env)
+        assert len(posts) == 1
+        assert f'🤝 邀请人：<a href="tg://user?id={VIEWER}">{shown}</a>' in posts[0]['text']
+    asyncio.run(run())
+
+
+def test_invite_receipt_without_bound_inviter_has_no_mention(env):
+    env.cfg.update(registration_notify_chat_id=str(GROUP), allow_invite=True)
+    code = env.bot._registration.issue_invite('u1')['code']
+    env.db.execute("UPDATE members SET tg_user_id='' WHERE emby_user_id='u1'")
+
+    async def run():
+        await env.bot._start_registration(TARGET, str(TARGET), credential=code)
+        await command(env, 'UnboundInviter', chat=TARGET, user=TARGET)
+        await confirm_registration_password(env)
+        posts = public_receipts(env)
+        assert len(posts) == 1 and '邀请人' not in posts[0]['text']
     asyncio.run(run())
 
 
