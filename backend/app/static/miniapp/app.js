@@ -9,20 +9,26 @@
     rank: { kind: 'watch', period: 'today' }, bag: 'shop',
     req: { q: '', type: '', results: null, page: 1, total: 1 },
   };
-  const ORN = { 1: '·', 2: '✦', 3: '❀', 4: '❄', 5: '✧', 6: '◈', 7: '♛', 8: '✺' };
-  const STATUS = { active: '✅ 正常', suspended: '⛔ 已停用', expired: '⌛ 已过期', exhausted: '📵 已超额', pending: '🕓 待开通', deleted: '⛔ 已删除' };
+  const ORN = { 1: '', 2: '', 3: '✦', 4: '✧', 5: '◈', 6: '❖', 7: '♛', 8: '✺' };
+  const STATUS = {
+    active: ['ok', '正常'], suspended: ['bad', '已停用'], expired: ['warn', '已过期'],
+    exhausted: ['warn', '已超额'], pending: ['', '待开通'], deleted: ['bad', '已删除'],
+  };
   const REQ_STATUS = { open: ['warn', '待处理'], accepted: ['ok', '已接受'], rejected: ['bad', '未通过'], cancelled: ['', '已取消'] };
   const KIND_ICON = {
-    bandwidth_card: ['🚀', '#6aa6ff'], streams_card: ['📺', '#43d39e'], title_card: ['🏷️', '#ffb84d'],
-    invite_card: ['🎫', '#c07bff'], whitelist_card: ['💠', '#9fe7ff'], custom: ['📦', '#8b93a7'],
+    bandwidth_card: ['gauge', '#5b8def'], streams_card: ['monitor-play', '#2fb36d'], title_card: ['award', '#c9953a'],
+    invite_card: ['ticket', '#8a6fd1'], whitelist_card: ['shield-check', '#4b9bb0'], custom: ['box', '#7d8696'],
   };
+  function icon(name) {
+    return `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+  }
 
   // -- platform ---------------------------------------------------------------
 
   function applyTheme() {
     const dark = !tg || tg.colorScheme !== 'light';
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    const bg = dark ? '#0b0e17' : '#f4f5fb';
+    const bg = (tg && tg.themeParams && tg.themeParams.secondary_bg_color) || (dark ? '#0c0e12' : '#f2f3f7');
     try { tg && tg.setHeaderColor(bg); tg && tg.setBackgroundColor(bg); } catch (_) { /* older clients */ }
   }
   if (tg) {
@@ -85,7 +91,7 @@
     return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
   }
   function left(ts) {
-    if (!ts) return '♾ 永久有效';
+    if (!ts) return '永久有效';
     const s = ts - Date.now() / 1000;
     if (s <= 0) return '已到期';
     if (s >= 86400) return `剩 ${Math.floor(s / 86400)} 天`;
@@ -136,13 +142,43 @@
   }
   function lvTag(tag, xs = false) {
     if (!tag) return '';
-    const label = tag.whitelist ? '💠 白名单' : `${esc(tag.icon || '')} Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
+    const label = tag.whitelist ? '白名单' : `Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
     return `<span class="lvtag ${xs ? 'xs ' : ''}${lvClass(tag)}">${label}</span>`;
+  }
+  function growthMeter(lv, nextLevel, pct, today, whitelist) {
+    const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+    const g = num(lv.growth || 0);
+    const td = today && today.growth > 0 ? `<em class="gm-today num"> · 今日 +${num(today.growth)}</em>` : '';
+    if (whitelist) {
+      return `<div class="gm">
+        <div class="gm-top"><span class="gm-label"><b>白名单</b> · 无需续期</span><b class="gm-pct">永久有效</b></div>
+        <div class="gm-bar" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span style="width:100%"></span></div>
+        <div class="gm-foot"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage">不参与等级考核</span></div>
+      </div>`;
+    }
+    const next = lv.next_threshold;
+    if (!next) {
+      const isEx = lv.level === 8;
+      return `<div class="gm">
+        <div class="gm-top"><span class="gm-label"><b>Lv${esc(lv.level)} ${esc(lv.name || '')}</b> · ${isEx ? '专属授予等级' : '已达最高常规等级'}</span><b class="gm-pct num">${isEx ? '专属' : '已满级'}</b></div>
+        <div class="gm-bar" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span style="width:100%"></span></div>
+        <div class="gm-foot"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} MAX</span></div>
+      </div>`;
+    }
+    const gap = Math.max(0, next - (lv.growth || 0));
+    const nextLv = lv.level + 1;
+    const nextName = nextLevel && nextLevel.name ? ` ${esc(nextLevel.name)}` : '';
+    return `<div class="gm">
+      <div class="gm-top"><span class="gm-label">距 <b>Lv${esc(nextLv)}${nextName}</b> 还差 <b class="num">${num(gap)}</b> 成长</span><b class="gm-pct num">${p}%</b></div>
+      <div class="gm-bar" role="progressbar" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100"><span style="width:${p}%${p > 0 ? ';min-width:4px' : ''}"></span></div>
+      <div class="gm-foot"><span>成长 <b class="num">${g}</b> / <span class="num">${num(next)}</span>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} → Lv${esc(nextLv)}</span></div>
+    </div>`;
   }
   function plaque(text, tag, big = false) {
     const tier = tag && tag.whitelist ? 7 : Math.min(8, Math.max(1, Number(tag && tag.level) || 1));
     const orn = tag && tag.whitelist ? '◆' : ORN[tier];
-    return `<span class="plaque t${tier}${big ? ' big' : ''}"><span class="orn">${orn}</span><span class="txt">${esc(text)}</span><span class="orn">${orn}</span></span>`;
+    const side = orn ? `<span class="orn">${orn}</span>` : '';
+    return `<span class="plaque t${tier}${big ? ' big' : ''}">${side}<span class="txt">${esc(text)}</span>${side}</span>`;
   }
   function myTag() {
     const me = S.me;
@@ -150,8 +186,8 @@
     return me.whitelist ? { whitelist: true } : { level: me.level.level, name: me.level.name, icon: me.level.icon };
   }
   function posterHtml(src, title, extra = '') {
-    const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.remove()">` : '';
-    return `${img}${extra}<span class="cap">${esc(title)}</span>`;
+    const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('no-img');this.remove()">` : '';
+    return `<span class="ph">${icon('clapperboard')}</span>${img}${extra}<span class="cap">${esc(title)}</span>`;
   }
 
   // -- shell ------------------------------------------------------------------
@@ -173,11 +209,11 @@
     screen.scrollTop = 0;
   }
   function loading(target = screen) { target.innerHTML = '<div class="loading"><span class="spin"></span>加载中…</div>'; }
-  function stateView(icon, title, text, action = '') {
-    return `<div class="state"><div class="big">${icon}</div><b>${esc(title)}</b><div>${esc(text)}</div>${action}</div>`;
+  function stateView(glyph, title, text, action = '') {
+    return `<div class="state"><div class="big">${glyph}</div><b>${esc(title)}</b><div>${esc(text)}</div>${action}</div>`;
   }
   function failView(err, retry = true) {
-    return stateView('⚠️', '没有加载出来', err.message || '请稍后再试',
+    return stateView(icon('circle-alert'), '加载失败', err.message || '请稍后再试',
       retry ? '<button class="btn ghost" type="button" data-retry>重试</button>' : '');
   }
 
@@ -225,12 +261,12 @@
   function fatal(err) {
     if (!(err instanceof ApiError)) return false;
     if (err.status === 401 || err.status === 403 || err.status === 503) {
-      const icon = err.code === 'unbound' ? '🔗' : err.code === 'disabled' ? '🛠' : '🔒';
+      const glyph = icon(err.code === 'unbound' ? 'unlink' : err.code === 'disabled' ? 'wrench' : 'lock');
       const title = err.code === 'unbound' ? '还没有绑定账号' : err.code === 'disabled' ? '会员面板暂未开放' : '无法确认身份';
       S.me = null;
       S.stack = [];
       syncChrome();
-      setScreen(stateView(icon, title, err.message,
+      setScreen(stateView(glyph, title, err.message,
         tg ? '<button class="btn" type="button" data-close>回到 Bot</button>' : ''));
       const close = $('[data-close]', screen);
       if (close) close.onclick = () => tg.close();
@@ -340,57 +376,57 @@
     const next = lv.next_threshold;
     const pct = next ? Math.min(100, Math.round((lv.growth - (lv.threshold || 0)) / Math.max(1, next - (lv.threshold || 0)) * 100)) : 100;
     const nextLevel = me.levels.find((r) => r.level === lv.level + 1);
-    const ring = next
-      ? `<div class="ring" style="--p:${pct}%"><div><b class="num">${num(lv.growth)}</b><span>/ ${num(next)}</span></div></div>`
-      : `<div class="ring" style="--p:100%"><div><b>${lv.level === 8 ? '专属' : '满级'}</b><span>${num(lv.growth)}</span></div></div>`;
-    const status = STATUS[me.state] || me.state;
-    const gap = next ? `距 Lv${lv.level + 1} ${esc(nextLevel ? nextLevel.name : '')} 还差 ${num(next - lv.growth)} 成长` : '';
+    const [statusCls, status] = STATUS[me.state] || ['', me.state];
     const today = me.today;
     const isToday = today.day === todayKey();
     const todayLabel = (today.points || today.growth)
-      ? `🎁 ${isToday ? '今日' : esc(today.day.slice(5))}${today.growth ? ` · +${num(today.growth)} 成长` : ''}`
-      : '🎁 今日暂无奖励';
+      ? `${isToday ? '今日' : esc(today.day.slice(5))}${today.growth ? ` · +${num(today.growth)} 成长` : ''}`
+      : '今日暂无奖励';
     const renew = me.renewal;
     let renewCard = '';
     if (me.whitelist) {
-      renewCard = '<div class="card row"><div><b>💠 白名单</b><div class="tiny muted">永久有效，无需续期</div></div></div>';
+      renewCard = '<div class="card row"><div><b>白名单</b><div class="tiny muted">永久有效，无需续期</div></div></div>';
     } else if (renew.available) {
       const when = renew.window_open ? '现在可以续期' : (renew.opens_at ? `${stamp(renew.opens_at)} 起可续` : '');
       renewCard = `<div class="card">
-        <div class="row"><div class="grow"><b>续期</b><div class="tiny muted">到期 ${stamp(me.expires_at)}${when ? ' · ' + when : ''}</div></div>
-          <button class="btn${renew.blockers.length ? ' dis' : ''}" type="button" id="renew">⏳ 续期 30 天</button></div>
+        <div class="row"><div class="grow"><b>续期</b><div class="tiny muted"><div>到期 ${stamp(me.expires_at)}</div>${when ? `<div>${when}</div>` : ''}</div></div>
+          <button class="btn${renew.blockers.length ? ' dis' : ''}" type="button" id="renew">续期 30 天</button></div>
         <div class="row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
-          <div class="grow"><div>🤖 自动保号</div><div class="tiny muted">到期前 24 小时积分够就自动续 · ${num(renew.price)} 积分 / 30 天</div></div>
+          <div class="grow"><div>自动保号</div><div class="tiny muted"><div>到期前 24 小时内积分足够即自动续期</div><div>每次 ${num(renew.price)} 积分 / 30 天</div></div></div>
           <button class="switch${renew.auto_renew ? ' on' : ''}" type="button" id="auto" role="switch" aria-checked="${renew.auto_renew}" aria-label="自动保号"></button>
         </div></div>`;
     }
     setScreen(`
       <div class="hero ${cls}"><div class="sheen"></div>
-        <div class="row" style="justify-content:flex-start;gap:12px">
+        <div class="row" style="align-items:center;gap:12px">
           ${face(me.name, me.avatar)}
-          <div class="grow"><div style="font-weight:800;font-size:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
-            <div style="margin-top:3px">${lvTag(tag)}</div></div>
-          ${ring}
+          <div class="grow" style="min-width:0">
+            <div style="font-weight:600;font-size:17px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
+            <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin-top:6px">
+              ${lvTag(tag)}
+              ${plaque(me.worn_title || lv.title, tag)}
+              <span class="tiny muted nowrap"><span class="status-dot ${statusCls}"></span>${esc(status)} · ${me.whitelist ? '永久有效' : esc(left(me.expires_at))}</span>
+            </div>
+          </div>
         </div>
-        <div style="text-align:center;margin:12px 0 4px">${plaque(me.worn_title || lv.title, tag)}</div>
-        <div class="row tiny" style="opacity:.85;margin-top:6px"><span>${esc(status)} · ${me.whitelist ? '♾ 永久有效' : esc(left(me.expires_at))}</span><span>${gap}</span></div>
+        ${growthMeter(lv, nextLevel, pct, today, me.whitelist)}
       </div>
       <div class="stats">
-        <div><b class="num">${num(me.balance)}</b><span>🪙 积分</span></div>
-        <div><b class="num" style="color:var(--ok)">${today.points ? '+' + num(today.points) : '—'}</b><span>${todayLabel}</span></div>
-        <div><b class="num">${Math.round((me.watch.seconds_30d || 0) / 3600)}<small style="font-size:11px"> 小时</small></b><span>📊 近 30 天</span></div>
+        <div><b class="num">${num(me.balance)}</b><span>积分</span></div>
+        <div><b class="num" style="color:${today.points ? 'var(--ok)' : 'var(--hint)'}">${today.points ? '+' + num(today.points) : '—'}</b><span>${todayLabel}</span></div>
+        <div><b class="num">${Math.round((me.watch.seconds_30d || 0) / 3600)}<small style="font-size:11px"> 小时</small></b><span>近 30 天</span></div>
       </div>
       ${renewCard}
       <div class="qgrid">
-        <button type="button" data-go="lines"><div class="ic" style="--c:#6aa6ff">🌐</div>播放线路</button>
-        <button type="button" data-go="level"><div class="ic" style="--c:#43d39e">🌱</div>等级权益</button>
-        <button type="button" data-go="titles"><div class="ic" style="--c:#ffb84d">🏷️</div>我的称号</button>
-        <button type="button" data-go="invites"><div class="ic" style="--c:#c07bff">🎫</div>邀请</button>
+        <button type="button" data-go="lines"><div class="ic" style="--c:#5b8def">${icon('route')}</div>播放线路</button>
+        <button type="button" data-go="level"><div class="ic" style="--c:#2fb36d">${icon('shield')}</div>等级权益</button>
+        <button type="button" data-go="titles"><div class="ic" style="--c:#c9953a">${icon('award')}</div>我的称号</button>
+        <button type="button" data-go="invites"><div class="ic" style="--c:#8a6fd1">${icon('user-plus')}</div>邀请</button>
       </div>
       <div class="list">
-        <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#ffcc5c">📜</div><span class="t">积分流水</span><span class="go">›</span></button>
-        <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#6aa6ff">📺</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + (me.rights.max_devices ? ' / ' + esc(me.rights.max_devices) : '') + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
-        <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#43d39e">🔑</div><span class="t">修改密码</span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#c9953a">${icon('receipt')}</div><span class="t">积分流水</span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#5b8def">${icon('monitor-smartphone')}</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + (me.rights.max_devices ? ' / ' + esc(me.rights.max_devices) : '') + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#2fb36d">${icon('key-round')}</div><span class="t">修改密码</span><span class="go">›</span></button>
       </div>`);
     $$('[data-go]', screen).forEach((b) => {
       b.onclick = () => {
@@ -439,7 +475,7 @@
     const done = await confirmSheet({
       title: enabled ? '开启自动保号' : '关闭自动保号',
       note: enabled
-        ? '到期前 24 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。积分不足时不扣分，也不会续期。<br>⚠️ 账号到期后无法播放，超过 72 小时可能被删除。'
+        ? '到期前 24 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。积分不足时不扣分，也不会续期。<br>账号到期后无法播放，超过 72 小时可能被删除。'
         : '关闭后不再自动扣积分续期；当前到期时间不变，仍可手动续期。',
       okText: enabled ? '确认开启' : '确认关闭',
       danger: !enabled,
@@ -464,29 +500,28 @@
     const rows = me.levels.filter((row) => row.level <= 7 || lv.level === 8).map((row) => {
       const reached = me.whitelist ? false : row.level < lv.level;
       const isCurrent = !me.whitelist && row.level === lv.level;
-      const detail = isCurrent ? `当前 · 续期 ${num(row.price)}`
+      const detail = isCurrent ? `续期 ${num(row.price)} 积分 / 30 天`
         : reached ? '已达成'
           : `${row.threshold != null ? num(row.threshold) + ' 成长 · ' : '专属授予 · '}${mbps(row.bandwidth_limit_kbps)} Mbps · 求片 ${row.request_quota}${row.max_devices ? ' · 设备 ' + row.max_devices : ''}`;
-      return `<div class="it lv${row.level}"${isCurrent ? ' style="background:color-mix(in srgb,var(--b) 18%,transparent)"' : ''}>
-        <span class="lvtag">${esc(row.icon)} Lv${row.level}</span>
+      return `<div class="it lv${row.level}${isCurrent ? ' cur' : (!reached ? ' dim-lv' : '')}">
+        <span class="lvtag">Lv${row.level}</span>
         <span class="t small">${isCurrent ? `<b>${esc(row.name)}</b>` : esc(row.name)} <span class="muted tiny">${esc(detail)}</span></span>
-        ${isCurrent ? '<span class="chip acc">当前</span>' : reached ? '<span class="chip ok">✓</span>' : ''}</div>`;
+        ${isCurrent ? '<span class="chip cur">当前</span>' : reached ? '<span class="chip ok">✓</span>' : ''}</div>`;
     }).join('');
     setScreen(`
       <div class="hero ${lvClass(tag)}" style="text-align:center"><div class="sheen"></div>
-        <div style="font-size:38px;filter:drop-shadow(0 4px 12px rgba(0,0,0,.4))">${me.whitelist ? '💠' : esc(lv.icon)}</div>
-        <div style="font-weight:800;font-size:19px;letter-spacing:2px">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
-        <div style="margin:6px 0">${plaque(lv.title, tag)}</div>
-        ${next ? `<div class="bar"><span style="width:${pct}%"></span></div><div class="tiny" style="opacity:.85">成长 ${num(lv.growth)} / ${num(next)} · 距 Lv${lv.level + 1} 还差 ${num(next - lv.growth)}</div>`
-    : `<div class="tiny" style="opacity:.85">成长 ${num(lv.growth)} · ${lv.level === 8 ? '专属等级' : '已满级'}</div>`}
+        <div style="font-size:28px;line-height:1;color:var(--a);margin-bottom:6px">${icon(me.whitelist ? 'shield-check' : 'shield')}</div>
+        <div style="font-weight:600;font-size:17px;letter-spacing:.3px">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
+        <div style="margin:8px 0 2px">${plaque(lv.title, tag)}</div>
+        ${growthMeter(lv, me.levels.find((row) => row.level === lv.level + 1), pct, me.today, me.whitelist)}
       </div>
       <div class="h"><span>当前权益</span></div>
       <div class="stats">
-        <div><b class="num">${r.bandwidth_kbps ? mbps(r.bandwidth_kbps) : '不限'}</b><span>🚀 带宽 Mbps</span></div>
-        <div><b class="num">${r.max_streams || '不限'}</b><span>📺 同时播放</span></div>
-        <div><b class="num">${r.request_quota || '不限'}</b><span>🎬 每月求片</span></div>
+        <div><b class="num">${r.bandwidth_kbps ? mbps(r.bandwidth_kbps) : '不限'}</b><span>带宽 Mbps</span></div>
+        <div><b class="num">${r.max_streams || '不限'}</b><span>同时播放</span></div>
+        <div><b class="num">${r.request_quota || '不限'}</b><span>每月求片</span></div>
       </div>
-      <div class="card small row"><span>📱 ${r.max_devices ? `最多登录 ${esc(r.max_devices)} 台` : '设备不限'}</span><span>${r.download ? '📥 可下载' : '📥 不可下载'}</span><span>${r.transcode ? '🎞 可转码' : '🎞 不可转码'}</span></div>
+      <div class="card small row tri-row"><span>${r.max_devices ? `最多登录 ${esc(r.max_devices)} 台` : '设备不限'}</span><span class="${r.download ? '' : 'muted'}">${r.download ? '可下载' : '不可下载'}</span><span class="${r.transcode ? '' : 'muted'}">${r.transcode ? '可转码' : '不可转码'}</span></div>
       <div class="h"><span>观看时长</span></div>
       <div class="stats">
         <div><b class="num" style="font-size:15px">${dur(me.watch.seconds_24h)}</b><span>近 24 小时</span></div>
@@ -512,10 +547,10 @@
         <span class="tiny muted" style="text-align:right">${esc(sub)}</span>
         ${isWorn ? '<span class="chip ok">佩戴中</span>' : action}</div>`;
     target.innerHTML = `
-      <div class="hero ${lvClass(tag)}" style="text-align:center;padding:22px 12px"><div class="sheen"></div>
-        <div class="tiny" style="opacity:.75;letter-spacing:3px">佩 戴 中</div>
+      <div class="hero ${lvClass(tag)}" style="text-align:center;padding:20px 14px"><div class="sheen"></div>
+        <div class="tiny muted">当前佩戴</div>
         <div style="margin:10px 0 8px">${plaque(worn ? worn.tag : levelTitle, tag, true)}</div>
-        <div class="tiny" style="opacity:.8">${worn ? `自定义称号 · ${worn.expires_at ? stamp(worn.expires_at) + ' 到期' : '长期有效'}` : '等级称号 · 随等级变化'}</div>
+        <div class="tiny muted">${worn ? `自定义称号 · ${worn.expires_at ? stamp(worn.expires_at) + ' 到期' : '长期有效'}` : '等级称号 · 随等级变化'}</div>
       </div>
       <div class="h"><span>我的称号</span><span class="muted">佩戴、切换免费</span></div>
       <div class="list">
@@ -550,11 +585,11 @@
   async function renderGallery(alive) {
     const me = S.me || await loadMe();
     if (!alive()) return;
-    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${esc(row.icon)} Lv${row.level}</span>${plaque(row.title, { level: row.level })}</div>`).join('');
+    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">Lv${row.level}</span>${plaque(row.title, { level: row.level })}</div>`).join('');
     const sample = me.worn_title || me.level.title;
     setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的称号和样式；自定义称号会按佩戴者的等级套用对应样式。</div>
-      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">💠 白名单</span>${plaque(sample, { whitelist: true })}</div></div>
-      <div class="card small" style="margin-top:12px"><div class="tiny muted">Lv1–4 是单色鎏金字；Lv5 起铭牌外有光晕；Lv7、Lv8 的流光更快更亮；白名单固定用水晶色。</div></div>`);
+      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">白名单</span>${plaque(sample, { whitelist: true })}</div></div>
+      <div class="card small" style="margin-top:12px"><div class="tiny muted">Lv1–2 为哑光简牌；Lv3–4 增加金属压线；Lv5–6 为双线镶边；Lv7–8 采用拉丝金印；白名单固定为铂金配色。</div></div>`);
   }
 
   // -- 播放线路 / 积分流水 ---------------------------------------------------------
@@ -581,7 +616,7 @@
     const rows = data.rows.map((r) => `<div class="rrow"><span class="grow"><span class="small">${esc(r.reason || '变动')}</span>
         <div class="tiny muted">${stamp(r.at)} · 余额 ${num(r.balance)}</div></span>
         <b class="num" style="color:${r.delta >= 0 ? 'var(--ok)' : 'var(--bad)'}">${r.delta >= 0 ? '+' : ''}${num(r.delta)}</b></div>`).join('');
-    setScreen(`<div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))"><span>🪙 当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
+    setScreen(`<div class="card row"><span>当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
       <div class="h"><span>最近 30 条</span></div>
       <div class="list">${rows || '<div class="empty">还没有积分变动</div>'}</div>`);
   }
@@ -744,11 +779,11 @@
       });
       if (!done) return;
       setScreen(`<div class="card" style="text-align:center;padding:22px 16px">
-          <div style="font-size:34px">✅</div><b style="font-size:17px">密码已修改</b>
-          <div class="kv" style="margin-top:12px"><span class="muted">用户名</span><b class="num">${esc(done.username)}</b></div>
-          <div class="kv"><span class="muted">新密码</span><b class="num">${esc(password)}</b></div>
-          <button class="btn ghost block" type="button" id="copy-pw" style="margin-top:12px">复制新密码</button>
-          ${(done.notices || []).map((n) => `<div class="banner" style="margin:12px 0 0;text-align:left"><span>⚠️</span><span>${esc(n)}</span></div>`).join('')}
+          <div style="font-size:32px;line-height:1;color:var(--ok);margin-bottom:8px">${icon('circle-check')}</div><b style="font-size:17px">密码已修改</b>
+          <div class="kv" style="margin-top:12px"><span class="muted">用户名</span><b class="mono num">${esc(done.username)}</b></div>
+          <div class="kv"><span class="muted">新密码</span><code class="mono num">${esc(password)}</code></div>
+          <button class="btn block" type="button" id="copy-pw" style="margin-top:12px">复制新密码</button>
+          ${(done.notices || []).map((n) => `<div class="banner" style="margin:12px 0 0;text-align:left">${icon('triangle-alert')}<span>${esc(n)}</span></div>`).join('')}
           <div class="tiny muted" style="margin-top:10px">请保存好新密码，不要转发。离开这个页面后不会再显示。</div></div>`);
       $('#copy-pw').onclick = () => copy(password);
     };
@@ -772,13 +807,16 @@
     loading(body);
     const data = await api(`/api/app/rank?kind=${S.rank.kind}&period=${S.rank.period}`);
     if (!alive()) return;
-    if (!data.available) { body.innerHTML = `<div class="empty">⏳ ${esc(data.message || '排行统计暂时不可用，请稍后再试')}</div>`; return; }
+    if (!data.available) { body.innerHTML = `<div class="empty">${esc(data.message || '排行统计暂时不可用，请稍后再试')}</div>`; return; }
     if (S.rank.kind === 'titles') { body.innerHTML = titleBoard(data); bindTitleBoard(body, data); return; }
     const value = (v) => (data.unit === 'points' ? num(v) : dur(v));
     const rows = data.rows;
-    if (!rows.length) { body.innerHTML = '<div class="empty">📭 暂无排行数据</div>'; return; }
-    const pod = (r, cls) => (r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar)}
-        <div class="small"><b>${esc(r.name)}</b></div><div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>');
+    if (!rows.length) { body.innerHTML = '<div class="empty">暂无排行数据</div>'; return; }
+    const pod = (r, cls) => {
+      const rk = cls === 'g' ? 1 : cls === 's' ? 2 : 3;
+      return r ? `<div class="p ${cls}">${cls === 'g' ? `<span class="crown">${icon('crown')}</span>` : ''}${face(r.name, r.avatar)}<span class="pod-rk num">${rk}</span>
+        <div class="small"><b>${esc(r.name)}</b></div><div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>';
+    };
     const mine = data.mine;
     body.innerHTML = `
       <div class="podium">${pod(rows[1], 's')}${pod(rows[0], 'g')}${pod(rows[2], 'b')}</div>
@@ -792,8 +830,8 @@
     const grid = (rows) => (rows.length ? `<div class="pgrid">${rows.map((r, i) => `<div>
         <button class="poster" type="button" style="--h:${hue(r.title)}" data-open="${i}">${posterHtml(r.poster, r.title, `<span class="rk">${r.rank}</span>`)}</button>
         <div class="pmeta num">${dur(r.seconds)} · ${r.plays} 次</div></div>`).join('')}</div>` : '<div class="empty">暂无数据</div>');
-    return `<div class="h"><span>🎬 电影</span><span>${esc(data.stamp || '')}</span></div><div data-set="movies">${grid(data.movies)}</div>
-      <div class="h"><span>📺 剧集</span></div><div data-set="shows">${grid(data.shows)}</div>`;
+    return `<div class="h"><span>电影</span><span>${esc(data.stamp || '')}</span></div><div data-set="movies">${grid(data.movies)}</div>
+      <div class="h"><span>剧集</span></div><div data-set="shows">${grid(data.shows)}</div>`;
   }
   function bindTitleBoard(body, data) {
     $$('[data-set]', body).forEach((set) => {
@@ -816,7 +854,7 @@
   async function renderReq(alive) {
     const r = S.req;
     setScreen(`<div id="req-quota"></div>
-      <form class="search" id="req-form"><span>🔍</span><input id="req-q" type="search" enterkeyhint="search" placeholder="输入片名搜索" value="${esc(r.q)}" maxlength="100">
+      <form class="search" id="req-form">${icon('search')}<input id="req-q" type="search" enterkeyhint="search" placeholder="输入片名搜索" value="${esc(r.q)}" maxlength="100">
         <button class="btn sm" type="submit">搜索</button></form>
       <div class="pills">${[['', '全部'], ['movie', '电影'], ['tv', '剧集']].map(([k, l]) => `<button type="button" data-type="${k}" class="${r.type === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <div id="req-body"></div>`);
@@ -899,13 +937,13 @@
       : lib.items.length ? `<div class="card small"><b>媒体库已有</b> ${lib.items.map((i) => `<span class="muted">${esc(i.name)}</span>${i.url ? ` <button class="link" type="button" data-url="${esc(i.url)}">去看 ↗</button>` : ''}`).join('；')}
           ${tv && t.seasons.some((s) => s.have) ? `<div class="tiny muted" style="margin-top:4px">${t.seasons.filter((s) => s.have).map((s) => `S${s.season} ${s.state === 'full' ? '全' : s.have + '/' + s.episodes}`).join(' · ')}</div>` : ''}</div>`
         : '<div class="card small muted">媒体库里还没有这部。</div>';
+    const poster = t.poster || pick.poster || '';
     setScreen(`
-      <div class="backdrop" style="background-image:url('${esc(t.poster || pick.poster || '')}')"></div>
-      <div class="row" style="align-items:flex-end;gap:12px;margin-top:-92px;margin-bottom:12px;position:relative;justify-content:flex-start">
-        <div class="poster" style="--h:${hue(title)};width:100px;flex:none">${posterHtml(t.poster || pick.poster, '')}</div>
-        <div class="grow" style="padding-bottom:4px"><div style="font-weight:800;font-size:17px">${esc(title)}</div>
-          <div class="tiny muted">${t.original_title && t.original_title !== title ? esc(t.original_title) + ' · ' : ''}${t.year ? esc(t.year) + ' · ' : ''}${tv ? `剧集${t.seasons.length ? ' · 共 ' + t.seasons.length + ' 季' : ''}` : '电影'} ·
-            <button class="link tiny" type="button" id="tmdb">TMDB ↗</button></div></div>
+      ${poster ? `<div class="backdrop" style="background-image:url('${esc(poster)}')"></div>` : ''}
+      <div class="row" style="align-items:flex-end;gap:12px;${poster ? 'margin-top:-92px;' : ''}margin-bottom:12px;position:relative;justify-content:flex-start">
+        <div class="poster${poster ? '' : ' no-img'}" style="--h:${hue(title)};width:100px;flex:none">${posterHtml(poster, '')}</div>
+        <div class="grow"><div style="font-weight:600;font-size:17px;line-height:1.25;margin-bottom:4px">${esc(title)}</div>
+          <div class="tiny muted" style="line-height:1.35">${t.original_title && t.original_title !== title ? esc(t.original_title) + ' · ' : ''}${t.year ? esc(t.year) + ' · ' : ''}${tv ? `剧集${t.seasons.length ? ' · 共 ' + t.seasons.length + ' 季' : ''}` : '电影'} · <button class="link tiny nowrap" type="button" id="tmdb" style="padding:0">TMDB ↗</button></div></div>
       </div>
       ${t.overview ? `<div class="tiny muted clamp" id="overview" style="margin-bottom:10px">${esc(t.overview)}</div>` : ''}
       ${libHtml}
@@ -1045,8 +1083,8 @@
     if (!alive()) return;
     const segs = [['shop', '商城'], ['items', '道具'], ['titles', '称号'], ['invites', '邀请']];
     setScreen(`
-      <div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))">
-        <span>🪙 积分 <button class="link tiny" type="button" id="to-ledger">流水 ›</button></span><b class="num" style="font-size:26px" id="bag-balance">${num(me.balance)}</b></div>
+      <div class="card row">
+        <span>积分 <button class="link tiny" type="button" id="to-ledger">流水 ›</button></span><b class="num" style="font-size:26px" id="bag-balance">${num(me.balance)}</b></div>
       <div class="seg">${segs.map(([k, l]) => `<button type="button" data-seg="${k}" class="${S.bag === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <div id="bag-body"></div>`);
     $('#to-ledger').onclick = () => push(renderLedger);
@@ -1065,16 +1103,16 @@
   async function shopBody(body, alive) {
     const data = await api('/api/app/shop');
     if (!alive()) return;
-    if (!data.available) { body.innerHTML = '<div class="empty">🛍️ 商城暂未开放</div>'; return; }
+    if (!data.available) { body.innerHTML = '<div class="empty">商城暂未开放</div>'; return; }
     const term = (it) => it.description || (it.duration_days ? `使用后 ${it.duration_days} 天有效` : '长期有效');
     body.innerHTML = data.items.length ? `<div class="list">${data.items.map((it, i) => {
-      const [icon, color] = KIND_ICON[it.kind] || ['🛍️', '#8b93a7'];
+      const [glyph, color] = KIND_ICON[it.kind] || KIND_ICON.custom;
       const soldOut = it.limit && it.redeemed >= it.limit;
       const short = it.price - data.balance;
       const btn = soldOut ? '<span class="btn sm dis">已兑完</span>'
         : short > 0 ? `<span class="btn sm dis">还差 ${num(short)}</span>`
           : `<button class="btn sm" type="button" data-buy="${i}">兑换</button>`;
-      return `<div class="it"><div class="ic" style="--c:${color}">${icon}</div>
+      return `<div class="it"><div class="ic" style="--c:${color}">${icon(glyph)}</div>
         <div class="t"><b class="small">${esc(it.name)}</b><div class="tiny muted">${esc(term(it))}${it.limit ? ` · 每人限 ${it.limit} 次` : ''}</div></div>
         <div style="text-align:right"><div class="tiny num"><b>${num(it.price)}</b> 积分</div><div style="margin-top:4px">${btn}</div></div></div>`;
     }).join('')}</div>` : '<div class="empty">商城里暂时没有商品</div>';
@@ -1106,7 +1144,7 @@
     const now = Date.now() / 1000;
     const rows = data.rows.slice().sort((a, b) => ((a.used_at == null ? 0 : 1) - (b.used_at == null ? 0 : 1)) || b.id - a.id);
     body.innerHTML = rows.length ? `<div class="list">${rows.map((r, i) => {
-      const [icon, color] = KIND_ICON[r.kind] || ['🎒', '#8b93a7'];
+      const [glyph, color] = KIND_ICON[r.kind] || KIND_ICON.custom;
       let side;
       let sub;
       if (r.kind === 'custom') {
@@ -1122,9 +1160,9 @@
         sub = r.expires_at && r.expires_at <= now ? `${day(r.expires_at)} 已到期` : '已使用';
         side = '<span class="chip">已失效</span>';
       }
-      return `<div class="it"><div class="ic" style="--c:${color}">${icon}</div>
+      return `<div class="it"><div class="ic" style="--c:${color}">${icon(glyph)}</div>
         <div class="t"><b class="small">${esc(r.name)}</b> <span class="tiny muted">#${esc(r.id)}</span><div class="tiny muted">${esc(sub)}</div>
-          ${r.error ? `<div class="tiny" style="color:var(--warn)">⚠ ${esc(r.error)}</div>` : ''}</div>${side}</div>`;
+          ${r.error ? `<div class="tiny" style="color:var(--warn)">${esc(r.error)}</div>` : ''}</div>${side}</div>`;
     }).join('')}</div>` : '<div class="empty">背包是空的。在商城兑换的道具会放在这里。</div>';
     $$('[data-use]', body).forEach((b) => {
       b.onclick = async () => {
@@ -1158,7 +1196,7 @@
       : `${lvTag(n.tag, true)}<div class="tiny muted">${esc(statusLabel[n.status] || n.status)}${n.active_7d === true ? ' · 近 7 天活跃' : n.active_7d === false ? ' · 近 7 天未观看' : ''} · 注册 ${day(n.registered_at)} · 到期 ${n.expires_at ? day(n.expires_at) : '永久'}</div>`);
     const dot = (n) => (n.status === 'deleted' ? 'bad' : n.status === 'active' && n.active_7d !== false ? '' : 'off');
     const tree = data.nodes.map((n, i) => `<div class="node${i ? ' top' : ''}" style="${i ? 'border-top:1px solid var(--line)' : ''}"><span class="dot ${dot(n)}"></span>
-        ${face(n.label, n.avatar, 'sm', n.status === 'deleted' ? 'background:linear-gradient(135deg,#ff6b81,#7a2233)' : '')}
+        ${face(n.label, n.avatar, n.status === 'deleted' ? 'sm del' : 'sm')}
         <div class="t"><b class="small">${esc(n.label)}</b> ${nodeLine(n)}</div></div>
       ${n.children.length ? `<div class="tree">${n.children.map((c) => `<div class="node"><span class="dot ${dot(c)}"></span>
         <div class="t small">${esc(c.label)} <span class="tiny muted">${c.status === 'deleted' ? '已删除' : esc(statusLabel[c.status] || c.status)}${c.status !== 'deleted' && c.active_7d === true ? ' · 活跃' : ''}</span></div></div>`).join('')}
@@ -1170,16 +1208,16 @@
           <button class="btn sm" type="button" data-share="${i}"${paused ? ' disabled' : ''}>分享给好友</button></span></div>`).join('')
       : '<div class="tiny muted" style="margin-top:6px">还没有可用的邀请码。</div>';
     body.innerHTML = `
-      ${paused ? `<div class="banner bad"><span>⏸</span><span><b>邀请资格暂停至 ${stamp(paused)}</b><br><span class="muted">期间不能生成新码，已发出的码也暂时不能用。</span></span></div>` : ''}
+      ${paused ? `<div class="banner bad">${icon('circle-pause')}<span><b>邀请资格暂停至 ${stamp(paused)}</b><br><span class="muted">期间不能生成新码，已发出的码也暂时不能用。</span></span></div>` : ''}
       <div class="card"${paused ? ' style="opacity:.6"' : ''}>
-        <div class="row"><b>我的邀请码</b><span class="chip ${paused ? '' : 'acc'}">${paused ? '暂停中' : `剩余名额 ${data.quota ?? '—'}`}</span></div>
+        <div class="row"><b>我的邀请码</b><span class="chip ${!paused && data.quota > 0 ? 'acc' : ''}">${paused ? '暂停中' : `剩余名额 ${data.quota ?? '—'}`}</span></div>
         ${codes}
         ${!paused && data.quota > 0 ? '<button class="btn ghost block" type="button" id="mint" style="margin-top:10px">生成邀请码（用 1 个名额）</button>' : ''}
         ${!paused && !data.quota && !usable.length ? '<div class="tiny muted" style="margin-top:6px">没有邀请名额。可以在商城兑换「邀请码卡」。</div>' : ''}
       </div>
       <div class="h"><span>我邀请的人 · 名下共 ${data.total} 人</span></div>
       <div class="list" style="padding:4px 14px">${tree || '<div class="empty">你还没有邀请过别人</div>'}</div>
-      <div class="banner"><span>⚠️</span><span>你邀请的人如果被管理员删号或因违规被删号，管理员可能连带处理你的账号，或暂停你的邀请资格。请只邀请信得过的人。</span></div>`;
+      <div class="banner">${icon('triangle-alert')}<span>你邀请的人如果被管理员删号或因违规被删号，管理员可能连带处理你的账号，或暂停你的邀请资格。请只邀请信得过的人。</span></div>`;
     $$('[data-copycode]', body).forEach((b) => { b.onclick = () => copy(usable[Number(b.dataset.copycode)].code); });
     $$('[data-share]', body).forEach((b) => {
       b.onclick = () => {
@@ -1210,7 +1248,7 @@
   const TABS = { me: renderMe, rank: renderRank, req: renderReq, bag: renderBag };
 
   if (!tg || !tg.initData) {
-    setScreen(stateView('📱', '请在 Telegram 里打开', '会员面板需要从 Bot 首页的「📱 会员面板」按钮进入。'));
+    setScreen(stateView(icon('smartphone'), '请在 Telegram 里打开', '会员面板需要从 Bot 首页的「📱 会员面板」按钮进入。'));
     return;
   }
   const deepLink = { devices: renderDevices, password: renderPassword }[new URLSearchParams(location.search).get('page')];

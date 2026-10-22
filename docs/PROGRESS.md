@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.48.1: Mini App visual redesign
+
+- Redesigned with Gemini 4 (gemini-4-argon) as designer, over three rounds of
+  screenshot review: native grouped surfaces following Telegram theme variables,
+  no gradient buttons, glow, frosted cards, emoji icons or shimmer text.
+- Lucide outline icon sprite replaces emoji (ICONS.md carries the ISC notice).
+- Growth progress: the cramped ring becomes a shared `growthMeter()` bar used on
+  the home and level pages (gap to next level, percent, stage).
+- Name plaques keep four tiers without animation and gain a light-theme variant;
+  podium shows rank numbers; disabled controls share one readable style; posters
+  without art show a neutral placeholder; request detail drops the empty backdrop.
+- Browser test now also checks a 360px light layout with a long name and captures
+  settled frames (reduced motion).
+
 ## 2026-10-22 — v0.48.0: Mini App avatars, signed-in devices and caps, password change
 
 - Mini App shows real Telegram avatars (own, rankings, invite tree) through a signed,
