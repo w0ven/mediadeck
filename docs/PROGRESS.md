@@ -2,6 +2,13 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-23 — v0.48.7: PK names players by nickname
+
+- PK cards mention both players by their Telegram nickname (tg://user link), like
+  the other games, instead of `@username`.
+- `/pkrank` and `/pkme` show nicknames as plain text, matching the points board;
+  listing members still never pings them.
+
 ## 2026-10-23 — v0.48.6: /pk uses Telegram dice; PK records and streak board
 
 - Accepting a duel now reserves the opponent's stake and moves to `rolling`; the Bot

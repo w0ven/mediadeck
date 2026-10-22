@@ -345,12 +345,7 @@ class PkService(RoundCards):
     # -- records ----------------------------------------------------------------
 
     def standings(self):
-        stats = standings(self.db.query("SELECT * FROM pk_rounds WHERE state='settled' ORDER BY settled_at,created_at"))
-        # Show today's handle, not the one captured when the duel was played.
-        for row in self.db.query("SELECT emby_user_id,tg_username FROM members WHERE tg_username!=''"):
-            if row['emby_user_id'] in stats and telegram_username(row['tg_username']):
-                stats[row['emby_user_id']]['username'] = telegram_username(row['tg_username'])
-        return stats
+        return standings(self.db.query("SELECT * FROM pk_rounds WHERE state='settled' ORDER BY settled_at,created_at"))
 
 
 class PkPlugin(Plugin):
