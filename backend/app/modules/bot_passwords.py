@@ -296,16 +296,16 @@ class PasswordBotMixin:
             return
         await self._pw_confirm_card(chat, mid, dict(p, password=raw, password_mode="custom"))
 
-    async def _execute_password_reset(self, chat, mid, tg_id, user_id, password):
-        current = self._member_for_chat(tg_id)
-        if not current or str(current["emby_user_id"]) != user_id:
-            await self._edit(chat, mid, "绑定已变化，未执行密码重置。", self.guest_menu())
-            return
+    async def _apply_password_reset(self, user_id, password, actor):
+        """Set a member's own password after the caller re-verified the binding.
+
+        Returns (ok, notices); notices describe follow-up steps that are unconfirmed.
+        """
         validate_password(password)
         ok = False
         with contextlib.suppress(Exception):
             ok = await self._emby.set_user_password(user_id, password)
-        cache_notice = ""
+        notices = []
         if ok:
             unlocked = False
             with contextlib.suppress(Exception):
@@ -313,20 +313,29 @@ class PasswordBotMixin:
                     user_id, {"InvalidLoginAttemptCount": 0, "LockedOutDate": None}
                 )
             if not unlocked:
-                cache_notice = "\n⚠ 密码已更改，但解除登录锁定未确认，请联系管理员；不要继续尝试旧密码。"
+                notices.append("密码已更改，但解除登录锁定未确认，请联系管理员；不要继续尝试旧密码。")
         if ok and self._on_password_changed is not None:
             try:
                 self._on_password_changed()
             except Exception:  # noqa: BLE001 - never pretend a remote password change rolled back
-                cache_notice += "\n⚠ 密码已更改，旧面板登录失效尚未确认，请联系管理员。"
+                notices.append("密码已更改，旧面板登录失效尚未确认，请联系管理员。")
         if hasattr(self._members, "audit"):
             self._members.audit(
-                f"tg:{chat}",
+                actor,
                 "member.password_reset",
                 user_id,
                 "success" if ok else "failed",
                 ok=bool(ok),
             )
+        return bool(ok), notices
+
+    async def _execute_password_reset(self, chat, mid, tg_id, user_id, password):
+        current = self._member_for_chat(tg_id)
+        if not current or str(current["emby_user_id"]) != user_id:
+            await self._edit(chat, mid, "绑定已变化，未执行密码重置。", self.guest_menu())
+            return
+        ok, notices = await self._apply_password_reset(user_id, password, f"tg:{chat}")
+        cache_notice = "".join("\n⚠ " + notice for notice in notices)
         current = self._member_for_chat(tg_id)
         if not current or str(current["emby_user_id"]) != user_id:
             await self._edit(

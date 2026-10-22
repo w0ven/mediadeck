@@ -719,6 +719,13 @@ PAGES.tgbot = async (context = pageContext('tgbot')) => {
           </aside>
         </div>
       </div>`)}
+    ${card('推荐播放器', '会员面板「我的设备」页按平台展示，留空则不显示',
+      `<div class="card-body">
+        <div class="form-row"><label for="tg-players">播放器列表</label>
+          <textarea id="tg-players" rows="6" placeholder="iPhone/iPad | 播放器名称 | https://下载链接 | 说明（可选）">${esc((tg.recommended_players || []).map((p) => [p.platform, p.name, p.url, p.note].filter(Boolean).join(' | ')).join('\n'))}</textarea></div>
+        <p class="help">每行一个：平台 | 名称 | HTTPS 下载链接 | 说明（可选）。平台可填 iPhone/iPad、Apple TV、Mac、安卓手机、安卓电视、鸿蒙、Windows，同一平台按填写顺序展示。</p>
+        <button class="btn primary" type="button" id="tg-save-players">保存推荐播放器</button>
+      </div>`)}
     ${card('注册开户', '注册需要凭证：预授权、邀请码或卡密，三选一',
       `<div class="card-body">
         <div class="form-row"><label for="tg-ch-admin">管理员预授权</label>

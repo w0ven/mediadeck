@@ -2,6 +2,18 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.47.1: Mini App avatars, signed-in devices, password change
+
+- Mini App shows real Telegram avatars (own, rankings, invite tree) through a signed,
+  cached thumbnail proxy; initials remain the fallback.
+- Members see signed-in devices as Emby keeps them and can remove their own (revokes
+  that client's login only; verified against an isolated Emby 4.9). Member-facing Bot
+  views drop the confusing device-group statistic; operator views keep it.
+- Recommended players per platform are configurable in Deck and shown on the device page.
+- Password change in the Mini App reuses the Bot's reset steps (unlock, panel session
+  invalidation, audit); random passwords are generated client-side.
+- Full suite 4911 passed, 79 optional skips; ruff clean.
+
 ## 2026-10-22 — v0.47.0: member Mini App, invite accountability, Deck/Bot UX, green suite
 
 - Member Mini App (`/app`, `/api/app/*`, docs/MINIAPP.md): Telegram-signed identity;

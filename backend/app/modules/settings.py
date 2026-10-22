@@ -42,9 +42,39 @@ MAX_NODES = 64
 MAX_PLAYBACK_LINES = 16
 PLAYBACK_LINE_LABEL_MAX = 40
 PLAYBACK_LINE_HINT_MAX = 80
+PLAYER_PLATFORMS = ("iPhone/iPad", "Apple TV", "Mac", "安卓手机", "安卓电视", "鸿蒙", "Windows")
+MAX_RECOMMENDED_PLAYERS = 40
 PLAYBACK_LINES_NOTE_MAX = 1500
 PLAYBACK_ROUTING_RULES_MAX = 2000
 MAX_POOLS = 12
+
+
+def normalize_recommended_players(raw: Any) -> list[dict[str, str]]:
+    """Member-facing client suggestions per platform, shown on the Mini App device page."""
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ConfigError("推荐播放器必须是列表")
+    if len(raw) > MAX_RECOMMENDED_PLAYERS:
+        raise ConfigError(f"推荐播放器最多 {MAX_RECOMMENDED_PLAYERS} 个")
+    out: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("推荐播放器格式错误")
+        platform = str(item.get("platform") or "").strip()
+        if platform not in PLAYER_PLATFORMS:
+            raise ConfigError("平台须为：" + "、".join(PLAYER_PLATFORMS))
+        name = str(item.get("name") or "").strip()
+        note = str(item.get("note") or "").strip()
+        if not name or len(name) > 40 or len(note) > 60 or any(ord(c) < 32 for c in name + note):
+            raise ConfigError("播放器名称必填且最长 40 字，说明最长 60 字")
+        url = str(item.get("url") or "").strip()
+        parsed = urlsplit(url)
+        if (len(url) > 500 or parsed.scheme != "https" or not parsed.hostname
+                or parsed.username or parsed.password):
+            raise ConfigError(f"{name} 的下载链接须为 HTTPS 地址")
+        out.append({"platform": platform, "name": name, "note": note, "url": url})
+    return out
 
 
 def normalize_playback_lines(raw: Any) -> list[dict[str, str]]:
@@ -175,6 +205,8 @@ TELEGRAM_DEFAULTS: dict[str, Any] = {
     # member-facing ingress names, not the internal node pool.
     "playback_lines": [],
     "playback_lines_note": "",
+    # Suggested clients per platform on the Mini App device page; empty hides it.
+    "recommended_players": [],
     # Operator-supplied example; empty hides the separate Bot rules button.
     "playback_routing_rules": "",
     "playback_lines_show_load": True,
@@ -674,6 +706,10 @@ class SettingsService:
             cfg["playback_lines"] = []
             cfg["playback_lines_note"] = ""
         try:
+            cfg["recommended_players"] = normalize_recommended_players(cfg.get("recommended_players"))
+        except ConfigError:
+            cfg["recommended_players"] = []
+        try:
             cfg["playback_routing_rules"] = normalize_playback_routing_rules(
                 cfg.get("playback_routing_rules"))
         except ConfigError:
@@ -770,6 +806,10 @@ class SettingsService:
             lines = normalize_playback_lines(payload.get("playback_lines"))
         else:
             lines = list(current.get("playback_lines") or [])
+        if "recommended_players" in payload:
+            players = normalize_recommended_players(payload.get("recommended_players"))
+        else:
+            players = list(current.get("recommended_players") or [])
         if "playback_lines_note" in payload:
             lines_note = normalize_playback_lines_note(payload.get("playback_lines_note"))
         else:
@@ -835,6 +875,7 @@ class SettingsService:
             "miniapp_url": miniapp,
             "playback_lines": lines,
             "playback_lines_note": lines_note,
+            "recommended_players": players,
             "playback_routing_rules": routing_rules,
             "playback_lines_show_load": show_load,
         })

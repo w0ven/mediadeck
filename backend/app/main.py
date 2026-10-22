@@ -47,6 +47,7 @@ from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeSnapshotReader, IntakeStore
 from app.modules.inventory import InventoryService
 from app.modules.levels import LevelService
+from app.modules.member_devices import MemberDevices
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
@@ -554,6 +555,8 @@ async def _startup() -> None:
         lambda: app.state.plugins.config("inventory"))
     app.state.telegram._inventory = app.state.inventory
     app.state.telegram._titles = app.state.titles
+    app.state.member_devices = MemberDevices(lambda: app.state.emby)
+    app.state.telegram._member_devices = app.state.member_devices
     app.state.telegram.bind_plugins(app.state.plugins)
     app.state.plugins.start()
 

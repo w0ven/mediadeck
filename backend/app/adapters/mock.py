@@ -23,6 +23,7 @@ class MockEmby:
         }
         self._next = 3
         self._sessions: list[dict[str, Any]] = []
+        self._devices: list[dict[str, Any]] = []
         self.stopped: list[tuple[str, str]] = []
         self.deleted_sessions: list[str] = []
         # username -> password; missing means any non-empty password is accepted
@@ -201,6 +202,12 @@ class MockEmby:
 
     def set_sessions(self, sessions: list[dict[str, Any]]) -> None:
         self._sessions = list(sessions)
+
+    async def list_devices(self) -> list[dict[str, Any]]:
+        return [dict(d) for d in self._devices]
+
+    async def delete_device(self, device_id: str) -> None:
+        self._devices = [d for d in self._devices if str(d.get("Id")) != str(device_id)]
 
     async def stop_session(self, session_id: str, reason: str = "") -> bool:
         before = len(self._sessions)

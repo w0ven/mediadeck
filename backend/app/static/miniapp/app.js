@@ -104,6 +104,25 @@
     const ch = Array.from(text)[0] || '?';
     return esc(ch.toUpperCase());
   }
+  function face(name, url, cls = '', style = '') {
+    const img = url ? `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">` : '';
+    return `<div class="avatar${cls ? ' ' + cls : ''}"${style ? ` style="${style}"` : ''}>${initial(name)}${img}</div>`;
+  }
+  function ago(ts) {
+    if (!ts) return '—';
+    const s = Date.now() / 1000 - ts;
+    if (s < 60) return '刚刚';
+    if (s < 3600) return `${Math.floor(s / 60)} 分钟前`;
+    const d = bj(ts);
+    const now = bj(Date.now() / 1000);
+    const hm = `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+    const days = Math.floor((Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())
+      - Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())) / 86400000);
+    if (days === 0) return `今天 ${hm}`;
+    if (days === 1) return `昨天 ${hm}`;
+    if (days < 30) return `${days} 天前`;
+    return day(ts);
+  }
   function hue(text) {
     let h = 0;
     for (const ch of String(text)) h = (h * 31 + ch.codePointAt(0)) % 360;
@@ -283,12 +302,6 @@
       if (input) setTimeout(() => $('#sheet-input', root).focus(), 50);
     });
   }
-  function botOnlySheet(title, text) {
-    return sheet(`<h3>${esc(title)}</h3><p class="muted small" style="margin:10px 0 4px">${esc(text)}</p>
-      <button class="btn block" type="button" id="to-bot" style="margin:14px 0 6px">回到 Bot</button>
-      <button class="link" type="button" data-cancel style="display:block;margin:0 auto 6px">留在面板</button>`,
-    (root) => { $('#to-bot', root).onclick = () => (tg ? tg.close() : closeLayer()); });
-  }
   function rid() {
     const a = new Uint8Array(16);
     crypto.getRandomValues(a);
@@ -354,7 +367,7 @@
     setScreen(`
       <div class="hero ${cls}"><div class="sheen"></div>
         <div class="row" style="justify-content:flex-start;gap:12px">
-          <div class="avatar">${initial(me.name)}</div>
+          ${face(me.name, me.avatar)}
           <div class="grow"><div style="font-weight:800;font-size:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
             <div style="margin-top:3px">${lvTag(tag)}</div></div>
           ${ring}
@@ -376,21 +389,16 @@
       </div>
       <div class="list">
         <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#ffcc5c">📜</div><span class="t">积分流水</span><span class="go">›</span></button>
-        <button class="it" type="button" data-bot="devices"><div class="ic sm" style="--c:#8b93a7">📺</div><span class="t">我的设备 <span class="tiny muted">${me.rights.devices != null ? esc(me.rights.devices) + ' 组' : ''}</span></span><span class="go">↗</span></button>
-        <button class="it" type="button" data-bot="password"><div class="ic sm" style="--c:#8b93a7">🔑</div><span class="t">修改密码 <span class="tiny muted">在 Bot 中完成</span></span><span class="go">↗</span></button>
+        <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#6aa6ff">📺</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#43d39e">🔑</div><span class="t">修改密码</span><span class="go">›</span></button>
       </div>`);
     $$('[data-go]', screen).forEach((b) => {
       b.onclick = () => {
         haptic.tap();
         const go = b.dataset.go;
         if (go === 'invites') goTab('bag', { bag: 'invites' });
-        else push({ lines: renderLines, level: renderLevel, titles: renderTitlesPage, ledger: renderLedger }[go]);
+        else push({ lines: renderLines, level: renderLevel, titles: renderTitlesPage, ledger: renderLedger, devices: renderDevices, password: renderPassword }[go]);
       };
-    });
-    $$('[data-bot]', screen).forEach((b) => {
-      b.onclick = () => (b.dataset.bot === 'devices'
-        ? botOnlySheet('我的设备', '设备管理在 Bot 的「我的账号 → 我的设备」里完成。')
-        : botOnlySheet('修改密码', '为了安全，修改 Emby 密码只在 Bot 私聊里完成：「我的账号 → 修改密码」。'));
     });
     const renewBtn = $('#renew', screen);
     if (renewBtn) renewBtn.onclick = () => (renew.blockers.length ? toast(renew.blockers[0], true) : openRenew());
@@ -478,8 +486,7 @@
         <div><b class="num">${r.max_streams || '不限'}</b><span>📺 同时播放</span></div>
         <div><b class="num">${r.request_quota || '不限'}</b><span>🎬 每月求片</span></div>
       </div>
-      <div class="card small row"><span>${r.download ? '📥 可下载' : '📥 不可下载'} · ${r.transcode ? '🎞 可转码' : '🎞 不可转码'}</span>
-        <span class="muted">${r.devices != null ? '设备 ' + esc(r.devices) + ' 组' : ''}</span></div>
+      <div class="card small row"><span>${r.download ? '📥 可下载' : '📥 不可下载'}</span><span>${r.transcode ? '🎞 可转码' : '🎞 不可转码'}</span></div>
       <div class="h"><span>观看时长</span></div>
       <div class="stats">
         <div><b class="num" style="font-size:15px">${dur(me.watch.seconds_24h)}</b><span>近 24 小时</span></div>
@@ -579,6 +586,170 @@
       <div class="list">${rows || '<div class="empty">还没有积分变动</div>'}</div>`);
   }
 
+  // -- 设备 ---------------------------------------------------------------------
+
+  const DEVICE_ICON = {
+    phone: '<rect x="7" y="2.5" width="10" height="19" rx="2.2"/><path d="M11 18.5h2"/>',
+    tablet: '<rect x="4.5" y="2.5" width="15" height="19" rx="2.2"/><path d="M11 18.5h2"/>',
+    tv: '<rect x="2.5" y="4" width="19" height="12.5" rx="2"/><path d="M8 20h8M12 16.5V20"/>',
+    desktop: '<rect x="3.5" y="4.5" width="17" height="11" rx="1.6"/><path d="M2 19h20"/>',
+    web: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
+    other: '<rect x="4" y="4" width="16" height="16" rx="3"/><path d="M9 12h6"/>',
+  };
+  function deviceIcon(kind) {
+    return `<div class="dev-ic"><svg viewBox="0 0 24 24" aria-hidden="true">${DEVICE_ICON[kind] || DEVICE_ICON.other}</svg></div>`;
+  }
+  function guessPlatform(device) {
+    if (!device) return '';
+    const t = `${device.name} ${device.app}`.toLowerCase();
+    if (/apple ?tv/.test(t)) return 'Apple TV';
+    if (/iphone|ipad|ios/.test(t)) return 'iPhone/iPad';
+    if (/\bmac/.test(t)) return 'Mac';
+    if (/harmony|鸿蒙/.test(t)) return '鸿蒙';
+    if (device.kind === 'tv') return '安卓电视';
+    if (device.kind === 'desktop') return 'Windows';
+    if (device.kind === 'phone' || device.kind === 'tablet') return '安卓手机';
+    return '';
+  }
+
+  async function renderDevices(alive) {
+    loading();
+    const data = await api('/api/app/devices');
+    if (!alive()) return;
+    const devices = data.devices || [];
+    const list = !data.available
+      ? '<div class="empty">暂时读不到设备列表，请稍后再试</div>'
+      : devices.length ? `<div class="list">${devices.map((d, i) => `<div class="it">${deviceIcon(d.kind)}
+          <div class="t"><b class="small">${esc(d.name)}</b><div class="tiny muted">${esc([d.app, d.version].filter(Boolean).join(' '))}${d.app ? ' · ' : ''}${esc(ago(d.last_active))}</div></div>
+          <button class="link danger-link" type="button" data-remove="${i}">移除</button></div>`).join('')}</div>`
+        : '<div class="empty">还没有已登录的设备</div>';
+    const platforms = data.players || [];
+    const preferred = guessPlatform(devices[0]);
+    let current = (platforms.find((p) => p.platform === preferred) || platforms[0] || {}).platform;
+    setScreen(`
+      <div class="card">
+        <div class="row" style="align-items:baseline;justify-content:flex-start;gap:6px">
+          <b class="num" style="font-size:34px;line-height:1">${data.available ? devices.length : '—'}</b><span class="muted">台设备已登录</span></div>
+        <div class="tiny muted" style="margin-top:8px">不认识或不再使用的设备可以移除，移除后它会立刻退出登录；之后用账号密码可以重新登录。</div>
+      </div>
+      <div class="h"><span>已登录</span><span>按最近使用排序</span></div>
+      ${list}
+      ${platforms.length ? `<div class="h"><span>推荐播放器</span></div>
+        <div class="pills" id="platforms"></div><div id="players"></div>` : ''}`);
+    $$('[data-remove]', screen).forEach((b) => {
+      b.onclick = async () => {
+        const d = devices[Number(b.dataset.remove)];
+        const done = await confirmSheet({
+          title: `移除 ${d.name}`,
+          rows: [['设备', esc(d.name)], ['播放器', esc([d.app, d.version].filter(Boolean).join(' ') || '—')], ['最后使用', esc(ago(d.last_active))]],
+          note: '移除后这台设备会立刻退出登录，正在播放的会中断；之后用账号密码可以重新登录。',
+          okText: '移除并退出登录',
+          danger: true,
+          onConfirm: () => api('/api/app/devices/remove', { method: 'POST', body: { id: d.id } }),
+        });
+        if (!done) return;
+        toast(`已移除 ${done.name || d.name}`);
+        render();
+      };
+    });
+    function drawPlayers() {
+      const box = $('#platforms');
+      if (!box) return;
+      box.innerHTML = platforms.map((p) => `<button type="button" data-platform="${esc(p.platform)}" class="${p.platform === current ? 'on' : ''}">${esc(p.platform)}</button>`).join('');
+      const group = platforms.find((p) => p.platform === current) || { players: [] };
+      $('#players').innerHTML = `<div class="list">${group.players.map((p, i) => `<div class="it">
+          <div class="t"><b class="small">${esc(p.name)}</b>${p.note ? `<div class="tiny muted">${esc(p.note)}</div>` : ''}</div>
+          <button class="btn sm ghost" type="button" data-get="${i}">下载</button></div>`).join('')}</div>`;
+      $$('[data-platform]', box).forEach((b) => { b.onclick = () => { haptic.tap(); current = b.dataset.platform; drawPlayers(); }; });
+      $$('[data-get]', $('#players')).forEach((b) => {
+        b.onclick = () => {
+          const url = group.players[Number(b.dataset.get)].url;
+          if (tg) tg.openLink(url); else window.open(url, '_blank', 'noopener');
+        };
+      });
+    }
+    drawPlayers();
+  }
+
+  // -- 修改密码 -------------------------------------------------------------------
+
+  function randomPassword(length = 12) {
+    const pool = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789';
+    const out = [];
+    const buf = new Uint8Array(1);
+    while (out.length < length) {
+      crypto.getRandomValues(buf);
+      if (buf[0] < 256 - (256 % pool.length)) out.push(pool[buf[0] % pool.length]);
+    }
+    return out.join('');
+  }
+
+  async function renderPassword(alive) {
+    const me = S.me || await loadMe();
+    if (!alive()) return;
+    let mode = 'random';
+    let generated = randomPassword();
+    setScreen(`
+      <div class="card"><div class="row"><span class="muted">用户名</span><span><b class="num">${esc(me.username)}</b>
+        <button class="btn sm ghost" type="button" id="copy-user" style="margin-left:6px">复制</button></span></div></div>
+      <div class="seg"><button type="button" data-mode="random" class="on">随机生成</button><button type="button" data-mode="custom">自己设置</button></div>
+      <div id="pw-body"></div>
+      <div class="tiny muted" style="margin:10px 4px">修改后旧密码立即失效，客户端里需要用新密码登录。</div>
+      <div class="footer-action"><button class="btn block" type="button" id="pw-go">修改密码</button></div>`);
+    $('#copy-user').onclick = () => copy(me.username);
+    function draw() {
+      $$('[data-mode]', screen).forEach((b) => b.classList.toggle('on', b.dataset.mode === mode));
+      $('#pw-body').innerHTML = mode === 'random'
+        ? `<div class="card"><div class="row"><span class="muted">新密码</span><button class="btn sm ghost" type="button" id="pw-new">换一个</button></div>
+            <code class="u num" style="font-size:18px;letter-spacing:1px;text-align:center">${esc(generated)}</code>
+            <div class="tiny muted">12 位字母和数字，修改成功后会再显示一次，记得保存。</div></div>`
+        : `<div class="card">
+            <input class="field" id="pw1" type="password" maxlength="128" placeholder="新密码，至少 6 位" autocomplete="new-password">
+            <input class="field" id="pw2" type="password" maxlength="128" placeholder="再输入一次" autocomplete="new-password">
+            <label class="tiny muted"><input type="checkbox" id="pw-show"> 显示密码</label>
+            <div class="tiny muted" style="margin-top:4px">首尾空格也会原样保留。</div></div>`;
+      if (mode === 'random') $('#pw-new').onclick = () => { generated = randomPassword(); haptic.tap(); draw(); };
+      else {
+        $('#pw-show').onchange = (e) => { $$('#pw1,#pw2', screen).forEach((f) => { f.type = e.target.checked ? 'text' : 'password'; }); };
+      }
+    }
+    $$('[data-mode]', screen).forEach((b) => { b.onclick = () => { mode = b.dataset.mode; draw(); }; });
+    draw();
+    $('#pw-go').onclick = async () => {
+      let password = generated;
+      if (mode === 'custom') {
+        password = $('#pw1').value;
+        if (password.length < 6) { toast('密码至少 6 位', true); return; }
+        if (password !== $('#pw2').value) { toast('两次输入的密码不一致', true); return; }
+      }
+      const done = await confirmSheet({
+        title: '确认修改密码',
+        rows: [['用户名', esc(me.username)], ['新密码', mode === 'random' ? `<b>${esc(password)}</b>` : '你刚才输入的密码']],
+        note: '确认后旧密码立即失效。请先保存好新密码，不要转发给别人。',
+        okText: '确认修改',
+        onConfirm: async () => {
+          try {
+            return await api('/api/app/password', { method: 'POST', body: { password, mode } });
+          } catch (err) {
+            if (err instanceof ApiError && err.status > 0 && err.status < 500) throw err;
+            // A lost response may still have changed it; keep the attempted value visible.
+            throw new ApiError(err.status || 0, err.code, mode === 'random'
+              ? `结果未确认，新密码可能已经生效：${password}` : '结果未确认，新密码可能已经生效');
+          }
+        },
+      });
+      if (!done) return;
+      setScreen(`<div class="card" style="text-align:center;padding:22px 16px">
+          <div style="font-size:34px">✅</div><b style="font-size:17px">密码已修改</b>
+          <div class="kv" style="margin-top:12px"><span class="muted">用户名</span><b class="num">${esc(done.username)}</b></div>
+          <div class="kv"><span class="muted">新密码</span><b class="num">${esc(password)}</b></div>
+          <button class="btn ghost block" type="button" id="copy-pw" style="margin-top:12px">复制新密码</button>
+          ${(done.notices || []).map((n) => `<div class="banner" style="margin:12px 0 0;text-align:left"><span>⚠️</span><span>${esc(n)}</span></div>`).join('')}
+          <div class="tiny muted" style="margin-top:10px">请保存好新密码，不要转发。离开这个页面后不会再显示。</div></div>`);
+      $('#copy-pw').onclick = () => copy(password);
+    };
+  }
+
   // -- 排行 ---------------------------------------------------------------------
 
   async function renderRank(alive) {
@@ -602,15 +773,15 @@
     const value = (v) => (data.unit === 'points' ? num(v) : dur(v));
     const rows = data.rows;
     if (!rows.length) { body.innerHTML = '<div class="empty">📭 暂无排行数据</div>'; return; }
-    const pod = (r, cls) => (r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}<div class="avatar">${initial(r.name)}</div>
+    const pod = (r, cls) => (r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar)}
         <div class="small"><b>${esc(r.name)}</b></div><div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>');
     const mine = data.mine;
     body.innerHTML = `
       <div class="podium">${pod(rows[1], 's')}${pod(rows[0], 'g')}${pod(rows[2], 'b')}</div>
-      ${rows.length > 3 ? `<div class="list">${rows.slice(3).map((r) => `<div class="rrow"><span class="n">${r.rank}</span><div class="avatar sm">${initial(r.name)}</div>
+      ${rows.length > 3 ? `<div class="list">${rows.slice(3).map((r) => `<div class="rrow"><span class="n">${r.rank}</span>${face(r.name, r.avatar, 'sm')}
         <span class="nm">${esc(r.name)} ${lvTag(r.tag, true)}</span><span class="tiny muted num">${value(r.value)}${data.unit === 'points' ? ' 积分' : ''}</span></div>`).join('')}</div>` : ''}
       ${data.unit === 'points' ? '<div class="tiny muted" style="margin:4px 4px 0">按当前可用积分排序。</div>' : data.stamp ? `<div class="tiny muted" style="margin:4px 4px 0">${esc(data.stamp)}</div>` : ''}
-      <div class="mine"><div class="avatar sm">${initial(me.name)}</div><span class="grow">我的排名 <b>${mine ? '#' + mine.rank : '未上榜'}</b></span>
+      <div class="mine">${face(me.name, me.avatar, 'sm')}<span class="grow">我的排名 <b>${mine ? '#' + mine.rank : '未上榜'}</b></span>
         <b class="num">${mine ? value(mine.value) + (data.unit === 'points' ? ' 积分' : '') : ''}</b></div>`;
   }
   function titleBoard(data) {
@@ -983,7 +1154,7 @@
       : `${lvTag(n.tag, true)}<div class="tiny muted">${esc(statusLabel[n.status] || n.status)}${n.active_7d === true ? ' · 近 7 天活跃' : n.active_7d === false ? ' · 近 7 天未观看' : ''} · 注册 ${day(n.registered_at)} · 到期 ${n.expires_at ? day(n.expires_at) : '永久'}</div>`);
     const dot = (n) => (n.status === 'deleted' ? 'bad' : n.status === 'active' && n.active_7d !== false ? '' : 'off');
     const tree = data.nodes.map((n, i) => `<div class="node${i ? ' top' : ''}" style="${i ? 'border-top:1px solid var(--line)' : ''}"><span class="dot ${dot(n)}"></span>
-        <div class="avatar sm"${n.status === 'deleted' ? ' style="background:linear-gradient(135deg,#ff6b81,#7a2233)"' : ''}>${initial(n.label)}</div>
+        ${face(n.label, n.avatar, 'sm', n.status === 'deleted' ? 'background:linear-gradient(135deg,#ff6b81,#7a2233)' : '')}
         <div class="t"><b class="small">${esc(n.label)}</b> ${nodeLine(n)}</div></div>
       ${n.children.length ? `<div class="tree">${n.children.map((c) => `<div class="node"><span class="dot ${dot(c)}"></span>
         <div class="t small">${esc(c.label)} <span class="tiny muted">${c.status === 'deleted' ? '已删除' : esc(statusLabel[c.status] || c.status)}${c.status !== 'deleted' && c.active_7d === true ? ' · 活跃' : ''}</span></div></div>`).join('')}
@@ -1038,5 +1209,7 @@
     setScreen(stateView('📱', '请在 Telegram 里打开', '会员面板需要从 Bot 首页的「📱 会员面板」按钮进入。'));
     return;
   }
+  const deepLink = { devices: renderDevices, password: renderPassword }[new URLSearchParams(location.search).get('page')];
+  if (deepLink) S.stack.push({ render: deepLink });
   render();
 })();

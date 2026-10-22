@@ -51,7 +51,12 @@ button{cursor:pointer}
 .list .it .t{flex:1;min-width:0}
 .go{color:var(--hint)}
 .avatar{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;color:#fff;font-weight:800;font-size:20px;flex:none;background:linear-gradient(135deg,#6d7cff,#c06bff);overflow:hidden}
+.avatar{position:relative}
+.avatar img{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;border-radius:50%}
 .avatar.sm{width:34px;height:34px;font-size:13px}
+.dev-ic{width:44px;height:44px;border-radius:14px;flex:none;display:grid;place-items:center;background:var(--glass2);border:1px solid var(--line)}
+.dev-ic svg{width:22px;height:22px;fill:none;stroke:var(--text);stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;opacity:.85}
+.danger-link{color:var(--bad);font-weight:600;padding:6px 2px}
 .switch{width:44px;height:26px;border-radius:13px;background:var(--line);position:relative;flex:none;border:1px solid var(--line);padding:0}
 .switch::after{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 2px 4px rgba(0,0,0,.3);transition:left .15s}
 .switch.on{background:var(--ok)}.switch.on::after{left:20px}
