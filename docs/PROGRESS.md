@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-23 — v0.48.5: /pk dice duel between two members
+
+- New points plugin `pk` (off by default). In an authorized group, reply to a member
+  with `/pk` or `/pk 100`, or `/pk @someone 100` (a text mention also works); the
+  number is the stake, no number is a friendly match. The card mentions both; only
+  the challenged member can accept, either side can decline/withdraw.
+- Accepting settles in one ledger transaction: re-check both members, reserve the
+  opponent's stake, roll three dice each (server-side `secrets`, like 牛牛), pay the
+  winner both stakes through a zero-sum pool, refund both on a tie. No fee, no stake
+  cap beyond balance, no daily cap; one pending duel per member. Declines, withdrawals,
+  timeouts (`wait_seconds`, default 120) and disabling refund the challenger.
+- Card uses the shared durable publication (one card, edited in place to the result).
+- Forum topic openers are not treated as reply targets.
+
 ## 2026-10-22 — v0.48.4: invite registrations name the inviter in the group
 
 - The registration receipt posted to the group now adds "🤝 邀请人：@inviter" (a

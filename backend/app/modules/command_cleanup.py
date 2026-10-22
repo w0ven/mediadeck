@@ -22,7 +22,7 @@ TARGET = ContextVar('group_command_response', default=None)
 ENTRY_COMMANDS = {'/start', '/help', '/rules', '/cancel', '/usage', '/me', '/myinfo', '/rank', '/today',
                   '/manage', '/requests', '/request', '/req', '/uploader', '/register', '/claim', '/rebind', '/resetpw',
                   '/blackwhite', '/黑白板', '/牛牛', '/niuniu', '/牛牛帮助', '/炸金花', '/poker', '/zjh', '/看牌', '/炸金花帮助',
-                  '/积分榜', '/pointsrank', '/游戏', '/games', '/玩法', '/刮刮乐', '/scratch9'} | set(POINT_COMMANDS) | set(PACKET_COMMANDS)
+                  '/积分榜', '/pointsrank', '/游戏', '/games', '/玩法', '/刮刮乐', '/scratch9', '/pk'} | set(POINT_COMMANDS) | set(PACKET_COMMANDS)
 
 
 def capture_response(method, sent, result):

@@ -40,6 +40,7 @@ from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.level_lifecycle import LevelLifecyclePlugin
 from app.modules.niuniu import NiuniuPlugin
+from app.modules.pk import PkPlugin
 from app.modules.plugins import Field, Plugin, PluginRegistry, Spec
 from app.modules.plugins_points import POINTS_PLUGINS
 from app.modules.points_ranking import PointsRankingPlugin
@@ -955,6 +956,7 @@ BUILTIN_PLUGINS = (
     BlackwhitePlugin,
     PokerPlugin,
     NiuniuPlugin,
+    PkPlugin,
     DicePlugin,
     Scratch9Plugin,
     GroupCommandCleanupPlugin,
