@@ -2,6 +2,15 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.48.2: Mini App polish from live-data review
+
+- Rendering v0.48.1 against real accounts (whitelist member, long names, long
+  leaderboard) surfaced leftovers; fixed with Gemini 4: solid growth bar, no bar
+  for whitelist, no sheen band or gradient on high-tier plaques (only Lv7/Lv8 keep
+  a small mark), solid podium avatars, inset list separators, a sticky "my rank"
+  bar that no longer lets rows show through, level tags that survive long names,
+  number/unit hierarchy in watch-time stats, and no duplicate whitelist card.
+
 ## 2026-10-22 — v0.48.1: Mini App visual redesign
 
 - Redesigned with Gemini 4 (gemini-4-argon) as designer, over three rounds of
