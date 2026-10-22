@@ -1,6 +1,7 @@
 """/pk dice duel through the real handlers and SQLite ledger; local transport only."""
 import asyncio
 import copy
+from html import escape
 
 import pytest
 from test_blackwhite import env as bw_env  # noqa: F401
@@ -205,12 +206,15 @@ def test_streaks_records_and_quiet_leaderboard(env):
         env.actors[1]['username'] = 'champ_one'
         for i, opponent in enumerate((2, 3, 4)):
             row = await duel(env, [6, 1], text='/pk 10', opponent=opponent, mid=2100 + i)
-        assert '🔥 3 连胜' in shown(env, row)['text']
+        final = shown(env, row)['text']
+        nick = escape(env.actors[1]['first_name'])
+        assert '🔥 3 连胜' in final and f'<a href="tg://user?id={env.actors[1]["id"]}">{nick}</a>' in final
+        assert '@champ_one' not in final
         row = await duel(env, [2, 2, 3, 3, 4, 4], text='/pk 10', opponent=5, mid=2110)
         await env.bot._dispatch_update({'message': message(env, '/pkrank', index=2, mid=2200)})
         board = sent(env)[-1]
-        assert '@\u2060champ_one · <b>3</b> 连胜' in board and '<b>3</b> 胜 0 负 · 积分 +30' in board
-        assert 'tg://user' not in board
+        assert f'{nick} · <b>3</b> 连胜' in board and '<b>3</b> 胜 0 负 · 积分 +30' in board
+        assert 'tg://user' not in board and '@champ_one' not in board
         await env.bot._dispatch_update({'message': message(env, '/pkme', index=1, mid=2201)})
         mine = sent(env)[-1]
         assert '<b>3</b> 胜 · 0 负 · 1 平，胜率 100%' in mine and '当前 3 连胜 · 最高 3 连胜' in mine and '+30' in mine

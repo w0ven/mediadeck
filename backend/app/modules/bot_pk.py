@@ -5,7 +5,7 @@ import asyncio
 import re
 from html import escape
 
-from app.modules.game_mentions import result_mention, telegram_username
+from app.modules.game_mentions import result_mention
 from app.modules.game_ui import defer_ui
 from app.modules.group_points import GroupPointsError, reliable_user
 from app.modules.pk import MAX_ROUNDS, PkService, result_of, rolls_of
@@ -53,10 +53,8 @@ def pk_args(message):
     return target, int(words[0]) if words else 0
 
 
-def quiet_handle(name, username):
-    """@username that reads as a mention but does not ping; the nickname when there is none."""
-    handle = telegram_username(username)
-    return '@\u2060' + handle if handle else escape(str(name or '成员')[:32])
+def plain_name(name):
+    return escape(str(name or '成员')[:32])
 
 
 def signed(value):
@@ -73,8 +71,8 @@ class PkBotMixin:
                          lambda: self._plugin_on('pk'), self._group_chat_allowed, self._active_bot_id)
 
     def _pk_view(self, row):
-        a = result_mention(row['actor_tg_id'], row['actor_name'], row['actor_username'])
-        b = result_mention(row['target_tg_id'], row['target_name'], row['target_username'])
+        a = result_mention(row['actor_tg_id'], row['actor_name'])
+        b = result_mention(row['target_tg_id'], row['target_name'])
         stake = row['stake']
         bet = f'押 <b>{stake:,}</b> 积分' if stake else '友谊赛 · 不押积分'
         refunded = '，押注已退回' if stake else ''
@@ -161,9 +159,7 @@ class PkBotMixin:
                 member = self._members.find_by_telegram(tg)
                 if not member:
                     raise PlayError('先绑定账号才有 PK 战绩')
-                sender = dict(message.get('from') or {})
-                sender['username'] = sender.get('username') or member.get('tg_username')
-                text = self._pk_me_text(stats.get(member['emby_user_id']), sender)
+                text = self._pk_me_text(stats.get(member['emby_user_id']), message.get('from') or {})
         except (PlayError, GroupPointsError) as exc:
             text = '🍃 ' + escape(str(exc))
         await self.send_message(chat.get('id'), text, thread_id=self._thread_id(message),
@@ -181,16 +177,16 @@ class PkBotMixin:
         text = '🎲 <b>PK 榜</b>\n'
         if hot:
             text += '\n🔥 <b>连胜中</b>\n' + '\n'.join(
-                f'{quiet_handle(s["name"], s["username"])} · <b>{s["streak"]}</b> 连胜' for s in hot) + '\n'
+                f'{plain_name(s["name"])} · <b>{s["streak"]}</b> 连胜' for s in hot) + '\n'
         text += '\n🏆 <b>胜场榜</b>\n' + '\n'.join(
-            f'{medal[i] if i < 3 else str(i + 1) + "."} {quiet_handle(s["name"], s["username"])} · '
+            f'{medal[i] if i < 3 else str(i + 1) + "."} {plain_name(s["name"])} · '
             f'<b>{s["wins"]}</b> 胜 {s["losses"]} 负 · 积分 {signed(s["net"])}'
             for i, s in enumerate(top))
         return text + '\n\n/pkme 看自己的战绩'
 
     @staticmethod
     def _pk_me_text(record, sender):
-        who = quiet_handle(' '.join(str(sender.get(k) or '') for k in ('first_name', 'last_name')).strip(), sender.get('username'))
+        who = plain_name(' '.join(str(sender.get(k) or '') for k in ('first_name', 'last_name')).strip())
         if not record or not (record['wins'] or record['losses'] or record['draws']):
             return f'🎲 {who} 还没打过 PK，回复对方消息发 /pk 开一局吧'
         decisive = record['wins'] + record['losses']
