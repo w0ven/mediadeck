@@ -1,19 +1,23 @@
-"""/pk in groups: one challenge card, edited in place to the dice result."""
+"""/pk in groups: one challenge card, Telegram dice replies, the card edited to the result."""
 from __future__ import annotations
 
 import asyncio
 import re
 from html import escape
 
-from app.modules.game_mentions import result_mention
+from app.modules.game_mentions import result_mention, telegram_username
 from app.modules.game_ui import defer_ui
 from app.modules.group_points import GroupPointsError, reliable_user
-from app.modules.pk import DICE, PkService, result_of
+from app.modules.pk import MAX_ROUNDS, PkService, result_of, rolls_of
 from app.modules.play_money import PlayError
 from app.modules.report_delivery import CALL_DELIVERY
 
-FACES = {1: '⚀', 2: '⚁', 3: '⚂', 4: '⚃', 5: '⚄', 6: '⚅'}
 USAGE = '用法：回复对方消息发 /pk 或 /pk 100，也可以 /pk @对方 100（数字是押注积分，不写就是不押积分的友谊赛）'
+RANK_VERBS = ('/pkrank', '/pk榜')
+ME_VERBS = ('/pkme', '/pk战绩')
+# Telegram's dice animation runs about three seconds; reveal after it lands.
+THROW_GAP_SECONDS = 1.5
+LANDING_SECONDS = 4.0
 
 
 def pk_args(message):
@@ -49,6 +53,16 @@ def pk_args(message):
     return target, int(words[0]) if words else 0
 
 
+def quiet_handle(name, username):
+    """@username that reads as a mention but does not ping; the nickname when there is none."""
+    handle = telegram_username(username)
+    return '@\u2060' + handle if handle else escape(str(name or '成员')[:32])
+
+
+def signed(value):
+    return f'+{value:,}' if value > 0 else f'{value:,}'
+
+
 class PkBotMixin:
     def _pk_service(self):
         if self._db is None or self._points is None:
@@ -65,26 +79,38 @@ class PkBotMixin:
         bet = f'押 <b>{stake:,}</b> 积分' if stake else '友谊赛 · 不押积分'
         refunded = '，押注已退回' if stake else ''
         result = result_of(row)
+        rounds = {}
+        for throw in rolls_of(row) or result.get('rolls') or []:
+            rounds.setdefault(throw['round'], {})[throw['side']] = throw['value']
+        lines = []
+        for number, pair in sorted(rounds.items()):
+            left = f'<b>{pair["actor"]}</b>' if 'actor' in pair else '…'
+            right = f'<b>{pair["target"]}</b>' if 'target' in pair else '…'
+            tie = '  平，加赛' if 'actor' in pair and 'target' in pair and pair['actor'] == pair['target'] and number < MAX_ROUNDS else ''
+            lines.append(f'第{number}轮  🎲 {left} : {right}{tie}')
+        board = ('\n' + '\n'.join(lines)) if lines else ''
         if row['state'] == 'pending':
             minutes = max(1, round((row['expires_at'] - row['created_at']) / 60))
-            outcome = '点数大的赢走对方押注，平局各自退回' if stake else '点数大的获胜，平局不分胜负'
             text = (f'🎲 <b>骰子 PK</b>\n\n{a} 向 {b} 发起挑战 · {bet}\n'
-                    f'双方各掷{"三" if DICE == 3 else DICE}颗骰子，{outcome}。\n\n'
+                    f'应战后双方各掷一颗骰子，点大的{"赢走对方押注" if stake else "获胜"}；'
+                    f'点数相同就加赛，{MAX_ROUNDS} 轮仍相同{"各自退回" if stake else "算平局"}。\n\n'
                     f'⏳ 等 {b} 在 {minutes} 分钟内应战')
             n = row['nonce']
             return text, [[{'text': '✅ 应战', 'callback_data': f'pk:{n}:accept'},
                            {'text': '❌ 拒绝', 'callback_data': f'pk:{n}:decline'}]]
+        if row['state'] == 'rolling':
+            return f'🎲 <b>骰子 PK · 开骰中</b> · {bet}\n\n{a}  vs  {b}{board}\n\n🎲 骰子已掷出，等落定…', []
         if row['state'] == 'settled':
-            dice, totals, winner = result['dice'], result['totals'], result['winner']
-
-            def line(who, side):
-                return f'{who}  {" ".join(FACES[v] for v in dice[side])}  = <b>{totals[side]}</b>'
-            text = f'🎲 <b>骰子 PK · 开骰</b> · {bet}\n\n{line(a, "actor")}\n{line(b, "target")}\n\n'
+            if 'dice' in result:  # duels settled before Telegram dice
+                board = '\n' + '\n'.join(f'{who}  {" ".join(str(v) for v in result["dice"][side])}  = <b>{result["totals"][side]}</b>'
+                                         for who, side in ((a, 'actor'), (b, 'target')))
+            text = f'🎲 <b>骰子 PK · 结果</b> · {bet}\n\n{a}  vs  {b}{board}\n\n'
+            winner = result.get('winner')
             if winner is None:
-                text += '🤝 平局' + ('，押注各自退回' if stake else '')
-            else:
-                text += f'🏆 {a if winner == "actor" else b} 获胜' + (f'，赢得 <b>{stake:,}</b> 积分' if stake else '')
-            return text, []
+                return text + '🤝 平局' + ('，押注各自退回' if stake else ''), []
+            streak = result.get('streak', 0)
+            return (text + f'🏆 {a if winner == "actor" else b} 获胜' + (f'，赢得 <b>{stake:,}</b> 积分' if stake else '')
+                    + (f'  🔥 {streak} 连胜' if streak >= 2 else '')), []
         if row['state'] == 'declined':
             return f'🎲 骰子 PK\n\n{b} 拒绝了 {a} 的挑战{refunded}', []
         if row['state'] == 'withdrawn':
@@ -92,16 +118,19 @@ class PkBotMixin:
         if row['state'] == 'expired':
             return f'🎲 骰子 PK\n\n⌛ {b} 没有应战，挑战已取消{refunded}', []
         reason = result.get('reason')
-        return f'🎲 骰子 PK\n\n挑战已取消{"：" + escape(reason) if reason else ""}{refunded}', []
+        return f'🎲 骰子 PK\n\n{a}  vs  {b}{board}\n\n挑战已取消{"：" + escape(reason) if reason else ""}{refunded}', []
 
     async def _pk_command(self, message):
         parts = str(message.get('text') or '').strip().split()
         first = parts[0].lower() if parts else ''
-        if first.split('@', 1)[0] != '/pk':
+        verb = first.split('@', 1)[0]
+        if verb not in ('/pk', *RANK_VERBS, *ME_VERBS):
             return False
         self._check_bot_identity()
         if '@' in first and (not self._bot_username or first.split('@', 1)[1] != self._bot_username.lower()):
             return True
+        if verb != '/pk':
+            return await self._pk_records(message, verb)
         chat = message.get('chat') or {}
         if chat.get('type') not in ('group', 'supergroup') or not self._group_chat_allowed(chat):
             return True
@@ -114,6 +143,62 @@ class PkBotMixin:
             await self.send_message(chat.get('id'), '🍃 ' + escape(str(exc)), thread_id=self._thread_id(message),
                                     reply_to_message_id=message.get('message_id'))
         return True
+
+    async def _pk_records(self, message, verb):
+        chat = message.get('chat') or {}
+        if chat.get('type') not in ('private', 'group', 'supergroup') or chat.get('type') != 'private' and not self._group_chat_allowed(chat):
+            return True
+        if not self._play_entry_valid(message):
+            return True
+        try:
+            if not self._plugin_on('pk'):
+                raise PlayError('骰子 PK 暂未开放')
+            stats = self._pk_service().standings()
+            if verb in RANK_VERBS:
+                text = self._pk_rank_text(stats)
+            else:
+                tg = reliable_user(message)
+                member = self._members.find_by_telegram(tg)
+                if not member:
+                    raise PlayError('先绑定账号才有 PK 战绩')
+                sender = dict(message.get('from') or {})
+                sender['username'] = sender.get('username') or member.get('tg_username')
+                text = self._pk_me_text(stats.get(member['emby_user_id']), sender)
+        except (PlayError, GroupPointsError) as exc:
+            text = '🍃 ' + escape(str(exc))
+        await self.send_message(chat.get('id'), text, thread_id=self._thread_id(message),
+                                reply_to_message_id=message.get('message_id'))
+        return True
+
+    @staticmethod
+    def _pk_rank_text(stats):
+        rows = [s for s in stats.values() if s['wins'] or s['losses'] or s['draws']]
+        if not rows:
+            return '🎲 <b>PK 榜</b>\n\n还没有人打过 PK，回复对方消息发 /pk 开一局吧'
+        hot = sorted((s for s in rows if s['streak'] >= 2), key=lambda s: (-s['streak'], -s['wins']))[:5]
+        top = sorted(rows, key=lambda s: (-s['wins'], -s['net'], s['losses']))[:10]
+        medal = ('🥇', '🥈', '🥉')
+        text = '🎲 <b>PK 榜</b>\n'
+        if hot:
+            text += '\n🔥 <b>连胜中</b>\n' + '\n'.join(
+                f'{quiet_handle(s["name"], s["username"])} · <b>{s["streak"]}</b> 连胜' for s in hot) + '\n'
+        text += '\n🏆 <b>胜场榜</b>\n' + '\n'.join(
+            f'{medal[i] if i < 3 else str(i + 1) + "."} {quiet_handle(s["name"], s["username"])} · '
+            f'<b>{s["wins"]}</b> 胜 {s["losses"]} 负 · 积分 {signed(s["net"])}'
+            for i, s in enumerate(top))
+        return text + '\n\n/pkme 看自己的战绩'
+
+    @staticmethod
+    def _pk_me_text(record, sender):
+        who = quiet_handle(' '.join(str(sender.get(k) or '') for k in ('first_name', 'last_name')).strip(), sender.get('username'))
+        if not record or not (record['wins'] or record['losses'] or record['draws']):
+            return f'🎲 {who} 还没打过 PK，回复对方消息发 /pk 开一局吧'
+        decisive = record['wins'] + record['losses']
+        rate = f'，胜率 {round(record["wins"] * 100 / decisive)}%' if decisive else ''
+        return (f'🎲 <b>{who} 的 PK 战绩</b>\n\n'
+                f'<b>{record["wins"]}</b> 胜 · {record["losses"]} 负 · {record["draws"]} 平{rate}\n'
+                f'🔥 当前 {record["streak"]} 连胜 · 最高 {record["best"]} 连胜\n'
+                f'💰 积分净输赢 {signed(record["net"])}')
 
     async def _pk_open(self, nonce, message):
         with self._group_command_context(message):
@@ -128,18 +213,67 @@ class PkBotMixin:
                 raise PlayError('PK 按钮无效')
             row = self._pk_service().respond(tokens[1], actor, message, tokens[2])
             publish_nonce = row['nonce']
-            text = {'settled': '🎲 已开骰', 'declined': '已拒绝', 'withdrawn': '已撤回'}.get(row['state'], '')
+            text = {'rolling': '🎲 开骰！', 'declined': '已拒绝', 'withdrawn': '已撤回'}.get(row['state'], '')
         except (PlayError, GroupPointsError) as exc:
             text, show_alert = '🍃 ' + str(exc), True
         await self._call('answerCallbackQuery', {'callback_query_id': callback_id,
                          'text': text, 'show_alert': show_alert}, timeout=10)
         if publish_nonce is not None:
             defer_ui(self, ('pk', publish_nonce), lambda: self._pk_publish(publish_nonce))
+            defer_ui(self, ('pkroll', publish_nonce), lambda: self._pk_roll(publish_nonce))
 
     def _pk_transport_allowed(self, row):
         self._check_bot_identity()
         return (self.enabled and row['bot_id'] == self._active_bot_id
                 and self._group_chat_allowed({'id': int(row['chat_id']), 'type': 'supergroup'}))
+
+    async def _pk_roll(self, nonce):
+        """Throw the duel's dice one by one; the dice Telegram returns decide the round."""
+        if not self.enabled:
+            return
+        locks = self.__dict__.setdefault('_pk_roll_locks', {})
+        async with locks.setdefault(nonce, asyncio.Lock()):
+            service = self._pk_service()
+            while True:
+                claim = service.begin_roll(nonce)
+                if not claim:
+                    break
+                payload = {'chat_id': int(claim['chat_id']), 'emoji': '🎲',
+                           'reply_parameters': {'message_id': claim['card_message_id'], 'allow_sending_without_reply': True}}
+                if claim['thread_id']:
+                    payload['message_thread_id'] = claim['thread_id']
+                CALL_DELIVERY.set(None)
+                started = False
+                try:
+                    if not self._pk_transport_allowed(claim):
+                        CALL_DELIVERY.set({'state': 'failed'})
+                        result = None
+                    else:
+                        started = True
+                        result = await self._call('sendDice', payload)
+                except asyncio.CancelledError:
+                    if not started:
+                        service.roll_failed(claim, {'state': 'retry'})
+                    raise
+                except Exception:  # noqa: BLE001 - an unconfirmed throw voids the duel, never re-rolls
+                    result = None
+                dice = result.get('dice') if isinstance(result, dict) else None
+                value = dice.get('value') if isinstance(dice, dict) and dice.get('emoji') == '🎲' else None
+                if type(value) is int and 1 <= value <= 6 and type(result.get('message_id')) is int:
+                    done = service.record_roll(claim, value, result['message_id'])
+                    if not done:
+                        break
+                    if done['round_complete']:
+                        await asyncio.sleep(LANDING_SECONDS)
+                        await self._pk_publish(nonce)
+                    else:
+                        await asyncio.sleep(THROW_GAP_SECONDS)
+                    if done['state'] != 'rolling':
+                        break
+                else:
+                    service.roll_failed(claim, CALL_DELIVERY.get() or {})
+                    await self._pk_publish(nonce)
+                    break
 
     async def _pk_publish(self, nonce):
         if not self.enabled:
@@ -191,5 +325,7 @@ class PkBotMixin:
         service = self._pk_service()
         service.expire_due()
         if self.enabled:
+            for row in service.rolling():
+                defer_ui(self, ('pkroll', row['nonce']), lambda nonce=row['nonce']: self._pk_roll(nonce))
             for row in service.pending_cards('pk'):
                 await self._pk_publish(row['nonce'])

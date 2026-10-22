@@ -552,6 +552,8 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 {"command": "blackwhite", "description": "黑白板·五人同注"},
                 {"command": "niuniu", "description": "牛牛·五张定胜负"},
                 {"command": "pk", "description": "骰子PK·回复对方 /pk 积分"},
+                {"command": "pkrank", "description": "PK榜·连胜与胜场"},
+                {"command": "pkme", "description": "我的PK战绩"},
             ]
         commands += [
             {"command": "help", "description": "命令与使用说明"},
@@ -5305,7 +5307,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                     callback_data = str((update.get('callback_query') or {}).get('data') or '')
                     words = str(message.get('text') or '').strip().split()
                     verb = words[0].lower().split('@', 1)[0] if words else ''
-                    if callback_data.startswith(('nn:', 'nnh:', 'pk:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/pk', '/红包', '/redpacket', '/packet'):
+                    if callback_data.startswith(('nn:', 'nnh:', 'pk:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/pk', '/pkrank', '/pk榜', '/pkme', '/pk战绩', '/红包', '/redpacket', '/packet'):
                         defer_ui(self, ('commands', str(chat['id'])+':'+args[1]), lambda: sync_game_commands(self, *args))
                     else:
                         await self._sync_chat_commands(*args[:3], group=group)

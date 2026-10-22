@@ -7,18 +7,37 @@ from test_blackwhite import env as bw_env  # noqa: F401
 from test_checkin_interaction import economy_env, interaction_env  # noqa: F401
 from test_tg_interaction_context import GROUP
 
-from app.modules import pk as pk_module
+from app.modules import bot_pk
 from app.modules.bot_pk import pk_args
 from app.modules.game_ui import drain_ui
 from app.modules.play_money import PlayError
+from app.modules.report_delivery import CALL_DELIVERY
+
+UNCONFIRMED = object()
 
 
 @pytest.fixture
 def env(request, monkeypatch):
     e = request.getfixturevalue('bw_env')
     e.services.registry.save('pk', enabled=True)
-    e.rolls = []
-    monkeypatch.setattr(pk_module, 'roll', lambda: e.rolls.pop(0))
+    monkeypatch.setattr(bot_pk, 'THROW_GAP_SECONDS', 0)
+    monkeypatch.setattr(bot_pk, 'LANDING_SECONDS', 0)
+    e.dice = []
+    plain = e.tg.call
+
+    async def call(method, payload=None, timeout=20):
+        if method != 'sendDice':
+            return await plain(method, payload, timeout)
+        e.tg.calls.append((method, copy.deepcopy(payload)))
+        value = e.dice.pop(0)
+        if value is UNCONFIRMED:
+            return None
+        if isinstance(value, dict):
+            CALL_DELIVERY.set(value)
+            return None
+        e.tg.next_id += 1
+        return {'message_id': e.tg.next_id, 'dice': {'emoji': '🎲', 'value': value}}
+    e.bot._call = call
     return e
 
 
@@ -32,8 +51,8 @@ def balance(e, index):
     return e.services.points.balance(e.uids[index])
 
 
-def message(e, text, index=1, mid=2001, reply=None, entities=None, topic=0):
-    m = {'chat': {'id': GROUP, 'type': 'supergroup'}, 'from': e.actors[index], 'text': text, 'message_id': mid,
+def message(e, text, index=1, mid=2001, reply=None, entities=None, topic=0, chat=None):
+    m = {'chat': chat or {'id': GROUP, 'type': 'supergroup'}, 'from': e.actors[index], 'text': text, 'message_id': mid,
          **({'is_topic_message': True, 'message_thread_id': topic} if topic else {})}
     if reply is not None:
         m['reply_to_message'] = {'message_id': mid - 1, 'from': e.actors[reply], 'text': 'hi'}
@@ -64,6 +83,12 @@ async def click(e, row, op, index):
     return e.bot._pk_service().get(row['nonce'])
 
 
+async def duel(e, dice, text='/pk 100', index=1, opponent=2, mid=2001):
+    row = await challenge(e, text, index=index, reply=opponent, mid=mid)
+    e.dice = list(dice)
+    return await click(e, row, 'accept', opponent)
+
+
 def answer(e):
     return [p for m, p in e.tg.calls if m == 'answerCallbackQuery'][-1]
 
@@ -72,63 +97,138 @@ def shown(e, row):
     return e.tg.message(GROUP, row['card_message_id'])
 
 
-def replies(e):
-    return [p['text'] for m, p in e.tg.calls if m == 'sendMessage' and p.get('text', '').startswith('🍃')]
+def throws(e):
+    return [p for m, p in e.tg.calls if m == 'sendDice']
 
 
-def test_reply_challenge_with_stake_pays_the_higher_roll(env):
+def sent(e):
+    return [p['text'] for m, p in e.tg.calls if m == 'sendMessage']
+
+
+def test_accepting_throws_telegram_dice_and_pays_the_higher_one(env):
     async def run():
         total = cash(env)
         row = await challenge(env, '/pk 100', index=1, reply=2)
-        assert row['state'] == 'pending' and row['stake'] == 100
-        assert row['target_user_id'] == env.uids[2] and balance(env, 1) == 900
+        assert row['state'] == 'pending' and row['stake'] == 100 and balance(env, 1) == 900
         first = shown(env, row)
         assert f'tg://user?id={env.actors[2]["id"]}' in first['text'] and '押 <b>100</b> 积分' in first['text']
+        assert '各掷一颗骰子' in first['text']
         buttons = [b['callback_data'] for line in first['reply_markup']['inline_keyboard'] for b in line]
         assert buttons == [f'pk:{row["nonce"]}:accept', f'pk:{row["nonce"]}:decline']
-        env.rolls = [[6, 5, 4], [1, 2, 3]]
+        env.dice = [6, 2]
         row = await click(env, row, 'accept', 2)
-        assert row['state'] == 'settled' and answer(env)['text'] == '🎲 已开骰'
+        assert answer(env)['text'] == '🎲 开骰！' and row['state'] == 'settled'
+        dice = throws(env)
+        assert len(dice) == 2 and all(d['emoji'] == '🎲' and d['reply_parameters']['message_id'] == row['card_message_id'] for d in dice)
         assert balance(env, 1) == 1100 and balance(env, 2) == 900 and cash(env) == total
         assert env.db.one("SELECT SUM(amount) n FROM play_escrows WHERE scope='pk'")['n'] == 0
         final = shown(env, row)
-        assert '⚅ ⚄ ⚃  = <b>15</b>' in final['text'] and '⚀ ⚁ ⚂  = <b>6</b>' in final['text']
-        assert '获胜，赢得 <b>100</b> 积分' in final['text'] and not final['reply_markup']['inline_keyboard']
+        assert '第1轮  🎲 <b>6</b> : <b>2</b>' in final['text'] and '获胜，赢得 <b>100</b> 积分' in final['text']
+        assert not final['reply_markup']['inline_keyboard']
     asyncio.run(run())
 
 
-def test_tie_returns_both_stakes(env):
+def test_ties_go_to_another_round_then_decide(env):
+    async def run():
+        row = await duel(env, [3, 3, 1, 5])
+        assert row['state'] == 'settled' and len(throws(env)) == 4
+        text = shown(env, row)['text']
+        assert '第1轮  🎲 <b>3</b> : <b>3</b>  平，加赛' in text and '第2轮  🎲 <b>1</b> : <b>5</b>' in text
+        assert balance(env, 2) == 1100 and balance(env, 1) == 900
+    asyncio.run(run())
+
+
+def test_three_tied_rounds_are_a_draw_with_refunds(env):
     async def run():
         total = cash(env)
-        row = await challenge(env, '/pk 50', index=1, reply=2)
-        env.rolls = [[3, 3, 3], [1, 4, 4]]
-        row = await click(env, row, 'accept', 2)
-        assert row['state'] == 'settled' and balance(env, 1) == balance(env, 2) == 1000 and cash(env) == total
-        assert '平局，押注各自退回' in shown(env, row)['text']
+        row = await duel(env, [2, 2, 4, 4, 6, 6])
+        assert row['state'] == 'settled' and len(throws(env)) == 6
+        assert balance(env, 1) == balance(env, 2) == 1000 and cash(env) == total
+        assert '🤝 平局，押注各自退回' in shown(env, row)['text']
+    asyncio.run(run())
+
+
+def test_an_unconfirmed_die_voids_the_duel_instead_of_rolling_again(env):
+    async def run():
+        total = cash(env)
+        row = await duel(env, [4, UNCONFIRMED])
+        assert row['state'] == 'cancelled' and len(throws(env)) == 2
+        assert balance(env, 1) == balance(env, 2) == 1000 and cash(env) == total
+        assert '本局作废' in shown(env, row)['text'] and '押注已退回' in shown(env, row)['text']
+    asyncio.run(run())
+
+
+def test_a_die_telegram_refused_to_send_is_retried_later(env):
+    async def run():
+        row = await duel(env, [{'state': 'retry', 'retry_after': 5}])
+        assert row['state'] == 'rolling' and row['roll_state'] == 'ready' and row['roll_due'] > 0
+        env.db.execute('UPDATE pk_rounds SET roll_due=0 WHERE nonce=?', (row['nonce'],))
+        env.dice = [5, 1]
+        await env.bot._pk_tick()
+        await drain_ui(env.bot)
+        row = env.bot._pk_service().get(row['nonce'])
+        assert row['state'] == 'settled' and balance(env, 1) == 1100
+    asyncio.run(run())
+
+
+def test_a_throw_lost_in_a_restart_is_refunded_not_rethrown(env):
+    async def run():
+        row = await challenge(env, '/pk 100', index=1, reply=2)
+        service = env.bot._pk_service()
+        env.dice = []
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(env.bot, '_pk_roll', lambda nonce: asyncio.sleep(0))
+            row = await click(env, row, 'accept', 2)
+        assert row['state'] == 'rolling'
+        claim = service.begin_roll(row['nonce'])
+        assert claim['side'] == 'actor'
+        lease = service.get(row['nonce'])['roll_lease']
+        service.expire_due(now=lease + 1)
+        row = service.get(row['nonce'])
+        assert row['state'] == 'cancelled' and balance(env, 1) == balance(env, 2) == 1000
+        assert not throws(env)
     asyncio.run(run())
 
 
 def test_without_a_number_it_is_a_friendly_match(env):
     async def run():
-        row = await challenge(env, '/pk', index=1, reply=3)
-        assert row['stake'] == 0 and '友谊赛' in shown(env, row)['text']
-        env.rolls = [[1, 1, 1], [6, 6, 6]]
-        row = await click(env, row, 'accept', 3)
-        assert balance(env, 1) == balance(env, 3) == 1000
+        row = await duel(env, [1, 6], text='/pk', opponent=3)
+        assert row['stake'] == 0 and balance(env, 1) == balance(env, 3) == 1000
         assert env.db.one("SELECT COUNT(*) n FROM play_escrows WHERE scope='pk'")['n'] == 0
-        assert '获胜' in shown(env, row)['text'] and '积分' not in shown(env, row)['text'].split('获胜')[1]
+        text = shown(env, row)['text']
+        assert '友谊赛' in text and '获胜' in text and '积分' not in text.split('获胜')[1]
+    asyncio.run(run())
+
+
+def test_streaks_records_and_quiet_leaderboard(env):
+    async def run():
+        env.actors[1]['username'] = 'champ_one'
+        for i, opponent in enumerate((2, 3, 4)):
+            row = await duel(env, [6, 1], text='/pk 10', opponent=opponent, mid=2100 + i)
+        assert '🔥 3 连胜' in shown(env, row)['text']
+        row = await duel(env, [2, 2, 3, 3, 4, 4], text='/pk 10', opponent=5, mid=2110)
+        await env.bot._dispatch_update({'message': message(env, '/pkrank', index=2, mid=2200)})
+        board = sent(env)[-1]
+        assert '@\u2060champ_one · <b>3</b> 连胜' in board and '<b>3</b> 胜 0 负 · 积分 +30' in board
+        assert 'tg://user' not in board
+        await env.bot._dispatch_update({'message': message(env, '/pkme', index=1, mid=2201)})
+        mine = sent(env)[-1]
+        assert '<b>3</b> 胜 · 0 负 · 1 平，胜率 100%' in mine and '当前 3 连胜 · 最高 3 连胜' in mine and '+30' in mine
+        row = await duel(env, [1, 6], text='/pk 10', opponent=2, mid=2120)
+        stats = env.bot._pk_service().standings()[env.uids[1]]
+        assert stats['streak'] == 0 and stats['best'] == 3 and stats['net'] == 20
+        await env.bot._dispatch_update({'message': message(env, '/pkme', index=6, mid=2202)})
+        assert '还没打过 PK' in sent(env)[-1]
     asyncio.run(run())
 
 
 def test_username_and_text_mentions_pick_the_opponent(env):
     async def run():
         env.db.execute('UPDATE members SET tg_username=? WHERE emby_user_id=?', ('Target_Four', env.uids[4]))
-        text = '/pk @target_four 20'
-        row = await challenge(env, text, index=1, entities=[{'type': 'mention', 'offset': 4, 'length': 12}])
+        row = await challenge(env, '/pk @target_four 20', index=1, entities=[{'type': 'mention', 'offset': 4, 'length': 12}])
         assert row['target_user_id'] == env.uids[4] and row['target_username'] == 'target_four'
         await click(env, row, 'decline', 4)
-        text = '/pk 小5 30'
-        row = await challenge(env, text, index=1, mid=2003,
+        row = await challenge(env, '/pk 小5 30', index=1, mid=2003,
                               entities=[{'type': 'text_mention', 'offset': 4, 'length': 2, 'user': env.actors[5]}])
         assert row['target_user_id'] == env.uids[5] and row['stake'] == 30
     asyncio.run(run())
@@ -151,7 +251,7 @@ def test_decline_withdraw_and_strangers(env):
         row = await click(env, row, 'decline', 1)
         assert row['state'] == 'withdrawn' and balance(env, 1) == 1000 and '撤回了' in shown(env, row)['text']
         again = await click(env, row, 'accept', 2)
-        assert again['state'] == 'withdrawn' and balance(env, 2) == 1000
+        assert again['state'] == 'withdrawn' and balance(env, 2) == 1000 and not throws(env)
     asyncio.run(run())
 
 
@@ -169,33 +269,33 @@ def test_unanswered_challenge_expires_with_refund(env):
 def test_balance_checks_on_both_sides(env):
     async def run():
         await challenge(env, '/pk 5000', index=1, reply=2)
-        assert '积分不足' in replies(env)[-1] and not env.db.query('SELECT * FROM pk_rounds')
+        assert '积分不足' in sent(env)[-1] and not env.db.query('SELECT * FROM pk_rounds')
         assert balance(env, 1) == 1000
         env.services.points.add(env.uids[1], 4000, 'isolated.fixture')
         row = await challenge(env, '/pk 3000', index=1, reply=2, mid=2007)
         row = await click(env, row, 'accept', 2)
         assert row['state'] == 'pending' and '应战需要 3000 积分' in answer(env)['text']
-        assert balance(env, 2) == 1000 and balance(env, 1) == 2000
+        assert balance(env, 2) == 1000 and balance(env, 1) == 2000 and not throws(env)
     asyncio.run(run())
 
 
-def test_rejected_opponents_and_one_pending_duel_each(env):
+def test_rejected_opponents_and_one_open_duel_each(env):
     async def run():
         await challenge(env, '/pk 10', index=1, reply=1)
-        assert '不能和自己 PK' in replies(env)[-1]
+        assert '不能和自己 PK' in sent(env)[-1]
         bot_reply = message(env, '/pk 10', index=1, mid=2010)
         bot_reply['reply_to_message'] = {'message_id': 1, 'from': {'id': 77, 'is_bot': True, 'first_name': 'Bot'}}
         await env.bot._dispatch_update({'message': bot_reply})
-        assert '不能和机器人 PK' in replies(env)[-1]
+        assert '不能和机器人 PK' in sent(env)[-1]
         stranger = message(env, '/pk 10', index=1, mid=2011)
         stranger['reply_to_message'] = {'message_id': 1, 'from': {'id': 4242, 'is_bot': False, 'first_name': 'x'}}
         await env.bot._dispatch_update({'message': stranger})
-        assert '不是有效的绑定会员' in replies(env)[-1]
+        assert '不是有效的绑定会员' in sent(env)[-1]
         await challenge(env, '/pk 10', index=1, reply=2, mid=2012)
         await challenge(env, '/pk 10', index=1, reply=3, mid=2013)
-        assert '你还有一场 PK 在等对方回应' in replies(env)[-1]
+        assert '你还有一场 PK 没结束' in sent(env)[-1]
         await challenge(env, '/pk 10', index=4, reply=2, mid=2014)
-        assert '对方正在另一场 PK 里' in replies(env)[-1]
+        assert '对方正在另一场 PK 里' in sent(env)[-1]
         assert len(env.db.query('SELECT * FROM pk_rounds')) == 1
     asyncio.run(run())
 
@@ -222,5 +322,5 @@ def test_disabled_plugin_refuses_and_refunds_pending(env):
         await env.bot._pk_tick()
         assert env.bot._pk_service().get(row['nonce'])['state'] == 'cancelled' and balance(env, 1) == 1000
         await challenge(env, '/pk 100', index=1, reply=2, mid=2020)
-        assert '暂未开放' in replies(env)[-1]
+        assert '暂未开放' in sent(env)[-1]
     asyncio.run(run())
