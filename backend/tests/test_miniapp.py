@@ -305,7 +305,8 @@ def test_mini_app_browser_flows(client, tmp_path):
     with sync_playwright() as driver:
         browser = driver.chromium.launch(executable_path=shutil.which('chromium') or '/usr/bin/chromium',
                                          args=['--no-sandbox'], headless=True)
-        page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=2)
+        page = browser.new_page(viewport={'width': 390, 'height': 844}, device_scale_factor=2,
+                                reduced_motion='reduce')
         page.set_default_timeout(8000)
         errors = []
         page.on('pageerror', lambda error: errors.append(str(error)))
@@ -454,5 +455,21 @@ def test_mini_app_browser_flows(client, tmp_path):
         page.locator('[data-tab="me"]').click()
         page.locator('.hero .plaque').wait_for()
         fits('miniapp-me-light.png')
+
+        # Narrowest common phone with a long display name: the name keeps room beside the plaque.
+        init = sign({'id': VIEWER_TG, 'first_name': '一个名字特别特别长的会员用户', 'username': 'viewer_a'})
+        page.set_viewport_size({'width': 360, 'height': 780})
+        page.goto('https://app.example.test/app')
+        page.locator('.hero .plaque').wait_for()
+        page.evaluate("document.documentElement.dataset.theme='light'")
+        assert page.locator('.hero .gm').is_visible() and page.locator('.hero .gm-bar span').count() == 1
+        name_box = page.locator('.hero .grow > div').first.bounding_box()
+        plaque_box = page.locator('.hero .plaque').bounding_box()
+        hero_box = page.locator('.hero').bounding_box()
+        assert name_box['width'] >= 80 and plaque_box['x'] + plaque_box['width'] <= hero_box['x'] + hero_box['width']
+        fits('miniapp-me-narrow-light.png')
+        page.locator('[data-go="level"]').click()
+        page.locator('.hero .gm').wait_for()
+        fits('miniapp-level-narrow-light.png')
         assert not errors, errors
         browser.close()
