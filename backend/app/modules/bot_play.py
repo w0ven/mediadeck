@@ -27,7 +27,7 @@ class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PkBotMixin,
         first=str(message.get('text') or '').strip().split()
         verb=first[0].lower().split('@',1)[0] if first else ''
         if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助','/牛牛','/niuniu','/牛牛帮助',
-                    '/积分榜','/pointsrank','/游戏','/games','/玩法','/刮刮乐','/scratch9','/pk'):
+                    '/积分榜','/pointsrank','/游戏','/games','/玩法','/刮刮乐','/scratch9','/pk','/pkrank','/pk榜','/pkme','/pk战绩'):
             self._play_remember(message,message.get('from') or {})
         return (await self._dice_command(message) or await self._blackwhite_command(message) or await self._niuniu_command(message) or await self._pk_command(message) or await self._poker_command(message)
                 or await self._scratch9_command(message) or await self._ranking_command(message) or await self._play_hub_command(message))

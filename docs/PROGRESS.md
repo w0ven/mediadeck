@@ -2,6 +2,19 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-23 — v0.48.6: /pk uses Telegram dice; PK records and streak board
+
+- Accepting a duel now reserves the opponent's stake and moves to `rolling`; the Bot
+  sends one Telegram 🎲 per player as replies to the card and the returned value
+  decides. Equal faces roll again, up to 3 rounds, then a draw refunds both.
+  Settlement still happens once in the ledger transaction that records the deciding die.
+- A die Telegram certainly did not send is retried with backoff; an unconfirmed
+  throw (lost ACK, restart mid-send) voids the duel and refunds both, never a public
+  re-roll. Rolling duels stuck for 10 minutes are voided the same way.
+- `/pkrank` (连胜中 + 胜场榜) and `/pkme` (wins/losses/draws, streak, best, net points);
+  the result card shows 🔥 N 连胜. Board names show the current @username without
+  pinging (word joiner after @); only the card mentions the two players.
+
 ## 2026-10-23 — v0.48.5: /pk dice duel between two members
 
 - New points plugin `pk` (off by default). In an authorized group, reply to a member
