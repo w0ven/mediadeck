@@ -760,7 +760,7 @@ def register(app: Any) -> None:
             now = time.time()
             rows = [r for r in titles.titles(ctx['uid'])
                     if r['revoked_at'] is None and (r['expires_at'] is None or r['expires_at'] > now)]
-            sync = [TITLE_SYNC.get(s['status'], s['status']) + (f"（{s['error']}）" if s['error'] else '')
+            sync = [TITLE_SYNC.get(s['status'], s['status']) + (f" · {s['error']}" if s['error'] else '')
                     for s in titles.states(ctx['uid'])]
             return [{'id': r['id'], 'tag': r['tag'], 'worn': bool(r.get('worn')), 'expires_at': r['expires_at']}
                     for r in rows], sync

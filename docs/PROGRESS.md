@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.48.3: Mini App returns to the glow look; full level identity on plaques
+
+- The operator prefers the v0.48.0 look (background glows, blue-purple gradient
+  buttons, glow shadows, frosted cards, shimmering titles); it is restored as the
+  base, keeping the later fixes (growth meter, podium ranks, long-name tags,
+  sticky rank bar, readable disabled buttons, poster placeholder).
+- Plaques show the level identity "name + emblem + title" as the Bot does; the
+  emblem sits outside the shimmer and text-default emoji get U+FE0F. Higher tiers
+  add halo, glowing edge, sweep and breathing glow; Lv8 is the largest.
+- Growth meter reads like the Bot (growth / next threshold) and also shows for
+  whitelist members, whose level still follows growth. Light theme gets a deeper
+  hero and dark gem bases for plaques and level tags.
+- Title sync status no longer nests parentheses.
+
 ## 2026-10-22 — v0.48.2: Mini App polish from live-data review
 
 - Rendering v0.48.1 against real accounts (whitelist member, long names, long
