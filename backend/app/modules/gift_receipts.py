@@ -45,8 +45,10 @@ class GiftReceipts:
         expires = member.get('expires_at_effective', member.get('expires_at'))
         term = time.strftime('%Y-%m-%d 到期', time.localtime(expires)) if expires else '永久'
         label = escape(str(recipient_label).strip()) if str(recipient_label or '').strip() else f'TG {tg_id}'
+        inviter = self._inviter_mention(conn, admission)
         body = (f'🎉 <a href="tg://user?id={tg_id}">{label}</a> 注册成功\n'
-                f'账号：<b>{escape(str(member["username"]))}</b>\n'
+                + (f'🤝 邀请人：{inviter}\n' if inviter else '')
+                + f'账号：<b>{escape(str(member["username"]))}</b>\n'
                 f'{escape(group_name)} · {term}')
         now = int(time.time())
         # Keep legacy gift keys stable; other channels have one receipt per
@@ -60,6 +62,20 @@ class GiftReceipts:
                      (key, grant_id, tg_id, member['emby_user_id'], bot_id,
                       chat_id, origin_message_id, thread_id, body, now, now))
         return int(conn.execute('SELECT id FROM tg_gift_receipts WHERE gift_key=?', (key,)).fetchone()[0])
+
+    @staticmethod
+    def _inviter_mention(conn: Any, admission: Any) -> str:
+        """The inviter as a Telegram mention; empty when the invite has no Telegram-bound owner."""
+        if admission.via != 'invite' or not admission.inviter_id:
+            return ''
+        row = conn.execute('SELECT tg_user_id,tg_username,tg_display_name FROM members WHERE emby_user_id=?',
+                           (str(admission.inviter_id),)).fetchone()
+        tg = str((row['tg_user_id'] if row else '') or '').strip()
+        if not tg.isdecimal():
+            return ''
+        handle = str(row['tg_username'] or '').strip().lstrip('@')
+        label = '@' + handle if handle else (str(row['tg_display_name'] or '').strip() or f'TG {tg}')
+        return f'<a href="tg://user?id={tg}">{escape(label)}</a>'
 
     async def retry_menu(self, tg_id: str) -> list:
         row = await run_usage_io(self.db.one,

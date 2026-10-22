@@ -2,6 +2,16 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-22 — v0.48.4: invite registrations name the inviter in the group
+
+- The registration receipt posted to the group now adds "🤝 邀请人：@inviter" (a
+  Telegram mention) when the account was created with a member's invite code.
+  The inviter is resolved in the registration transaction and stored with the
+  receipt, so delivery keeps its once-only and no-resend-after-restart rules.
+  Falls back to the display name, then the TG id; no line when the inviter has no
+  Telegram binding; admin and redeem registrations are unchanged.
+- Full suite 4920 passed, 79 optional skips; ruff clean.
+
 ## 2026-10-22 — v0.48.3: Mini App returns to the glow look; full level identity on plaques
 
 - The operator prefers the v0.48.0 look (background glows, blue-purple gradient
