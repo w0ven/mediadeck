@@ -9,16 +9,17 @@
     rank: { kind: 'watch', period: 'today' }, bag: 'shop',
     req: { q: '', type: '', results: null, page: 1, total: 1 },
   };
-  const ORN = { 1: '', 2: '', 3: '', 4: '', 5: '', 6: '', 7: '◆', 8: '◆' };
+  const ORN = { 1: '⋆', 2: '✦', 3: '❀', 4: '❄', 5: '✧', 6: '◈', 7: '♛', 8: '✺' };
   const STATUS = {
     active: ['ok', '正常'], suspended: ['bad', '已停用'], expired: ['warn', '已过期'],
     exhausted: ['warn', '已超额'], pending: ['', '待开通'], deleted: ['bad', '已删除'],
   };
   const REQ_STATUS = { open: ['warn', '待处理'], accepted: ['ok', '已接受'], rejected: ['bad', '未通过'], cancelled: ['', '已取消'] };
   const KIND_ICON = {
-    bandwidth_card: ['gauge', '#5b8def'], streams_card: ['monitor-play', '#2fb36d'], title_card: ['award', '#c9953a'],
-    invite_card: ['ticket', '#8a6fd1'], whitelist_card: ['shield-check', '#4b9bb0'], custom: ['box', '#7d8696'],
+    bandwidth_card: ['gauge', '#6aa6ff'], streams_card: ['monitor-play', '#43d39e'], title_card: ['award', '#ffb84d'],
+    invite_card: ['ticket', '#c07bff'], whitelist_card: ['shield-check', '#9fe7ff'], custom: ['box', '#8b93a7'],
   };
+  const emo = (s) => (s && [...s].length === 1 ? s + '\uFE0F' : s || '');
   function icon(name) {
     return `<svg class="ico" aria-hidden="true"><use href="#i-${name}"/></svg>`;
   }
@@ -28,7 +29,7 @@
   function applyTheme() {
     const dark = !tg || tg.colorScheme !== 'light';
     document.documentElement.dataset.theme = dark ? 'dark' : 'light';
-    const bg = (tg && tg.themeParams && tg.themeParams.secondary_bg_color) || (dark ? '#0c0e12' : '#f2f3f7');
+    const bg = dark ? '#0b0e17' : '#f4f5fb';
     try { tg && tg.setHeaderColor(bg); tg && tg.setBackgroundColor(bg); } catch (_) { /* older clients */ }
   }
   if (tg) {
@@ -140,26 +141,22 @@
     if (!tag) return '';
     return tag.whitelist ? 'wl' : `lv${tag.level}`;
   }
-  function lvTag(tag, xs = false) {
+  function lvTag(tag, xs = false, bare = false) {
     if (!tag) return '';
-    const label = tag.whitelist ? '白名单' : `Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
+    const label = tag.whitelist ? '💠 白名单'
+      : `${bare || !tag.icon ? '' : esc(emo(tag.icon)) + ' '}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
     return `<span class="lvtag ${xs ? 'xs ' : ''}${lvClass(tag)}">${label}</span>`;
   }
-  function growthMeter(lv, nextLevel, pct, today, whitelist) {
-    const p = Math.max(0, Math.min(100, Math.round(Number(pct) || 0)));
+  function growthMeter(lv, nextLevel, today) {
+    // Same reading as the Bot's "成长 120 / 360": share of the next threshold reached.
+    const p = lv.next_threshold ? Math.max(0, Math.min(100, Math.floor((lv.growth || 0) / lv.next_threshold * 100))) : 100;
     const g = num(lv.growth || 0);
     const td = today && today.growth > 0 ? `<em class="gm-today num"> · 今日 +${num(today.growth)}</em>` : '';
-    if (whitelist) {
-      return `<div class="gm">
-        <div class="gm-top"><span class="gm-label"><b>白名单</b> · 无需续期</span><b class="gm-pct">永久有效</b></div>
-        <div class="gm-foot" style="margin-top:4px"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage">不参与等级考核</span></div>
-      </div>`;
-    }
     const next = lv.next_threshold;
     if (!next) {
       const isEx = lv.level === 8;
       return `<div class="gm">
-        <div class="gm-top"><span class="gm-label"><b>Lv${esc(lv.level)} ${esc(lv.name || '')}</b> · ${isEx ? '专属授予等级' : '已达最高常规等级'}</span><b class="gm-pct num">${isEx ? '专属' : '已满级'}</b></div>
+        <div class="gm-top"><span class="gm-label"><b>${lv.icon ? esc(emo(lv.icon)) + ' ' : ''}Lv${esc(lv.level)} ${esc(lv.name || '')}</b> · ${isEx ? '专属授予等级' : '已达最高常规等级'}</span><b class="gm-pct num">${isEx ? '专属' : '已满级'}</b></div>
         <div class="gm-bar" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span style="width:100%"></span></div>
         <div class="gm-foot"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} MAX</span></div>
       </div>`;
@@ -167,17 +164,19 @@
     const gap = Math.max(0, next - (lv.growth || 0));
     const nextLv = lv.level + 1;
     const nextName = nextLevel && nextLevel.name ? ` ${esc(nextLevel.name)}` : '';
+    const nextIcon = nextLevel && nextLevel.icon ? `${esc(emo(nextLevel.icon))} ` : '';
     return `<div class="gm">
-      <div class="gm-top"><span class="gm-label">距 <b>Lv${esc(nextLv)}${nextName}</b> 还差 <b class="num">${num(gap)}</b> 成长</span><b class="gm-pct num">${p}%</b></div>
+      <div class="gm-top"><span class="gm-label">距 <b>${nextIcon}Lv${esc(nextLv)}${nextName}</b> 还差 <b class="num">${num(gap)}</b> 成长</span><b class="gm-pct num">${p}%</b></div>
       <div class="gm-bar" role="progressbar" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100"><span style="width:${p}%${p > 0 ? ';min-width:4px' : ''}"></span></div>
       <div class="gm-foot"><span>成长 <b class="num">${g}</b> / <span class="num">${num(next)}</span>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} → Lv${esc(nextLv)}</span></div>
     </div>`;
   }
-  function plaque(text, tag, big = false) {
+  function plaque(text, tag, big = false, ident = null) {
     const tier = tag && tag.whitelist ? 7 : Math.min(8, Math.max(1, Number(tag && tag.level) || 1));
-    const orn = tag && tag.whitelist ? '◆' : ORN[tier];
-    const side = orn ? `<span class="orn">${orn}</span>` : '';
-    return `<span class="plaque t${tier}${big ? ' big' : ''}">${side}<span class="txt">${esc(text)}</span>${side}</span>`;
+    const orn = `<span class="orn">${tag && tag.whitelist ? '◆' : ORN[tier]}</span>`;
+    const head = ident && ident.name
+      ? `<span class="txt nm">${esc(ident.name)}</span>${ident.icon ? `<span class="emb">${esc(emo(ident.icon))}</span>` : ''}` : '';
+    return `<span class="plaque t${tier}${big ? ' big' : ''}">${orn}${head}<span class="txt">${esc(text)}</span>${orn}</span>`;
   }
   function myTag() {
     const me = S.me;
@@ -373,13 +372,12 @@
     const tag = myTag();
     const cls = lvClass(tag);
     const next = lv.next_threshold;
-    const pct = next ? Math.min(100, Math.round((lv.growth - (lv.threshold || 0)) / Math.max(1, next - (lv.threshold || 0)) * 100)) : 100;
     const nextLevel = me.levels.find((r) => r.level === lv.level + 1);
     const [statusCls, status] = STATUS[me.state] || ['', me.state];
     const today = me.today;
     const isToday = today.day === todayKey();
     const todayLabel = (today.points || today.growth)
-      ? `${isToday ? '今日' : esc(today.day.slice(5))}${today.growth ? ` · +${num(today.growth)} 成长` : ''}`
+      ? `${isToday ? '今日' : esc(today.day.slice(5))}积分`
       : '今日暂无奖励';
     const renew = me.renewal;
     let renewCard = '';
@@ -395,18 +393,18 @@
     }
     setScreen(`
       <div class="hero ${cls}"><div class="sheen"></div>
-        <div class="row" style="align-items:center;gap:12px">
+        <div class="row" style="justify-content:flex-start;gap:12px">
           ${face(me.name, me.avatar)}
-          <div class="grow" style="min-width:0">
-            <div style="font-weight:600;font-size:17px;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
-            <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin-top:6px">
-              ${lvTag(tag)}
-              ${plaque(me.worn_title || lv.title, tag)}
-              <span class="tiny muted nowrap"><span class="status-dot ${statusCls}"></span>${esc(status)} · ${me.whitelist ? '永久有效' : esc(left(me.expires_at))}</span>
+          <div class="grow">
+            <div style="font-weight:800;font-size:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
+            <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin-top:4px">
+              ${lvTag(tag, true, true)}
+              <span class="tiny nowrap" style="opacity:.85"><span class="status-dot ${statusCls}"></span>${esc(status)} · ${me.whitelist ? '永久有效' : esc(left(me.expires_at))}</span>
             </div>
           </div>
         </div>
-        ${growthMeter(lv, nextLevel, pct, today, me.whitelist)}
+        <div style="text-align:center;margin:12px 0 2px">${plaque(me.worn_title || lv.title, tag, false, lv)}</div>
+        ${growthMeter(lv, nextLevel, today)}
       </div>
       <div class="stats">
         <div><b class="num">${num(me.balance)}</b><span>积分</span></div>
@@ -415,15 +413,15 @@
       </div>
       ${renewCard}
       <div class="qgrid">
-        <button type="button" data-go="lines"><div class="ic" style="--c:#5b8def">${icon('route')}</div>播放线路</button>
-        <button type="button" data-go="level"><div class="ic" style="--c:#2fb36d">${icon('shield')}</div>等级权益</button>
-        <button type="button" data-go="titles"><div class="ic" style="--c:#c9953a">${icon('award')}</div>我的称号</button>
-        <button type="button" data-go="invites"><div class="ic" style="--c:#8a6fd1">${icon('user-plus')}</div>邀请</button>
+        <button type="button" data-go="lines"><div class="ic" style="--c:#6aa6ff">${icon('route')}</div>播放线路</button>
+        <button type="button" data-go="level"><div class="ic" style="--c:#43d39e">${icon('shield')}</div>等级权益</button>
+        <button type="button" data-go="titles"><div class="ic" style="--c:#ffb84d">${icon('award')}</div>我的称号</button>
+        <button type="button" data-go="invites"><div class="ic" style="--c:#c07bff">${icon('user-plus')}</div>邀请</button>
       </div>
       <div class="list">
-        <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#c9953a">${icon('receipt')}</div><span class="t">积分流水</span><span class="go">›</span></button>
-        <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#5b8def">${icon('monitor-smartphone')}</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + (me.rights.max_devices ? ' / ' + esc(me.rights.max_devices) : '') + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
-        <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#2fb36d">${icon('key-round')}</div><span class="t">修改密码</span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#ffcc5c">${icon('receipt')}</div><span class="t">积分流水</span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#6aa6ff">${icon('monitor-smartphone')}</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + (me.rights.max_devices ? ' / ' + esc(me.rights.max_devices) : '') + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
+        <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#43d39e">${icon('key-round')}</div><span class="t">修改密码</span><span class="go">›</span></button>
       </div>`);
     $$('[data-go]', screen).forEach((b) => {
       b.onclick = () => {
@@ -492,7 +490,6 @@
     const lv = me.level;
     const tag = myTag();
     const next = lv.next_threshold;
-    const pct = next ? Math.min(100, Math.round((lv.growth - (lv.threshold || 0)) / Math.max(1, next - (lv.threshold || 0)) * 100)) : 100;
     const r = me.rights;
     const rows = me.levels.filter((row) => row.level <= 7 || lv.level === 8).map((row) => {
       const reached = me.whitelist ? false : row.level < lv.level;
@@ -501,16 +498,16 @@
         : reached ? '已达成'
           : `${row.threshold != null ? num(row.threshold) + ' 成长 · ' : '专属授予 · '}${mbps(row.bandwidth_limit_kbps)} Mbps · 求片 ${row.request_quota}${row.max_devices ? ' · 设备 ' + row.max_devices : ''}`;
       return `<div class="it lv${row.level}${isCurrent ? ' cur' : (!reached ? ' dim-lv' : '')}">
-        <span class="lvtag">Lv${row.level}</span>
+        <span class="lvtag">${esc(emo(row.icon))} Lv${row.level}</span>
         <span class="t small">${isCurrent ? `<b>${esc(row.name)}</b>` : esc(row.name)} <span class="muted tiny">${esc(detail)}</span></span>
         ${isCurrent ? '<span class="chip cur">当前</span>' : reached ? '<span class="chip ok">✓</span>' : ''}</div>`;
     }).join('');
     setScreen(`
       <div class="hero ${lvClass(tag)}" style="text-align:center"><div class="sheen"></div>
-        <div style="font-size:28px;line-height:1;color:var(--a);margin-bottom:6px">${icon(me.whitelist ? 'shield-check' : 'shield')}</div>
-        <div style="font-weight:600;font-size:17px;letter-spacing:.3px">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
-        <div style="margin:8px 0 2px">${plaque(lv.title, tag)}</div>
-        ${growthMeter(lv, me.levels.find((row) => row.level === lv.level + 1), pct, me.today, me.whitelist)}
+        <div style="font-size:38px;filter:drop-shadow(0 4px 12px rgba(0,0,0,.4))">${me.whitelist ? '💠' : esc(emo(lv.icon))}</div>
+        <div style="font-weight:800;font-size:19px;letter-spacing:2px">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
+        <div style="margin:6px 0 2px">${plaque(lv.title, tag, false, lv)}</div>
+        ${growthMeter(lv, me.levels.find((row) => row.level === lv.level + 1), me.today)}
       </div>
       <div class="h"><span>当前权益</span></div>
       <div class="stats">
@@ -538,14 +535,14 @@
     const worn = data.rows.find((r) => r.worn);
     const levelTitle = me.level.title;
     const item = (label, sub, action, isWorn) => `<div class="it ${lvClass(tag)}">
-        <span style="flex:1;min-width:0;overflow:hidden">${plaque(label, tag)}</span>
+        <span style="flex:1;min-width:0;overflow:hidden">${plaque(label, tag, false, me.level)}</span>
         <span class="tiny muted" style="text-align:right">${esc(sub)}</span>
         ${isWorn ? '<span class="chip ok">佩戴中</span>' : action}</div>`;
     target.innerHTML = `
-      <div class="hero ${lvClass(tag)}" style="text-align:center;padding:20px 14px"><div class="sheen"></div>
-        <div class="tiny muted">当前佩戴</div>
-        <div style="margin:10px 0 8px">${plaque(worn ? worn.tag : levelTitle, tag, true)}</div>
-        <div class="tiny muted">${worn ? `自定义称号 · ${worn.expires_at ? stamp(worn.expires_at) + ' 到期' : '长期有效'}` : '等级称号 · 随等级变化'}</div>
+      <div class="hero ${lvClass(tag)}" style="text-align:center;padding:22px 12px"><div class="sheen"></div>
+        <div class="tiny" style="opacity:.75;letter-spacing:3px">佩 戴 中</div>
+        <div style="margin:10px 0 8px">${plaque(worn ? worn.tag : levelTitle, tag, true, me.level)}</div>
+        <div class="tiny" style="opacity:.8">${worn ? `自定义称号 · ${worn.expires_at ? stamp(worn.expires_at) + ' 到期' : '长期有效'}` : '等级称号 · 随等级变化'}</div>
       </div>
       <div class="h"><span>我的称号</span><span class="muted">佩戴、切换免费</span></div>
       <div class="list">
@@ -580,11 +577,11 @@
   async function renderGallery(alive) {
     const me = S.me || await loadMe();
     if (!alive()) return;
-    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">Lv${row.level}</span>${plaque(row.title, { level: row.level })}</div>`).join('');
+    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${esc(emo(row.icon))} Lv${row.level}</span>${plaque(row.title, { level: row.level }, false, row)}</div>`).join('');
     const sample = me.worn_title || me.level.title;
     setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的称号和样式；自定义称号会按佩戴者的等级套用对应样式。</div>
-      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">白名单</span>${plaque(sample, { whitelist: true })}</div></div>
-      <div class="card small" style="margin-top:12px"><div class="tiny muted">Lv1–2 为哑光简牌；Lv3–4 增加金属压线；Lv5–6 为双线镶边；Lv7–8 采用拉丝金印；白名单固定为铂金配色。</div></div>`);
+      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">💠 白名单</span>${plaque(sample, { whitelist: true }, false, me.level)}</div></div>
+      <div class="card small" style="margin-top:12px"><div class="tiny muted">铭牌显示「等级名 + 标志 + 称号」，文字带本级配色的流光。Lv3 起铭牌外有光晕；Lv5 起光晕更强、边框发光；Lv7、Lv8 再加扫光和呼吸光晕，Lv8 最大最亮；白名单固定用水晶色。</div></div>`);
   }
 
   // -- 播放线路 / 积分流水 ---------------------------------------------------------
@@ -611,7 +608,7 @@
     const rows = data.rows.map((r) => `<div class="rrow"><span class="grow"><span class="small">${esc(r.reason || '变动')}</span>
         <div class="tiny muted">${stamp(r.at)} · 余额 ${num(r.balance)}</div></span>
         <b class="num" style="color:${r.delta >= 0 ? 'var(--ok)' : 'var(--bad)'}">${r.delta >= 0 ? '+' : ''}${num(r.delta)}</b></div>`).join('');
-    setScreen(`<div class="card row"><span>当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
+    setScreen(`<div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))"><span>当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
       <div class="h"><span>最近 30 条</span></div>
       <div class="list">${rows || '<div class="empty">还没有积分变动</div>'}</div>`);
   }
@@ -809,7 +806,7 @@
     if (!rows.length) { body.innerHTML = '<div class="empty">暂无排行数据</div>'; return; }
     const pod = (r, cls) => {
       const rk = cls === 'g' ? 1 : cls === 's' ? 2 : 3;
-      return r ? `<div class="p ${cls}">${cls === 'g' ? `<span class="crown">${icon('crown')}</span>` : ''}${face(r.name, r.avatar)}<span class="pod-rk num">${rk}</span>
+      return r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar)}<span class="pod-rk num">${rk}</span>
         <div class="small"><b>${esc(r.name)}</b></div><div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>';
     };
     const mine = data.mine;
@@ -1078,7 +1075,7 @@
     if (!alive()) return;
     const segs = [['shop', '商城'], ['items', '道具'], ['titles', '称号'], ['invites', '邀请']];
     setScreen(`
-      <div class="card row">
+      <div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))">
         <span>积分 <button class="link tiny" type="button" id="to-ledger">流水 ›</button></span><b class="num" style="font-size:26px" id="bag-balance">${num(me.balance)}</b></div>
       <div class="seg">${segs.map(([k, l]) => `<button type="button" data-seg="${k}" class="${S.bag === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       <div id="bag-body"></div>`);
