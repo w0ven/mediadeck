@@ -47,6 +47,7 @@ from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeSnapshotReader, IntakeStore
 from app.modules.inventory import InventoryService
 from app.modules.levels import LevelService
+from app.modules.member_devices import MemberDevices, device_cap
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.mounts import MockMounts, MountsReader
 from app.modules.pipeline import MockPipeline, PipelineReader
@@ -414,6 +415,14 @@ async def _startup() -> None:
                 return str(entry["node"])
         return ""
 
+    async def _enforce_device_caps() -> None:
+        removed = await app.state.member_devices.enforce(
+            lambda uid: device_cap(app.state.members.get(uid)))
+        for row in removed:
+            await run_usage_io(app.state.members.audit, 'system', 'device.auto_logout', row['user_id'],
+                               json.dumps({'name': row['name'], 'app': row['app'], 'cap': row['cap']},
+                                          ensure_ascii=False))
+
     async def usage_loop() -> None:
         """Verified viewing/rewards, playback safety and bounded cache housekeeping.
 
@@ -423,6 +432,7 @@ async def _startup() -> None:
         housekeeping_due = 0.0
         prune_due = 0.0
         member_sync_due = 0.0
+        device_cap_due = 0.0
         while True:
             membership = app.state.settings_service.membership_config()
             await asyncio.sleep(max(5, int(membership["sample_interval_seconds"])))
@@ -439,6 +449,11 @@ async def _startup() -> None:
             if hasattr(app.state,"inventory"):
                 with contextlib.suppress(Exception):
                     await app.state.inventory.reconcile_expired(_inventory_expired_effects)
+            if (now >= device_cap_due and membership['enforcement_enabled']
+                    and app.state.levels.config()['config']['enabled']):
+                device_cap_due = now + 120
+                with contextlib.suppress(Exception):
+                    await _enforce_device_caps()
             if now >= member_sync_due:
                 member_sync_due = now + 900
                 # Flag members whose Emby account disappeared, clear the flag
@@ -554,6 +569,8 @@ async def _startup() -> None:
         lambda: app.state.plugins.config("inventory"))
     app.state.telegram._inventory = app.state.inventory
     app.state.telegram._titles = app.state.titles
+    app.state.member_devices = MemberDevices(lambda: app.state.emby)
+    app.state.telegram._member_devices = app.state.member_devices
     app.state.telegram.bind_plugins(app.state.plugins)
     app.state.plugins.start()
 

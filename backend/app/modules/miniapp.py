@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from app.modules.economy_rules import economy_write, encode
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.invite_tree import InviteTree, active_suspension
+from app.modules.member_devices import device_cap
 from app.modules.points_ranking import PointsRankingService
 from app.modules.requests import RequestError, normalize_demand
 from app.modules.tmdb import poster_url
@@ -75,6 +76,26 @@ def poster_sig(item_id: str) -> str:
     return hmac.new(_POSTER_KEY, str(item_id).encode(), hashlib.sha256).hexdigest()[:24]
 
 
+def avatar_url(tg_id: Any) -> str:
+    tg = str(tg_id or '').strip()
+    if not tg.isascii() or not tg.isdigit() or int(tg) <= 0:
+        return ''
+    return f'/api/app/avatar/{tg}?s={poster_sig("avatar:" + tg)}'
+
+
+def _thumbnail(raw: bytes) -> bytes | None:
+    from io import BytesIO
+
+    from PIL import Image, ImageOps
+    try:
+        with Image.open(BytesIO(raw)) as image:
+            out = BytesIO()
+            ImageOps.fit(image.convert('RGB'), (160, 160)).save(out, 'JPEG', quality=82)
+            return out.getvalue()
+    except Exception:  # noqa: BLE001 - a broken picture falls back to the initial
+        return None
+
+
 def _fail(status: int, code: str, message: str) -> HTTPException:
     return HTTPException(status, {'code': code, 'message': message})
 
@@ -123,6 +144,8 @@ def _library_url(base: str, item_id: str) -> str:
 def register(app: Any) -> None:
     state = app.state
     library_cache: dict[tuple[str, int], tuple[float, dict[str, Any]]] = {}
+    avatar_cache: dict[str, tuple[float, bytes | None]] = {}
+    avatar_gate = asyncio.Semaphore(3)
 
     async def io(fn, *args, **kwargs):
         return await run_usage_io(fn, *args, **kwargs)
@@ -220,11 +243,12 @@ def register(app: Any) -> None:
                        'request_quota': group.get('request_quota'),
                        'download': bool(member.get('allow_download')),
                        'transcode': bool(member.get('allow_transcode')),
-                       'devices': member.get('device_count')},
+                       'max_devices': device_cap(member)},
             'watch': {'seconds_24h': watch.get('seconds_24h'), 'seconds_30d': watch.get('seconds_30d'),
                       'total': watch.get('recorded_seconds')},
             'levels': [{k: row.get(k) for k in ('level', 'name', 'title', 'icon', 'threshold', 'price',
-                                                'bandwidth_limit_kbps', 'max_streams', 'request_quota')}
+                                                'bandwidth_limit_kbps', 'max_streams', 'request_quota',
+                                                'max_devices')}
                        for row in config['levels']],
             'bot_username': str(getattr(b, '_bot_username', '') or ''),
             'features': {
@@ -236,7 +260,13 @@ def register(app: Any) -> None:
 
     @app.get('/api/app/me')
     async def app_me(ctx=Ctx):
-        return await io(me_payload, ctx)
+        payload = await io(me_payload, ctx)
+        payload['avatar'] = avatar_url(ctx['tg_id'])
+        try:
+            payload['devices'] = len(await state.member_devices.for_user(ctx['uid']))
+        except Exception:  # noqa: BLE001 - the count is optional on the home page
+            payload['devices'] = None
+        return payload
 
     # -- renewal ----------------------------------------------------------------
 
@@ -340,6 +370,7 @@ def register(app: Any) -> None:
                 mine = {'rank': index, 'value': seconds}
             if index <= 50:
                 out.append({'rank': index, 'name': _rank_label(row, profiles), 'value': seconds,
+                            'avatar': avatar_url(row.get('tg_user_id')),
                             'tag': _level_tag(state.members.get(uid)) if uid else None})
         return {'available': True, 'stamp': stamp, 'rows': out, 'mine': mine, 'unit': 'seconds'}
 
@@ -356,7 +387,7 @@ def register(app: Any) -> None:
             if index <= 50:
                 member = state.members.get(row['_uid']) or {}
                 out.append({'rank': index, 'name': _rank_label(member, profiles), 'value': row['points'],
-                            'tag': _level_tag(member)})
+                            'avatar': avatar_url(member.get('tg_user_id')), 'tag': _level_tag(member)})
         return {'available': True, 'rows': out, 'mine': mine, 'unit': 'points'}
 
     def rank_titles(period):
@@ -407,6 +438,88 @@ def register(app: Any) -> None:
             raise HTTPException(404)
         kind = 'image/png' if blob[:8] == b'\x89PNG\r\n\x1a\n' else 'image/jpeg'
         return Response(blob, media_type=kind, headers={'Cache-Control': 'private, max-age=86400'})
+
+    @app.get('/api/app/avatar/{tg_id}')
+    async def app_avatar(tg_id: str, s: str = ''):
+        if not tg_id.isascii() or not tg_id.isdigit() or not hmac.compare_digest(poster_sig('avatar:' + tg_id), s or ''):
+            raise HTTPException(404)
+        hit = avatar_cache.get(tg_id)
+        if not hit or hit[0] <= time.monotonic():
+            async with avatar_gate:
+                hit = avatar_cache.get(tg_id)
+                if not hit or hit[0] <= time.monotonic():
+                    b = bot()
+                    try:
+                        raw = await b._tg_avatar_bytes(tg_id) if b is not None else None
+                    except Exception:  # noqa: BLE001 - avatar is optional
+                        raw = None
+                    blob = await asyncio.to_thread(_thumbnail, raw) if raw else None
+                    if len(avatar_cache) > 1000:
+                        avatar_cache.clear()
+                    hit = (time.monotonic() + (6 * 3600 if blob else 1800), blob)
+                    avatar_cache[tg_id] = hit
+        if not hit[1]:
+            raise HTTPException(404)
+        return Response(hit[1], media_type='image/jpeg', headers={'Cache-Control': 'private, max-age=21600'})
+
+    # -- password -------------------------------------------------------------------
+
+    @app.post('/api/app/password')
+    async def app_password(payload: dict = Body(...), ctx=Ctx):  # noqa: B008
+        from app.core.errors import ConfigError
+        from app.modules.bot_passwords import validate_password
+        # The client generates random passwords too, so it can always show what it sent.
+        password = payload.get('password')
+        if not isinstance(password, str) or len(password) > 128:
+            raise _fail(400, 'bad_request', '密码无效')
+        try:
+            validate_password(password)
+        except ConfigError as exc:
+            raise _fail(400, 'bad_request', str(exc)) from None
+        b = bot()
+        if b is None or getattr(b, '_emby', None) is None:
+            raise _fail(503, 'disabled', '暂时无法修改密码，请稍后再试')
+        current = await io(state.members.find_by_telegram, ctx['tg_id'])
+        if not current or str(current['emby_user_id']) != ctx['uid']:
+            raise _fail(409, 'rejected', '账号绑定已变化，未修改密码')
+        mode = 'random' if payload.get('mode') == 'random' else 'custom'
+        ok, notices = await b._apply_password_reset(ctx['uid'], password, f"miniapp:{ctx['tg_id']}:{mode}")
+        if not ok:
+            raise _fail(502, 'upstream', '修改失败或结果未确认，请稍后重试；旧密码可能仍然有效')
+        return {'ok': True, 'username': str(current.get('username') or ''), 'notices': notices}
+
+    # -- devices --------------------------------------------------------------------
+
+    def players():
+        from app.modules.settings import PLAYER_PLATFORMS
+        rows = tg_cfg().get('recommended_players') or []
+        return [{'platform': p, 'players': [{k: r[k] for k in ('name', 'note', 'url')} for r in rows
+                                            if r.get('platform') == p]}
+                for p in PLAYER_PLATFORMS if any(r.get('platform') == p for r in rows)]
+
+    @app.get('/api/app/devices')
+    async def app_devices(ctx=Ctx):
+        limit = device_cap(await io(refreshed, ctx))
+        try:
+            rows = await state.member_devices.for_user(ctx['uid'])
+        except Exception:  # noqa: BLE001 - unavailable is not "no devices"
+            return {'available': False, 'limit': limit, 'players': players()}
+        return {'available': True, 'devices': rows, 'count': len(rows), 'limit': limit, 'players': players()}
+
+    @app.post('/api/app/devices/remove')
+    async def app_device_remove(payload: dict = Body(...), ctx=Ctx):  # noqa: B008
+        device_id = str(payload.get('id') or '').strip()
+        if not device_id or len(device_id) > 128:
+            raise _fail(400, 'bad_request', '设备无效')
+        try:
+            removed = await state.member_devices.remove(ctx['uid'], device_id)
+        except LookupError as exc:
+            raise _fail(404, 'gone', str(exc)) from None
+        except Exception:  # noqa: BLE001 - Emby errors never reach members verbatim
+            raise _fail(502, 'upstream', '暂时无法移除，请稍后再试') from None
+        await io(state.members.audit, f"miniapp:{ctx['tg_id']}", 'device.remove', ctx['uid'],
+                 json.dumps({'name': removed['name'], 'app': removed['app']}, ensure_ascii=False))
+        return {'ok': True, 'name': removed['name']}
 
     # -- requests -----------------------------------------------------------------
 
@@ -685,6 +798,7 @@ def register(app: Any) -> None:
         def node(n):
             member = state.members.get(n['emby_user_id']) if n.get('status') != 'deleted' else None
             return {'label': n.get('label') or _rank_label(n, profiles), 'status': n.get('status'),
+                    'avatar': avatar_url(n.get('tg_user_id')),
                     'active_7d': n.get('active_7d'), 'registered_at': n.get('registered_at'),
                     'expires_at': n.get('expires_at'), 'deleted_at': n.get('deleted_at'),
                     'tag': _level_tag(member), 'descendants': n.get('descendants', 0),

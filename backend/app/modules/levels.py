@@ -26,8 +26,10 @@ def defaults():
         rows.append({"level": i+1, "name": LEVEL_NAMES[i], "title": LEVEL_TITLES[i],
                      "icon": LEVEL_ICONS[i], "threshold": LEVEL_THRESHOLDS[i], "price": LEVEL_PRICES[i],
                      "bandwidth_limit_kbps": (120, 120, 140, 160, 180, 220, 280)[i]*1000,
-                     "max_streams": (2, 2, 2, 2, 3, 3, 4)[i], "request_quota": (3, 3, 4, 5, 6, 8, 10)[i]})
-    rows.append(dict(rows[-1], level=8, name="道祖", title="一炁化三清", icon="🪷", threshold=None, price=1))
+                     "max_streams": (2, 2, 2, 2, 3, 3, 4)[i], "request_quota": (3, 3, 4, 5, 6, 8, 10)[i],
+                     "max_devices": (3, 4, 5, 6, 7, 8, 9)[i]})
+    rows.append(dict(rows[-1], level=8, name="道祖", title="一炁化三清", icon="🪷", threshold=None, price=1,
+                     max_devices=10))
     return {"enabled": False, "delete_enabled": False, "levels": rows}
 
 
@@ -54,8 +56,8 @@ def validate(config):
             previous = value
         elif row["threshold"] is not None:
             raise ValueError("Lv8为专属授予，不设置成长门槛")
-        for key, high in (("price", 10**9),
-                          ("bandwidth_limit_kbps", 10000000), ("max_streams", 100), ("request_quota", 10000)):
+        for key, high in (("price", 10**9), ("bandwidth_limit_kbps", 10000000), ("max_streams", 100),
+                          ("request_quota", 10000), ("max_devices", 100)):
             if type(row[key]) is not int or not 1 <= row[key] <= high:
                 raise ValueError(f"{key}须为合法正整数")
     return config
@@ -111,8 +113,11 @@ class LevelService:
 
     def config(self):
         row = self.db.one("SELECT * FROM activity_config WHERE id=1")
-        return {"revision": row["revision"] if row else 0,
-                "config": json.loads(row["config_json"]) if row else defaults()}
+        config = json.loads(row["config_json"]) if row else defaults()
+        # Configurations saved before per-level device caps carry the defaults.
+        for level, default in zip(config.get("levels", []), defaults()["levels"], strict=False):
+            level.setdefault("max_devices", default["max_devices"])
+        return {"revision": row["revision"] if row else 0, "config": config}
 
     def save_config(self, config, revision):
         validate(config)

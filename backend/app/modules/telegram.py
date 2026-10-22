@@ -2015,10 +2015,40 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 '按设备名称归并（同账号跨播放器）\n'
                 '非硬件唯一识别；空/未知按ID单计')
 
-    @staticmethod
-    def _member_device_line(member: dict[str, Any]) -> str:
-        count = member.get('device_count')
-        return '设备分组：' + (f'{count} 组' if count is not None else '暂不可用')
+    async def _devices_view(self, member: dict[str, Any]) -> tuple[str, list[list[dict[str, Any]]]]:
+        """Signed-in devices as Emby sees them; removal happens in the Mini App."""
+        from app.modules.member_devices import ago_text, device_cap
+        cap = device_cap(member)
+        lines = ["📺 <b>我的设备</b>", ""]
+        service = getattr(self, "_member_devices", None)
+        try:
+            devices = await service.for_user(str(member.get("emby_user_id"))) if service else None
+        except Exception:  # noqa: BLE001 - unavailable is not "no devices"
+            devices = None
+        if devices is None:
+            lines.append("暂时读不到设备列表，请稍后刷新。")
+        elif not devices:
+            lines.append("还没有已登录的设备。")
+        else:
+            lines.append(f"已登录 <b>{len(devices)}</b>" + (f" / {cap}" if cap else "") + " 台设备，按最近使用排序：")
+            lines.append("")
+            for device in devices[:10]:
+                software = " ".join(v for v in (device["app"], device["version"]) if v)
+                lines.append(f"· <b>{escape(device['name'])}</b>"
+                             + (f" · {escape(software)}" if software else "")
+                             + f" · {ago_text(device['last_active'])}")
+            if len(devices) > 10:
+                lines.append(f"……还有 {len(devices) - 10} 台")
+        keyboard: list[list[dict[str, Any]]] = []
+        miniapp = str(self._cfg().get("miniapp_url") or "").strip()
+        if devices is not None and cap:
+            lines += ["", f"<i>最多同时登录 {cap} 台，超出会自动登出最久没用的。</i>"]
+        if miniapp and not _GROUP.get():
+            lines += ["", "<i>不认识或不再使用的设备，可以在会员面板里移除，它会立刻退出登录。</i>"]
+            keyboard.append([{"text": "📱 在会员面板管理设备", "web_app": {"url": miniapp + "?page=devices"}}])
+        keyboard.append([{"text": "🔄 刷新", "callback_data": "devices"},
+                         {"text": "◀ 我的账号", "callback_data": "me"}])
+        return "\n".join(lines), keyboard
 
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = [self._whitelist_decoration(member) + "📊 <b>权益与观看</b>", '',
@@ -2026,7 +2056,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
-        lines.extend([f"同时播放：{stream_text}", self._member_device_line(member), '按设备名称合并，非硬件识别'])
+        lines.append(f"同时播放：{stream_text}")
         lines.extend([f"有效期：{_member_expiry_label(member)}", "", self._watch_text(member)])
         return '\n'.join(lines)
 
@@ -3307,8 +3337,9 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
-        lines.extend(['同时播放：' + stream_text,
-                      self._device_count_text(member) if managing else self._member_device_line(member)])
+        lines.append('同时播放：' + stream_text)
+        if managing:
+            lines.append(self._device_count_text(member))
         for field, label in (('allow_download', '下载权限'), ('allow_transcode', '转码权限')):
             if field in member:
                 value = member[field]
@@ -3351,13 +3382,12 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
             for old, new in (('同时播放：', '同播：'), ('下载权限：', '下载：'), ('转码权限：', '转码：')):
                 lines = [new + line[len(old):] if line.startswith(old) else line for line in lines]
             icons = (('有效期：', '⏳'), ('<b>本月流量', '📊'), ('带宽：', '🚀'),
-                     ('同播：', '📺'), ('设备分组：', '📱'), ('下载：', '📥'),
+                     ('同播：', '📺'), ('下载：', '📥'),
                      ('转码：', '🎞️'), ('<b>观看记录', '🎬'), ('<b>积分：', '🪙'), ('备注：', '📝'))
             lines = [next((icon + ' ' + line for prefix, icon in icons if line.startswith(prefix)), line)
                      for line in lines]
             # Compact pairs retain known/unknown values and their original units.
-            for left, right in (('已用：', '剩余：'), ('📺 同播：', '📱 设备分组：'),
-                                ('📥 下载：', '🎞️ 转码：'), ('近24小时：', '近30天：')):
+            for left, right in (('已用：', '剩余：'), ('📥 下载：', '🎞️ 转码：'), ('近24小时：', '近30天：')):
                 for i in range(len(lines) - 1):
                     if lines[i].startswith(left) and lines[i + 1].startswith(right):
                         pair = lines[i] + ' · ' + lines[i + 1]
@@ -5210,19 +5240,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 self.member_menu())
             return
         if data == "devices":
-            devices = self._members.devices(str(member.get("emby_user_id")))
-            text = ("📺 <b>我的设备</b>\n\n📱 " + self._member_device_line(member)
-                    + ("\n<i>同名设备合并为一组，不等于实体设备台数。</i>" if member.get('device_count') is not None else "") + "\n\n")
-            if not devices:
-                text += "还没有登录记录。"
-            else:
-                rows = [device_display_row(device) for device in devices[:8]]
-                text += (f"<b>最近登录</b>（共 {len(devices)} 条，显示最近 {len(rows)} 条）\n\n"
-                         + "\n\n".join(rows)
-                         + "\n\n<i>重装或重置客户端可能会多出一条记录。</i>")
-            await self._edit(chat_id, message_id, text,
-                             [[{"text": "🔄 刷新", "callback_data": "devices"},
-                               {"text": "◀ 我的账号", "callback_data": "me"}]])
+            await self._edit(chat_id, message_id, *(await self._devices_view(member)))
             return
         if data == "usage":
             await self._edit(chat_id, message_id, self._usage_text(member), [
