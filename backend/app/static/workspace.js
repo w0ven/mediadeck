@@ -293,12 +293,17 @@ function initTelegramSettings(tg) {
   $('#view').append(groupBox.firstElementChild);
   $('#view').insertAdjacentHTML('beforeend', membershipSettingsCards(tg));
   $('#tg-save').textContent = '保存机器人连接'; $('#tg-save2').textContent = '保存注册规则'; $('#tg-test').textContent = '测试已保存连接';
-  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'lines',label:'播放线路',keys:['会员播放线路']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'membership',label:'群组与频道',keys:['群组与频道','定时成员检测']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
+  configWorkspace([{id:'connection',label:'机器人连接',keys:['机器人对接']},{id:'appearance',label:'首页外观',keys:['首页外观']},{id:'lines',label:'播放线路',keys:['会员播放线路','推荐播放器']},{id:'registration',label:'注册规则',keys:['注册开户']},{id:'groups',label:'群内交互',keys:['群内交互']},{id:'membership',label:'群组与频道',keys:['群组与频道','定时成员检测']},{id:'notifications',label:'通知任务',keys:['通知与排行']}]);
   const payloadKeys = keys => { const all = telegramPagePayload(); return Object.fromEntries(keys.map(k => [k,all[k]])); };
   configureSave('tg-save','/api/settings/telegram','POST',() => payloadKeys(['bot_token','enabled','emby_public_url']));
   configureSave('tg-save2','/api/settings/telegram','POST',() => payloadKeys(['allow_admin_grant','allow_invite','allow_redeem','register_days','max_users','default_group_id','registration_notify_chat_id','registration_notify_thread_id']));
   configureSave('tg-save-logo','/api/settings/telegram','POST',() => ({menu_logo_url:$('#tg-logo').value.trim()}));
   configureSave('tg-save-miniapp','/api/settings/telegram','POST',() => ({miniapp_url:$('#tg-miniapp').value.trim()}));
+  configureSave('tg-save-players','/api/settings/telegram','POST',() => ({recommended_players:$('#tg-players').value.split('\n').map(line => line.trim()).filter(Boolean).map((line, i) => {
+    const [platform, name, url, ...note] = line.split('|').map(part => part.trim());
+    if (!platform || !name || !url) throw new Error(`第 ${i + 1} 行需要「平台 | 名称 | 下载链接」`);
+    return {platform, name, url, note: note.join(' | ')};
+  })}));
   configureSave('tg-save-groups','/api/settings/telegram','POST',() => ({group_interaction_chats:$('#tg-reviewgroups').value.split(/[\n,，]+/).map(x=>x.trim()).filter(Boolean),shop_purchase_broadcast:$('#tg-shop-notice').checked}));
   initPlaybackLinesEditor();
   initMembershipSettings(tg);

@@ -168,12 +168,12 @@ def test_unknown_values_never_become_zero_or_unlimited():
     bot, _, _ = demo_bot()
     bot._stats = SimpleNamespace(watch_summary=lambda uid: {})
     body = bot._usage_text({'emby_user_id': 'demo', 'quota_source': 'measured'})
-    assert '设备分组：暂不可用' in body and '同时播放：暂不可用' in body
+    assert '同时播放：暂不可用' in body and '设备分组' not in body
     assert '近24小时：暂不可用' in body and '累计观看：暂不可用' in body
     assert '有效期：暂不可用' in body
     account = bot._account_card({'emby_user_id': 'demo'})
     assert '有效期：暂不可用' in account
-    assert '同播：暂不可用' in account and '设备分组：暂不可用' in account
+    assert '同播：暂不可用' in account and '设备分组' not in account
     assert '累计观看：<b>暂不可用</b>' in account
     bot._points = SimpleNamespace(balance=lambda uid: (_ for _ in ()).throw(OSError()))
     assert '余额 <b>暂不可用</b>' in bot._points_text({'emby_user_id': 'demo'})

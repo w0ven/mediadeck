@@ -9,6 +9,7 @@ from html import escape
 from app.modules.bot_views import bandwidth_value, duration
 from app.modules.economy_rules import BEIJING, economy_write, encode
 from app.modules.levels import DAY
+from app.modules.member_devices import device_cap
 
 
 def beijing_stamp(value):
@@ -114,13 +115,14 @@ class ActivityBotMixin:
             lines += [expiry_line(info['expires_at']), *self._renewal_lines(info)]
         streams = member.get('max_streams')
         quota = member['group'].get('request_quota')
-        device = member.get('device_count')
         lines += ['', '✨ <b>当前权益</b>',
                   f"🚀 带宽 {bandwidth_value(member)}",
                   f"📺 同播 {streams or '不限'}{' 路' if streams else ''} · 🎬 每月求片 {quota or '不限'}{' 次' if quota else ''}",
                   ('📥 可下载' if member.get('allow_download') else '📥 不可下载')
-                  + (' · 🎞 可转码' if member.get('allow_transcode') else ' · 🎞 不可转码'),
-                  '📱 设备分组 ' + (f'{device} 组（按名称合并）' if device is not None else '暂不可用')]
+                  + (' · 🎞 可转码' if member.get('allow_transcode') else ' · 🎞 不可转码')]
+        cap = device_cap(member)
+        if cap:
+            lines.append(f"📱 最多登录 {cap} 台设备")
         if self._stats is not None and hasattr(self._stats, 'watch_summary'):
             history = self._stats.watch_summary(member['emby_user_id']) or {}
             lines += ['', '📊 <b>观看时长</b>',

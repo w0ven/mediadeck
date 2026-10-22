@@ -138,14 +138,15 @@ def test_member_list_detail_bot_and_global_api_share_count_with_raw_api_unchange
         assert client.get("/api/members/viewer-a/devices", auth=AUTH).json() == before
         assert client.get("/api/stats/overview", auth=AUTH).json()["devices"] == 2
         bot = TelegramBot(dict, app.state.members, stats=app.state.stats)
-        assert "设备分组：2 组" in bot._usage_text(member) and "非硬件识别" in bot._usage_text(member)
+        # Members no longer see device groups; operator cards keep the statistic.
+        assert "设备分组" not in bot._usage_text(member) and "设备分组" not in bot._account_card(member)
         for text in (bot._account_card(member, managing=True), bot._admin_details(member)):
             assert "设备分组：2 组" in text
             assert "按设备名称归并" in text and "非硬件唯一识别" in text
             assert "空/未知按ID单计" in text
             assert "已登记设备" not in text
         for text in (bot._account_card(member), bot._account_card(member, public=True)):
-            assert "设备分组：2 组" in text
+            assert "设备分组" not in text
             assert "按设备名称归并" not in text and "非硬件唯一识别" not in text
         target = next(row for row in before if row["device_name"] == "iPhone")
         response = client.post(f'/api/members/viewer-a/devices/{target["device_id"]}/block',
@@ -168,24 +169,39 @@ def test_member_list_detail_bot_and_global_api_share_count_with_raw_api_unchange
         assert client.get("/api/members/viewer-a/devices", auth=AUTH).json() == before
 
 
-def test_bot_raw_identity_view_labels_count_as_records_not_hardware(members):
+def test_bot_device_page_lists_signed_in_devices_not_groups(members):
+    from app.adapters.mock import MockEmby
+    from app.modules.member_devices import MemberDevices
     seed_33(members)
     member = members.get("viewer-a")
     members.bind_telegram("viewer-a", "1001", "demo")
-    bot = TelegramBot(lambda: {"enabled": True}, members)
-    captured = []
+    emby = MockEmby()
+    emby._devices = [
+        {"Id": "1", "Name": "iPhone", "AppName": "Player A", "AppVersion": "6.2",
+         "LastUserId": "viewer-a", "DateLastActivity": "2026-10-21T14:36:00.0000000Z"},
+        {"Id": "2", "Name": "Living Room", "AppName": "Player B", "LastUserId": "someone-else",
+         "DateLastActivity": "2026-10-21T14:36:00.0000000Z"},
+    ]
+    configs = [{"enabled": True}, {"enabled": True, "miniapp_url": "https://app.example.test/app"}]
+    for config in configs:
+        bot = TelegramBot(lambda config=config: config, members)
+        bot._member_devices = MemberDevices(lambda: emby)
+        captured = []
 
-    async def edit(chat, mid, text, keyboard=None):
-        captured.append(text)
-        return True
+        async def edit(chat, mid, text, keyboard=None, captured=captured):
+            captured.append((text, keyboard))
+            return True
 
-    bot._edit = edit
-    asyncio.run(bot._handle_callback({
-        "id": "synthetic-callback", "data": "devices", "from": {"id": 1001},
-        "message": {"message_id": 1, "chat": {"id": 1001, "type": "private"}},
-    }))
-    assert captured
-    assert "设备分组：2 组" in captured[-1]
-    assert "共 33 条" in captured[-1]
-    assert "不等于实体设备台数" in captured[-1]
+        bot._edit = edit
+        asyncio.run(bot._handle_callback({
+            "id": "synthetic-callback", "data": "devices", "from": {"id": 1001},
+            "message": {"message_id": 1, "chat": {"id": 1001, "type": "private"}},
+        }))
+        text, keyboard = captured[-1]
+        assert "已登录 <b>1</b> 台设备" in text and "iPhone" in text and "Player A 6.2" in text
+        assert "Living Room" not in text and "设备分组" not in text
+        manage = [b for row in keyboard for b in row if "web_app" in b]
+        assert manage == ([{"text": "📱 在会员面板管理设备",
+                            "web_app": {"url": "https://app.example.test/app?page=devices"}}]
+                          if config.get("miniapp_url") else [])
     assert member["max_streams"] == members.get("viewer-a")["max_streams"]

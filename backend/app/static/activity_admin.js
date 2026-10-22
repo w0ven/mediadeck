@@ -21,7 +21,7 @@ PAGES.groups = async (context = pageContext('groups')) => {
   if (!context.isCurrent()) return;
   const host = document.createElement('section');
   host.className='card';host.id='activity-level-admin';
-  const keys = [['name','名称'],['title','称号'],['icon','图标'],['threshold','成长门槛'],['price','30天积分'],['bandwidth_limit_kbps','带宽kbps'],['max_streams','同播'],['request_quota','月求片']];
+  const keys = [['name','名称'],['title','称号'],['icon','图标'],['threshold','成长门槛'],['price','30天积分'],['bandwidth_limit_kbps','带宽kbps'],['max_streams','同播'],['request_quota','月求片'],['max_devices','设备数']];
   host.innerHTML=`<div class="card-head"><h3>等级与权益</h3><span>版本 ${data.revision}</span></div><div class="card-body">
     <p class="help">Lv1～7按独立成长值升级，Lv8仅迁移或管理员明确授予。升级不清个人覆盖/道具，白名单仍保留原豁免与销售。</p>
     <label><input type="checkbox" id="level-enabled" ${data.config.enabled?'checked':''}>启用等级基础权益（迁移须先预览确认）</label>

@@ -672,6 +672,27 @@ class LiveEmby:
                                   json=payload)
             return r.status_code
 
+    async def list_devices(self) -> list[dict[str, Any]]:
+        base, headers, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            r = self._check(await client.get(f"{base}/emby/Devices", headers=headers))
+            r.raise_for_status()
+            data = r.json()
+        items = data.get("Items") if isinstance(data, dict) else data
+        if not isinstance(items, list):
+            raise UpstreamError("设备列表返回了不完整的结果")
+        return items
+
+    async def delete_device(self, device_id: str) -> None:
+        device_id = str(device_id or "").strip()
+        if not device_id:
+            raise ValueError("设备编号为空")
+        base, headers, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            r = self._check(await client.delete(f"{base}/emby/Devices", headers=headers,
+                                                params={"Id": device_id}))
+            r.raise_for_status()
+
     async def stop_session(self, session_id: str, reason: str = "") -> bool:
         """End a playback session.
 
