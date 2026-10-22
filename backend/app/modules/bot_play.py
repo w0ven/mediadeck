@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from app.modules.bot_blackwhite import BlackwhiteBotMixin
 from app.modules.bot_dice import DiceBotMixin
 from app.modules.bot_niuniu import NiuniuBotMixin
+from app.modules.bot_pk import PkBotMixin
 from app.modules.bot_play_hub import PlayHubBotMixin
 from app.modules.bot_play_panels import PlayPanelsBotMixin
 from app.modules.bot_poker import PokerBotMixin
@@ -18,17 +19,17 @@ from app.modules.points_ranking import PointsRankingBotMixin
 from app.modules.report_delivery import CALL_DELIVERY
 from app.modules.shop_notices import ShopNoticeBotMixin
 
-PLAY_CALLBACKS = ('dg:', 'dcg:', 'dc:', 'bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'nn:', 'nnh:', 'pp:', 'gg:', 'ggc:')
+PLAY_CALLBACKS = ('dg:', 'dcg:', 'dc:', 'bw:', 'bwh:', 'pg:', 'pgl:', 'pgh:', 'nn:', 'nnh:', 'pp:', 'gg:', 'ggc:', 'pk:')
 
 
-class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMixin, Scratch9BotMixin, PlayPanelsBotMixin, PointsRankingBotMixin, PlayHubBotMixin, ShopNoticeBotMixin):
+class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PkBotMixin, PokerBotMixin, Scratch9BotMixin, PlayPanelsBotMixin, PointsRankingBotMixin, PlayHubBotMixin, ShopNoticeBotMixin):
     async def _play_command(self, message):
         first=str(message.get('text') or '').strip().split()
         verb=first[0].lower().split('@',1)[0] if first else ''
         if verb in ('/blackwhite','/黑白板','/炸金花','/poker','/zjh','/看牌','/炸金花帮助','/牛牛','/niuniu','/牛牛帮助',
-                    '/积分榜','/pointsrank','/游戏','/games','/玩法','/刮刮乐','/scratch9'):
+                    '/积分榜','/pointsrank','/游戏','/games','/玩法','/刮刮乐','/scratch9','/pk'):
             self._play_remember(message,message.get('from') or {})
-        return (await self._dice_command(message) or await self._blackwhite_command(message) or await self._niuniu_command(message) or await self._poker_command(message)
+        return (await self._dice_command(message) or await self._blackwhite_command(message) or await self._niuniu_command(message) or await self._pk_command(message) or await self._poker_command(message)
                 or await self._scratch9_command(message) or await self._ranking_command(message) or await self._play_hub_command(message))
 
     async def _play_callback(self, data, message, actor, callback_id):
@@ -43,6 +44,8 @@ class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMix
             await self._blackwhite_callback(data, message, actor, callback_id)
         elif data.startswith(('nn:', 'nnh:')):
             await self._niuniu_callback(data, message, actor, callback_id)
+        elif data.startswith('pk:'):
+            await self._pk_callback(data, message, actor, callback_id)
         elif data.startswith(('gg:', 'ggc:')):
             await self._scratch9_callback(data, message, actor, callback_id)
         elif data.startswith('pp:'):
@@ -134,7 +137,7 @@ class PlayBotMixin(DiceBotMixin, BlackwhiteBotMixin, NiuniuBotMixin, PokerBotMix
 
     async def _play_worker(self):
         while True:
-            for work in (self._dice_tick, self._drain_checkin_deletes, self._drain_niuniu_feedback, self._drain_account_cards, self._blackwhite_tick, self._niuniu_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
+            for work in (self._dice_tick, self._drain_checkin_deletes, self._drain_niuniu_feedback, self._drain_account_cards, self._blackwhite_tick, self._niuniu_tick, self._pk_tick, self._poker_tick, self._scratch9_tick, self._shop_notice_tick, self._drain_group_commands):
                 try:
                     await work()
                 except asyncio.CancelledError:

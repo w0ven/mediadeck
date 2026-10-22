@@ -551,6 +551,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
             commands += [
                 {"command": "blackwhite", "description": "黑白板·五人同注"},
                 {"command": "niuniu", "description": "牛牛·五张定胜负"},
+                {"command": "pk", "description": "骰子PK·回复对方 /pk 积分"},
             ]
         commands += [
             {"command": "help", "description": "命令与使用说明"},
@@ -1117,7 +1118,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         extra = [{"text": "🏆 排行榜", "callback_data": "rank"}]
         if self._plugin_on('points_ranking'):
             extra.append({'text': '💰 积分榜', 'callback_data': 'points_board'})
-        if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice'):
+        if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice') or self._plugin_on('pk'):
             extra.append({'text': '🎲 游戏玩法', 'callback_data': 'play_hub'})
         extra.append({"text": "💡 帮助", "callback_data": "help"})
         return [
@@ -5304,7 +5305,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                     callback_data = str((update.get('callback_query') or {}).get('data') or '')
                     words = str(message.get('text') or '').strip().split()
                     verb = words[0].lower().split('@', 1)[0] if words else ''
-                    if callback_data.startswith(('nn:', 'nnh:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/红包', '/redpacket', '/packet'):
+                    if callback_data.startswith(('nn:', 'nnh:', 'pk:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/pk', '/红包', '/redpacket', '/packet'):
                         defer_ui(self, ('commands', str(chat['id'])+':'+args[1]), lambda: sync_game_commands(self, *args))
                     else:
                         await self._sync_chat_commands(*args[:3], group=group)
