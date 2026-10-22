@@ -9,7 +9,7 @@
     rank: { kind: 'watch', period: 'today' }, bag: 'shop',
     req: { q: '', type: '', results: null, page: 1, total: 1 },
   };
-  const ORN = { 1: '', 2: '', 3: '✦', 4: '✧', 5: '◈', 6: '❖', 7: '♛', 8: '✺' };
+  const ORN = { 1: '', 2: '', 3: '', 4: '', 5: '', 6: '', 7: '◆', 8: '◆' };
   const STATUS = {
     active: ['ok', '正常'], suspended: ['bad', '已停用'], expired: ['warn', '已过期'],
     exhausted: ['warn', '已超额'], pending: ['', '待开通'], deleted: ['bad', '已删除'],
@@ -152,8 +152,7 @@
     if (whitelist) {
       return `<div class="gm">
         <div class="gm-top"><span class="gm-label"><b>白名单</b> · 无需续期</span><b class="gm-pct">永久有效</b></div>
-        <div class="gm-bar" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span style="width:100%"></span></div>
-        <div class="gm-foot"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage">不参与等级考核</span></div>
+        <div class="gm-foot" style="margin-top:4px"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage">不参与等级考核</span></div>
       </div>`;
     }
     const next = lv.next_threshold;
@@ -384,9 +383,7 @@
       : '今日暂无奖励';
     const renew = me.renewal;
     let renewCard = '';
-    if (me.whitelist) {
-      renewCard = '<div class="card row"><div><b>白名单</b><div class="tiny muted">永久有效，无需续期</div></div></div>';
-    } else if (renew.available) {
+    if (!me.whitelist && renew.available) {
       const when = renew.window_open ? '现在可以续期' : (renew.opens_at ? `${stamp(renew.opens_at)} 起可续` : '');
       renewCard = `<div class="card">
         <div class="row"><div class="grow"><b>续期</b><div class="tiny muted"><div>到期 ${stamp(me.expires_at)}</div>${when ? `<div>${when}</div>` : ''}</div></div>
@@ -517,19 +514,17 @@
       </div>
       <div class="h"><span>当前权益</span></div>
       <div class="stats">
-        <div><b class="num">${r.bandwidth_kbps ? mbps(r.bandwidth_kbps) : '不限'}</b><span>带宽 Mbps</span></div>
-        <div><b class="num">${r.max_streams || '不限'}</b><span>同时播放</span></div>
-        <div><b class="num">${r.request_quota || '不限'}</b><span>每月求片</span></div>
+        <div><b class="num${r.bandwidth_kbps ? '' : ' txt-val'}">${r.bandwidth_kbps ? mbps(r.bandwidth_kbps) : '不限'}</b><span>带宽 Mbps</span></div>
+        <div><b class="num${r.max_streams ? '' : ' txt-val'}">${r.max_streams || '不限'}</b><span>同时播放</span></div>
+        <div><b class="num${r.request_quota ? '' : ' txt-val'}">${r.request_quota || '不限'}</b><span>每月求片</span></div>
       </div>
       <div class="card small row tri-row"><span>${r.max_devices ? `最多登录 ${esc(r.max_devices)} 台` : '设备不限'}</span><span class="${r.download ? '' : 'muted'}">${r.download ? '可下载' : '不可下载'}</span><span class="${r.transcode ? '' : 'muted'}">${r.transcode ? '可转码' : '不可转码'}</span></div>
       <div class="h"><span>观看时长</span></div>
       <div class="stats">
-        <div><b class="num" style="font-size:15px">${dur(me.watch.seconds_24h)}</b><span>近 24 小时</span></div>
-        <div><b class="num" style="font-size:15px">${dur(me.watch.seconds_30d)}</b><span>近 30 天</span></div>
-        <div><b class="num" style="font-size:15px">${dur(me.watch.total)}</b><span>累计</span></div>
+        ${[me.watch.seconds_24h, me.watch.seconds_30d, me.watch.total].map((s, i) => `<div><b class="num" style="font-size:16px">${dur(s).replace(/(\D+)/g, '<small>$1</small>')}</b><span>${['近 24 小时', '近 30 天', '累计'][i]}</span></div>`).join('')}
       </div>
       ${me.whitelist ? '' : `<div class="h"><span>升级之路</span></div><div class="list">${rows}</div>`}
-      <div class="card small"><b>积分和成长怎么来？</b><div class="muted tiny" style="margin-top:4px">看片会自动获得积分和成长；签到等其他玩法见 Bot 的「💡 帮助」。</div></div>`);
+      <div class="card small"><b>积分和成长怎么来？</b><div class="muted tiny" style="margin-top:4px">看片会自动获得积分和成长；签到等其他玩法见 Bot 的<span class="nowrap">「💡 帮助」</span>。</div></div>`);
   }
 
   // -- 称号 ---------------------------------------------------------------------
@@ -821,7 +816,7 @@
     body.innerHTML = `
       <div class="podium">${pod(rows[1], 's')}${pod(rows[0], 'g')}${pod(rows[2], 'b')}</div>
       ${rows.length > 3 ? `<div class="list">${rows.slice(3).map((r) => `<div class="rrow"><span class="n">${r.rank}</span>${face(r.name, r.avatar, 'sm')}
-        <span class="nm">${esc(r.name)} ${lvTag(r.tag, true)}</span><span class="tiny muted num">${value(r.value)}${data.unit === 'points' ? ' 积分' : ''}</span></div>`).join('')}</div>` : ''}
+        <span class="nm"><span class="nm-txt">${esc(r.name)}</span>${lvTag(r.tag, true)}</span><span class="tiny muted num">${value(r.value)}${data.unit === 'points' ? ' 积分' : ''}</span></div>`).join('')}</div>` : ''}
       ${data.unit === 'points' ? '<div class="tiny muted" style="margin:4px 4px 0">按当前可用积分排序。</div>' : data.stamp ? `<div class="tiny muted" style="margin:4px 4px 0">${esc(data.stamp)}</div>` : ''}
       <div class="mine">${face(me.name, me.avatar, 'sm')}<span class="grow">我的排名 <b>${mine ? '#' + mine.rank : '未上榜'}</b></span>
         <b class="num">${mine ? value(mine.value) + (data.unit === 'points' ? ' 积分' : '') : ''}</b></div>`;
