@@ -1,0 +1,16 @@
+# Example only: replace __LISTEN__ with the Deck's loopback address:port.
+# systemd owns this listening socket, so it stays open while mediadeck.service
+# restarts; connections wait in the backlog instead of being refused. The
+# service must start uvicorn with `--fd 3` (see README.md in this directory).
+# To stop the Deck completely, stop BOTH units: a connection arriving at a
+# listening socket starts the service again.
+[Unit]
+Description=MediaDeck listening socket (kept open across Deck restarts)
+
+[Socket]
+ListenStream=__LISTEN__
+NoDelay=true
+Backlog=4096
+
+[Install]
+WantedBy=sockets.target

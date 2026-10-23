@@ -21,6 +21,7 @@ def test_real_nginx_login_chain(client, tmp_path, monkeypatch, login_path):  # n
     if not nginx:
         pytest.skip('nginx required')
     requests = []
+    deck_headers = []
 
     class Backend(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -33,6 +34,7 @@ def test_real_nginx_login_chain(client, tmp_path, monkeypatch, login_path):  # n
         def do_POST(self):
             raw = self.rfile.read(int(self.headers.get('Content-Length', 0)))
             if self.path.startswith('/api/access/emby-login'):
+                deck_headers.append(dict(self.headers))
                 response = client.post(self.path, content=raw, headers=dict(self.headers))
                 self.send_response(response.status_code)
                 self.end_headers()
@@ -82,7 +84,8 @@ location / {{ proxy_pass http://emby_playback_origin; }} }} }}''')
                     break
                 except httpx.ConnectError:
                     time.sleep(.02)
-            web = {'X-Emby-Authorization': 'MediaBrowser Client="Emby Web", DeviceId="d", Token="forged"'}
+            web = {'X-Emby-Authorization': 'MediaBrowser Client="Emby Web", DeviceId="d", Token="forged"',
+                   'X-Forwarded-For': '198.51.100.66', 'X-Real-IP': '198.51.100.66'}
             assert edge.post(login_path, headers=web, json={'Username': 'demo', 'Pw': 'wrong'}).status_code == 401
             assert not app.state.restrictions.events()
             native = {'X-Emby-Authorization': 'MediaBrowser Client="Hills", DeviceId="d"'}
@@ -96,6 +99,10 @@ location / {{ proxy_pass http://emby_playback_origin; }} }} }}''')
             assert response.status_code == 200
             assert len(requests) == 4
             assert all('forged' not in str(r[1]) and 'admin-secret' not in str(r[1]) for r in requests)
+            # The throttle sees the real peer address; a forged one is replaced.
+            assert len(deck_headers) == 4
+            assert all(h.get('X-Forwarded-For') == '127.0.0.1' and h.get('X-Real-IP') == '127.0.0.1'
+                       for h in deck_headers)
     finally:
         proc.terminate()
         proc.wait(timeout=10)

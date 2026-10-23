@@ -2,6 +2,24 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-24 — v0.48.8: operations hardening (disconnects, login throttle, audit retention, restarts)
+
+- A player that resets its HTTP/2 stream while a lifecycle report is still
+  uploading no longer surfaces as "Exception in ASGI application": the body read
+  raised `ClientDisconnect`, which now ends the request with one path-only log
+  line. Nothing partial is forwarded to Emby or observed.
+- Failed Emby password logins are throttled per address+account (6 failures in
+  10 min → 10 min) and per address (30 in 10 min → 15 min). Only upstream
+  401/403 counts; successful logins are never counted and clear their pair; no
+  account-wide lock; state is in memory and expires by itself. The nginx login
+  locations now pass the peer address, replacing any client-supplied value.
+- `device.*` audit rows are kept 90 days and purged daily in small batches.
+  Every other audit action is kept.
+- `deploy/watchdog/`: a hang watchdog that restarts the Deck only after
+  repeated unanswered health probes (skips maintenance, inactive units, pending
+  jobs, startup grace; hourly limit), and a socket-activation example so the
+  listening socket survives restarts and requests queue instead of being refused.
+
 ## 2026-10-23 — v0.48.7: PK names players by nickname
 
 - PK cards mention both players by their Telegram nickname (tg://user link), like

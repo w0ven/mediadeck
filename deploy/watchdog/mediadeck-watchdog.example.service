@@ -1,0 +1,23 @@
+# Example only: replace __CHECKOUT__ with the deployed checkout directory.
+# Restarts the Deck unit only after repeated unanswered health probes; see
+# deck_watchdog.py for the skip rules (maintenance flag, inactive unit,
+# pending job, startup grace, hourly restart limit).
+[Unit]
+Description=MediaDeck hang watchdog (restart only when health stops answering)
+After=mediadeck.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 -u __CHECKOUT__/deploy/watchdog/deck_watchdog.py
+# Optional overrides, e.g. in a host drop-in:
+# Environment=DECK_WATCHDOG_LOG=/var/log/mediadeck-watchdog.log
+# Environment=DECK_WATCHDOG_THRESHOLD=4 DECK_WATCHDOG_INTERVAL=15 DECK_WATCHDOG_TIMEOUT=5
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=read-only
+Nice=-5
+
+[Install]
+WantedBy=multi-user.target
