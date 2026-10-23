@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import secrets
 import threading
@@ -24,6 +25,7 @@ from fastapi.responses import (
 )
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.staticfiles import StaticFiles
+from starlette.requests import ClientDisconnect
 
 from app.adapters.live import LiveEmby, LiveProbe, probe_emby
 from app.adapters.mock import MockEmby, MockProbe
@@ -32,7 +34,7 @@ from app.core.config import settings
 from app.core.db import Database
 from app.core.errors import ConfigError, ConflictError, NotConfigured, UpstreamError
 from app.core.store import SettingsStore
-from app.modules import activity_api, member_ops, miniapp
+from app.modules import activity_api, audit_retention, member_ops, miniapp
 from app.modules.access import AccessRules
 from app.modules.downloaders import MockDownloader, QbittorrentClient
 from app.modules.enforcement import EnforcementService
@@ -47,6 +49,7 @@ from app.modules.intake import FsReader, IntakePaths
 from app.modules.intake_plugin import IntakeSnapshotReader, IntakeStore
 from app.modules.inventory import InventoryService
 from app.modules.levels import LevelService
+from app.modules.login_throttle import FAILURE_STATUSES, LoginThrottle, account_key, client_address
 from app.modules.member_devices import MemberDevices, device_cap
 from app.modules.members import MemberService, random_password, rate_bytes_per_sec
 from app.modules.mounts import MockMounts, MountsReader
@@ -246,6 +249,22 @@ async def _upstream_error_handler(_: Any, exc: UpstreamError) -> JSONResponse:
     return JSONResponse(status_code=502, content={"detail": str(exc)})
 
 
+@app.exception_handler(ClientDisconnect)
+async def _client_disconnect_handler(request: Request, _: ClientDisconnect) -> Response:
+    """The caller went away before its request body was complete.
+
+    The media entrance streams request bodies, so an HTTP/2 player resetting
+    its stream mid-upload reaches us as a disconnect while the handler is still
+    reading. Nothing was processed or forwarded; nobody is left to answer.
+    Log the path only (queries can carry credentials) instead of letting the
+    abort surface as an unhandled "Exception in ASGI application".
+    """
+    logging.getLogger(__name__).warning(
+        'client disconnected before the request body was complete: %s %s',
+        request.method, request.url.path)
+    return Response(status_code=400, headers={"Cache-Control": "private, no-store"})
+
+
 @app.on_event("startup")
 async def _startup() -> None:
     cfg = settings()
@@ -392,6 +411,7 @@ async def _startup() -> None:
         sharing=app.state.sharing)
     app.state.streams = StreamAdmission(app.state.members, app.state.emby)
     app.state.whitelist_route = WhitelistRoute(app.state, cfg.mediadeck_route_mobile_registry)
+    app.state.login_throttle = LoginThrottle()
     app.state.stats.bind_live_watch(app.state.usage.live_watch)
 
     image_cfg = app.state.settings_service.image_cache_config()
@@ -524,6 +544,8 @@ async def _startup() -> None:
             await asyncio.sleep(5)
 
     app.state.restriction_notice_task = asyncio.create_task(restriction_notice_loop())
+    # device.* audit rows are kept 90 days; all other audit actions are kept.
+    app.state.audit_retention_task = asyncio.create_task(audit_retention.retention_loop(app.state.db))
 
     # ---- plugins ---------------------------------------------------------
     # Everything that used to be a bespoke background loop is a plugin now.
@@ -629,7 +651,8 @@ async def _startup() -> None:
 async def _shutdown() -> None:
     """Join background writers before releasing their shared database."""
     tasks = [getattr(app.state, name, None) for name in
-             ("usage_task", "probe_task", "intake_prime_task", "restriction_notice_task")]
+             ("usage_task", "probe_task", "intake_prime_task", "restriction_notice_task",
+              "audit_retention_task")]
     tasks = [task for task in tasks if task is not None]
     for task in tasks:
         task.cancel()
@@ -1475,11 +1498,24 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
         raise HTTPException(400, "invalid authentication body") from None
     if not isinstance(payload, dict):
         raise HTTPException(400, "invalid authentication body")
+    # Repeated FAILED passwords from one address get a short, self-expiring
+    # block before Emby is asked again. Successful logins are never counted.
+    throttle = app.state.login_throttle
+    address = client_address(request.client.host if request.client else "")
+    account = account_key(str(payload.get("Username") or ""), user_id)
+    wait = throttle.retry_after(address, account)
+    if wait:
+        return JSONResponse({"error": "too many failed logins, try again later"}, status_code=429,
+                            headers={"Cache-Control": "private, no-store", "Retry-After": str(wait)})
     try:
         code, data = await login_request(app.state.emby, request.headers,
                                          dict(request.query_params), payload, user_id)
     except Exception:  # noqa: BLE001 - do not disclose credential-bearing upstream errors
         raise HTTPException(503, "authentication unavailable") from None
+    if code in FAILURE_STATUSES:
+        throttle.failure(address, account)
+    elif 200 <= code < 300:
+        throttle.success(address, account)
     headers = {"Cache-Control": "private, no-store"}
     # A failed password attempt or unauthenticated visit never creates an event.
     if not 200 <= code < 300:
