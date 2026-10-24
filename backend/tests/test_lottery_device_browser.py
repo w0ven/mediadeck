@@ -99,7 +99,9 @@ def assert_contract(data):
     assert set(data) <= {'v', 'k', 's'} and data['v'] == 1
     assert re.fullmatch(r'[0-9a-f]{64}', data['k'])
     s = data['s']
-    assert set(s) <= set(FIELDS) and {'a', 'b', 'c', 'e', 'f', 'g', 'i', 'j', 'n'} <= set(s)
+    assert set(s) <= set(FIELDS) and {'a', 'e', 'f', 'g', 'i', 'j', 'n'} <= set(s)
+    # WebGL (b, c) is absent on GPU-less headless runners; when present it comes as a pair.
+    assert {'b', 'c'} <= set(s) or not {'b', 'c'} & set(s)
     for key, value in s.items():
         assert isinstance(value, str) and len(value) <= LIMITS.get(key, 64), key
         assert re.fullmatch(FIELDS[key], value), (key, value)

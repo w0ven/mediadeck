@@ -17,6 +17,18 @@ from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create, draw, join
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import TELEGRAM_STUB, headers
 
+LOADED = "[...document.querySelectorAll('.lottery img')].every(i => i.complete && i.naturalWidth > 0)"
+PENDING = "imgs => imgs.filter(i => !(i.complete && i.naturalWidth > 0)).map(i => i.getAttribute('src'))"
+
+
+def images_loaded(page):
+    # Every asset request goes through the Python bridge; slow runners need the wait.
+    timeout = pytest.importorskip('playwright.sync_api').TimeoutError
+    try:
+        page.wait_for_function(LOADED)
+    except timeout:
+        raise AssertionError(f"lottery images not loaded: {page.locator('.lottery img').evaluate_all(PENDING)}") from None
+
 
 def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
     env = request.getfixturevalue('lottery_env')
@@ -65,7 +77,7 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         def fits(page, name):
             assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
             assert page.evaluate("document.querySelector('#screen').scrollWidth <= document.querySelector('#screen').clientWidth")
-            assert page.locator('.lottery img').evaluate_all('(imgs) => imgs.every(i=>i.complete && i.naturalWidth>0)')
+            images_loaded(page)
             if os.getenv('LOTTERY_UI_ARTIFACTS'):
                 page.wait_for_function("document.querySelector('#toast').hidden")
             page.screenshot(path=str(output / name), full_page=True)
@@ -248,7 +260,7 @@ def test_lottery_ui_silent_association_admin_records(request, tmp_path):
         assert str(MEMBER) in page.locator('.lot-cluster').inner_text()
         page.locator('details summary').click()
         assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-        assert page.locator('.lottery img').evaluate_all('(imgs)=>imgs.every(i=>i.complete && i.naturalWidth>0)')
+        images_loaded(page)
         page.screenshot(path=str(output / '08-admin-association-records.png'), full_page=True)
         page.locator('#lot-record-back').click()
         page.locator('#lot-draw').click()
