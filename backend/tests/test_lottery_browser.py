@@ -94,6 +94,7 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         admin.locator('#lot-prize-ok').click()
         admin.locator('#lot-save').click()
         admin.locator('#lot-form-error').filter(has_text='截止时间').wait_for()
+        admin.locator('#lot-mode').select_option('manual')  # drawn below by the administrator
         deadline = config()['deadline']
         from datetime import datetime
 
@@ -209,7 +210,7 @@ def test_lottery_ui_all_prize_types_and_private_registration(request, tmp_path):
 def test_lottery_ui_silent_association_admin_records(request, tmp_path):
     env = request.getfixturevalue('lottery_env')
     sync_playwright = pytest.importorskip('playwright.sync_api').sync_playwright
-    lid = create(env, config(prizes=[{'kind': 'points', 'name': '星光积分', 'quantity': 1, 'amount': 5}]))
+    lid = create(env, config(draw_mode='manual', prizes=[{'kind': 'points', 'name': '星光积分', 'quantity': 1, 'amount': 5}]))
     viewer = {'id': GUEST}
     with sync_playwright() as driver:
         browser = driver.chromium.launch(executable_path=shutil.which('chromium'), args=['--no-sandbox'])

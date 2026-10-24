@@ -384,7 +384,7 @@
       <div class="grow">
         <div class="row between"><b class="small">${esc(item.title)}</b>${joinedBadge}</div>
         <div class="tiny muted" style="margin-top:2px">${esc(item.prize_summary || '丰厚奖品')}</div>
-        <div class="tiny muted" style="margin-top:2px">截止：${stamp(item.deadline, true)} · 费用：${feeText}</div>
+        <div class="tiny muted" style="margin-top:2px">${item.deadline ? '截止：' + stamp(item.deadline, true) : '开奖前均可报名'} · 费用：${feeText}</div>
       </div>
       <span class="go">›</span>
     </button>`;

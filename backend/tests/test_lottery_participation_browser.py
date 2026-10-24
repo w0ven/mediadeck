@@ -41,7 +41,7 @@ def test_admin_participation_and_manage_toggle(request, tmp_path):
         page.route('**/*', bridge)
 
         # 1. Create a free activity
-        lid = create(env, config(title='星光惊喜抽奖', prizes=[{'kind': 'points', 'name': '200 积分', 'quantity': 2, 'amount': 200}]))
+        lid = create(env, config(title='星光惊喜抽奖', draw_mode='manual', prizes=[{'kind': 'points', 'name': '200 积分', 'quantity': 2, 'amount': 200}]))
         url = 'https://app.example.test/app?tgWebAppStartParam=lottery_' + lid
 
         # Admin opens via deep link -> defaults to participant view
@@ -118,6 +118,7 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
         page.locator('#lot-add').click()
         page.locator('#lot-kind').select_option('points')
         page.locator('#lot-prize-ok').click()
+        page.locator('#lot-mode').select_option('manual')
         page.locator('#lot-save').click()
         page.locator('#lot-preview').wait_for()
 

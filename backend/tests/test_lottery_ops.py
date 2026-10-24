@@ -17,7 +17,7 @@ import pytest
 from app.core.db import Database
 from app.main import app
 from app.modules import lottery_identity
-from app.modules.lottery import FAIRNESS, RULES
+from app.modules.lottery import FAIRNESS, RULES, live_status
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
 from tests.test_lottery import (
@@ -167,7 +167,7 @@ def test_fairness_statement_public_and_only_on_paid_launch(e):
     free_text = json.loads(notice(e, free, 'launch')['payload_json'])['text']
     paid_text = json.loads(notice(e, paid, 'launch')['payload_json'])['text']
     assert FAIRNESS not in free_text
-    assert '报名扣 40 积分，成功报名后不退（未中奖不退），活动取消时全额退还；须绑定已注册积分账户。' + FAIRNESS in paid_text
+    assert '报名 40 积分 · 成功报名不退，取消活动全额退还' in paid_text and FAIRNESS + '</i>' in paid_text
     for text in (free_text, paid_text):
         assert no_forbidden(text)
 
@@ -188,7 +188,7 @@ def test_winner_dm_short_native_deep_link_without_private_instructions(e):
         assert '<tg-emoji emoji-id=' in dm['text'] and 'message_thread_id' not in dm
         button = dm['reply_markup']['inline_keyboard'][0][0]
         assert button['url'] == f'https://t.me/example_lottery_bot?startapp=lottery_{lid}'
-        assert button['icon_custom_emoji_id'] and button['text'] == '查看结果 / 领取'
+        assert button['icon_custom_emoji_id'] and button['text'] == '查看并领取'
     assert {a['dm']['state'] for a in result['awards']} == {'sent'}
     member = req(e, 'GET', '/' + lid, MEMBER).json()
     assert 'dm' not in member['my_award'] and 'awards' not in member
@@ -250,20 +250,21 @@ def test_live_count_edits_on_change_with_interval_and_final_edit(e):
     ops(e, lid)
     edits = sent(e, 'editMessageText')
     assert len(edits) == 1 and edits[0]['message_id'] == launch['message_id']
-    assert edits[0]['text'].endswith('\n已报名 1 人') and edits[0]['reply_markup']['inline_keyboard']
-    assert edits[0]['text'].startswith(json.loads(launch['payload_json'])['text'])
+    # The count joins the title line (what a pinned-message bar shows); the body is unchanged.
+    title, body = json.loads(launch['payload_json'])['text'].split('\n', 1)
+    assert edits[0]['text'] == f'{title}  {live_status("open:1", {})}\n{body}' and edits[0]['reply_markup']['inline_keyboard']
     ops(e, lid)  # unchanged count: no edit
     join(e, lid, GUEST)
-    ops(e, lid)  # changed, but within 3 minutes
+    ops(e, lid)  # changed, but within 30 seconds
     assert len(sent(e, 'editMessageText')) == 1
-    e.service.db.execute("UPDATE lottery_ops SET updated_at=updated_at-181 WHERE lottery_id=? AND kind='live'", (lid,))
+    e.service.db.execute("UPDATE lottery_ops SET updated_at=updated_at-31 WHERE lottery_id=? AND kind='live'", (lid,))
     ops(e, lid)
-    assert sent(e, 'editMessageText')[-1]['text'].endswith('\n已报名 2 人')
+    assert sent(e, 'editMessageText')[-1]['text'].split('\n')[0] == f'{title}  {live_status("open:2", {})}'
     join(e, lid, ADMIN)
     result = draw(e, lid)  # final edit ignores the interval
-    assert sent(e, 'editMessageText')[-1]['text'].endswith('\n报名已截止 · 3 人')
+    assert sent(e, 'editMessageText')[-1]['text'].split('\n')[0] == f'{title}  {live_status("settled:3", {})}'
     assert result['operations']['live']['state'] == 'sent'
-    assert result['operations']['live']['shown'] == '报名已截止 · 3 人'
+    assert result['operations']['live']['shown'] == '已开奖 · 3 人参与'
     count = len(sent(e, 'editMessageText'))
     ops(e, lid)
     assert len(sent(e, 'editMessageText')) == count
@@ -311,7 +312,7 @@ def test_live_count_only_for_confirmed_launch_message(e):
 def test_copy_creates_draft_with_cleared_deadline_and_audit(e):
     fund(e, 'u2', 100)
     source = create(e, config(entry_fee=30, audience='member', min_points=10, reminder=False, pin=True,
-                              anti_multi=False, draw_mode='manual'))
+                              anti_multi=False, draw_mode='timed'))
     result = req(e, 'POST', f'/{source}/copy')
     assert result.status_code == 200, result.text
     draft = result.json()
@@ -323,7 +324,7 @@ def test_copy_creates_draft_with_cleared_deadline_and_audit(e):
         assert c[key] == old[key], key
     assert c['prizes'] == old['prizes']
     assert 'winner_dm' not in c and 'live_count' not in c
-    assert req(e, 'POST', f'/{draft["id"]}/publish', json={'revision': 1}).json()['detail'] == '请填写报名截止时间'
+    assert req(e, 'POST', f'/{draft["id"]}/publish', json={'revision': 1}).json()['detail'] == '定时开奖须填写截止时间'
     assert req(e, 'PUT', '/' + draft['id'], json={**c, 'revision': 1}).status_code == 400
     saved = req(e, 'PUT', '/' + draft['id'], json={**c, 'deadline': int(time.time()) + 7200, 'revision': 1})
     assert saved.status_code == 200
@@ -344,6 +345,28 @@ def test_copy_revalidates_shop_prizes_and_legacy_switches_copy_as_off(e):
     result = req(e, 'POST', f'/{source}/copy')
     assert result.status_code == 400 and '已下架' in result.json()['detail']
     assert len(e.service.db.query("SELECT * FROM lotteries WHERE state='draft'")) == 1
+
+
+def test_manual_draw_without_deadline_stays_open_until_drawn(e):
+    rejected = req(e, 'POST', '/admin/drafts', json=config(deadline=None))
+    assert rejected.status_code == 400 and rejected.json()['detail'] == '定时开奖须填写截止时间'
+    lid = create(e, config(draw_mode='manual', deadline=None))
+    launch = json.loads(notice(e, lid, 'launch')['payload_json'])['text']
+    assert '管理员开奖 · 开奖前均可报名' in launch and '截止' not in launch
+    join(e, lid, MEMBER)
+    assert lid in {i['id'] for i in req(e, 'GET', '/ongoing', MEMBER).json()['items']}
+    e.service.stage_reminders(now=int(time.time()) + 400 * 86400)
+    assert notice(e, lid, 'reminder') is None
+    assert req(e, 'GET', '/' + lid).json()['operations']['reminder']['state'] == 'off'
+    ops(e, lid)
+    assert sent(e, 'editMessageText')[-1]['text'].split('\n')[0].endswith(live_status('open:1', {}))
+    asyncio.run(e.service.tick())  # never drawn automatically
+    assert e.service.row(lid)['state'] == 'published'
+    join(e, lid, GUEST)
+    draw(e, lid)
+    assert e.service.row(lid)['state'] == 'settled'
+    late = req(e, 'POST', f'/{lid}/join', ADMIN)
+    assert late.status_code == 400 and lid not in {i['id'] for i in req(e, 'GET', '/ongoing', MEMBER).json()['items']}
 
 
 # --- d. delete / cancel --------------------------------------------------------
@@ -380,15 +403,15 @@ def test_cancel_paid_refunds_once_notifies_unpins_and_blocks_entry_and_draw(e):
     refunds = e.service.db.query("SELECT * FROM points_ledger WHERE reason='lottery.refund' ORDER BY ref")
     assert sorted(r['ref'] for r in refunds) == sorted(f'lottery.refund:{lid}:{t}' for t in (MEMBER, ADMIN))
     # Short cancel notice replies to the launch notice; no forbidden wording.
-    cancel = [p for p in sent(e, 'sendMessage') if '活动已取消' in p['text']]
+    cancel = [p for p in sent(e, 'sendMessage') if '本期不再报名和开奖' in p['text']]
     assert len(cancel) == 1 and cancel[0]['reply_parameters']['message_id'] == launch['message_id']
     assert '全额退还' in cancel[0]['text'] and no_forbidden(cancel[0]['text']) and 'reply_markup' not in cancel[0]
     assert sent(e, 'unpinChatMessage') == [{'chat_id': CHAT, 'message_id': launch['message_id']}]
-    assert sent(e, 'editMessageText')[-1]['text'].endswith('\n活动已取消 · 报名积分已全额退还')
+    assert sent(e, 'editMessageText')[-1]['text'].split('\n')[0].endswith(live_status('cancelled:2', {'entry_fee': 40}))
     # Repeated cancel: success no-op, no second refund, no second notice.
     assert req(e, 'POST', f'/{lid}/cancel', json={'confirm': True}).status_code == 200
     assert len(e.service.db.query("SELECT * FROM points_ledger WHERE reason='lottery.refund'")) == 2
-    assert len([p for p in sent(e, 'sendMessage') if '活动已取消' in p['text']]) == 1
+    assert len([p for p in sent(e, 'sendMessage') if '本期不再报名和开奖' in p['text']]) == 1
     joined = req(e, 'POST', f'/{lid}/join', GUEST)
     assert joined.status_code == 400 and '已取消' in joined.json()['detail']
     assert req(e, 'POST', f'/{lid}/draw').json()['detail'] == '活动已取消，不能开奖'
@@ -409,7 +432,7 @@ def test_cancel_rules_settled_draft_free_and_unsent_launch(e):
     free = create(e)
     join(e, free, GUEST)
     assert req(e, 'POST', f'/{free}/cancel', json={'confirm': True}).json()['refunds'] == {'count': 0, 'points': 0}
-    text = next(p for p in sent(e, 'sendMessage') if '活动已取消' in p['text'])['text']
+    text = next(p for p in sent(e, 'sendMessage') if '本期不再报名和开奖' in p['text'])['text']
     assert '退还' not in text
     e.replies.append({'ok': False, 'error_code': 400, 'description': 'Bad Request: chat not found'})
     unsent = create(e)
@@ -555,7 +578,7 @@ def test_points_threshold_checked_not_debited_and_public(e):
     lid = create(e, config(min_points=50))
     view = req(e, 'GET', '/' + lid, MEMBER).json()
     assert '参与门槛：积分余额不少于 50（积分只校验不扣）' in view['rules']
-    assert '参与门槛：积分余额不少于 50' in json.loads(notice(e, lid, 'launch')['payload_json'])['text']
+    assert '积分余额不少于 50 · 积分只校验不扣 · 须已注册' in json.loads(notice(e, lid, 'launch')['payload_json'])['text']
     result = req(e, 'POST', f'/{lid}/join', MEMBER)
     assert result.status_code == 400 and result.json()['detail'] == '需要积分余额不少于 50（当前 40，只校验不扣）'
     result = req(e, 'POST', f'/{lid}/join', GUEST)
@@ -603,15 +626,15 @@ def test_reminder_once_about_an_hour_before_deadline_replying_to_launch(e):
     e.service.stage_reminders(now=deadline - 3500)
     e.service.stage_reminders(now=deadline - 3400)
     asyncio.run(e.service.deliver_notices(lid))
-    reminders = [p for p in sent(e, 'sendMessage') if '报名即将截止' in p['text']]
+    reminders = [p for p in sent(e, 'sendMessage') if '即将截止' in p['text']]
     assert len(reminders) == 1
     reminder = reminders[0]
     assert reminder['reply_parameters']['message_id'] == notice(e, lid, 'launch')['message_id']
-    assert reminder['reply_markup']['inline_keyboard'][0][0]['text'] == '参加抽奖'
+    assert reminder['reply_markup']['inline_keyboard'][0][0]['text'] == '立即参与'
     assert reminder['message_thread_id'] == 9 and no_forbidden(reminder['text'])
     e.service.stage_reminders(now=deadline - 1000)
     asyncio.run(e.service.deliver_notices(lid))
-    assert len([p for p in sent(e, 'sendMessage') if '报名即将截止' in p['text']]) == 1
+    assert len([p for p in sent(e, 'sendMessage') if '即将截止' in p['text']]) == 1
     assert req(e, 'GET', '/' + lid).json()['operations']['reminder']['state'] == 'sent'
 
 
@@ -642,7 +665,7 @@ def test_delayed_reminder_is_skipped_not_sent_late(e, monkeypatch):
     store(e, lid, deadline=int(time.time()) + 300)  # Bot came back with < 10 minutes left
     asyncio.run(e.service.deliver_notices(lid))
     assert notice(e, lid, 'reminder')['state'] == 'skipped'
-    assert not [p for p in sent(e, 'sendMessage') if '报名即将截止' in p['text']]
+    assert not [p for p in sent(e, 'sendMessage') if '即将截止' in p['text']]
 
 
 # --- h. silent pin -----------------------------------------------------------------------

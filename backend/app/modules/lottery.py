@@ -22,7 +22,7 @@ from app.modules.report_delivery import CALL_DELIVERY
 
 ENTRY_FEE_UNSET = object()
 RULES = ('每个 Telegram 每期仅一次、最多一奖；报名时须属于发布群且符合参与对象。'
-         '截止后不能报名；管理员可提前手动开奖。人数不足如实少发。'
+         '截止后不能报名；定时开奖到点自动开奖，手动开奖由管理员开奖，未设截止时开奖前均可报名。人数不足如实少发。'
          '本人专属注册资格仅在开奖时仍未注册者中抽取，先抽该类奖，再抽其他奖，'
          '同类奖项随机排序，每个名额在剩余合资格报名者中等概率抽取。'
          '账户类奖励未绑定时保留，绑定后可领取；商城道具入背包后使用生效。'
@@ -41,7 +41,7 @@ LEVEL_MAX = 8
 # Reminder: ~1h before the deadline; not when published < 90 min before it;
 # skipped once fewer than 10 min remain (missed maintenance window).
 REMINDER_LEAD, REMINDER_NOTICE, REMINDER_CUTOFF = 3600, 5400, 600
-LIVE_INTERVAL = 180
+LIVE_INTERVAL = 30
 LEASE = 180
 MAX_ATTEMPTS = 4
 FINISHED_WINDOW = 7 * 86400
@@ -49,8 +49,21 @@ FINISHED_WINDOW = 7 * 86400
 # cannot reach: never started the Bot, blocked it, or deactivated account.
 UNREACHABLE = ('用户已屏蔽机器人', '无法向该用户发送消息', 'Telegram 账号已注销', '会话不存在或用户尚未启动机器人')
 RETRYABLE = ('连接失败，稍后重试', 'Telegram 限流')
+# Alternatives are each sticker's exact Telegram `emoji` metadata (incl. variation selectors).
 EMOJI = {'gift': ('5235826903490764103', '🎁'), 'star': ('5830101874467938532', '⭐️'),
-         'notice': ('5197304993920616826', '📣'), 'check': ('5350486389806868244', '✅')}
+         'notice': ('5197304993920616826', '📣'), 'check': ('5350486389806868244', '✅'),
+         'present': ('5193085063998224234', '🎁'), 'party': ('5193209274452425995', '🎉'),
+         'reaper': ('5861500009547045904', '⏰'), 'clock': ('5267421370114914946', '⏱'),
+         'shield': ('5352888345972187597', '🛡'), 'crown': ('5449601904147440135', '👑'),
+         'live': ('5260750418320836046', '🚨'), 'redpack': ('5868538327073822996', '🧧'),
+         'warn': ('5188463524568926712', '⚠️'), 'done': ('5861526823027873795', '✅'),
+         'prize0': ('5427225953463972959', '🎁'), 'prize1': ('5429263077927300012', '🎁'),
+         'prize2': ('5427315847129478207', '🎁')}
+# ColorfulFontEmoji 26–35: colourful digits 0–9.
+DIGITS = [('5381817669425058178', '0️⃣'), ('5381828389663431280', '1️⃣'), ('5382051178207007027', '2️⃣'),
+          ('5379910025340802255', '3️⃣'), ('5388624247696412237', '4️⃣'), ('5390859675094766802', '5️⃣'),
+          ('5388691197646625260', '6️⃣'), ('5391035158868547187', '7️⃣'), ('5388710159927236114', '8️⃣'),
+          ('5391071623140889606', '9️⃣')]
 # ColorfulFontEmoji indices 11/20/2/10/24 render LUCKY, but each sticker's
 # Telegram `emoji` metadata is 🔡. ASCII letters are not valid alternatives.
 LETTERS = [('5364273836122463188', '🔡'), ('5368486821082715433', '🔡'),
@@ -60,6 +73,10 @@ LETTERS = [('5364273836122463188', '🔡'), ('5368486821082715433', '🔡'),
 def emoji(key):
     eid, fallback = EMOJI[key]
     return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
+
+
+def number(value):
+    return ''.join(f'<tg-emoji emoji-id="{DIGITS[int(d)][0]}">{DIGITS[int(d)][1]}</tg-emoji>' for d in str(value))
 
 
 def normalize_notice_payload(payload):
@@ -179,6 +196,11 @@ def gated(config):
     return bool(config.get('min_level') or config.get('min_points') or config.get('min_watch_hours'))
 
 
+def accepting(config, now):
+    """Entries are open until the deadline; a manual draw without one stays open until drawn."""
+    return not config.get('deadline') or now < config['deadline']
+
+
 def watch_seconds(db, uid, now):
     """The member-facing recorded-viewing window: StatsService.watch_summary()['seconds_30d']."""
     since = now - 30 * 86400
@@ -195,7 +217,26 @@ def live_line(key, config):
         return f'已报名 {count} 人'
     if phase == 'closed':
         return f'报名已截止 · {count} 人'
+    if phase == 'settled':
+        return f'已开奖 · {count} 人参与'
     return '活动已取消' + (' · 报名积分已全额退还' if config.get('entry_fee') and count != '0' else '')
+
+
+def live_status(key, config):
+    phase, count = key.split(':')
+    if phase == 'open':
+        return f'{emoji("live")} {number(count)} 人已报名'
+    if phase == 'closed':
+        return f'{emoji("clock")} 报名截止 · {number(count)} 人'
+    if phase == 'settled':
+        return f'{emoji("party")} 已开奖 · {number(count)} 人参与'
+    return emoji('warn') + ' 已取消' + (' · 积分已退还' if config.get('entry_fee') and count != '0' else '')
+
+
+def with_live(text, key, config):
+    """The status joins the title line, which is all a pinned-message bar shows."""
+    head, sep, rest = text.partition('\n')
+    return f'{head}  {live_status(key, config)}{sep}{rest}'
 
 
 def has_custom(payload):
@@ -206,7 +247,7 @@ def has_custom(payload):
 
 def strip_custom(payload):
     """Only our known generated tags/icons; no general HTML interpretation."""
-    for eid, fallback in LETTERS + list(EMOJI.values()):
+    for eid, fallback in LETTERS + list(EMOJI.values()) + DIGITS:
         payload['text'] = payload['text'].replace(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>', fallback)
     for buttons in (payload.get('reply_markup') or {}).get('inline_keyboard', []):
         for button in buttons:
@@ -294,15 +335,16 @@ class LotteryService:
         chat = str(raw.get('chat_id') or '')
         if chat not in self.bot._group_allowlist() and not (incomplete and not chat):
             raise ValueError('请选择已配置白名单群')
-        if raw.get('deadline') is None:
-            if not incomplete:
-                raise ValueError('请填写报名截止时间')
-            deadline = None
-        else:
-            deadline = integer(raw.get('deadline'), '截止时间', now + 60, now + 366 * 86400)
         mode = raw.get('draw_mode')
         if mode not in ('manual', 'timed'):
             raise ValueError('开奖方式无效')
+        if raw.get('deadline') is None:
+            # A manual draw may leave entries open until the administrator draws.
+            if not incomplete and mode == 'timed':
+                raise ValueError('定时开奖须填写截止时间')
+            deadline = None
+        else:
+            deadline = integer(raw.get('deadline'), '截止时间', now + 60, now + 366 * 86400)
         thread = raw.get('thread_id')
         if thread is not None:
             integer(thread, '话题 ID', 1, 2147483647)
@@ -543,7 +585,7 @@ class LotteryService:
         items = []
         for r in self.db.query("SELECT id,config_json FROM lotteries WHERE state='published' ORDER BY id"):
             c = json.loads(r['config_json'])
-            if now >= c['deadline'] or (known and str(c.get('chat_id') or '') not in known and r['id'] not in joined):
+            if not accepting(c, now) or (known and str(c.get('chat_id') or '') not in known and r['id'] not in joined):
                 continue
             prizes = [{'name': p['name'], 'kind': p['kind'], 'quantity': p['quantity']} for p in c['prizes']]
             summary = '、'.join(f'{p["name"]} ×{p["quantity"]}' for p in prizes[:3])
@@ -551,7 +593,7 @@ class LotteryService:
                           'entry_fee': c.get('entry_fee', 0), 'joined': r['id'] in joined, 'prizes': prizes,
                           'prize_summary': summary + (f' 等 {len(prizes)} 项' if len(prizes) > 3 else ''),
                           'slots': sum(p['quantity'] for p in prizes)})
-        items.sort(key=lambda item: (item['deadline'], item['id']))
+        items.sort(key=lambda item: (item['deadline'] is None, item['deadline'] or 0, item['id']))
         return {'items': items[:20]}
 
     def operations(self, row, notices):
@@ -576,6 +618,8 @@ class LotteryService:
         deadline = c.get('deadline')
         if not c['reminder']:
             reminder = {'state': 'off', 'error': ''}
+        elif not deadline:
+            reminder = {'state': 'off', 'error': '未设截止时间，不发送提醒'}
         elif reminder is None and draft:
             reminder = {'state': 'waiting', 'error': '发布时距截止须不少于 90 分钟才会提醒'}
         elif reminder is None and deadline - (row['published_at'] or 0) < REMINDER_NOTICE:
@@ -636,42 +680,55 @@ class LotteryService:
             raise ValueError('请将 Bot 设为群管理员，以可靠查询报名者群成员身份')
         return me['username'], str(chat['id'])
 
-    def notice_payload(self, row, kind, winners=None):
+    def notice_payload(self, row, kind, winners=None, count=0):
         c = row['config']
-        suffix = {'result': ' · 已开奖', 'reminder': ' · 报名即将截止', 'cancel': ' · 活动已取消'}.get(kind, '')
-        lines = [emoji('gift' if kind == 'launch' else 'notice') + ' <b>' + escape(c['title']) + '</b>' + suffix]
-        deadline = ('截止：' + datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')
-                    if c.get('deadline') else '截止：待填写')
+        title = '<b>' + escape(c['title']) + '</b>'
+        when = datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%m-%d %H:%M') if c.get('deadline') else ''
+        # Sections are separated by one blank line; the launch title line stays
+        # first and alone because the live entry count is appended to it.
         if kind == 'launch':
-            lines += [f'参与对象：{AUDIENCES[c["audience"]]}', deadline,
-                      '定时开奖' if c['draw_mode'] == 'timed' else '管理员开奖']
-            lines += [f'{emoji("star")} {escape(p["name"])} × {p["quantity"]} 名' for p in c['prizes']]
-            # Paid launches repeat the public fairness statement after the fee terms.
-            lines += [entry_terms(c) + (FAIRNESS if c.get('entry_fee') else ''), requirement_terms(c),
-                      '注册资格奖仅限开奖时未注册者本人。' if any(p['kind'] == 'registration' for p in c['prizes']) else '']
+            timing = (f'{when} 截止 · ' + ('到点自动开奖' if c['draw_mode'] == 'timed' else '管理员开奖')
+                      if when else '管理员开奖 · 开奖前均可报名')
+            who = [AUDIENCES[c['audience']] + '可参与', *requirement_parts(c)]
+            if c.get('min_points'):
+                who.append('积分只校验不扣')
+            if (gated(c) or c.get('entry_fee')) and c['audience'] != 'member':
+                who.append('须已注册')
+            terms = [f'{emoji("clock")} {timing}', f'{emoji("shield")} ' + ' · '.join(who)]
+            if c.get('entry_fee'):
+                terms.append(f'{emoji("redpack")} 报名 {c["entry_fee"]} 积分 · 成功报名不退，取消活动全额退还')
+            notes = []
+            if c.get('entry_fee'):
+                notes.append(f'<i>{emoji("warn")} {FAIRNESS}</i>')
+            if any(p['kind'] == 'registration' for p in c['prizes']):
+                notes.append('<i>注册资格奖仅限开奖时未注册者本人领取</i>')
+            sections = [[f'{emoji("present")} {title}'],
+                        [f'{emoji("prize" + str(i % 3))} {escape(p["name"])} × {p["quantity"]}'
+                         for i, p in enumerate(c['prizes'])], terms, notes]
         elif kind == 'reminder':
-            lines += [deadline, '还没报名的群友请抓紧时间。']
+            sections = [[f'{emoji("reaper")} {title} 即将截止'],
+                        [f'{emoji("clock")} {when} 截止 · 已有 {number(count)} 人报名', '还没报名的抓紧上车']]
         elif kind == 'cancel':
-            lines += ['本期不再报名和开奖' + ('，已扣报名积分全额退还。' if c.get('entry_fee') else '。')]
+            sections = [[f'{emoji("warn")} {title} 已取消'],
+                        ['本期不再报名和开奖' + ('，报名积分已全额退还' if c.get('entry_fee') else '')]]
         else:
-            winners = winners or []
-            shown = 0
+            winners, lines = winners or [], []
+            head = f'{emoji("party")} {title} 开奖啦'
             # Conservatively bound the serialized HTML in UTF-16 units, counting
             # escaped labels AND mention URLs; reserve room for the honest tail.
             tail = f'其余 {len(winners)} 位见结果页'
             for w in winners[:12]:
-                line = f'{winner_mention(w)} · {escape(json.loads(w["prize_json"])["name"])}'
-                if len('\n'.join([*lines, line, tail]).encode('utf-16-le')) // 2 > 4096:
+                line = f'{emoji("crown")} {winner_mention(w)} · {escape(json.loads(w["prize_json"])["name"])}'
+                if len('\n'.join([head, '', *lines, line, tail]).encode('utf-16-le')) // 2 > 4096:
                     break
                 lines.append(line)
-                shown += 1
-            if len(winners) > shown:
-                lines += [f'其余 {len(winners) - shown} 位见结果页']
-            if not winners:
-                lines += ['本期暂无中奖者']
-        payload = {'chat_id': c['chat_id'], 'text': '\n'.join(x for x in lines if x), 'parse_mode': 'HTML'}
+            if len(winners) > len(lines):
+                lines.append(f'其余 {len(winners) - len(lines)} 位见结果页')
+            sections = [[head], lines or ['本期暂无中奖者']]
+        text = '\n\n'.join('\n'.join(section) for section in sections if section)
+        payload = {'chat_id': c['chat_id'], 'text': text, 'parse_mode': 'HTML'}
         if kind != 'cancel':
-            payload['reply_markup'] = {'inline_keyboard': [[{'text': '查看结果' if kind == 'result' else '参加抽奖',
+            payload['reply_markup'] = {'inline_keyboard': [[{'text': '查看结果' if kind == 'result' else '立即参与',
                                        'icon_custom_emoji_id': EMOJI['check' if kind == 'result' else 'gift'][0],
                                        'url': f'https://t.me/{row["bot_username"]}?startapp=lottery_{row["id"]}'}]]}
         if c['thread_id']:
@@ -683,15 +740,17 @@ class LotteryService:
         """Short winner DM: activity, prize, original deep link. Never private claim text."""
         prize = json.loads(award['prize_json'])
         tg_id = str(award['tg_id'])
-        text = '\n'.join([emoji('gift') + ' <b>恭喜中奖</b>', '活动：' + escape(row['config']['title']),
-                          '奖品：' + escape(prize['name']), '点击下方按钮查看结果并领取。'])
+        text = '\n\n'.join([f'{emoji("party")} <b>恭喜中奖！</b>',
+                            f'{emoji("present")} {escape(prize["name"])}\n来自「{escape(row["config"]["title"])}」',
+                            '点下方按钮查看并领取'])
         return {'chat_id': int(tg_id) if tg_id.isdigit() else tg_id, 'text': text, 'parse_mode': 'HTML',
-                'reply_markup': {'inline_keyboard': [[{'text': '查看结果 / 领取', 'icon_custom_emoji_id': EMOJI['check'][0],
+                'reply_markup': {'inline_keyboard': [[{'text': '查看并领取', 'icon_custom_emoji_id': EMOJI['check'][0],
                                                        'url': deep_link(row)}]]}}
 
     def stage_notice(self, conn, row, kind, winners=None):
+        count = conn.execute('SELECT COUNT(*) FROM lottery_entries WHERE lottery_id=?', (row['id'],)).fetchone()[0]
         conn.execute('INSERT OR IGNORE INTO lottery_notices(lottery_id,kind,payload_json,updated_at) VALUES(?,?,?,?)',
-                     (row['id'], kind, encode(self.notice_payload(row, kind, winners)), int(time.time())))
+                     (row['id'], kind, encode(self.notice_payload(row, kind, winners, count)), int(time.time())))
 
     async def publish(self, lottery_id, revision, actor):
         row = self.row(lottery_id)
@@ -702,7 +761,7 @@ class LotteryService:
         self.validate(row['config'])
         username, chat_id = await self.ready(row['config'])
         with economy_write(self.db) as conn:
-            if int(time.time()) >= row['config']['deadline']:
+            if not accepting(row['config'], int(time.time())):
                 raise ValueError('报名截止时间已过，请修改草稿后发布')
             row['config']['chat_id'] = chat_id
             # Only activities published from now on get winner DMs and the live
@@ -752,7 +811,7 @@ class LotteryService:
         row = self.row(lottery_id)
         if row['state'] == 'cancelled':
             raise ValueError('活动已取消，不能报名')
-        if row['state'] != 'published' or int(time.time()) >= row['config']['deadline']:
+        if row['state'] != 'published' or not accepting(row['config'], int(time.time())):
             raise ValueError('报名已截止或活动尚未发布')
         # No unavailable-check fail-open, including Telegram's restricted status.
         member = await self.bot._call('getChatMember', {'chat_id': row['config']['chat_id'], 'user_id': tg['id']})
@@ -769,7 +828,7 @@ class LotteryService:
             now = int(time.time())
             if current['state'] == 'cancelled':
                 raise ValueError('活动已取消，不能报名')
-            if current['state'] != 'published' or now >= c['deadline']:
+            if current['state'] != 'published' or not accepting(c, now):
                 raise ValueError('报名已截止')
             if conn.execute('SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id)).fetchone():
                 return
@@ -958,7 +1017,7 @@ class LotteryService:
                     activity = conn.execute('SELECT state,config_json FROM lotteries WHERE id=?',
                                             (notice['lottery_id'],)).fetchone()
                     launch_deadline = json.loads(activity['config_json'])['deadline']
-                    if activity['state'] != 'published' or launch_deadline <= int(time.time()):
+                    if activity['state'] != 'published' or not accepting({'deadline': launch_deadline}, int(time.time())):
                         conn.execute("UPDATE lottery_notices SET state='failed',error=?,next_at=0 WHERE id=? AND state='pending'",
                                      ('活动已取消，发起公告未补发' if activity['state'] == 'cancelled'
                                       else '发起公告报名期已结束，未补发；请管理员人工处理', notice['id']))
@@ -969,7 +1028,7 @@ class LotteryService:
                     deadline = json.loads(activity['config_json'])['deadline']
                     # A delayed (Bot paused / rate-limited) reminder is never sent
                     # late, after cancellation, the deadline or the draw.
-                    if activity['state'] != 'published' or int(time.time()) >= deadline - REMINDER_CUTOFF:
+                    if activity['state'] != 'published' or not deadline or int(time.time()) >= deadline - REMINDER_CUTOFF:
                         conn.execute("UPDATE lottery_notices SET state='skipped',error=?,next_at=0 WHERE id=? AND state='pending'",
                                      ('已错过提醒窗口或活动已结束，未发送', notice['id']))
                         continue
@@ -1056,8 +1115,8 @@ class LotteryService:
                              "WHERE r.lottery_id=l.id AND r.kind='reminder')")
         for row in rows:
             c = json.loads(row['config_json'])
-            deadline = c['deadline']
-            if (not c.get('reminder') or deadline - (row['published_at'] or 0) < REMINDER_NOTICE
+            deadline = c.get('deadline')
+            if (not c.get('reminder') or not deadline or deadline - (row['published_at'] or 0) < REMINDER_NOTICE
                     or not deadline - REMINDER_LEAD <= now < deadline - REMINDER_CUTOFF):
                 continue
             with economy_write(self.db) as conn:
@@ -1191,8 +1250,8 @@ class LotteryService:
             if op['state'] in ('failed', 'sending', 'skipped') or (op['state'] == 'pending' and op['next_at'] > now):
                 return None
             count = conn.execute('SELECT COUNT(*) FROM lottery_entries WHERE lottery_id=?', (lottery_id,)).fetchone()[0]
-            phase = ('cancelled' if row['state'] == 'cancelled'
-                     else 'closed' if row['state'] == 'settled' or now >= c['deadline'] else 'open')
+            phase = ('cancelled' if row['state'] == 'cancelled' else 'settled' if row['state'] == 'settled'
+                     else 'open' if accepting(c, now) else 'closed')
             key = f'{phase}:{count}'
             if key == op['shown'] or (op['state'] == 'unknown' and key == op['target']):
                 return None  # unchanged, or the identical unconfirmed edit: never repeated
@@ -1201,7 +1260,7 @@ class LotteryService:
             attempts = claim(key, op['attempts'] + 1 if op['state'] == 'pending' and key == op['target'] else 1)
             stored = normalize_notice_payload(json.loads(launch['payload_json']))
             payload = {'chat_id': stored['chat_id'], 'message_id': launch['message_id'], 'parse_mode': 'HTML',
-                       'text': stored['text'] + '\n' + live_line(key, c)}
+                       'text': with_live(stored['text'], key, c)}
             if stored.get('reply_markup'):
                 payload['reply_markup'] = stored['reply_markup']
             return 'editMessageText', payload, attempts

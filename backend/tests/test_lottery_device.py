@@ -185,6 +185,23 @@ def test_each_activity_judged_alone_from_its_first_entries(e):
     assert [w['label'] for w in draw(e, first)['winners']] == ['Viewer']
 
 
+def test_iphone_entries_keep_no_device_digest(e):
+    iphone = {k: v for k, v in traits('iphone').items() if k != 'h'} | {'b': 'Apple Inc.|Apple GPU', 'i': '5'}
+    lid = create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 4, 'amount': 5}]))
+    for tg in (GUEST, OTHER):
+        assert enter(e, lid, tg, s=iphone).status_code == 200
+    for tg in (THIRD, FOURTH):
+        assert enter(e, lid, tg, seed='android').status_code == 200
+    assert {r['tg_id'] for r in device_rows(e, lid)} == {str(THIRD), str(FOURTH)}
+    records = e.service.records(lid)
+    assert records['excluded'] == 2 and [sorted(a['tg_id'] for a in c['accounts']) for c in records['clusters']] == [
+        sorted([str(THIRD), str(FOURTH)])]
+    assert len(draw(e, lid)['winners']) == 2
+    assert lottery_device.apple_mobile(json.dumps({k: v for k, v in iphone.items() if k != 'b'}))
+    assert not lottery_device.apple_mobile(json.dumps({**iphone, 'i': '0'}))  # a Mac
+    assert not lottery_device.apple_mobile(json.dumps(traits('android')))
+
+
 def test_draw_transaction_freezes_the_decision(e):
     lid = create(e, strict())
     for tg in (GUEST, OTHER):

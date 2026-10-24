@@ -174,7 +174,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       <img class="hero-art" src="/app/assets/lottery-assets/giftPink.png" alt="礼物">
       <div class="hero-bottom">
         <div>
-          <span>截止：</span><b>${c.deadline ? stamp(c.deadline, true) : '待设置'}</b>
+          <span>截止：</span><b>${c.deadline ? stamp(c.deadline, true) : c.draw_mode === 'manual' ? '开奖前均可报名' : '待设置'}</b>
         </div>
         <span class="hero-draw-mode">${drawModeDesc}</span>
       </div>
@@ -226,7 +226,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (!alive() || load !== detailLoad) return;
     const c = d.config, admin = ctx.is_admin;
     const isManage = admin && (mode === 'manage' || d.state === 'draft');
-    const closed = d.state !== 'published' || Date.now() >= c.deadline * 1000;
+    const closed = d.state !== 'published' || Boolean(c.deadline && Date.now() >= c.deadline * 1000);
     const eligible = c.audience === 'all' || (c.audience === 'member') === ctx.registered;
     const refresh = () => detail(lid, alive, isManage ? 'manage' : 'participant');
     const total = c.prizes.reduce((s, p) => s + p.quantity, 0);
@@ -249,7 +249,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     // Setup live countdown for active lottery
     function startCountdown() {
       clearTimer();
-      if (d.state === 'settled') return;
+      if (d.state === 'settled' || !c.deadline) return;
       activeTimer = setInterval(() => {
         if (!alive() || load !== detailLoad) {
           clearTimer();
@@ -269,6 +269,9 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (isManage) {
       // Admin Management Mode
       const adminRulesText = d.admin_rules ? `${d.rules}\n\n【防小号配置】\n${d.admin_rules}` : d.rules;
+      // Timed activities draw themselves at the deadline; the button is only a fallback once it has passed.
+      const drawButton = c.draw_mode === 'manual' ? '<button class="btn" id="lot-draw">手动开奖</button>'
+        : closed ? '<button class="btn" id="lot-draw">立即开奖</button>' : '';
       const statsHtml = d.state === 'settled'
         ? `<div class="lot-stats cols-3">
             <div class="stat"><b class="num">${d.count}</b><span>参与人数</span></div>
@@ -306,7 +309,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           <div class="rule-note">${image('shield', 20)}<span>${esc(adminRulesText)}</span></div>
         </details>
         <div class="lot-actions">
-          ${d.state === 'draft' ? '<button class="btn danger-outline" id="lot-delete">删除草稿</button><button class="btn secondary" id="lot-edit">编辑草稿</button><button class="btn" id="lot-preview">发布前预览</button>' : d.state === 'published' ? '<button class="btn danger-outline" id="lot-cancel-act">取消活动</button><button class="btn secondary" id="lot-list">活动列表</button><button class="btn" id="lot-draw">手动开奖</button>' : '<button class="btn secondary" id="lot-list">活动列表</button><button class="btn" id="lot-retry-awards">重试未发奖励</button>'}
+          ${d.state === 'draft' ? '<button class="btn danger-outline" id="lot-delete">删除草稿</button><button class="btn secondary" id="lot-edit">编辑草稿</button><button class="btn" id="lot-preview">发布前预览</button>' : d.state === 'published' ? '<button class="btn danger-outline" id="lot-cancel-act">取消活动</button><button class="btn secondary" id="lot-list">活动列表</button>' + drawButton + '' : '<button class="btn secondary" id="lot-list">活动列表</button><button class="btn" id="lot-retry-awards">重试未发奖励</button>'}
         </div>
         <div class="lot-bottom-spacer"></div>`);
 
@@ -617,7 +620,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (!alive()) return;
     const gifts = ['giftPink', 'giftBlue', 'giftPurple'];
     page(`${head('抽奖中心', '<button class="btn" style="min-height:36px;padding:6px 14px;font-size:12.5px" id="lot-new">＋ 新建抽奖</button>')}
-      ${data.items.map((d, i) => `<button class="activity-item" data-lot-open="${esc(d.id)}"><img class="activity-icon" src="/app/assets/lottery-assets/${gifts[i % gifts.length]}.png" alt=""><div class="grow"><b>${esc(d.title)}</b><div class="prize-desc">${stamp(d.deadline, true)} 截止 · 北京</div></div><span class="pill ${d.state === 'settled' ? 'gold' : 'green'}">${esc(titles[d.state])}</span></button>`).join('') || `<div class="empty"><img class="activity-icon" style="width:56px;height:56px;margin:0 auto 8px" src="/app/assets/lottery-assets/giftPink.png" alt=""><p>暂无活动，点击上方新建。</p></div>`}
+      ${data.items.map((d, i) => `<button class="activity-item" data-lot-open="${esc(d.id)}"><img class="activity-icon" src="/app/assets/lottery-assets/${gifts[i % gifts.length]}.png" alt=""><div class="grow"><b>${esc(d.title)}</b><div class="prize-desc">${d.deadline ? stamp(d.deadline, true) + ' 截止 · 北京' : '未设截止 · 管理员开奖'}</div></div><span class="pill ${d.state === 'settled' ? 'gold' : 'green'}">${esc(titles[d.state])}</span></button>`).join('') || `<div class="empty"><img class="activity-icon" style="width:56px;height:56px;margin:0 auto 8px" src="/app/assets/lottery-assets/giftPink.png" alt=""><p>暂无活动，点击上方新建。</p></div>`}
       <div class="lot-actions">
         ${offset ? '<button class="btn secondary" id="lot-prev">上一页</button>' : ''}
         ${data.more ? '<button class="btn secondary" id="lot-next">下一页</button>' : ''}
@@ -690,7 +693,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       const date = draft.deadline ? new Date((draft.deadline + 8 * 3600) * 1000).toISOString().slice(0, 16) : '';
       const options = (rows, value) => rows.map(([id, name]) => `<option value="${esc(id)}" ${String(id) === String(value) ? 'selected' : ''}>${esc(name)}</option>`).join('');
       const levelOpts = [['0', '不限'], ['1', 'Lv1'], ['2', 'Lv2'], ['3', 'Lv3'], ['4', 'Lv4'], ['5', 'Lv5'], ['6', 'Lv6'], ['7', 'Lv7'], ['8', 'Lv8']];
-      const copiedNotice = isCopied && !draft.deadline
+      const copiedNotice = isCopied && !draft.deadline && draft.draw_mode === 'timed'
         ? '<div class="banner bad" id="lot-copied-banner"><span>⚠️ 请重新设置截止时间（复制出的草稿截止时间已清空）</span></div>'
         : '';
 
@@ -704,8 +707,9 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           <div class="lot-field"><label for="lot-fee">报名费用（积分，0 为免费）</label><input id="lot-fee" type="number" min="0" max="100000" step="1" value="${draft.entry_fee || 0}"><p class="tiny muted" id="lot-fee-note">成功报名后扣除且不退（未中奖不退）。收费活动需已注册账户，不能搭配注册资格奖。</p></div>
           <div class="grid2">
             <div class="lot-field"><label for="lot-mode">开奖方式</label><select id="lot-mode">${options([['timed','定时开奖'],['manual','手动开奖']], draft.draw_mode)}</select></div>
-            <div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" required value="${date}"></div>
+            <div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" value="${date}"></div>
           </div>
+          <p class="tiny muted" id="lot-date-note">定时开奖须填写，到点自动开奖；手动开奖可不填，不填则开奖前都能报名。</p>
 
           <div class="subpanel">
             <h3>参与门槛</h3>
@@ -718,7 +722,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           </div>
 
           <div class="subpanel">
-            <label class="lot-check" for="lot-reminder"><input id="lot-reminder" type="checkbox" ${draft.reminder ? 'checked' : ''}><span>截止前 1 小时群内提醒</span></label>
+            <label class="lot-check" for="lot-reminder"><input id="lot-reminder" type="checkbox" ${draft.reminder ? 'checked' : ''}><span>截止前 1 小时群内提醒（需设截止时间）</span></label>
             <p class="tiny muted">报名截止前约 1 小时自动在群内发送提醒公告。</p>
             <label class="lot-check" for="lot-pin" style="margin-top:10px"><input id="lot-pin" type="checkbox" ${draft.pin ? 'checked' : ''}><span>发布后静默置顶公告</span></label>
             <p class="tiny muted">发布后在群内静默置顶发起公告，开奖或取消后自动取消置顶。</p>
@@ -769,7 +773,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         try {
           if ($('#lot-kind')) throw new Error('请先将编辑中的奖项加入奖池或取消该奖项');
           collect();
-          if (!draft.deadline) throw new Error('请设置报名截止时间');
+          if (!draft.deadline && draft.draw_mode === 'timed') throw new Error('定时开奖须设置报名截止时间');
           const hasGate = draft.min_level > 0 || draft.min_points > 0 || draft.min_watch_hours > 0;
           if (hasGate) {
             if (draft.audience === 'guest') throw new Error('设有参与门槛的活动不能选择仅未注册参与');
