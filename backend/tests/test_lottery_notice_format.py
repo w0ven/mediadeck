@@ -8,6 +8,7 @@ import time
 import pytest
 
 from app.modules.lottery import (
+    DIGITS,
     EMOJI,
     LETTERS,
     emoji,
@@ -32,6 +33,29 @@ PACK_METADATA = {
     '5830101874467938532': ('ZaiHuaNews', 42, '⭐️'),
     '5197304993920616826': ('IslomjonAnimeEmoji', 160, '📣'),
     '5350486389806868244': ('IslomjonAnimeEmoji', 1, '✅'),
+    '5193085063998224234': ('IslomjonAnimeEmoji', 168, '🎁'),
+    '5193209274452425995': ('IslomjonAnimeEmoji', 169, '🎉'),
+    '5861500009547045904': ('ZaiHuaNews', 31, '⏰'),
+    '5267421370114914946': ('IslomjonAnimeEmoji', 181, '⏱'),
+    '5352888345972187597': ('IslomjonAnimeEmoji', 40, '🛡'),
+    '5449601904147440135': ('IslomjonAnimeEmoji', 112, '👑'),
+    '5260750418320836046': ('IslomjonAnimeEmoji', 173, '🚨'),
+    '5868538327073822996': ('ZaiHuaNews', 181, '🧧'),
+    '5188463524568926712': ('IslomjonAnimeEmoji', 159, '⚠️'),
+    '5861526823027873795': ('ZaiHuaNews', 152, '✅'),
+    '5427225953463972959': ('IslomjonAnimeEmoji', 165, '🎁'),
+    '5429263077927300012': ('IslomjonAnimeEmoji', 166, '🎁'),
+    '5427315847129478207': ('IslomjonAnimeEmoji', 167, '🎁'),
+    '5381817669425058178': ('ColorfulFontEmoji', 26, '0️⃣'),
+    '5381828389663431280': ('ColorfulFontEmoji', 27, '1️⃣'),
+    '5382051178207007027': ('ColorfulFontEmoji', 28, '2️⃣'),
+    '5379910025340802255': ('ColorfulFontEmoji', 29, '3️⃣'),
+    '5388624247696412237': ('ColorfulFontEmoji', 30, '4️⃣'),
+    '5390859675094766802': ('ColorfulFontEmoji', 31, '5️⃣'),
+    '5388691197646625260': ('ColorfulFontEmoji', 32, '6️⃣'),
+    '5391035158868547187': ('ColorfulFontEmoji', 33, '7️⃣'),
+    '5388710159927236114': ('ColorfulFontEmoji', 34, '8️⃣'),
+    '5391071623140889606': ('ColorfulFontEmoji', 35, '9️⃣'),
 }
 
 
@@ -60,7 +84,7 @@ def old_payload(payload):
 
 
 def test_native_fallbacks_match_original_sticker_metadata(e):
-    assert dict(LETTERS + list(EMOJI.values())) == {eid: r[2] for eid, r in PACK_METADATA.items()}
+    assert dict(LETTERS + list(EMOJI.values()) + DIGITS) == {eid: r[2] for eid, r in PACK_METADATA.items()}
     lid = create(e, config(title='公告 <b>不是 HTML</b> LUCKY'))
     launch = sends(e)[0][1]
     result = e.service.notice_payload(e.service.row(lid), 'result', [])
@@ -155,7 +179,7 @@ def test_existing_explicit_emoji_rejection_downgrades_body_and_button_once(e, de
     sent = sends(e)
     assert len(sent) == 2 and notice(e, lid)['state'] == 'sent'
     first, second = [p for _, p in sent]
-    assert first['text'].count('<tg-emoji') == 2 and '<tg-emoji' not in second['text']
+    assert first['text'].count('<tg-emoji') == 3 + len(config()['prizes']) and '<tg-emoji' not in second['text']
     assert 'icon_custom_emoji_id' in first['reply_markup']['inline_keyboard'][0][0]
     assert 'icon_custom_emoji_id' not in second['reply_markup']['inline_keyboard'][0][0]
     assert first['chat_id'] == second['chat_id'] and first['message_thread_id'] == second['message_thread_id']
@@ -283,8 +307,9 @@ def test_result_mentions_use_stored_telegram_name_then_handle(e, identity, displ
     result = e.service.db.one("SELECT payload_json FROM lottery_notices WHERE lottery_id=? AND kind='result'", (lid,))
     payload = json.loads(result['payload_json'])
     assert payload['text'].splitlines() == [
-        emoji('notice') + ' <b>午夜 &amp; &lt;抽奖&gt;</b> · 已开奖',
-        f'<a href="tg://user?id={GUEST}">{display}</a> · 500 积分',
+        emoji('party') + ' <b>午夜 &amp; &lt;抽奖&gt;</b> 开奖啦',
+        '',
+        emoji('crown') + f' <a href="tg://user?id={GUEST}">{display}</a> · 500 积分',
     ]
     button = payload['reply_markup']['inline_keyboard'][0][0]
     assert button['text'] == '查看结果' and button['icon_custom_emoji_id'] == EMOJI['check'][0]
@@ -335,9 +360,9 @@ def test_short_registration_launch_keeps_necessary_eligibility(e):
                                     'group_id': 'standard', 'days': 10}]), publish=False)
     before = e.service.db.query('SELECT * FROM lottery_notices')
     preview = req(e, 'POST', f'/{lid}/preview').json()
-    assert '注册资格奖仅限开奖时未注册者本人。' in preview['text']
-    assert '参与对象：全部群友' in preview['text'] and '截止：' in preview['text']
-    assert '本人资格 × 2 名' in preview['text'] and '免费参与。' in preview['text']
+    assert '<i>注册资格奖仅限开奖时未注册者本人领取</i>' in preview['text']
+    assert '全部群友可参与' in preview['text'] and '截止 · 到点自动开奖' in preview['text']
+    assert '本人资格 × 2' in preview['text'] and '积分' not in preview['text']
     assert '完整规则和私密领奖信息' not in preview['text'] and '其他奖随后抽取' not in preview['text']
     assert '最多一奖' in preview['rules'] and '不可转赠' in preview['rules']
     assert e.service.db.query('SELECT * FROM lottery_notices') == before

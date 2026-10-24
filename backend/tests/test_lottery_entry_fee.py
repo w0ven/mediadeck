@@ -352,17 +352,21 @@ def test_winner_and_loser_both_pay_no_refund_on_settlement_or_retries(e):
 def test_api_rules_and_launch_disclose_fee_and_keep_native_icons(e, fee):
     lid = create(e, config(entry_fee=fee), publish=False)
     terms = entry_terms({'entry_fee': fee})
+    line = '报名 40 积分 · 成功报名不退，取消活动全额退还'
     preview = req(e, 'POST', f'/{lid}/preview').json()
-    assert terms in preview['rules'] and terms in preview['text']
-    assert preview['text'].count('<tg-emoji') == 2 and '🔡' not in preview['text']
+    assert terms in preview['rules'] and (line in preview['text']) == bool(fee)
+    native = 3 + len(config()['prizes']) + (2 if fee else 0)  # title, prizes, timing, eligibility, fee, fairness
+    assert preview['text'].count('<tg-emoji') == native and '🔡' not in preview['text']
     req(e, 'POST', f'/{lid}/publish', json={'revision': 1})
     result = req(e, 'GET', '/' + lid, MEMBER).json()
     assert terms in result['rules']
     launch = [p for m, p in e.calls if m == 'sendMessage'][-1]
-    assert terms in launch['text'] and launch['reply_markup']['inline_keyboard'][0][0]['icon_custom_emoji_id']
+    assert launch['text'] == preview['text'] and launch['reply_markup']['inline_keyboard'][0][0]['icon_custom_emoji_id']
     if fee:
-        assert '未中奖不退' in launch['text'] and '已注册积分账户' in result['rules']
+        assert '须已注册' in launch['text'] and '已注册积分账户' in result['rules']
         assert '免费' not in launch['text'] and '免费' not in result['rules']
+    else:
+        assert '报名 0 积分' not in launch['text'] and '不退' not in launch['text']
     assert '关联' not in result['rules'] and '排除' not in launch['text']
 
 
