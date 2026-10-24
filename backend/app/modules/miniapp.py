@@ -199,7 +199,7 @@ def register(app: Any) -> None:
         except Exception:  # noqa: BLE001 - version stamping must never break the page
             ver = ''
         if ver:
-            for asset in ('app.css', 'app.js', 'lottery.css', 'lottery.js'):
+            for asset in ('app.css', 'app.js', 'lottery.css', 'lottery.js', 'ux.js', 'vendor/thumbmark.umd.js'):
                 html = html.replace(f'/app/assets/{asset}', f'/app/assets/{asset}?v={quote(ver)}')
         return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 

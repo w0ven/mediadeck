@@ -17,10 +17,10 @@ from collections import defaultdict
 
 from app.modules.economy_rules import encode
 
-RULE = ('严格防小号已开启：本期相同可信公网 IP 或相同浏览器安装标识关联的所有报名账号'
-        '均标记异常、排除中奖，包括先报名者。共享网络也可能被排除。'
-        '浏览器标识不是硬件 ID；不同 WebView、清缓存、换浏览器/设备/IP 可能绕过检测，'
-        '不能保证识别同一个人。只影响本期抽奖，不限制观影；发布后不能关闭此规则。')
+# Administrator-only explanation (``admin_rules``). Never part of public
+# ``rules`` or any group message: the heuristics are not published.
+RULE = '严格防小号已开启：关联账号全部不中奖（含先报名者），管理员可在报名记录页查看关联原因。'
+RULE_OFF = '本期未开启严格防小号。'
 
 
 def public_ip(raw):

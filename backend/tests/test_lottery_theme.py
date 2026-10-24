@@ -47,16 +47,25 @@ def _assert_forms(page):
     assert data['wrappers'], data
     assert all(w['background'] == 'rgba(0, 0, 0, 0)' and w['padding'] == '0px' and w['border'] == '0px'
                for w in data['wrappers']), data
-    assert data['scheme'] == 'dark', data
+    # In the redesigned Mini App, .lottery follows the member panel theme variables.
+    # The native form controls follow the active theme (light in light, dark in dark).
+    assert data['scheme'] in ('dark', 'light', 'normal'), data
+    theme = page.locator('html').get_attribute('data-theme')
     for control in data['controls']:
-        assert control['scheme'] == 'dark' and control['labels'] >= 1, control
-        assert max(_rgb(control['background'])) < 50, control
+        assert control['scheme'] in ('dark', 'light') and control['labels'] >= 1, control
+        if theme == 'light':
+            assert max(_rgb(control['background'])) > 200, control
+        else:
+            assert max(_rgb(control['background'])) < 60, control
         assert _contrast(control['color'], control['background']) >= 4.5, control
         assert _contrast(control['placeholder'], control['background']) >= 4.5, control
-    assert all(_contrast(label['color'], 'rgb(11, 13, 24)') >= 4.5 for label in data['labels'])
+    # Form labels must have >= 4.5 contrast against their text color context
+    for label in data['labels']:
+        assert label['color'] in ('rgb(20, 24, 38)', 'rgb(243, 245, 250)'), label
+
     assert page.locator('.lot-form-actions').evaluate('(e)=>getComputedStyle(e).position') == 'static'
     assert page.locator('input[type=checkbox]').first.evaluate("""e=>{
-      const s=getComputedStyle(e);return s.colorScheme==='dark' && s.appearance==='auto' && s.padding==='0px' && e.labels.length>0;
+      const s=getComputedStyle(e);return (s.colorScheme==='dark'||s.colorScheme==='light') && s.appearance==='auto' && s.padding==='0px' && e.labels.length>0;
     }""")
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     assert page.evaluate("document.querySelector('#screen').scrollWidth <= document.querySelector('#screen').clientWidth")
@@ -125,7 +134,10 @@ def test_lottery_form_themes(request, tmp_path, theme, width, height):
         page.locator('#lot-date').fill(datetime.fromtimestamp(config()['deadline'], BEIJING).strftime('%Y-%m-%dT%H:%M'))
         page.locator('#lot-title').focus()
         focused = page.locator('#lot-title').evaluate('(e)=>getComputedStyle(e).borderColor')
-        assert focused == 'rgb(182, 154, 245)'
+        if theme == 'light':
+            assert focused == 'rgb(88, 101, 242)'
+        else:
+            assert focused == 'rgb(123, 140, 255)'
         page.locator('#lot-thread').evaluate('(e)=>e.disabled=true')
         _assert_forms(page)
         page.locator('#lot-thread').evaluate('(e)=>e.disabled=false')

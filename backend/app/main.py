@@ -606,6 +606,7 @@ async def _startup() -> None:
     app.state.lottery = LotteryService(app.state.db, app.state.members, app.state.points,
                                       app.state.shop, app.state.registration, app.state.groups,
                                       app.state.telegram)
+    app.state.telegram._lottery = app.state.lottery
     app.state.telegram._inventory = app.state.inventory
     app.state.telegram._titles = app.state.titles
     app.state.member_devices = MemberDevices(lambda: app.state.emby)

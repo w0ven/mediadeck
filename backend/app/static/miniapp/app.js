@@ -361,19 +361,54 @@
     return S.me;
   }
 
+  function showWelcome(ongoingItems = []) {
+    const ongoingSection = ongoingItems.length ? `
+      <div class="h" style="margin-top:24px"><span>进行中的抽奖</span><span>点击参与</span></div>
+      <div id="welcome-ongoing">${ongoingItems.map(ongoingCardHtml).join('')}</div>` : '';
+    setScreen(`
+      ${stateView(icon('ticket'), '欢迎来到 Mini App', '从群抽奖消息按钮可直接参与活动，无需提前绑定。会员功能请先在 Bot 注册或绑定账号。')}
+      ${ongoingSection}`);
+    $$('#welcome-ongoing [data-lot-id]', screen).forEach(b => {
+      b.onclick = () => {
+        haptic.tap();
+        push(a => lottery.detail(b.dataset.lotId, a));
+      };
+    });
+  }
+
+  function ongoingCardHtml(item) {
+    const feeText = item.entry_fee > 0 ? `${item.entry_fee} 积分` : '免费';
+    const joinedBadge = item.joined ? '<span class="pill green" style="font-size:10.5px;padding:2px 8px">已报名</span>' : '';
+    return `<button class="card it" type="button" data-lot-id="${esc(item.id)}" style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;margin-bottom:8px">
+      <div class="ic sm" style="--c:#c07bff">${icon('ticket')}</div>
+      <div class="grow">
+        <div class="row between"><b class="small">${esc(item.title)}</b>${joinedBadge}</div>
+        <div class="tiny muted" style="margin-top:2px">${esc(item.prize_summary || '丰厚奖品')}</div>
+        <div class="tiny muted" style="margin-top:2px">截止：${stamp(item.deadline, true)} · 费用：${feeText}</div>
+      </div>
+      <span class="go">›</span>
+    </button>`;
+  }
+
   // -- 我的 -------------------------------------------------------------------
 
   async function renderMe(alive) {
     if (!S.me) {
       loading();
-      const ctx = await api('/api/app/lottery/context');
+      const [ctx, ongoingRes] = await Promise.all([
+        api('/api/app/lottery/context'),
+        api('/api/app/lottery/ongoing').catch(() => ({ items: [] }))
+      ]);
       if (!alive()) return;
       if (!ctx.registered) {
-        setScreen(stateView(icon('ticket'), '欢迎来到 Mini App', '从群抽奖消息按钮可直接参与活动，无需提前绑定。会员功能请先在 Bot 注册或绑定账号。'));
+        showWelcome(ongoingRes.items || []);
         return;
       }
     }
-    const me = await loadMe();
+    const [me, ongoingRes] = await Promise.all([
+      loadMe(),
+      api('/api/app/lottery/ongoing').catch(() => ({ items: [] }))
+    ]);
     if (!alive()) return;
     syncChrome();
     const lv = me.level;
@@ -399,6 +434,12 @@
           <button class="switch${renew.auto_renew ? ' on' : ''}" type="button" id="auto" role="switch" aria-checked="${renew.auto_renew}" aria-label="自动保号"></button>
         </div></div>`;
     }
+
+    const ongoingItems = ongoingRes.items || [];
+    const ongoingSection = ongoingItems.length ? `
+      <div class="h"><span>进行中的抽奖</span><span>点击参与</span></div>
+      <div id="home-ongoing">${ongoingItems.map(ongoingCardHtml).join('')}</div>` : '';
+
     setScreen(`
       <div class="hero ${cls}"><div class="sheen"></div>
         <div class="row" style="justify-content:flex-start;gap:12px">
@@ -420,6 +461,7 @@
         <div><b class="num">${Math.round((me.watch.seconds_30d || 0) / 3600)}<small style="font-size:11px"> 小时</small></b><span>近 30 天</span></div>
       </div>
       ${renewCard}
+      ${ongoingSection}
       <div class="qgrid">
         <button type="button" data-go="lines"><div class="ic" style="--c:#6aa6ff">${icon('route')}</div>播放线路</button>
         <button type="button" data-go="level"><div class="ic" style="--c:#43d39e">${icon('shield')}</div>等级权益</button>
@@ -438,6 +480,12 @@
         const go = b.dataset.go;
         if (go === 'invites') goTab('bag', { bag: 'invites' });
         else push({ lottery: lottery.list, lines: renderLines, level: renderLevel, titles: renderTitlesPage, ledger: renderLedger, devices: renderDevices, password: renderPassword }[go]);
+      };
+    });
+    $$('#home-ongoing [data-lot-id]', screen).forEach(b => {
+      b.onclick = () => {
+        haptic.tap();
+        push(a => lottery.detail(b.dataset.lotId, a));
       };
     });
     const renewBtn = $('#renew', screen);
@@ -1246,7 +1294,7 @@
     }
   }
 
-  const lottery = window.createLotteryUI({ api, esc, setScreen, push, back, toast, stamp, tg });
+  const lottery = window.createLotteryUI({ api, esc, setScreen, push, back, toast, stamp, tg, icon });
   const TABS = { me: renderMe, rank: renderRank, req: renderReq, bag: renderBag };
 
   if (!tg || !tg.initData) {
@@ -1261,9 +1309,12 @@
     S.stack.push({ render: alive => lottery.detail(lotteryLink[1], alive) });
     render();
   } else {
-    api('/api/app/lottery/context').then(ctx => {
+    Promise.all([
+      api('/api/app/lottery/context'),
+      api('/api/app/lottery/ongoing').catch(() => ({ items: [] }))
+    ]).then(([ctx, ongoingRes]) => {
       if (!ctx.registered) {
-        setScreen(stateView(icon('ticket'), '欢迎来到 Mini App', '从群抽奖消息按钮可直接参与活动，无需提前绑定。会员功能请先在 Bot 注册或绑定账号。'));
+        showWelcome(ongoingRes.items || []);
         return;
       }
       const deepLink = { devices: renderDevices, password: renderPassword }[params.get('page')];

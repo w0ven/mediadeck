@@ -295,6 +295,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         self._shop = shop
         self._inventory = None
         self._titles = None
+        self._lottery = None
         # The registry, not the plugins themselves: whether a feature is on is
         # an operator decision that can change between two taps of the same
         # keyboard, so it is read at render time rather than captured here.
@@ -432,6 +433,24 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         _CALL_ERROR.set(error)
         if not _QUIET_CALL.get():
             self._last_error = error
+
+    async def _lottery_pin_cleanup(self, message: dict[str, Any]) -> None:
+        """Best-effort removal of the service message for a lottery's silent pin.
+
+        Only the Bot's own pin of a launch notice recorded by the lottery; a
+        missing delete right simply leaves the service message. Never raises.
+        """
+        lottery = self._lottery
+        sender = message.get('from') or {}
+        pinned = (message.get('pinned_message') or {}).get('message_id')
+        chat_id = (message.get('chat') or {}).get('id')
+        bot_id = self._token().split(':', 1)[0]
+        if (lottery is None or not bot_id or str(sender.get('id') or '') != bot_id
+                or type(pinned) is not int or not chat_id):
+            return
+        with contextlib.suppress(Exception):
+            if lottery.pinned_by_lottery(chat_id, pinned):
+                await self._delete_trigger_command(chat_id, message.get('message_id'))
 
     async def _delete_trigger_command(self, chat_id: Any, message_id: Any) -> bool:
         if not isinstance(message_id, int) or isinstance(message_id, bool) or message_id <= 0:
@@ -4430,6 +4449,8 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         text = str(message.get("text") or "").strip()
         if not chat_id or not tg_user_id:
             return
+        if message.get('pinned_message'):
+            await self._lottery_pin_cleanup(message)
         if await self._play_command(message):
             return
         if await self._packet_command(message):
