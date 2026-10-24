@@ -26,15 +26,80 @@ RULES = ('免费报名，每个 Telegram 每期仅一次、最多一奖；报名
          '账户类奖励未绑定时保留，绑定后可领取；商城道具入背包后使用生效。'
          '注册资格绑定中奖 Telegram，不可转赠，进入原 Bot 注册流程自行设置密码，受原注册通道开关约束。')
 AUDIENCES = {'all': '全部群友', 'member': '仅已注册', 'guest': '仅未注册'}
-EMOJI = {'gift': ('5235826903490764103', '🎁'), 'star': ('5830101874467938532', '⭐'),
+EMOJI = {'gift': ('5235826903490764103', '🎁'), 'star': ('5830101874467938532', '⭐️'),
          'notice': ('5197304993920616826', '📣'), 'check': ('5350486389806868244', '✅')}
-LETTERS = [('5364273836122463188', 'L'), ('5368486821082715433', 'U'),
-           ('5364012727880668255', 'C'), ('5364258799441957434', 'K'), ('5381971708427132282', 'Y')]
+# ColorfulFontEmoji indices 11/20/2/10/24 render LUCKY, but each sticker's
+# Telegram `emoji` metadata is 🔡. ASCII letters are not valid alternatives.
+LETTERS = [('5364273836122463188', '🔡'), ('5368486821082715433', '🔡'),
+           ('5364012727880668255', '🔡'), ('5364258799441957434', '🔡'), ('5381971708427132282', '🔡')]
 
 
 def emoji(key):
     eid, fallback = EMOJI[key]
     return f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>'
+
+
+def normalize_notice_payload(payload):
+    """Repair only exact legacy tags emitted by this feature, including saved jobs.
+
+    No HTML parser, arbitrary ID substitution, unescaping or regeneration from
+    current activity data: frozen text, recipients, links and results stay intact.
+    A failed/unknown job is NOT queued by this function or by an upgrade.
+    """
+    result = copy.deepcopy(payload)
+    body = result['text']
+    for (eid, fallback), old in zip(LETTERS, 'LUCKY'):
+        body = body.replace(f'<tg-emoji emoji-id="{eid}">{old}</tg-emoji>',
+                            f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>')
+    # Match the exact original star metadata, including its variation selector.
+    eid, fallback = EMOJI['star']
+    body = body.replace(f'<tg-emoji emoji-id="{eid}">⭐</tg-emoji>',
+                        f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>')
+    result['text'] = body
+    return result
+
+
+def notice_rejection(error, failure):
+    """Lottery-only fixed diagnostics; never retain external description fragments.
+
+    The shared transport classifies delivery certainty; this only refines a
+    definite rejection. Unknown/5xx/timeout must not acquire replay permission.
+    The boolean permits ONE emoji-less attempt, never a generic content retry.
+    """
+    if failure.get('state') != 'failed':
+        return '未取得确认，需管理员人工核验', False
+    detail = str(error or '').lower()
+    # Confirmed by a controlled Telegram comparison: ASCII letter alternatives
+    # fail with ENTITY_TEXT_INVALID; the same IDs/buttons succeed with 🔡.
+    # A format rejection is diagnostic, not permission to strip native artwork.
+    if 'entity_text_invalid' in detail:
+        return 'Telegram 拒绝实体替代文本（ENTITY_TEXT_INVALID）；请检查自定义表情的有效 emoji 替代值', False
+    if 'button_icon_document_invalid' in detail:
+        return 'Telegram 拒绝按钮自定义图标（BUTTON_ICON_DOCUMENT_INVALID）', False
+    if ('custom emoji' in detail or 'custom_emoji' in detail or 'tg-emoji' in detail) and any(
+            word in detail for word in ('alternative', 'valid emoji', 'entity', 'entities')):
+        return 'Telegram 拒绝自定义表情替代文本或实体格式（400）', False
+    if 'emoji' in detail and any(word in detail for word in (
+            'invalid', 'not allowed', 'not_allowed', 'forbidden', 'premium',
+            'unsupported', 'not supported', 'not_supported')):
+        return 'Telegram 拒绝自定义表情（ID 无效、不支持或权限不足）', True
+    if any(word in detail for word in ("can't parse entities", "can't find end", 'unsupported start tag',
+                                       'entity_bounds_invalid', 'entity length', 'entity offset')):
+        return 'Telegram 拒绝 HTML 实体格式（400）', False
+    if any(word in detail for word in ('button_url_invalid', 'url_invalid', 'wrong http url', 'url host is empty',
+                                       'unsupported url protocol', 'web_app_invalid', 'start_param_invalid')):
+        return 'Telegram 拒绝按钮链接或 Mini App 参数（400）', False
+    if any(word in detail for word in ('message is too long', 'message_too_long', 'message text is too long', 'text_too_long')):
+        return 'Telegram 拒绝公告：正文过长（400）', False
+    if any(word in detail for word in ('reply markup', 'reply_markup', 'inline keyboard', 'button_type_invalid', 'button_data_invalid')):
+        return 'Telegram 拒绝按钮结构或参数（400）', False
+    # No substring from error is persisted, even if transport redaction missed a
+    # quoted title, secret prize instruction, URL or newly shaped credential.
+    if failure.get('content_error'):
+        return 'Telegram 拒绝公告参数（未识别的 400）；请管理员核验，未自动重发', False
+    if failure.get('reason') == '机器人凭据不可用':
+        return '机器人凭据不可用', False
+    return 'Telegram 明确拒绝公告，请检查 Bot / 群权限或消息参数', False
 
 
 def integer(value, label, low, high):
@@ -444,12 +509,24 @@ class LotteryService:
                              (' AND lottery_id=?' if lottery_id else '') + ' ORDER BY id LIMIT 20',
                              (now, lottery_id) if lottery_id else (now,))
         for notice in rows:
+            launch_deadline = None
             with economy_write(self.db) as conn:
+                if notice['kind'] == 'launch' and not notice['message_id']:
+                    activity = conn.execute('SELECT state,config_json FROM lotteries WHERE id=?',
+                                            (notice['lottery_id'],)).fetchone()
+                    launch_deadline = json.loads(activity['config_json'])['deadline']
+                    if activity['state'] != 'published' or launch_deadline <= int(time.time()):
+                        conn.execute("UPDATE lottery_notices SET state='failed',error=?,next_at=0 WHERE id=? AND state='pending'",
+                                     ('发起公告报名期已结束，未补发；请管理员人工处理', notice['id']))
+                        continue
                 changed = conn.execute("UPDATE lottery_notices SET state='sending',attempts=attempts+1,updated_at=? WHERE id=? AND state='pending'",
                                        (now, notice['id'])).rowcount
             if not changed:
                 continue
-            payload = json.loads(notice['payload_json'])
+            payload = normalize_notice_payload(json.loads(notice['payload_json']))
+            # Repair only the claimed job. Failed/unknown rows remain untouched
+            # until an administrator explicitly authorizes recovery.
+            self.db.execute('UPDATE lottery_notices SET payload_json=? WHERE id=?', (encode(payload), notice['id']))
             method = 'sendMessage'
             if notice['message_id']:
                 payload['message_id'] = notice['message_id']
@@ -458,23 +535,37 @@ class LotteryService:
             result = await self._send(method, payload)
             failure = CALL_DELIVERY.get() or {}
             from app.modules.telegram import _CALL_ERROR
-            error = _CALL_ERROR.get().lower()
-            # Retry only a definite emoji-specific rejection, never generic 403/5xx.
-            if (result is None and failure.get('state') == 'failed' and
-                    ('emoji' in error and any(word in error for word in ('invalid', 'not allowed', 'forbidden', 'premium', 'unsupported', 'not supported')))):
-                payload['text'] = re.sub(r'<tg-emoji[^>]*>(.*?)</tg-emoji>', r'\1', payload['text'])
+            error = str(_CALL_ERROR.get() or '').lower()
+            _, allow_fallback = notice_rejection(error, failure)
+            has_custom = '<tg-emoji' in payload['text'] or any(
+                'icon_custom_emoji_id' in button for buttons in payload['reply_markup']['inline_keyboard'] for button in buttons)
+            expired = launch_deadline is not None and launch_deadline <= int(time.time())
+            downgraded = result is None and allow_fallback and has_custom and not expired
+            if downgraded:
+                # Only our known generated tags; no general HTML interpretation.
+                for eid, fallback in LETTERS + list(EMOJI.values()):
+                    payload['text'] = payload['text'].replace(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>', fallback)
                 for buttons in payload['reply_markup']['inline_keyboard']:
                     for button in buttons:
                         button.pop('icon_custom_emoji_id', None)
+                # Persist before the retry, so a later known connection failure /
+                # rate limit or manual recovery cannot reintroduce the icons.
+                saved = json.loads(notice['payload_json'])
+                saved.update(text=payload['text'], reply_markup=payload['reply_markup'])
+                self.db.execute('UPDATE lottery_notices SET payload_json=? WHERE id=?', (encode(saved), notice['id']))
                 result = await self._send(method, payload)
                 failure = CALL_DELIVERY.get() or {}
-                error = _CALL_ERROR.get().lower()
+                error = str(_CALL_ERROR.get() or '').lower()
             mid = result.get('message_id') if isinstance(result, dict) else notice['message_id']
             state, reason, next_at = 'unknown', '未取得确认，需管理员人工核验', 0
             if (result is not None and mid) or (notice['message_id'] and failure.get('not_modified')):
                 state, reason = 'sent', ''
             elif failure.get('state') == 'failed':
-                state, reason = 'failed', failure.get('reason', 'Telegram 拒绝消息')
+                state, reason = 'failed', notice_rejection(error, failure)[0]
+                if downgraded:
+                    reason = '已移除自定义图标重试一次；' + reason
+                elif expired:
+                    reason += '；报名期已结束，未补发'
             elif (failure.get('state') == 'retry' and 'timeout' not in error
                   and failure.get('reason') in ('连接失败，稍后重试', 'Telegram 限流')):
                 state = 'pending' if notice['attempts'] < 3 else 'failed'
