@@ -2,6 +2,7 @@
 
 No server/real Telegram/domain is contacted. Optional screenshots are opt-in.
 """
+import base64
 import json
 import os
 import shutil
@@ -11,6 +12,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from app.main import app
+from tests.lottery_device_helpers import device_ctx
 from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create, draw, join
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import TELEGRAM_STUB, headers
@@ -40,8 +42,17 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
                 if u.hostname != 'app.example.test':
                     return route.abort()
                 requests.append((tid, r.method, u.path))
+                content = r.post_data_buffer
+                if r.method == 'POST' and u.path.endswith('/join'):
+                    # One headless Chromium plays every account; give each its own physical device,
+                    # just as each gets its own network address below.
+                    body = json.loads(content)
+                    if body.get('ctx'):
+                        k = json.loads(base64.urlsafe_b64decode(body['ctx'] + '=' * (-len(body['ctx']) % 4)))['k']
+                        body['ctx'] = device_ctx(tid, k=k)
+                        content = json.dumps(body).encode()
                 response = env.client.request(r.method, u.path + ('?' + u.query if u.query else ''),
-                                              content=r.post_data_buffer, auth=None,
+                                              content=content, auth=None,
                                               headers={**{k: v for k, v in r.headers.items()
                                                           if k.lower() in ('content-type', 'x-telegram-init-data')},
                                                        'CF-Connecting-IP': env.ip_for(tid)})
@@ -87,6 +98,7 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         admin.locator('#lot-publish').click()
         admin.locator('#lot-draw').wait_for()
         assert app.state.lottery.row(lid)['state'] == 'published'
+        assert app.state.lottery.row(lid)['config']['device_check'] is True  # strict default
         fits(admin, '02-admin-published.png')
 
         guest = page_for(GUEST)
@@ -96,6 +108,9 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         assert not guest.locator('#tabbar').is_visible()
         guest.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         guest.locator('#lot-join').click()
+        guest.locator('#lot-sheet').wait_for()
+        assert '设备校验' in guest.locator('#lot-sheet h3').inner_text()
+        guest.locator('#lot-ok').click()
         guest.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert guest.locator('#lot-join').is_disabled()
         assert not guest.locator('#tabbar').is_visible()
@@ -107,7 +122,10 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         assert not member.locator('[data-go="lottery"]').count()
         member.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         member.locator('#lot-join').click()
+        member.locator('#lot-sheet').wait_for()
+        member.locator('#lot-ok').click()
         member.locator('.ticket strong', has_text='报名已记录').wait_for()
+        assert app.state.db.one('SELECT COUNT(*) AS n FROM lottery_device_entries WHERE lottery_id=?', (lid,))['n'] == 2
         admin.locator('#lot-refresh').click()
         admin.locator('#lot-draw').click()
         admin.locator('#lot-ok').click()
@@ -243,4 +261,131 @@ def test_lottery_ui_silent_association_admin_records(request, tmp_path):
         assert not page.locator('#lot-claim,#lot-register,#lot-records').count()
         page.screenshot(path=str(output / '09-silent-result.png'), full_page=True)
         assert not errors
+        browser.close()
+
+
+def test_lottery_v3_operations_and_interactions(request, tmp_path):
+    env = request.getfixturevalue('lottery_env')
+    # Enable levels for testing min_level setting
+    levels = app.state.levels
+    cfg = levels.config()
+    cfg['config']['enabled'] = True
+    levels.save_config(cfg['config'], cfg['revision'])
+
+    sync_playwright = pytest.importorskip('playwright.sync_api').sync_playwright
+    with sync_playwright() as driver:
+        browser = driver.chromium.launch(executable_path=shutil.which('chromium'), args=['--no-sandbox'])
+        viewer = {'id': ADMIN}
+
+        def bridge(route):
+            r, u = route.request, urlsplit(route.request.url)
+            if u.hostname == 'telegram.org':
+                return route.fulfill(content_type='application/javascript',
+                                     body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname != 'app.example.test':
+                return route.abort()
+            res = env.client.request(r.method, u.path + ('?' + u.query if u.query else ''),
+                                     content=r.post_data_buffer, auth=None,
+                                     headers={**{k: v for k, v in r.headers.items()
+                                                 if k.lower() in ('content-type', 'x-telegram-init-data')},
+                                              'CF-Connecting-IP': env.ip_for(viewer['id'])})
+            route.fulfill(status=res.status_code, body=res.content,
+                          headers={k: v for k, v in res.headers.items() if k not in ('content-length', 'content-encoding')})
+
+        page = browser.new_page(viewport={'width': 390, 'height': 844}, reduced_motion='reduce')
+        page.set_default_timeout(8000)
+        page.route('**/*', bridge)
+
+        # 1. Test create form fields (thresholds + reminder + pin)
+        viewer['id'] = ADMIN
+        page.goto('https://app.example.test/app')
+        page.locator('[data-go="lottery"]').click()
+        page.locator('#lot-new').click()
+        page.locator('#lot-title').fill('门槛与开关测试')
+        from datetime import datetime
+
+        from app.modules.economy_rules import BEIJING
+        deadline = config()['deadline']
+        page.locator('#lot-date').fill(datetime.fromtimestamp(deadline, BEIJING).strftime('%Y-%m-%dT%H:%M'))
+        page.locator('#lot-min-level').select_option('3')
+        page.locator('#lot-min-points').fill('500')
+        page.locator('#lot-min-watch').fill('10')
+        assert page.locator('#lot-reminder').is_checked()
+        assert page.locator('#lot-pin').is_checked()
+        page.locator('#lot-add').click()
+        page.locator('#lot-kind').select_option('points')
+        page.locator('#lot-quantity').fill('2')
+        page.locator('#lot-prize-ok').click()
+        page.locator('#lot-save').click()
+        page.locator('#lot-preview').wait_for()
+
+        lid = app.state.db.one('SELECT id FROM lotteries ORDER BY created_at DESC')['id']
+        row = env.service.row(lid)
+        assert row['config']['min_level'] == 3
+        assert row['config']['min_points'] == 500
+        assert row['config']['min_watch_hours'] == 10
+        assert row['config']['reminder'] is True
+        assert row['config']['pin'] is True
+
+        # Publish first lottery, so it has #lot-list in published state
+        page.locator('#lot-preview').click()
+        page.locator('#lot-publish').click()
+        page.locator('#lot-cancel-act').wait_for()
+
+        # 2. Test copy activity (from published activity)
+        page.locator('#lot-copy').click()
+        page.locator('#lot-copied-banner').wait_for()
+        assert '请重新设置截止时间' in page.locator('#lot-copied-banner').inner_text()
+        copied_lid = app.state.db.one('SELECT id FROM lotteries ORDER BY rowid DESC')['id']
+        assert copied_lid != lid
+
+        # 3. Test delete draft via bottom sheet
+        page.locator('#lot-cancel').click()  # cancel editor -> back to published lottery detail
+        page.locator('#lot-list').click()
+        page.locator(f'[data-lot-open="{copied_lid}"]').click()
+        page.locator('#lot-delete').click()
+        page.locator('#lot-sheet').wait_for()
+        assert page.locator('#lot-ok').is_visible()
+        page.locator('#lot-ok').click()
+        page.locator('#lot-sheet').wait_for(state='detached')
+        assert not env.service.db.one('SELECT 1 FROM lotteries WHERE id=?', (copied_lid,))
+
+        # 4. Member checks threshold pills and admin cancels activity
+        # Join as member
+        viewer['id'] = MEMBER
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid}')
+        page.locator('#lot-join').wait_for()
+        # Verify threshold pills
+        assert 'Lv3 及以上' in page.locator('.lot-threshold-pills').inner_text()
+        assert '积分余额 ≥ 500' in page.locator('.lot-threshold-pills').inner_text()
+        assert '近 30 天观看 ≥ 10 小时' in page.locator('.lot-threshold-pills').inner_text()
+
+        # Admin cancels activity via bottom sheet with {confirm: true}
+        viewer['id'] = ADMIN
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid}')
+        page.locator('#lot-to-manage').click()
+        page.locator('#lot-cancel-act').click()
+        page.locator('#lot-sheet').wait_for()
+        assert '取消后不再报名和开奖' in page.locator('#lot-sheet').inner_text()
+        page.locator('#lot-ok').click()
+        page.locator('#lot-sheet').wait_for(state='detached')
+        assert env.service.row(lid)['state'] == 'cancelled'
+
+        # 5. Member visits cancelled lottery
+        viewer['id'] = MEMBER
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid}')
+        page.locator('.consolation-card').wait_for()
+        assert '本期活动已取消' in page.locator('.consolation-card').inner_text()
+        assert not page.locator('#lot-join').count()
+
+        # 6. Member home shows ongoing lotteries
+        # Create an active free lottery
+        fresh_lid = create(env, config(title='首页展示抽奖', prizes=[{'kind': 'points', 'name': '100 积分', 'quantity': 1, 'amount': 100}]))
+        page.goto('https://app.example.test/app')
+        page.locator('#home-ongoing').wait_for()
+        assert '首页展示抽奖' in page.locator('#home-ongoing').inner_text()
+        page.locator(f'#home-ongoing [data-lot-id="{fresh_lid}"]').click()
+        page.locator('#lot-join').wait_for()
+        assert page.locator('.lot-hero h3').inner_text() == '首页展示抽奖'
+
         browser.close()

@@ -49,7 +49,7 @@ def test_admin_participation_and_manage_toggle(request, tmp_path):
         page.locator('#lot-join').wait_for()
         assert page.locator('#lot-to-manage').is_visible()
         assert not page.locator('#lot-records,#lot-draw').count()
-        assert page.locator('#lot-join').inner_text() == '收下我的幸运号码'
+        assert page.locator('#lot-join').inner_text() in ('立即参与', '收下我的幸运号码')
 
         # Admin takes participation screenshot
         page.screenshot(path=str(output / 'admin-join.png'), full_page=True)
@@ -98,8 +98,9 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
             if u.hostname != 'app.example.test':
                 return route.abort()
+            content = r.post_data_buffer
             res = env.client.request(r.method, u.path + ('?' + u.query if u.query else ''),
-                                     content=r.post_data_buffer, auth=None,
+                                     content=content, auth=None,
                                      headers={**{k: v for k, v in r.headers.items()
                                                  if k.lower() in ('content-type', 'x-telegram-init-data')},
                                               'CF-Connecting-IP': env.ip_for(viewer['id'])})

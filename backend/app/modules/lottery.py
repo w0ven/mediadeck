@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import secrets
 import time
 from datetime import datetime
 from html import escape
 
-from app.modules import lottery_identity
+from app.modules import lottery_device, lottery_identity, viewing
 from app.modules.economy_rules import BEIJING, economy_write, encode, validate_bag_spec
 from app.modules.inventory import InventoryService
 from app.modules.registration import generate_code
@@ -26,7 +27,28 @@ RULES = ('每个 Telegram 每期仅一次、最多一奖；报名时须属于发
          '同类奖项随机排序，每个名额在剩余合资格报名者中等概率抽取。'
          '账户类奖励未绑定时保留，绑定后可领取；商城道具入背包后使用生效。'
          '注册资格绑定中奖 Telegram，不可转赠，进入原 Bot 注册流程自行设置密码，受原注册通道开关约束。')
+# Generic public fairness statement (product-approved). It names no detection
+# method; the association heuristics stay administrator-only (admin_rules).
+FAIRNESS = '发现多账号等违规参与，将取消中奖资格，报名费不退。'
+RULES += FAIRNESS
 AUDIENCES = {'all': '全部群友', 'member': '仅已注册', 'guest': '仅未注册'}
+# How a stored configuration WITHOUT a newer field is read: off / unlimited.
+# New drafts get explicit values from validate(); publication freezes them.
+LEGACY_DEFAULTS = {'min_level': 0, 'min_points': 0, 'min_watch_hours': 0, 'reminder': False, 'pin': False,
+                   'winner_dm': False, 'live_count': False}
+INTERNAL = ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count')
+LEVEL_MAX = 8
+# Reminder: ~1h before the deadline; not when published < 90 min before it;
+# skipped once fewer than 10 min remain (missed maintenance window).
+REMINDER_LEAD, REMINDER_NOTICE, REMINDER_CUTOFF = 3600, 5400, 600
+LIVE_INTERVAL = 180
+LEASE = 180
+MAX_ATTEMPTS = 4
+FINISHED_WINDOW = 7 * 86400
+# Fixed transport reasons (report_delivery.failure) for private chats the Bot
+# cannot reach: never started the Bot, blocked it, or deactivated account.
+UNREACHABLE = ('用户已屏蔽机器人', '无法向该用户发送消息', 'Telegram 账号已注销', '会话不存在或用户尚未启动机器人')
+RETRYABLE = ('连接失败，稍后重试', 'Telegram 限流')
 EMOJI = {'gift': ('5235826903490764103', '🎁'), 'star': ('5830101874467938532', '⭐️'),
          'notice': ('5197304993920616826', '📣'), 'check': ('5350486389806868244', '✅')}
 # ColorfulFontEmoji indices 11/20/2/10/24 render LUCKY, but each sticker's
@@ -129,8 +151,96 @@ def winner_mention(winner):
 def entry_terms(config):
     fee = config.get('entry_fee', 0)
     if fee:
-        return f'报名扣 {fee} 积分，成功报名后不退（未中奖不退）；须绑定已注册积分账户。'
+        return f'报名扣 {fee} 积分，成功报名后不退（未中奖不退），活动取消时全额退还；须绑定已注册积分账户。'
     return '免费参与。'
+
+
+def requirement_parts(config):
+    parts = []
+    if config.get('min_level'):
+        parts.append(f'Lv{config["min_level"]} 及以上')
+    if config.get('min_points'):
+        parts.append(f'积分余额不少于 {config["min_points"]}')
+    if config.get('min_watch_hours'):
+        parts.append(f'近 30 天观看满 {config["min_watch_hours"]} 小时')
+    return parts
+
+
+def requirement_terms(config):
+    """Public participation conditions; never any risk-control wording."""
+    parts = requirement_parts(config)
+    if not parts:
+        return ''
+    note = '（积分只校验不扣）' if config.get('min_points') else ''
+    return '参与门槛：' + '、'.join(parts) + note + '；须绑定已注册账户，报名时按当时数据判定。'
+
+
+def gated(config):
+    return bool(config.get('min_level') or config.get('min_points') or config.get('min_watch_hours'))
+
+
+def watch_seconds(db, uid, now):
+    """The member-facing recorded-viewing window: StatsService.watch_summary()['seconds_30d']."""
+    since = now - 30 * 86400
+    return viewing.window(viewing.records(db, uid, since, now), since, now)['seconds']
+
+
+def deep_link(row):
+    return f'https://t.me/{row["bot_username"]}?startapp=lottery_{row["id"]}'
+
+
+def live_line(key, config):
+    phase, count = key.split(':')
+    if phase == 'open':
+        return f'已报名 {count} 人'
+    if phase == 'closed':
+        return f'报名已截止 · {count} 人'
+    return '活动已取消' + (' · 报名积分已全额退还' if config.get('entry_fee') and count != '0' else '')
+
+
+def has_custom(payload):
+    return '<tg-emoji' in payload['text'] or any(
+        'icon_custom_emoji_id' in button for buttons in (payload.get('reply_markup') or {}).get('inline_keyboard', [])
+        for button in buttons)
+
+
+def strip_custom(payload):
+    """Only our known generated tags/icons; no general HTML interpretation."""
+    for eid, fallback in LETTERS + list(EMOJI.values()):
+        payload['text'] = payload['text'].replace(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>', fallback)
+    for buttons in (payload.get('reply_markup') or {}).get('inline_keyboard', []):
+        for button in buttons:
+            button.pop('icon_custom_emoji_id', None)
+
+
+def outcome(result, failure, error):
+    """Shared certainty classification for every new lottery Telegram write.
+
+    'retry' only for a definite connection failure (not a timeout) or a rate
+    limit; timeouts, 5xx and unconfirmed replies are 'unknown' and never resent.
+    """
+    if result is not None and result is not False:
+        return 'sent'
+    if failure.get('not_modified'):
+        return 'sent'
+    if failure.get('state') == 'failed':
+        return 'failed'
+    if failure.get('state') == 'retry' and 'timeout' not in error and failure.get('reason') in RETRYABLE:
+        return 'retry'
+    return 'unknown'
+
+
+def backoff(attempts, failure, now):
+    return now + max(60 * 2 ** max(0, attempts - 1), int(failure.get('retry_after') or 0))
+
+
+def rejection(error, failure, action):
+    """Fixed pin/unpin/edit diagnostics; never echo the external description."""
+    if failure.get('state') != 'failed':
+        return '未取得确认，未自动重试'
+    if any(word in error for word in ('rights', 'admin_required', 'administrator', 'not enough')):
+        return f'Bot 没有{action}权限；未重试'
+    return f'Telegram 拒绝{action}请求；未重试'
 
 
 def public_prize(prize):
@@ -146,7 +256,14 @@ class LotteryService:
         self.db, self.members, self.points, self.shop = db, members, points, shop
         self.registration, self.groups, self.bot = registration, groups, bot
 
-    def validate(self, raw, *, now=None):
+    def levels_enabled(self):
+        levels = getattr(self.members, '_levels', None)
+        return bool(levels is not None and levels.config()['config']['enabled'])
+
+    def validate(self, raw, *, now=None, incomplete=False):
+        """Server-side draft validation. ``incomplete`` is only for copy(): the
+        deadline (and a no-longer-allowlisted group) must be re-entered before
+        the draft can be saved again or published."""
         now = int(time.time()) if now is None else now
         if not isinstance(raw, dict):
             raise ValueError('活动配置无效')  # noqa: TRY004 - API validation contract
@@ -154,16 +271,35 @@ class LotteryService:
         anti_multi = raw.get('anti_multi', True)
         if type(anti_multi) is not bool:
             raise ValueError('防小号开关必须为布尔值')
+        switches = {}
+        for key, label in (('reminder', '截止前提醒'), ('pin', '静默置顶')):
+            switches[key] = raw.get(key, True)  # new drafts: on by default
+            if type(switches[key]) is not bool:
+                raise ValueError(f'{label}开关必须为布尔值')
         audience = raw.get('audience')
         if audience not in AUDIENCES:
             raise ValueError('参与对象无效')
         entry_fee = integer(raw.get('entry_fee', 0), '报名积分', 0, 100000)
         if entry_fee and audience == 'guest':
             raise ValueError('收费活动需已注册积分账户，不能选择仅未注册参与')
+        limits = {}
+        for key, label, high in (('min_level', '最低等级', LEVEL_MAX), ('min_points', '最低积分余额', 1000000),
+                                 ('min_watch_hours', '近 30 天观看时长（小时）', 720)):
+            value = raw.get(key)
+            limits[key] = integer(0 if value is None else value, label, 0, high)
+        if gated(limits) and audience == 'guest':
+            raise ValueError('设置参与门槛的活动需已注册账户，不能选择仅未注册参与')
+        if limits['min_level'] and not self.levels_enabled():
+            raise ValueError('等级体系未启用，不能设置最低等级门槛')
         chat = str(raw.get('chat_id') or '')
-        if chat not in self.bot._group_allowlist():
+        if chat not in self.bot._group_allowlist() and not (incomplete and not chat):
             raise ValueError('请选择已配置白名单群')
-        deadline = integer(raw.get('deadline'), '截止时间', now + 60, now + 366 * 86400)
+        if raw.get('deadline') is None:
+            if not incomplete:
+                raise ValueError('请填写报名截止时间')
+            deadline = None
+        else:
+            deadline = integer(raw.get('deadline'), '截止时间', now + 60, now + 366 * 86400)
         mode = raw.get('draw_mode')
         if mode not in ('manual', 'timed'):
             raise ValueError('开奖方式无效')
@@ -192,6 +328,8 @@ class LotteryService:
             elif kind == 'registration':
                 if entry_fee:
                     raise ValueError('收费活动不能配置本人专属注册资格奖；请改为免费活动')
+                if gated(limits):
+                    raise ValueError('设置参与门槛的活动不能配置本人专属注册资格奖')
                 group = str(p.get('group_id') or '')
                 found = self.groups.get(group)
                 if not found:
@@ -208,7 +346,8 @@ class LotteryService:
         if sum(p['quantity'] for p in clean) > 200:
             raise ValueError('每期最多 200 个获奖名额')
         return {'title': title, 'audience': audience, 'chat_id': chat, 'thread_id': thread,
-                'deadline': deadline, 'draw_mode': mode, 'prizes': clean, 'anti_multi': anti_multi, 'entry_fee': entry_fee}
+                'deadline': deadline, 'draw_mode': mode, 'prizes': clean, 'anti_multi': anti_multi, 'entry_fee': entry_fee,
+                **limits, **switches, 'device_check': lottery_device.flag(raw, anti_multi)}
 
     def save(self, raw, actor, lottery_id=None, revision=None):
         config = self.validate(raw)
@@ -227,6 +366,90 @@ class LotteryService:
             self.audit(conn, actor, 'save', lottery_id)
         return lottery_id
 
+    def copy(self, lottery_id, actor):
+        """New draft from any activity's configuration; the deadline must be re-entered.
+
+        Prize pool, audience, fee, thresholds and switches are copied as the
+        source's effective values (a legacy source's missing switches = off).
+        """
+        source = self.row(lottery_id)['config']
+        raw = {k: source.get(k) for k in ('title', 'audience', 'chat_id', 'thread_id', 'draw_mode', 'anti_multi',
+                                          'entry_fee', 'min_level', 'min_points', 'min_watch_hours', 'reminder', 'pin')}
+        # Publication may have normalised an @handle to the numeric chat id;
+        # a group that is no longer allowlisted must be chosen again.
+        if raw['chat_id'] not in self.bot._group_allowlist():
+            raw['chat_id'] = ''
+        # Shop prizes are re-read and re-validated as current products, not
+        # the old frozen snapshot; other prize fields are validated again too.
+        raw['prizes'] = [{k: v for k, v in p.items() if k not in ('spec', 'group_name')} for p in source['prizes']]
+        raw['deadline'] = None
+        config = self.validate(raw, incomplete=True)
+        new_id = secrets.token_hex(12)
+        with economy_write(self.db) as conn:
+            conn.execute('INSERT INTO lotteries(id,config_json,created_by,created_at) VALUES(?,?,?,?)',
+                         (new_id, encode(config), actor, int(time.time())))
+            self.audit(conn, actor, 'copy', new_id, f'from={lottery_id}')
+        return new_id
+
+    def delete(self, lottery_id, actor, confirm=False):
+        if confirm is not True:
+            raise ValueError('请确认删除草稿（confirm 须为 true）')
+        with economy_write(self.db) as conn:
+            row = conn.execute('SELECT state,config_json FROM lotteries WHERE id=?', (lottery_id,)).fetchone()
+            if not row:
+                raise KeyError('活动不存在')
+            if row['state'] != 'draft':
+                raise ValueError('只有草稿可以删除；已发布且未开奖的活动请使用取消')
+            conn.execute("DELETE FROM lotteries WHERE id=? AND state='draft'", (lottery_id,))
+            self.audit(conn, actor, 'delete', lottery_id, json.loads(row['config_json'])['title'][:60])
+
+    def cancel(self, lottery_id, actor, confirm=False):
+        """Published, unsettled only. Same write lock as entry and draw: exactly one wins.
+
+        Paid entries are refunded the amount actually debited, once, keyed by
+        activity + TG. A repeated or concurrent cancel is a no-op.
+        """
+        if confirm is not True:
+            raise ValueError('请确认取消：取消后不再报名和开奖，收费活动退还报名积分（confirm 须为 true）')
+        now = int(time.time())
+        with economy_write(self.db) as conn:
+            row = conn.execute('SELECT * FROM lotteries WHERE id=?', (lottery_id,)).fetchone()
+            if not row:
+                raise KeyError('活动不存在')
+            if row['state'] == 'cancelled':
+                return False  # repeated / concurrent cancel: nothing refunded twice
+            if row['state'] == 'settled':
+                raise ValueError('已开奖的活动不能取消')
+            if row['state'] != 'published':
+                raise ValueError('草稿尚未发布，请直接删除草稿')
+            conn.execute("UPDATE lotteries SET state='cancelled',cancelled_at=? WHERE id=? AND state='published'",
+                         (now, lottery_id))
+            entrants = {r['tg_id'] for r in conn.execute('SELECT tg_id FROM lottery_entries WHERE lottery_id=?',
+                                                         (lottery_id,)).fetchall()}
+            prefix = f'lottery.entry:{lottery_id}:'
+            refunded = {r['ref'] for r in conn.execute(
+                "SELECT ref FROM points_ledger WHERE reason='lottery.refund' AND ref LIKE ?",
+                (f'lottery.refund:{lottery_id}:%',)).fetchall()}
+            count = total = 0
+            for paid in conn.execute("SELECT emby_user_id,delta,ref FROM points_ledger WHERE reason='lottery.entry' "
+                                     'AND ref LIKE ? ORDER BY id', (prefix + '%',)).fetchall():
+                tg_id = paid['ref'][len(prefix):]
+                ref = f'lottery.refund:{lottery_id}:{tg_id}'
+                if tg_id not in entrants or paid['delta'] >= 0 or ref in refunded:
+                    continue
+                self.points._apply(conn, paid['emby_user_id'], -paid['delta'], 'lottery.refund', ref, str(actor), now)
+                refunded.add(ref)
+                count, total = count + 1, total - paid['delta']
+            launch = conn.execute("SELECT state FROM lottery_notices WHERE lottery_id=? AND kind='launch'",
+                                  (lottery_id,)).fetchone()
+            if launch and launch['state'] in ('sent', 'unknown', 'sending'):
+                # Only when the group may have seen the launch; reply target is
+                # resolved at send time from the then-known launch message.
+                current = {**dict(row), 'config': json.loads(row['config_json'])}
+                self.stage_notice(conn, current, 'cancel')
+            self.audit(conn, actor, 'cancel', lottery_id, f'refunds={count} points={total}')
+        return True
+
     @staticmethod
     def audit(conn, actor, action, subject, detail=''):
         conn.execute('INSERT INTO audit_log(ts,actor,action,subject,detail,ok) VALUES(?,?,?,?,?,1)',
@@ -238,6 +461,8 @@ class LotteryService:
             raise KeyError('活动不存在')
         row['config'] = json.loads(row.pop('config_json'))
         row['config'].setdefault('entry_fee', 0)
+        for key, value in LEGACY_DEFAULTS.items():
+            row['config'].setdefault(key, value)
         return row
 
     def view(self, lottery_id, tg_id, admin=False):
@@ -246,16 +471,16 @@ class LotteryService:
             raise KeyError('活动尚未发布')
         config = copy.deepcopy(row['config'])
         config['prizes'] = [public_prize(p) for p in config['prizes']]
-        config.pop('chat_id', None)
-        config.pop('thread_id', None)
-        if not admin:
-            config.pop('anti_multi', None)
-        data = {k: row[k] for k in ('id', 'state', 'revision', 'published_at', 'settled_at')}
+        for key in INTERNAL if not admin else ('chat_id', 'thread_id'):
+            config.pop(key, None)
+        data = {k: row[k] for k in ('id', 'state', 'revision', 'published_at', 'settled_at', 'cancelled_at')}
         mine = self.db.one('SELECT excluded,joined_at FROM lottery_entries WHERE lottery_id=? AND tg_id=?',
                            (lottery_id, tg_id))
-        rules = entry_terms(config) + RULES
+        # Identical public rules for everybody, administrators included: the
+        # association explanation is a separate administrator-only field.
+        rules = entry_terms(config) + requirement_terms(config) + RULES
         if admin:
-            rules += lottery_identity.RULE if config['anti_multi'] else '本期未开启 IP/浏览器关联排除。'
+            data['admin_rules'] = lottery_identity.RULE if config['anti_multi'] else lottery_identity.RULE_OFF
         data.update(config=config, rules=rules, count=self.db.one(
             'SELECT COUNT(*) AS n FROM lottery_entries WHERE lottery_id=?', (lottery_id,))['n'],
             joined=bool(mine), winners=[], my_award=None)
@@ -276,15 +501,100 @@ class LotteryService:
                 if award['tg_id'] == tg_id:
                     data['my_award'] = private
                 if admin:
+                    # Administrator-only private message receipt (null: old activity / not staged).
+                    private = {**private, 'dm': self.db.one(
+                        'SELECT state,error,updated_at FROM lottery_dms WHERE award_id=?', (award['id'],))}
                     data.setdefault('awards', []).append(private)
         if admin:
             data['qualification'] = {'excluded': bool(mine and mine['excluded'])}
             data['excluded_count'] = self.db.one('SELECT COUNT(*) AS n FROM lottery_entries WHERE lottery_id=? AND excluded=1', (lottery_id,))['n']
             data['candidate_count'] = data['count'] - data['excluded_count']
-            data.update(config=row['config'], notices=self.db.query(
+            notices = self.db.query(
                 'SELECT id,kind,state,message_id,attempts,error FROM lottery_notices WHERE lottery_id=? ORDER BY id',
-                (lottery_id,)), last_error=row['last_error'])
-        return data
+                (lottery_id,))
+            admin_config = row['config']
+            if row['state'] == 'draft':
+                # Frozen ON only at publication (see publish); not draft settings.
+                admin_config = {k: v for k, v in admin_config.items() if k not in ('winner_dm', 'live_count')}
+            data.update(config=admin_config, notices=notices, last_error=row['last_error'],
+                        operations=self.operations(row, notices))
+            if row['state'] == 'cancelled':
+                data['refunds'] = self.db.one("SELECT COUNT(*) AS count,COALESCE(SUM(delta),0) AS points FROM points_ledger "
+                                              "WHERE reason='lottery.refund' AND ref LIKE ?",
+                                              (f'lottery.refund:{lottery_id}:%',))
+        return lottery_device.present(self.db, row, data, tg_id, admin)
+
+    def ongoing(self, tg_id, now=None):
+        """Member-home summary of activities open for entry right now.
+
+        Group scoping uses local evidence only, never live Telegram lookups:
+        groups where this Telegram account was already admitted (membership
+        verified at entry) to an earlier lottery. Without such evidence every
+        open activity is listed; joining still verifies membership. No chat
+        IDs, thresholds of others or association data are returned.
+        """
+        now = int(time.time()) if now is None else now
+        tg_id = str(tg_id)
+        joined, known = set(), set()
+        for r in self.db.query("SELECT e.lottery_id,l.config_json FROM lottery_entries e JOIN lotteries l "
+                               "ON l.id=e.lottery_id WHERE e.tg_id=? AND l.state<>'draft'", (tg_id,)):
+            joined.add(r['lottery_id'])
+            known.add(str(json.loads(r['config_json']).get('chat_id') or ''))
+        items = []
+        for r in self.db.query("SELECT id,config_json FROM lotteries WHERE state='published' ORDER BY id"):
+            c = json.loads(r['config_json'])
+            if now >= c['deadline'] or (known and str(c.get('chat_id') or '') not in known and r['id'] not in joined):
+                continue
+            prizes = [{'name': p['name'], 'kind': p['kind'], 'quantity': p['quantity']} for p in c['prizes']]
+            summary = '、'.join(f'{p["name"]} ×{p["quantity"]}' for p in prizes[:3])
+            items.append({'id': r['id'], 'title': c['title'], 'deadline': c['deadline'], 'audience': c['audience'],
+                          'entry_fee': c.get('entry_fee', 0), 'joined': r['id'] in joined, 'prizes': prizes,
+                          'prize_summary': summary + (f' 等 {len(prizes)} 项' if len(prizes) > 3 else ''),
+                          'slots': sum(p['quantity'] for p in prizes)})
+        items.sort(key=lambda item: (item['deadline'], item['id']))
+        return {'items': items[:20]}
+
+    def operations(self, row, notices):
+        """Administrator-only status of reminder / pin / unpin / live count / winner DMs.
+
+        'off' = disabled for this activity (legacy activities: always off),
+        'waiting' = not yet due/staged, otherwise the persisted job state.
+        """
+        c, now, draft = row['config'], int(time.time()), row['state'] == 'draft'
+        ops = {r['kind']: r for r in self.db.query(
+            'SELECT kind,state,error,updated_at,shown FROM lottery_ops WHERE lottery_id=?', (row['id'],))}
+
+        def job(kind, enabled):
+            if not enabled:
+                return {'state': 'off', 'error': '', 'updated_at': None}
+            found = ops.get(kind)
+            if not found:
+                return {'state': 'waiting', 'error': '', 'updated_at': None}
+            return {'state': found['state'], 'error': found['error'], 'updated_at': found['updated_at'] or None}
+
+        reminder = next(({'state': n['state'], 'error': n['error']} for n in notices if n['kind'] == 'reminder'), None)
+        deadline = c.get('deadline')
+        if not c['reminder']:
+            reminder = {'state': 'off', 'error': ''}
+        elif reminder is None and draft:
+            reminder = {'state': 'waiting', 'error': '发布时距截止须不少于 90 分钟才会提醒'}
+        elif reminder is None and deadline - (row['published_at'] or 0) < REMINDER_NOTICE:
+            reminder = {'state': 'skipped', 'error': '发布时距截止不足 90 分钟，不发送提醒'}
+        elif reminder is None and (row['state'] != 'published' or now >= deadline - REMINDER_CUTOFF):
+            reminder = {'state': 'skipped', 'error': '未在提醒窗口内发送（活动已结束、发起公告未确认或错过窗口）'}
+        elif reminder is None:
+            reminder = {'state': 'waiting', 'error': ''}
+        if reminder['state'] not in ('off', 'skipped') and deadline:
+            reminder['at'] = deadline - REMINDER_LEAD
+        # Drafts: live count and winner DMs are frozen ON at publication.
+        live_on, dm_on = draft or c['live_count'], draft or c['winner_dm']
+        live = job('live', live_on)
+        if live_on and ops.get('live'):
+            live['shown'] = live_line(ops['live']['shown'], c) if ops['live']['shown'] != 'open:0' else ''
+        dms = {r['state']: r['n'] for r in self.db.query(
+            'SELECT state,COUNT(*) AS n FROM lottery_dms WHERE lottery_id=? GROUP BY state', (row['id'],))}
+        return {'reminder': reminder, 'pin': job('pin', c['pin']), 'unpin': job('unpin', c['pin']),
+                'live': live, 'winner_dm': {'enabled': bool(dm_on), 'summary': dms}}
 
     def records(self, lottery_id, offset=0):
         # One read snapshot for the roster and association explanation.
@@ -299,10 +609,12 @@ class LotteryService:
                                     (lottery_id, max(0, offset)))
             for entry in entries:
                 entry['outcome'] = ('excluded' if entry['excluded'] else 'winner' if entry['award_id']
-                                    else 'not_selected' if row['state'] == 'settled' else 'eligible')
-            return {**counts, 'state': row['state'], 'anti_multi': row['config']['anti_multi'],
-                    'entries': entries[:50], 'more': len(entries) > 50,
-                    'clusters': lottery_identity.clusters(self.db, lottery_id)}
+                                    else 'not_selected' if row['state'] == 'settled'
+                                    else 'cancelled' if row['state'] == 'cancelled' else 'eligible')
+            return lottery_device.annotate_records(self.db, row, {
+                **counts, 'state': row['state'], 'anti_multi': row['config']['anti_multi'],
+                'entries': entries[:50], 'more': len(entries) > 50,
+                'clusters': lottery_identity.clusters(self.db, lottery_id)})
 
     async def ready(self, config):
         if not self.bot._cfg().get('enabled'):
@@ -326,14 +638,21 @@ class LotteryService:
 
     def notice_payload(self, row, kind, winners=None):
         c = row['config']
-        lines = [emoji('notice' if kind == 'result' else 'gift') + ' <b>' + escape(c['title']) + '</b>'
-                 + (' · 已开奖' if kind == 'result' else '')]
+        suffix = {'result': ' · 已开奖', 'reminder': ' · 报名即将截止', 'cancel': ' · 活动已取消'}.get(kind, '')
+        lines = [emoji('gift' if kind == 'launch' else 'notice') + ' <b>' + escape(c['title']) + '</b>' + suffix]
+        deadline = ('截止：' + datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')
+                    if c.get('deadline') else '截止：待填写')
         if kind == 'launch':
-            lines += [f'参与对象：{AUDIENCES[c["audience"]]}', '截止：' + datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间'),
+            lines += [f'参与对象：{AUDIENCES[c["audience"]]}', deadline,
                       '定时开奖' if c['draw_mode'] == 'timed' else '管理员开奖']
             lines += [f'{emoji("star")} {escape(p["name"])} × {p["quantity"]} 名' for p in c['prizes']]
-            lines += [entry_terms(c),
+            # Paid launches repeat the public fairness statement after the fee terms.
+            lines += [entry_terms(c) + (FAIRNESS if c.get('entry_fee') else ''), requirement_terms(c),
                       '注册资格奖仅限开奖时未注册者本人。' if any(p['kind'] == 'registration' for p in c['prizes']) else '']
+        elif kind == 'reminder':
+            lines += [deadline, '还没报名的群友请抓紧时间。']
+        elif kind == 'cancel':
+            lines += ['本期不再报名和开奖' + ('，已扣报名积分全额退还。' if c.get('entry_fee') else '。')]
         else:
             winners = winners or []
             shown = 0
@@ -350,13 +669,25 @@ class LotteryService:
                 lines += [f'其余 {len(winners) - shown} 位见结果页']
             if not winners:
                 lines += ['本期暂无中奖者']
-        payload = {'chat_id': c['chat_id'], 'text': '\n'.join(x for x in lines if x), 'parse_mode': 'HTML',
-                   'reply_markup': {'inline_keyboard': [[{'text': '查看结果' if kind == 'result' else '参加抽奖',
-                       'icon_custom_emoji_id': EMOJI['check' if kind == 'result' else 'gift'][0],
-                       'url': f'https://t.me/{row["bot_username"]}?startapp=lottery_{row["id"]}'}]]}}
+        payload = {'chat_id': c['chat_id'], 'text': '\n'.join(x for x in lines if x), 'parse_mode': 'HTML'}
+        if kind != 'cancel':
+            payload['reply_markup'] = {'inline_keyboard': [[{'text': '查看结果' if kind == 'result' else '参加抽奖',
+                                       'icon_custom_emoji_id': EMOJI['check' if kind == 'result' else 'gift'][0],
+                                       'url': f'https://t.me/{row["bot_username"]}?startapp=lottery_{row["id"]}'}]]}
         if c['thread_id']:
             payload['message_thread_id'] = c['thread_id']
         return payload
+
+    @staticmethod
+    def dm_payload(row, award):
+        """Short winner DM: activity, prize, original deep link. Never private claim text."""
+        prize = json.loads(award['prize_json'])
+        tg_id = str(award['tg_id'])
+        text = '\n'.join([emoji('gift') + ' <b>恭喜中奖</b>', '活动：' + escape(row['config']['title']),
+                          '奖品：' + escape(prize['name']), '点击下方按钮查看结果并领取。'])
+        return {'chat_id': int(tg_id) if tg_id.isdigit() else tg_id, 'text': text, 'parse_mode': 'HTML',
+                'reply_markup': {'inline_keyboard': [[{'text': '查看结果 / 领取', 'icon_custom_emoji_id': EMOJI['check'][0],
+                                                       'url': deep_link(row)}]]}}
 
     def stage_notice(self, conn, row, kind, winners=None):
         conn.execute('INSERT OR IGNORE INTO lottery_notices(lottery_id,kind,payload_json,updated_at) VALUES(?,?,?,?)',
@@ -374,6 +705,9 @@ class LotteryService:
             if int(time.time()) >= row['config']['deadline']:
                 raise ValueError('报名截止时间已过，请修改草稿后发布')
             row['config']['chat_id'] = chat_id
+            # Only activities published from now on get winner DMs and the live
+            # entry count; legacy published rows keep their stored (absent = off) config.
+            row['config'].update(winner_dm=True, live_count=True)
             changed = conn.execute('UPDATE lotteries SET state=\'published\',published_at=?,bot_username=?,config_json=? '
                                    'WHERE id=? AND state=\'draft\' AND revision=?',
                                    (int(time.time()), username, encode(row['config']), lottery_id, revision)).rowcount
@@ -383,11 +717,41 @@ class LotteryService:
             self.stage_notice(conn, row, 'launch')
             self.audit(conn, actor, 'publish', lottery_id)
         await self.deliver_notices(lottery_id)
+        await self.deliver_ops(lottery_id)
 
-    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None, expected_entry_fee=ENTRY_FEE_UNSET):
+    def threshold(self, config, tg_id, now=None):
+        """Read-only participation-threshold verdict, computed before the write lock.
+
+        Returns (uid, error). Level = current Lv number of the existing level
+        system; watch time = the member-facing recorded 30-day window.
+        """
+        if not gated(config):
+            return None, None
+        member = self.members.find_by_telegram(tg_id)
+        if not member:
+            return None, '本期设有参与门槛，须绑定已注册账户后报名'
+        uid = str(member['emby_user_id'])
+        need = config.get('min_level')
+        if need:
+            level = (member.get('activity_level') or {}).get('level')
+            if not level:
+                return uid, f'需要 Lv{need} 及以上（当前无法确认等级）'
+            if level < need:
+                return uid, f'需要 Lv{need} 及以上（当前 Lv{level}）'
+        hours = config.get('min_watch_hours')
+        if hours:
+            seconds = watch_seconds(self.db, uid, int(time.time()) if now is None else now)
+            if seconds < hours * 3600:
+                return uid, f'需要近 30 天观看满 {hours} 小时（当前约 {int(seconds // 360) / 10:g} 小时）'
+        return uid, None
+
+    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None, expected_entry_fee=ENTRY_FEE_UNSET,
+                   consent_version=None, device=None):
         if not self.bot._cfg().get('enabled'):
             raise ValueError('Bot 暂未启用，无法确认群成员身份')
         row = self.row(lottery_id)
+        if row['state'] == 'cancelled':
+            raise ValueError('活动已取消，不能报名')
         if row['state'] != 'published' or int(time.time()) >= row['config']['deadline']:
             raise ValueError('报名已截止或活动尚未发布')
         # No unavailable-check fail-open, including Telegram's restricted status.
@@ -398,14 +762,19 @@ class LotteryService:
                 (member.get('status') == 'restricted' and member.get('is_member') is True)):
             raise ValueError('仅发布群的群成员可报名')
         tg_id = str(tg['id'])
+        gate_uid, gate_error = self.threshold(row['config'], tg_id)
         with economy_write(self.db) as conn:
             current = conn.execute('SELECT * FROM lotteries WHERE id=?', (lottery_id,)).fetchone()
             c = json.loads(current['config_json'])
             now = int(time.time())
+            if current['state'] == 'cancelled':
+                raise ValueError('活动已取消，不能报名')
             if current['state'] != 'published' or now >= c['deadline']:
                 raise ValueError('报名已截止')
             if conn.execute('SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id)).fetchone():
                 return
+            # Consent + usable device data before any debit; never decoded without consent.
+            consented = lottery_device.admit(conn, c, consent_version, device)
             account = conn.execute('SELECT emby_user_id FROM members WHERE tg_user_id=?', (tg_id,)).fetchone()
             registered = bool(account)
             if c['audience'] != 'all' and (c['audience'] == 'member') != registered:
@@ -414,6 +783,17 @@ class LotteryService:
             if ((expected_entry_fee is not ENTRY_FEE_UNSET or fee) and
                     (type(expected_entry_fee) is not int or expected_entry_fee != fee)):
                 raise ValueError('报名积分费用未确认或已变化，请刷新活动后确认报名')
+            if gated(c):
+                if gate_error:
+                    raise ValueError(gate_error)
+                if not account or str(account['emby_user_id']) != gate_uid:
+                    raise ValueError('账号绑定状态已变化，请刷新后重试')
+                if c.get('min_points'):
+                    # Checked only, never debited; same lock as every points spender.
+                    balance = conn.execute('SELECT COALESCE(SUM(delta),0) FROM points_ledger WHERE emby_user_id=?',
+                                           (gate_uid,)).fetchone()[0]
+                    if balance < c['min_points']:
+                        raise ValueError(f'需要积分余额不少于 {c["min_points"]}（当前 {balance}，只校验不扣）')
             if fee:
                 if not account:
                     raise ValueError('收费活动须绑定已注册积分账户后报名')
@@ -427,7 +807,9 @@ class LotteryService:
             conn.execute('INSERT INTO lottery_entries(lottery_id,tg_id,label,joined_at,registered) VALUES(?,?,?,?,?)',
                          (lottery_id, tg_id, label[:40], now, int(registered)))
             if c['anti_multi']:
-                lottery_identity.record(conn, lottery_id, tg_id, source_ip, browser_id, now)
+                lottery_identity.record(conn, lottery_id, tg_id, source_ip,
+                                        lottery_device.browser(consented, browser_id), now)
+            lottery_device.record(conn, lottery_id, tg_id, consented, now)
 
     def draw(self, lottery_id, actor='system', *, timed=False, now=None):
         now = int(time.time()) if now is None else now
@@ -437,11 +819,14 @@ class LotteryService:
                 raise KeyError('活动不存在')
             if row['state'] == 'settled':
                 return
+            if row['state'] == 'cancelled':
+                raise ValueError('活动已取消，不能开奖')
             if row['state'] != 'published':
                 raise ValueError('活动尚未发布')
             c = json.loads(row['config_json'])
             if timed and (c['draw_mode'] != 'timed' or now < c['deadline']):
                 return
+            lottery_device.settle(conn, lottery_id, c, now)  # merged into excluded before candidates are read
             remaining = [dict(r) for r in conn.execute('SELECT * FROM lottery_entries WHERE lottery_id=? AND excluded=0 ORDER BY tg_id', (lottery_id,))]
             registered = {str(r[0]) for r in conn.execute("SELECT tg_user_id FROM members WHERE tg_user_id<>''")}
             rng = secrets.SystemRandom()
@@ -458,7 +843,15 @@ class LotteryService:
                     remaining.remove(w)
             conn.execute('UPDATE lotteries SET state=\'settled\',settled_at=?,last_error=\'\' WHERE id=?', (now, lottery_id))
             winners = [dict(r) for r in conn.execute('SELECT * FROM lottery_awards WHERE lottery_id=? ORDER BY id', (lottery_id,))]
-            self.stage_notice(conn, {**dict(row), 'config': c}, 'result', winners)
+            current = {**dict(row), 'config': c}
+            self.stage_notice(conn, current, 'result', winners)
+            if c.get('winner_dm'):
+                # Durable DM jobs in the same transaction; delivery is separate
+                # and can never change winners or award delivery.
+                for w in winners:
+                    conn.execute('INSERT OR IGNORE INTO lottery_dms(lottery_id,award_id,tg_id,payload_json,updated_at) '
+                                 'VALUES(?,?,?,?,?)', (lottery_id, w['id'], w['tg_id'],
+                                                        encode(self.dm_payload(current, w)), now))
             self.audit(conn, actor, 'draw', lottery_id, f'winners={len(winners)}')
 
     def deliver_award(self, award_id):
@@ -543,6 +936,11 @@ class LotteryService:
             CALL_DELIVERY.set({'state': 'unknown'})
             return None
 
+    @staticmethod
+    def _last_failure():
+        from app.modules.telegram import _CALL_ERROR
+        return CALL_DELIVERY.get() or {}, str(_CALL_ERROR.get() or '').lower()
+
     async def deliver_notices(self, lottery_id=None):
         now = int(time.time())
         # A crashed sender might have reached Telegram. Never replay an expired lease.
@@ -554,7 +952,7 @@ class LotteryService:
                              (' AND lottery_id=?' if lottery_id else '') + ' ORDER BY id LIMIT 20',
                              (now, lottery_id) if lottery_id else (now,))
         for notice in rows:
-            launch_deadline = None
+            launch_deadline = reply_to = None
             with economy_write(self.db) as conn:
                 if notice['kind'] == 'launch' and not notice['message_id']:
                     activity = conn.execute('SELECT state,config_json FROM lotteries WHERE id=?',
@@ -562,8 +960,24 @@ class LotteryService:
                     launch_deadline = json.loads(activity['config_json'])['deadline']
                     if activity['state'] != 'published' or launch_deadline <= int(time.time()):
                         conn.execute("UPDATE lottery_notices SET state='failed',error=?,next_at=0 WHERE id=? AND state='pending'",
-                                     ('发起公告报名期已结束，未补发；请管理员人工处理', notice['id']))
+                                     ('活动已取消，发起公告未补发' if activity['state'] == 'cancelled'
+                                      else '发起公告报名期已结束，未补发；请管理员人工处理', notice['id']))
                         continue
+                if notice['kind'] == 'reminder' and not notice['message_id']:
+                    activity = conn.execute('SELECT state,config_json FROM lotteries WHERE id=?',
+                                            (notice['lottery_id'],)).fetchone()
+                    deadline = json.loads(activity['config_json'])['deadline']
+                    # A delayed (Bot paused / rate-limited) reminder is never sent
+                    # late, after cancellation, the deadline or the draw.
+                    if activity['state'] != 'published' or int(time.time()) >= deadline - REMINDER_CUTOFF:
+                        conn.execute("UPDATE lottery_notices SET state='skipped',error=?,next_at=0 WHERE id=? AND state='pending'",
+                                     ('已错过提醒窗口或活动已结束，未发送', notice['id']))
+                        continue
+                if notice['kind'] in ('reminder', 'cancel') and not notice['message_id']:
+                    # Reply target is the then-known launch message (resolved at send time).
+                    launch = conn.execute("SELECT message_id FROM lottery_notices WHERE lottery_id=? AND kind='launch'",
+                                          (notice['lottery_id'],)).fetchone()
+                    reply_to = launch['message_id'] if launch else None
                 changed = conn.execute("UPDATE lottery_notices SET state='sending',attempts=attempts+1,updated_at=? WHERE id=? AND state='pending'",
                                        (now, notice['id'])).rowcount
             if not changed:
@@ -577,30 +991,24 @@ class LotteryService:
                 payload['message_id'] = notice['message_id']
                 payload.pop('message_thread_id', None)
                 method = 'editMessageText'
+            elif reply_to:
+                payload['reply_parameters'] = {'message_id': reply_to, 'allow_sending_without_reply': True}
             result = await self._send(method, payload)
-            failure = CALL_DELIVERY.get() or {}
-            from app.modules.telegram import _CALL_ERROR
-            error = str(_CALL_ERROR.get() or '').lower()
+            failure, error = self._last_failure()
             _, allow_fallback = notice_rejection(error, failure)
-            has_custom = '<tg-emoji' in payload['text'] or any(
-                'icon_custom_emoji_id' in button for buttons in payload['reply_markup']['inline_keyboard'] for button in buttons)
             expired = launch_deadline is not None and launch_deadline <= int(time.time())
-            downgraded = result is None and allow_fallback and has_custom and not expired
+            downgraded = result is None and allow_fallback and has_custom(payload) and not expired
             if downgraded:
-                # Only our known generated tags; no general HTML interpretation.
-                for eid, fallback in LETTERS + list(EMOJI.values()):
-                    payload['text'] = payload['text'].replace(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>', fallback)
-                for buttons in payload['reply_markup']['inline_keyboard']:
-                    for button in buttons:
-                        button.pop('icon_custom_emoji_id', None)
+                strip_custom(payload)
                 # Persist before the retry, so a later known connection failure /
                 # rate limit or manual recovery cannot reintroduce the icons.
                 saved = json.loads(notice['payload_json'])
-                saved.update(text=payload['text'], reply_markup=payload['reply_markup'])
+                saved['text'] = payload['text']
+                if 'reply_markup' in payload:
+                    saved['reply_markup'] = payload['reply_markup']
                 self.db.execute('UPDATE lottery_notices SET payload_json=? WHERE id=?', (encode(saved), notice['id']))
                 result = await self._send(method, payload)
-                failure = CALL_DELIVERY.get() or {}
-                error = str(_CALL_ERROR.get() or '').lower()
+                failure, error = self._last_failure()
             mid = result.get('message_id') if isinstance(result, dict) else notice['message_id']
             state, reason, next_at = 'unknown', '未取得确认，需管理员人工核验', 0
             if (result is not None and mid) or (notice['message_id'] and failure.get('not_modified')):
@@ -612,7 +1020,7 @@ class LotteryService:
                 elif expired:
                     reason += '；报名期已结束，未补发'
             elif (failure.get('state') == 'retry' and 'timeout' not in error
-                  and failure.get('reason') in ('连接失败，稍后重试', 'Telegram 限流')):
+                  and failure.get('reason') in RETRYABLE):
                 state = 'pending' if notice['attempts'] < 3 else 'failed'
                 reason = failure['reason']
                 next_at = now + max(60 * 2 ** notice['attempts'], failure.get('retry_after', 0))
@@ -620,6 +1028,11 @@ class LotteryService:
             # it retryable; lottery public announcements intentionally do not.
             self.db.execute('UPDATE lottery_notices SET state=?,message_id=?,error=?,updated_at=?,next_at=? WHERE id=?',
                             (state, mid, reason, int(time.time()), next_at, notice['id']))
+            if notice['kind'] == 'launch' and state == 'sent':
+                # The (re)confirmed launch text carries no entry-count line yet.
+                self.db.execute("UPDATE lottery_ops SET state='idle',shown='open:0',target='',error='',attempts=0,"
+                                "next_at=0,updated_at=0,message_id=? WHERE lottery_id=? AND kind='live'",
+                                (mid, notice['lottery_id']))
 
     def recover_notice(self, lottery_id, notice_id, raw, actor):
         with economy_write(self.db) as conn:
@@ -634,6 +1047,185 @@ class LotteryService:
             conn.execute("UPDATE lottery_notices SET state='pending',message_id=?,next_at=0,attempts=0,error='' WHERE id=?", (mid, notice_id))
             self.audit(conn, actor, 'notice_recover', notice_id, 'edit' if mid else 'confirmed absent / rejected')
 
+    def stage_reminders(self, now=None):
+        """At most one reminder per activity, ~1h before the deadline (UNIQUE kind)."""
+        now = int(time.time()) if now is None else now
+        rows = self.db.query("SELECT l.id,l.published_at,l.config_json FROM lotteries l JOIN lottery_notices n "
+                             "ON n.lottery_id=l.id AND n.kind='launch' WHERE l.state='published' AND n.state='sent' "
+                             "AND n.message_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM lottery_notices r "
+                             "WHERE r.lottery_id=l.id AND r.kind='reminder')")
+        for row in rows:
+            c = json.loads(row['config_json'])
+            deadline = c['deadline']
+            if (not c.get('reminder') or deadline - (row['published_at'] or 0) < REMINDER_NOTICE
+                    or not deadline - REMINDER_LEAD <= now < deadline - REMINDER_CUTOFF):
+                continue
+            with economy_write(self.db) as conn:
+                current = conn.execute('SELECT * FROM lotteries WHERE id=?', (row['id'],)).fetchone()
+                if current['state'] == 'published':
+                    self.stage_notice(conn, {**dict(current), 'config': json.loads(current['config_json'])}, 'reminder')
+
+    async def deliver_dms(self, lottery_id=None):
+        """Winner DMs: unreachable recipients are recorded, never retried; an
+        unconfirmed result is never resent. Independent of results and awards."""
+        now = int(time.time())
+        self.db.execute("UPDATE lottery_dms SET state='unknown',error='发送进程中断，未自动重发' "
+                        "WHERE state='sending' AND updated_at<?", (now - LEASE,))
+        if not self.bot._cfg().get('enabled'):
+            self.db.execute("UPDATE lottery_dms SET error='Bot 暂未启用，私信保留等待恢复' WHERE state='pending'")
+            return
+        rows = self.db.query("SELECT * FROM lottery_dms WHERE state='pending' AND next_at<=?" +
+                             (' AND lottery_id=?' if lottery_id else '') + ' ORDER BY id LIMIT 30',
+                             (now, lottery_id) if lottery_id else (now,))
+        for dm in rows:
+            if not self.db.execute("UPDATE lottery_dms SET state='sending',attempts=attempts+1,updated_at=? "
+                                   "WHERE id=? AND state='pending'", (now, dm['id'])):
+                continue
+            attempts = dm['attempts'] + 1
+            payload = json.loads(dm['payload_json'])
+            result = await self._send('sendMessage', payload)
+            failure, error = self._last_failure()
+            downgraded = result is None and notice_rejection(error, failure)[1] and has_custom(payload)
+            if downgraded:
+                strip_custom(payload)
+                self.db.execute('UPDATE lottery_dms SET payload_json=? WHERE id=?', (encode(payload), dm['id']))
+                result = await self._send('sendMessage', payload)
+                failure, error = self._last_failure()
+            state = outcome(result if isinstance(result, dict) else None, failure, error)
+            reason, next_at = '', 0
+            if state == 'failed' and failure.get('reason') in UNREACHABLE:
+                state, reason = 'unreachable', '无法私信：对方未私聊过 Bot、已屏蔽或已注销；未重试'
+            elif state == 'failed':
+                reason = ('已移除自定义图标重试一次；' if downgraded else '') + notice_rejection(error, failure)[0]
+            elif state == 'retry' and attempts >= MAX_ATTEMPTS:
+                state, reason = 'failed', failure['reason'] + '；已达自动重试上限'
+            elif state == 'retry':
+                state, reason, next_at = 'pending', failure['reason'], backoff(attempts, failure, now)
+            elif state == 'unknown':
+                reason = '未取得确认，未自动重发'
+            self.db.execute('UPDATE lottery_dms SET state=?,message_id=?,error=?,updated_at=?,next_at=? WHERE id=?',
+                            (state, result.get('message_id') if isinstance(result, dict) else None, reason,
+                             int(time.time()), next_at, dm['id']))
+
+    def pinned_by_lottery(self, chat_id, message_id):
+        """Whether a group message is a launch notice this feature pinned (service-message cleanup)."""
+        return bool(self.db.one("SELECT 1 FROM lottery_ops WHERE kind='pin' AND chat_id=? AND message_id=?",
+                                (str(chat_id), message_id)))
+
+    async def deliver_ops(self, lottery_id=None):
+        """Silent pin, unpin and live entry-count edits of a confirmed launch notice.
+
+        Only launch notices with a confirmed message_id. Failures are recorded
+        for administrators; uncertain outcomes are not repeated; nothing here
+        can change entries, results or awards.
+        """
+        now = int(time.time())
+        self.db.execute("UPDATE lottery_ops SET state='unknown',error='处理进程中断，未自动重试' "
+                        "WHERE state='sending' AND updated_at<?", (now - LEASE,))
+        if not self.bot._cfg().get('enabled'):
+            return
+        sql = ("SELECT l.id FROM lotteries l JOIN lottery_notices n ON n.lottery_id=l.id AND n.kind='launch' "
+               "WHERE n.state='sent' AND n.message_id IS NOT NULL AND (l.state='published' OR "
+               "(l.state IN ('settled','cancelled') AND COALESCE(l.settled_at,l.cancelled_at,0)>=?))")
+        params = (now - FINISHED_WINDOW,)
+        if lottery_id:
+            sql, params = sql + ' AND l.id=?', (*params, lottery_id)
+        for row in self.db.query(sql + ' ORDER BY l.published_at LIMIT 100', params):
+            for kind in ('pin', 'unpin', 'live'):
+                job = self._claim_op(row['id'], kind)
+                if job:
+                    await self._run_op(row['id'], kind, *job)
+
+    def _claim_op(self, lottery_id, kind):
+        """Decide and claim one due operation inside the write lock: (method, payload, attempts) or None."""
+        now = int(time.time())
+        with economy_write(self.db) as conn:
+            row = conn.execute('SELECT * FROM lotteries WHERE id=?', (lottery_id,)).fetchone()
+            launch = conn.execute("SELECT message_id,payload_json FROM lottery_notices WHERE lottery_id=? AND kind='launch' "
+                                  "AND state='sent'", (lottery_id,)).fetchone()
+            if not row or not launch or not launch['message_id']:
+                return None
+            c = {**LEGACY_DEFAULTS, **json.loads(row['config_json'])}
+            ops = {r['kind']: dict(r) for r in conn.execute('SELECT * FROM lottery_ops WHERE lottery_id=?', (lottery_id,))}
+            op = ops.get(kind)
+
+            def claim(target='', attempts=None):
+                attempts = op['attempts'] + 1 if attempts is None else attempts
+                conn.execute("UPDATE lottery_ops SET state='sending',attempts=?,target=?,updated_at=?,error='' "
+                             'WHERE lottery_id=? AND kind=?', (attempts, target, now, lottery_id, kind))
+                return attempts
+
+            def insert(state, chat, mid, shown='', updated=None):
+                conn.execute('INSERT INTO lottery_ops(lottery_id,kind,state,chat_id,message_id,shown,updated_at) '
+                             'VALUES(?,?,?,?,?,?,?)', (lottery_id, kind, state, chat, mid, shown,
+                                                       now if updated is None else updated))
+                return dict(conn.execute('SELECT * FROM lottery_ops WHERE lottery_id=? AND kind=?',
+                                         (lottery_id, kind)).fetchone())
+
+            if kind == 'pin':
+                if not c['pin'] or (op is None and row['state'] != 'published'):
+                    return None
+                op = op or insert('pending', str(c['chat_id']), launch['message_id'])
+                if op['state'] != 'pending' or op['next_at'] > now:
+                    return None
+                if row['state'] != 'published':
+                    conn.execute("UPDATE lottery_ops SET state='skipped',error='活动已结束，未置顶',updated_at=? "
+                                 "WHERE lottery_id=? AND kind='pin'", (now, lottery_id))
+                    return None
+                attempts = claim()
+                return 'pinChatMessage', {'chat_id': op['chat_id'], 'message_id': op['message_id'],
+                                          'disable_notification': True}, attempts
+            if kind == 'unpin':
+                pin = ops.get('pin')
+                if not c['pin'] or row['state'] not in ('settled', 'cancelled') or not pin or pin['state'] not in ('sent', 'unknown'):
+                    return None
+                op = op or insert('pending', pin['chat_id'], pin['message_id'])
+                if op['state'] != 'pending' or op['next_at'] > now:
+                    return None
+                attempts = claim()
+                return 'unpinChatMessage', {'chat_id': op['chat_id'], 'message_id': op['message_id']}, attempts
+            # Live entry count: the public total, same as the ordinary view.
+            if not c['live_count']:
+                return None
+            op = op or insert('idle', str(c['chat_id']), launch['message_id'], 'open:0', 0)
+            if op['state'] in ('failed', 'sending', 'skipped') or (op['state'] == 'pending' and op['next_at'] > now):
+                return None
+            count = conn.execute('SELECT COUNT(*) FROM lottery_entries WHERE lottery_id=?', (lottery_id,)).fetchone()[0]
+            phase = ('cancelled' if row['state'] == 'cancelled'
+                     else 'closed' if row['state'] == 'settled' or now >= c['deadline'] else 'open')
+            key = f'{phase}:{count}'
+            if key == op['shown'] or (op['state'] == 'unknown' and key == op['target']):
+                return None  # unchanged, or the identical unconfirmed edit: never repeated
+            if phase == 'open' and op['state'] != 'pending' and now - op['updated_at'] < LIVE_INTERVAL:
+                return None
+            attempts = claim(key, op['attempts'] + 1 if op['state'] == 'pending' and key == op['target'] else 1)
+            stored = normalize_notice_payload(json.loads(launch['payload_json']))
+            payload = {'chat_id': stored['chat_id'], 'message_id': launch['message_id'], 'parse_mode': 'HTML',
+                       'text': stored['text'] + '\n' + live_line(key, c)}
+            if stored.get('reply_markup'):
+                payload['reply_markup'] = stored['reply_markup']
+            return 'editMessageText', payload, attempts
+
+    async def _run_op(self, lottery_id, kind, method, payload, attempts):
+        now = int(time.time())
+        result = await self._send(method, payload)
+        failure, error = self._last_failure()
+        state = outcome(result, failure, error)
+        action = {'pin': '置顶', 'unpin': '取消置顶', 'live': '编辑发起公告'}[kind]
+        reason, next_at = '', 0
+        if state == 'failed':
+            reason = rejection(error, failure, action)
+        elif state == 'retry' and attempts >= MAX_ATTEMPTS:
+            state, reason = 'failed', failure['reason'] + '；已达自动重试上限'
+        elif state == 'retry':
+            state, reason, next_at = 'pending', failure['reason'], backoff(attempts, failure, now)
+        elif state == 'unknown':
+            reason = rejection(error, failure, action)
+        shown = ',shown=target' if state == 'sent' and kind == 'live' else ''
+        self.db.execute(f'UPDATE lottery_ops SET state=?,error=?,updated_at=?,next_at=?{shown} '
+                        "WHERE lottery_id=? AND kind=? AND state='sending'",
+                        (state, reason, int(time.time()), next_at, lottery_id, kind))
+
     async def tick(self):
         for row in self.db.query("SELECT id,config_json FROM lotteries WHERE state='published'"):
             c = json.loads(row['config_json'])
@@ -643,4 +1235,14 @@ class LotteryService:
                 except Exception:  # noqa: BLE001 - persisted operator-visible failure
                     self.db.execute('UPDATE lotteries SET last_error=? WHERE id=?', ('定时开奖失败，待重试；未改变已确定结果', row['id']))
         self.deliver_awards()
+        try:
+            self.stage_reminders()
+        except Exception:  # noqa: BLE001 - optional reminder must never block delivery
+            logging.getLogger(__name__).warning('Lottery reminder staging failed; retried next tick')
         await self.deliver_notices()
+        # Optional group/private operations run last and independently.
+        for step in (self.deliver_dms, self.deliver_ops):
+            try:
+                await step()
+            except Exception:  # noqa: BLE001 - durable rows remain for the next tick
+                logging.getLogger(__name__).warning('Lottery %s interrupted; rows retained', step.__name__)

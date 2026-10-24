@@ -39,6 +39,11 @@ def register(app, telegram_context):
                 'bot_username': app.state.telegram._bot_username,
                 'points_balance': max(0, service().points.balance(ctx['member']['emby_user_id'])) if ctx['member'] else None}
 
+    @app.get('/api/app/lottery/ongoing')
+    async def ongoing(ctx=identity):
+        # Member home: signed initData only (registered or not); local data only.
+        return service().ongoing(ctx['tg_id'])
+
     @app.get('/api/app/lottery/admin/options')
     async def options(ctx=manager):
         return {'chats': app.state.telegram._group_allowlist(),
@@ -82,6 +87,7 @@ def register(app, telegram_context):
             await service().join(lid, ctx['tg'],
                                  source_ip=trusted_ip(request, settings().mediadeck_lottery_ip_mode),
                                  browser_id=raw.get('browser_id'),
+                                 consent_version=raw.get('consent_version'), device=raw.get('ctx'),
                                  **({'expected_entry_fee': raw['expected_entry_fee']} if 'expected_entry_fee' in raw else {}))
             return service().view(lid, ctx['tg_id'], ctx['is_admin'])
 
@@ -115,6 +121,27 @@ def register(app, telegram_context):
             service().draw(lid, ctx['tg_id'])
             service().deliver_awards(lid)
             await service().deliver_notices(lid)
+            await service().deliver_dms(lid)
+            await service().deliver_ops(lid)
+            return service().view(lid, ctx['tg_id'], True)
+
+    @app.post('/api/app/lottery/{lid}/copy')
+    async def copy_draft(lid: str, ctx=manager):
+        with errors():
+            return service().view(service().copy(lid, ctx['tg_id']), ctx['tg_id'], True)
+
+    @app.post('/api/app/lottery/{lid}/delete')
+    async def delete_draft(lid: str, raw: dict = payload, ctx=manager):
+        with errors():
+            service().delete(lid, ctx['tg_id'], confirm=raw.get('confirm'))
+            return {'deleted': True, 'id': lid}
+
+    @app.post('/api/app/lottery/{lid}/cancel')
+    async def cancel(lid: str, raw: dict = payload, ctx=manager):
+        with errors():
+            service().cancel(lid, ctx['tg_id'], confirm=raw.get('confirm'))
+            await service().deliver_notices(lid)
+            await service().deliver_ops(lid)
             return service().view(lid, ctx['tg_id'], True)
 
     @app.post('/api/app/lottery/{lid}/retry-awards')

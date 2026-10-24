@@ -1,53 +1,1111 @@
-/* Approved Lucky Studio visual language, scoped to lottery only. */
-.lottery{color-scheme:dark;--lot-muted:#aaa0bd;--lot-line:rgba(207,202,255,.14);color:#f5f3ff;background:radial-gradient(450px 280px at 95% 6%,#6145a93b,transparent 72%),radial-gradient(350px 280px at -20% 45%,#28607b17,transparent 76%),#0b0d18;border-radius:22px;padding:18px;margin:-2px;min-height:80vh;font-size:13px}
-.lottery *{box-sizing:border-box}.lottery h2{font-size:23px;font-weight:650;margin:5px 0}.lottery h3{font-size:15px;margin:18px 0 11px}.lottery p{line-height:1.8}.lottery .muted{color:var(--lot-muted)}.lottery .small{font-size:12px}.lottery .tiny{font-size:11px}.lottery .row{display:flex;align-items:center;justify-content:initial;gap:10px}.lottery .between{justify-content:space-between}.lottery .grow{flex:1;min-width:0}.lottery button{min-height:44px;cursor:pointer;font:inherit;scroll-margin-block:16px}.lottery button:disabled{opacity:.5;cursor:default}.lottery button:focus-visible,.lottery a:focus-visible{outline:2px solid #c5aaff;outline-offset:3px}.lottery .section-kicker{letter-spacing:2px;color:#b5a6d0;font-size:10px}.lottery .emoji{display:inline-block;object-fit:contain;vertical-align:middle;flex:none;pointer-events:none}.lottery .lucky{height:36px;display:flex;align-items:center;gap:1px;margin-left:-3px;position:relative;z-index:2}.lottery .lucky img{width:31px;height:35px}.lottery .lot-hero{position:relative;overflow:hidden;border-radius:23px;min-height:205px;padding:20px 20px 17px;border:1px solid #c4adff30;background:radial-gradient(ellipse at 100% 0,#a572d74f,transparent 65%),linear-gradient(115deg,#302051,#34204c 70%,#2b2549);box-shadow:0 16px 36px #0a061938,inset 0 1px #ffffff09;margin-top:17px}.lottery .lot-hero:before{content:"";position:absolute;inset:0;background:linear-gradient(115deg,transparent 24%,#f0d6ff05 25%,#f0d6ff05 26%,transparent 27%,transparent 73%,#ffffff04 74%,transparent 75%);pointer-events:none}.lottery .lot-hero h3{font-size:24px;font-weight:650;letter-spacing:-.7px;margin:9px 0;line-height:1.35;position:relative;z-index:2;max-width:70%;overflow-wrap:anywhere}.lottery .hero-sub{font-size:11px;color:#d8c6e9bb;margin:4px 0 26px;position:relative;z-index:2;max-width:65%}.lottery .hero-art{position:absolute;width:125px;height:125px;right:-4px;top:42px;filter:drop-shadow(0 15px 18px #1f0d3980);animation:lot-float 5s ease-in-out infinite}.lottery .hero-star{position:absolute;width:28px;height:28px;right:104px;top:25px;transform:rotate(-15deg)}.lottery .hero-bottom{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:7px;position:relative;z-index:2;font-size:11px;color:#d1c3e3;border-top:1px solid #f0daff14;padding-top:12px}.lottery .pill{display:inline-flex;align-items:center;gap:5px;border-radius:99px;padding:5px 9px;color:#c9b7ff;font-size:11px;background:#ae94ee15;border:1px solid #ae94ee2b}.lottery .pill.green{color:#8ee6bb;background:#61bd9310;border-color:#61bd9324}.lottery .pill.gold{color:#f0d39c;background:#e9bd6c0b;border-color:#e9bd6c29}.lottery .lot-stats{display:grid;grid-template-columns:repeat(3,1fr);margin:13px 0 20px;gap:8px}.lottery .stat{border:1px solid var(--lot-line);border-radius:14px;padding:12px 11px;background:#ffffff03}.lottery .stat b{display:block;font-size:23px;font-weight:600;margin-bottom:3px}.lottery .stat span{font-size:11px;color:var(--lot-muted)}.lottery .stat:nth-child(2) b{color:#c3b5fa}.lottery .stat:nth-child(3) b{color:#efc2c8}.lottery .prize-list{border:1px solid var(--lot-line);border-radius:18px;overflow:hidden;background:linear-gradient(130deg,#ffffff06,#ffffff02);backdrop-filter:blur(14px)}.lottery .prize-row{display:flex;align-items:center;gap:12px;padding:13px;border-bottom:1px solid #ffffff08}.lottery .prize-row:last-child{border-bottom:0}.lottery .prize-icon{width:46px;height:46px;border-radius:13px;display:grid;place-items:center;background:radial-gradient(ellipse,#a789e32b,#a789e308);border:1px solid #c8b6e611;flex:none}.lottery .prize-name{font-size:13px;font-weight:600;line-height:1.4;overflow-wrap:anywhere}.lottery .prize-desc{font-size:11px;color:var(--lot-muted);margin-top:4px}.lottery .prize-count{text-align:right;font-size:13px;color:#dbd3e7;flex:none}.lottery .rule-note{display:flex;align-items:flex-start;gap:8px;border:1px solid #8e7dba30;border-radius:12px;padding:12px;margin-top:13px;color:#b9aecb;background:#a18be108;font-size:12px;line-height:1.85;overflow-wrap:anywhere}.lottery .ticket{padding:15px;border:1px dashed #b8a4ef60;background:linear-gradient(110deg,#a48dd51a,#a48dd506);border-radius:15px;margin:14px 0;display:flex;align-items:center;gap:11px}.lottery .ticket strong{color:#dbccff}.lottery .ticket small{display:block;color:#aaa0bd;margin-top:4px}.lottery .result-banner{border:1px solid #e7cb9930;border-radius:17px;padding:17px;background:radial-gradient(ellipse at 95% 0,#e8c98f17,transparent 65%),#ad925508;margin:14px 0}.lottery .result-banner h3{color:#ecd8b7;margin:0 0 7px}.lottery .result-banner p{font-size:12px;color:#c4b9a8;white-space:pre-wrap;overflow-wrap:anywhere}.lottery .lot-actions{position:sticky;bottom:0;padding:13px 0 calc(10px + env(safe-area-inset-bottom));background:#0c0e19e8;backdrop-filter:blur(16px);margin-top:18px;z-index:5;display:flex;gap:9px;flex-wrap:wrap}.lottery .btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:46px;border-radius:13px;padding:12px 14px;font-size:13px;font-weight:600;background:linear-gradient(115deg,#aa8df4,#8879ed);color:#170d2d;box-shadow:0 5px 22px #956be72e;border:0;text-decoration:none;white-space:normal}.lottery .btn.secondary{background:#ffffff07;border:1px solid var(--lot-line);color:#d2c9e4;box-shadow:none}.lottery .lot-actions .btn{flex:1}.lottery .text-btn{background:none;border:0;color:#c7b0f5;padding:6px;font-size:12px}.lottery .winner{display:flex;gap:10px;align-items:center;padding:13px;border-bottom:1px solid #ffffff07}.lottery .avatar{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:linear-gradient(140deg,#6951a6,#34355d);color:#eee0ff;flex:none}.lottery .subpanel{background:#0b0a1455;border:1px solid #9d83d23a;border-radius:14px;padding:13px;margin:12px 0}.lottery .add-prize{width:100%;padding:11px;background:#ad8fdf09;border:1px dashed #ac8cda55;color:#c6adea;border-radius:11px}.lottery .error{font-size:12px;color:#ffb5c3;white-space:pre-wrap;overflow-wrap:anywhere}.lottery .message{background:#211e34;border:1px solid #aa91d626;border-radius:17px 17px 17px 4px;padding:16px;white-space:pre-wrap;line-height:1.85;font-size:13px}.lottery .empty{text-align:center;padding:32px 12px;color:#b9accb}.lottery .activity-item{width:100%;text-align:left;background:#ffffff04;color:#f5f3ff;border:1px solid var(--lot-line);border-radius:16px;padding:15px;margin:10px 0;display:flex;gap:12px;align-items:center}.lottery .footnote{text-align:center;font-size:10px;color:#9f92b3;margin:10px 0}.lottery a{color:#cbb7ff}.lottery .notice{padding:12px;border:1px solid var(--lot-line);border-radius:12px;margin:10px 0}.lottery .notice .btn{margin-top:8px}
-/* The member shell uses stable height. Lottery forms instead follow the current
-   Telegram viewport so the keyboard cannot leave controls below the scrollport. */
-#app:has(.lottery){height:var(--tg-viewport-height,100vh);height:var(--tg-viewport-height,100dvh)}
-/* Form wrappers are NOT the member app's .field input class. Keep the native
-   controls/labels, but isolate their palette from Telegram's light theme. */
-.lottery .lot-form{margin-top:22px}
-.lottery .lot-field{min-width:0;margin:0 0 17px;padding:0;border:0;background:transparent;box-shadow:none}
-.lottery label{display:block;margin:0 0 7px;font-size:12px;font-weight:500;line-height:1.6;color:#cbbfdd}
-.lottery input,.lottery select,.lottery textarea{
-  color-scheme:dark;box-sizing:border-box;width:100%;min-width:0;max-width:100%;min-height:46px;
-  border:1px solid #504363;border-radius:12px;padding:11px 12px;background:#141323;
-  color:#f5f3ff;font:inherit;font-size:16px;line-height:1.5;caret-color:#d2b9ff;
-  box-shadow:inset 0 1px 2px #00000024;scroll-margin-block:24px;
-  transition:border-color .15s,box-shadow .15s}
-.lottery input::placeholder,.lottery textarea::placeholder{color:#aaa0bd;opacity:1}
-.lottery select{appearance:auto;cursor:pointer}
-.lottery select option,.lottery select optgroup{background:#191627;color:#f5f3ff}
-.lottery textarea{min-height:104px;resize:vertical}
-.lottery input[type=number],.lottery input[type=datetime-local]{appearance:auto;font-variant-numeric:tabular-nums}
-.lottery input::-webkit-date-and-time-value{text-align:left;min-height:1.5em}
-.lottery input::-webkit-calendar-picker-indicator{opacity:.85;cursor:pointer}
-.lottery input:focus,.lottery select:focus,.lottery textarea:focus{
-  border-color:#b69af5;outline:2px solid transparent;outline-offset:2px;box-shadow:0 0 0 3px #a38add30,0 3px 18px #8e66c518}
-.lottery input:disabled,.lottery select:disabled,.lottery textarea:disabled{
-  background:#1b1928;color:#b2a8c3;border-color:#42394f;opacity:1;cursor:not-allowed;-webkit-text-fill-color:#b2a8c3}
-.lottery input[type=checkbox]{appearance:auto;accent-color:#b69af5;width:18px;height:18px;min-height:18px;
-  flex:0 0 18px;margin:2px 0 0;padding:0;border-radius:4px;box-shadow:none;cursor:pointer}
-.lottery input[type=checkbox]:focus-visible{outline:2px solid #c5aaff;outline-offset:3px}
-.lottery .lot-check{display:flex;align-items:flex-start;gap:10px;min-height:32px;font-size:13px;cursor:pointer}
-.lottery .lot-check span{min-width:0}
-.lottery .grid2{display:grid;grid-template-columns:minmax(0,1fr);gap:0}
-.lottery .subpanel{background:linear-gradient(120deg,#9c77d310,#20182d30);border-color:#9276ba36;padding:14px;margin:16px 0}
-.lottery .subpanel>h3{margin-top:0}
-.lottery .subpanel p{margin:6px 0 0}
-.lottery #lot-prize-editor{scroll-margin-block:16px}
-.lottery #lot-prize-editor .row>.btn{flex:1;min-width:0;min-height:42px;scroll-margin-block:24px}
-.lottery .add-prize{margin-top:12px}
-/* In-flow form actions never float over a focused field, help text or prize
-   controls, including when the software keyboard shrinks the WebView. */
-.lottery .lot-actions.lot-form-actions{position:static;bottom:auto;margin-top:22px;padding-top:16px;
-  border-top:1px solid var(--lot-line);background:transparent;backdrop-filter:none}
-.lottery .lot-form-actions .btn{min-width:0}
-.lottery .lot-fold{margin:16px 0;background:linear-gradient(130deg,#ffffff04,#ffffff01);border:1px solid var(--lot-line);border-radius:14px;padding:12px}
-.lottery .lot-fold summary{color:#c9b7ff;font-size:12px;font-weight:600;cursor:pointer;user-select:none;outline:none}
-.lottery .lot-fold summary:focus-visible{outline:2px solid #c5aaff;outline-offset:2px}
-.lottery .lot-fold[open] summary{margin-bottom:10px}
-.lottery .lot-fold .rule-note{margin-top:0}
-@keyframes lot-float{0%,100%{transform:translateY(0) rotate(10deg)}50%{transform:translateY(-5px) rotate(6deg)}}
-@media(max-width:360px){.lottery{padding:12px}.lottery .hero-art{width:102px;height:102px;top:57px}.lottery .lot-hero h3{font-size:21px}.lottery .prize-row{padding:12px 9px;gap:9px}.lottery .prize-icon{width:40px;height:40px}}
-@media(prefers-reduced-motion:reduce){.lottery *{animation:none!important;transition:none!important}}
+/* Scoped Lottery Redesign Styles: Follows Telegram & App light/dark theme variables. */
+.lottery {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.5;
+  padding: 4px 0 calc(100px + env(safe-area-inset-bottom));
+  min-height: 80vh;
+  position: relative;
+}
+.lottery * {
+  box-sizing: border-box;
+}
+.lottery h2 {
+  font-size: 22px;
+  font-weight: 750;
+  letter-spacing: -0.3px;
+  margin: 3px 0 0;
+  color: var(--text);
+}
+.lottery h3 {
+  font-size: 14.5px;
+  font-weight: 700;
+  margin: 20px 4px 10px;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.lottery p {
+  line-height: 1.6;
+}
+.lottery .muted {
+  color: var(--hint);
+}
+.lottery .small {
+  font-size: 12px;
+}
+.lottery .tiny {
+  font-size: 11px;
+}
+.lottery .row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lottery .between {
+  justify-content: space-between;
+}
+.lottery .grow {
+  flex: 1;
+  min-width: 0;
+}
+.lottery .num {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Header bar */
+.lottery .lot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+.lottery .lot-head-side {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+}
+.lottery .lot-top-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  padding: 6px 11px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.lottery .lot-top-btn svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2;
+  color: var(--accent);
+}
+
+/* User Role Bar */
+.lottery .lot-role-bar {
+  display: flex;
+  align-items: center;
+  margin: 2px 0 12px;
+}
+
+/* Chips / Badges */
+.lottery .pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--hint);
+  white-space: nowrap;
+}
+.lottery .pill.green {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--line));
+  background: color-mix(in srgb, var(--ok) 10%, var(--glass2));
+}
+.lottery .pill.gold {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, var(--glass2));
+}
+.lottery .pill.red {
+  color: var(--bad);
+  border-color: color-mix(in srgb, var(--bad) 30%, var(--line));
+  background: color-mix(in srgb, var(--bad) 10%, var(--glass2));
+}
+.lottery .lot-threshold-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.lottery .lot-threshold-pills .pill {
+  font-size: 11px;
+  padding: 3px 9px;
+}
+
+/* Hero Festive Card */
+.lottery .lot-hero {
+  position: relative;
+  overflow: hidden;
+  border-radius: 24px;
+  padding: 18px 18px 16px;
+  margin-bottom: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+  background: radial-gradient(280px 180px at 95% -10%, color-mix(in srgb, var(--accent2) 48%, transparent), transparent 72%),
+              radial-gradient(220px 160px at 0% 110%, color-mix(in srgb, var(--accent) 38%, transparent), transparent 70%),
+              linear-gradient(135deg, color-mix(in srgb, var(--accent) 18%, var(--bg2)), var(--bg2));
+  box-shadow: 0 12px 30px var(--glow), var(--shadow);
+  color: var(--text);
+  isolation: isolate;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+.lottery .lot-hero .hero-sheen {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(115deg, transparent 32%, rgba(255, 255, 255, .12) 46%, transparent 60%);
+  pointer-events: none;
+  z-index: 1;
+}
+.lottery .lot-hero .hero-top-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  position: relative;
+  z-index: 2;
+}
+.lottery .lot-hero .lucky {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+.lottery .lot-hero .lucky img {
+  width: 25px;
+  height: 28px;
+  object-fit: contain;
+}
+.lottery .lot-hero h3 {
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: -0.3px;
+  margin: 4px 0 10px;
+  line-height: 1.3;
+  color: var(--text);
+  position: relative;
+  z-index: 2;
+  max-width: 65%;
+  overflow-wrap: anywhere;
+}
+.lottery .lot-hero .hero-art {
+  position: absolute;
+  width: 96px;
+  height: 96px;
+  right: 12px;
+  top: 36px;
+  object-fit: contain;
+  filter: drop-shadow(0 10px 18px color-mix(in srgb, var(--accent2) 40%, rgba(0,0,0,.3)));
+  animation: lot-float 4.8s ease-in-out infinite;
+  z-index: 2;
+  pointer-events: none;
+}
+
+/* Prominent Countdown Digit Blocks in Hero */
+.lottery .hero-countdown-box {
+  position: relative;
+  z-index: 2;
+  margin: 2px 0 12px;
+  max-width: 66%;
+}
+.lottery .cd-blocks {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lottery .cd-unit {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: color-mix(in srgb, var(--bg2) 80%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--line));
+  border-radius: 10px;
+  padding: 4px 7px 3px;
+  min-width: 38px;
+  backdrop-filter: blur(10px);
+  box-shadow: 0 4px 10px rgba(0,0,0,.08);
+}
+.lottery .cd-unit.urgent {
+  border-color: color-mix(in srgb, var(--bad) 50%, var(--line));
+  background: color-mix(in srgb, var(--bad) 12%, var(--bg2));
+}
+.lottery .cd-val {
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--accent);
+}
+.lottery .cd-unit.urgent .cd-val {
+  color: var(--bad);
+}
+.lottery .cd-lbl {
+  font-size: 9.5px;
+  color: var(--hint);
+  margin-top: 1px;
+}
+.lottery .cd-colon {
+  font-weight: 800;
+  color: var(--hint);
+  font-size: 14px;
+}
+.lottery .cd-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 12px;
+  border-radius: 12px;
+  font-size: 12.5px;
+  font-weight: 700;
+  background: color-mix(in srgb, var(--bg2) 75%, transparent);
+  border: 1px solid var(--line);
+  color: var(--hint);
+}
+.lottery .cd-status-badge.gold {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 35%, var(--line));
+}
+
+.lottery .lot-hero .hero-bottom {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 6px;
+  position: relative;
+  z-index: 3;
+  font-size: 11.5px;
+  color: var(--hint);
+  border-top: 1px solid var(--line);
+  padding-top: 9px;
+  margin-top: auto;
+  background: color-mix(in srgb, var(--bg2) 30%, transparent);
+  border-radius: 0 0 16px 16px;
+}
+.lottery .lot-hero .hero-bottom b {
+  color: var(--text);
+}
+.lottery .lot-hero .hero-draw-mode {
+  color: var(--hint);
+  font-size: 11px;
+}
+
+/* Stats Multi-column Grid */
+.lottery .lot-stats {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.lottery .lot-stats.cols-2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+.lottery .lot-stats.cols-3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+.lottery .stat {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 12px 10px;
+  text-align: center;
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+.lottery .stat b {
+  display: block;
+  font-size: 21px;
+  font-weight: 750;
+  line-height: 1.2;
+  margin-bottom: 2px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.lottery .stat span {
+  font-size: 11px;
+  color: var(--hint);
+}
+.lottery .stat:nth-child(1) b {
+  color: var(--accent);
+}
+.lottery .stat:nth-child(2) b {
+  color: var(--accent2);
+}
+.lottery .stat:nth-child(3) b {
+  color: var(--ok);
+}
+
+/* Section Header Tags */
+.lottery .section-tag {
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--hint);
+}
+
+/* Cards & Lists */
+.lottery .card {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 14px;
+  margin-bottom: 12px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+.lottery .prize-list {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  overflow: hidden;
+  margin-bottom: 14px;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+}
+.lottery .prize-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.lottery .prize-row:last-child {
+  border-bottom: 0;
+}
+.lottery .prize-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 14px;
+  display: grid;
+  place-items: center;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  flex: none;
+}
+.lottery .prize-name {
+  font-size: 13.5px;
+  font-weight: 650;
+  line-height: 1.35;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.lottery .prize-desc {
+  font-size: 11.5px;
+  color: var(--hint);
+  margin-top: 3px;
+  line-height: 1.4;
+}
+.lottery .prize-count {
+  text-align: right;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  padding: 3px 8px;
+  border-radius: 8px;
+  flex: none;
+}
+
+/* Tickets & Status Banners */
+.lottery .ticket {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 15px;
+  border-radius: 18px;
+  margin-bottom: 12px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--glass)), var(--glass));
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+.lottery .ticket strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.lottery .ticket small {
+  display: block;
+  font-size: 11.5px;
+  color: var(--hint);
+  margin-top: 3px;
+}
+
+/* Festive Result Banner */
+.lottery .result-banner {
+  position: relative;
+  overflow: hidden;
+  border-radius: 20px;
+  padding: 16px;
+  margin-bottom: 14px;
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+.lottery .result-banner.winner-card {
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+  background: radial-gradient(220px 140px at 100% 0, color-mix(in srgb, var(--warn) 35%, transparent), transparent 70%),
+              linear-gradient(135deg, color-mix(in srgb, var(--warn) 15%, var(--bg2)), var(--bg2));
+  box-shadow: 0 10px 26px color-mix(in srgb, var(--warn) 22%, transparent);
+}
+.lottery .result-banner.consolation-card {
+  border: 1px solid var(--line);
+  background: var(--glass);
+}
+.lottery .result-banner h3 {
+  margin: 0 0 5px;
+  font-size: 16px;
+  font-weight: 750;
+  color: var(--text);
+}
+.lottery .result-banner.winner-card h3 {
+  color: var(--warn);
+}
+.lottery .result-banner p {
+  font-size: 12px;
+  color: var(--hint);
+  margin: 4px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lottery .result-banner .btn {
+  margin-top: 12px;
+}
+.lottery .award-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.lottery .award-badge {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--ok);
+}
+
+/* Rules Fold / Details with Lucide Arrow */
+.lottery .lot-fold {
+  margin: 12px 0 16px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 11px 14px;
+  backdrop-filter: blur(14px);
+}
+.lottery .lot-fold summary {
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  outline: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  list-style: none;
+}
+.lottery .lot-fold summary::-webkit-details-marker {
+  display: none;
+}
+.lottery .lot-fold summary .fold-arrow {
+  display: inline-flex;
+  align-items: center;
+  transition: transform .2s ease;
+  color: var(--hint);
+}
+.lottery .lot-fold summary .fold-arrow svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 2.2;
+}
+.lottery .lot-fold[open] summary .fold-arrow {
+  transform: rotate(180deg);
+}
+.lottery .lot-fold[open] summary {
+  margin-bottom: 8px;
+}
+.lottery .rule-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border-radius: 12px;
+  padding: 10px 12px;
+  margin-top: 10px;
+  color: var(--hint);
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  font-size: 12px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.lottery .lot-fold .rule-note {
+  margin-top: 0;
+}
+
+/* Winners list */
+.lottery .winner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 14px;
+  border-bottom: 1px solid var(--line);
+}
+.lottery .winner:last-child {
+  border-bottom: 0;
+}
+.lottery .avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  font-size: 13px;
+  font-weight: 750;
+  flex: none;
+}
+
+/* Activity item in List page */
+.lottery .activity-item {
+  width: 100%;
+  text-align: left;
+  background: var(--glass);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 14px;
+  margin-bottom: 10px;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  box-shadow: var(--shadow);
+  backdrop-filter: blur(14px);
+  cursor: pointer;
+  font: inherit;
+}
+.lottery .activity-item:hover, .lottery .activity-item:active {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--line));
+}
+.lottery .activity-item .activity-icon {
+  width: 44px;
+  height: 44px;
+  object-fit: contain;
+  flex: none;
+}
+
+/* Notice Cards for Admin */
+.lottery .notice {
+  padding: 12px 14px 10px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  margin-bottom: 10px;
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+.lottery .notice p.tiny {
+  margin: 4px 0 0;
+  line-height: 1.45;
+}
+.lottery .notice p.tiny:empty {
+  display: none;
+}
+.lottery .notice .btn {
+  margin-top: 8px;
+}
+.lottery .error {
+  font-size: 12px;
+  color: var(--bad);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Form Styles: Adapts to theme variables with high contrast */
+#app:has(.lottery) {
+  height: var(--tg-viewport-height, 100vh);
+  height: var(--tg-viewport-height, 100dvh);
+}
+.lottery .lot-form {
+  margin-top: 14px;
+}
+.lottery .lot-field {
+  min-width: 0;
+  margin: 0 0 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.lottery label {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+  color: var(--text);
+}
+.lottery input, .lottery select, .lottery textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 46px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 11px 12px;
+  background: var(--bg2);
+  color: var(--text);
+  font: inherit;
+  font-size: 16px;
+  line-height: 1.5;
+  caret-color: var(--accent);
+  box-shadow: inset 0 1px 2px rgba(0,0,0,.06);
+  scroll-margin-block: 24px;
+  transition: border-color .15s, box-shadow .15s;
+}
+html[data-theme="dark"] .lottery input,
+html[data-theme="dark"] .lottery select,
+html[data-theme="dark"] .lottery textarea {
+  color-scheme: dark;
+  background: #141724;
+  border-color: rgba(255, 255, 255, .15);
+  color: #f3f5fa;
+}
+html[data-theme="light"] .lottery input,
+html[data-theme="light"] .lottery select,
+html[data-theme="light"] .lottery textarea {
+  color-scheme: light;
+  background: #ffffff;
+  border-color: rgba(20, 30, 60, .18);
+  color: #141826;
+}
+
+.lottery input::placeholder, .lottery textarea::placeholder {
+  opacity: 1;
+}
+html[data-theme="dark"] .lottery input::placeholder,
+html[data-theme="dark"] .lottery textarea::placeholder {
+  color: #8b93a7;
+}
+html[data-theme="light"] .lottery input::placeholder,
+html[data-theme="light"] .lottery textarea::placeholder {
+  color: #555e73;
+}
+
+.lottery select {
+  appearance: auto;
+  cursor: pointer;
+}
+html[data-theme="dark"] .lottery select option,
+html[data-theme="dark"] .lottery select optgroup {
+  background: #191c2b;
+  color: #f3f5fa;
+}
+html[data-theme="light"] .lottery select option,
+html[data-theme="light"] .lottery select optgroup {
+  background: #ffffff;
+  color: #141826;
+}
+
+.lottery textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+.lottery input[type=number], .lottery input[type=datetime-local] {
+  appearance: auto;
+  font-variant-numeric: tabular-nums;
+}
+.lottery input::-webkit-date-and-time-value {
+  text-align: left;
+  min-height: 1.5em;
+}
+.lottery input::-webkit-calendar-picker-indicator {
+  opacity: .85;
+  cursor: pointer;
+}
+.lottery input:focus, .lottery select:focus, .lottery textarea:focus {
+  border-color: var(--accent) !important;
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 30%, transparent), 0 3px 18px var(--glow);
+}
+.lottery input:disabled, .lottery select:disabled, .lottery textarea:disabled {
+  background: var(--glass2);
+  color: var(--hint);
+  border-color: var(--line);
+  opacity: 1;
+  cursor: not-allowed;
+  -webkit-text-fill-color: var(--hint);
+}
+.lottery input[type=checkbox] {
+  appearance: auto;
+  accent-color: var(--accent);
+  width: 18px;
+  height: 18px;
+  min-height: 18px;
+  flex: 0 0 18px;
+  margin: 2px 0 0;
+  padding: 0;
+  border-radius: 4px;
+  box-shadow: none;
+  cursor: pointer;
+}
+.lottery input[type=checkbox]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+.lottery .lot-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-height: 32px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.lottery .lot-check span {
+  min-width: 0;
+}
+.lottery .grid2 {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0;
+}
+.lottery .subpanel {
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 14px;
+  margin: 14px 0;
+}
+.lottery .subpanel > h3 {
+  margin-top: 0;
+}
+.lottery .subpanel p {
+  margin: 6px 0 0;
+}
+.lottery #lot-prize-editor {
+  scroll-margin-block: 16px;
+}
+.lottery #lot-prize-editor .row > .btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 42px;
+  scroll-margin-block: 24px;
+}
+.lottery .add-prize {
+  width: 100%;
+  min-height: 44px;
+  background: var(--glass2);
+  border: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line));
+  color: var(--accent);
+  border-radius: 14px;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: pointer;
+  margin-top: 10px;
+}
+.lottery .text-btn {
+  background: none;
+  border: 0;
+  color: var(--accent);
+  padding: 6px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Button & Actions bar (Seamless edge-to-edge gradient blur, white text, no boxy edge) */
+.lottery .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 46px;
+  border-radius: 14px;
+  padding: 11px 16px;
+  font-size: 14px;
+  font-weight: 700;
+  background: linear-gradient(135deg, var(--accent), var(--accent2));
+  color: #fff;
+  box-shadow: 0 6px 18px var(--glow);
+  border: 0;
+  text-decoration: none;
+  white-space: normal;
+  cursor: pointer;
+  transition: opacity .15s, transform .1s;
+}
+.lottery .btn:active {
+  transform: scale(0.985);
+}
+.lottery .btn.danger {
+  background: linear-gradient(135deg, #e05252, #c73636);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(224, 82, 82, 0.35);
+}
+.lottery .btn.danger-outline {
+  background: color-mix(in srgb, var(--bad) 8%, var(--glass2));
+  border: 1px solid color-mix(in srgb, var(--bad) 40%, var(--line));
+  color: var(--bad);
+  box-shadow: none;
+}
+.lottery .btn.secondary {
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  box-shadow: none;
+}
+.lottery .btn.dis, .lottery .btn:disabled {
+  opacity: 1;
+  background: var(--glass2);
+  color: var(--hint);
+  box-shadow: none;
+  border: 1px solid var(--line);
+  cursor: not-allowed;
+  transform: none;
+}
+
+.lottery .lot-actions {
+  position: sticky;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  margin: 20px -14px -18px;
+  padding: 14px 14px calc(14px + env(safe-area-inset-bottom));
+  background: linear-gradient(180deg, transparent 0%, color-mix(in srgb, var(--bg) 80%, transparent) 28%, var(--bg) 92%);
+  backdrop-filter: blur(12px);
+  z-index: 5;
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  border: 0;
+  box-shadow: none;
+}
+.lottery .lot-actions .btn {
+  flex: 1;
+}
+.lottery .lot-actions.lot-form-actions {
+  position: static;
+  bottom: auto;
+  margin: 22px 0 0;
+  padding: 16px 0 0;
+  border-top: 1px solid var(--line);
+  background: transparent;
+  backdrop-filter: none;
+}
+.lottery .lot-form-actions .btn {
+  min-width: 0;
+}
+.lottery .lot-bottom-spacer {
+  height: 80px;
+}
+
+/* Modal Bottom Sheet */
+.lot-sheet-dim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, .58);
+  backdrop-filter: blur(4px);
+  z-index: 50;
+  opacity: 0;
+  transition: opacity .22s ease-out;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+.lot-sheet-dim.active {
+  opacity: 1;
+}
+.lot-sheet-card {
+  position: relative;
+  background: var(--bg2);
+  color: var(--text);
+  border-radius: 26px 26px 0 0;
+  border-top: 1px solid var(--line);
+  box-shadow: 0 -12px 42px rgba(0, 0, 0, .45);
+  padding: 12px 20px calc(18px + env(safe-area-inset-bottom));
+  transform: translateY(100%);
+  transition: transform .24s cubic-bezier(0.16, 1, 0.3, 1);
+  max-height: 86vh;
+  overflow-y: auto;
+}
+.lot-sheet-dim.active .lot-sheet-card {
+  transform: translateY(0);
+}
+.lot-sheet-grab {
+  width: 42px;
+  height: 5px;
+  border-radius: 3px;
+  background: var(--line);
+  margin: 0 auto 14px;
+}
+.lot-sheet-body {
+  text-align: center;
+}
+.lot-sheet-icon {
+  width: 60px;
+  height: 60px;
+  margin: 2px auto 10px;
+  object-fit: contain;
+}
+.lot-sheet-body h3 {
+  font-size: 18px;
+  font-weight: 750;
+  margin: 0 0 10px;
+  color: var(--text);
+}
+.lot-sheet-desc {
+  font-size: 13.5px;
+  color: var(--hint);
+  line-height: 1.6;
+  margin: 0 0 16px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.lot-sheet-ticket {
+  display: block;
+  text-align: left;
+  padding: 12px 14px;
+  border-radius: 16px;
+  margin: 0 0 18px;
+  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, var(--glass2)), var(--glass2));
+  border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--line));
+}
+.lot-sheet-ticket strong {
+  display: block;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text);
+}
+.lot-sheet-ticket small {
+  display: block;
+  font-size: 11.5px;
+  color: var(--hint);
+  margin-top: 4px;
+  line-height: 1.45;
+}
+.lot-sheet-actions {
+  display: flex;
+  gap: 10px;
+}
+.lot-sheet-actions .btn {
+  flex: 1;
+}
+.lot-sheet-actions .btn.secondary {
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--text);
+  box-shadow: none;
+}
+.lot-sheet-actions .btn.danger {
+  background: linear-gradient(135deg, #e05252, #c73636);
+  color: #fff;
+  box-shadow: 0 6px 16px rgba(224, 82, 82, 0.35);
+}
+
+/* Fallback confirm box inside pages if needed */
+.lottery .confirm-box {
+  background: var(--glass);
+  border: 1px solid var(--line);
+  border-radius: 24px;
+  padding: 20px;
+  text-align: center;
+  backdrop-filter: blur(18px);
+  box-shadow: var(--shadow);
+  margin: 16px 0 20px;
+}
+.lottery .confirm-icon {
+  width: 72px;
+  height: 72px;
+  margin: 4px auto 14px;
+  object-fit: contain;
+}
+.lottery .confirm-box h3 {
+  font-size: 18px;
+  font-weight: 750;
+  margin: 0 0 10px;
+  justify-content: center;
+}
+.lottery .confirm-box p {
+  font-size: 13.5px;
+  color: var(--hint);
+  white-space: pre-wrap;
+  line-height: 1.65;
+  margin: 0;
+}
+
+/* Message / Preview */
+.lottery .message {
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  white-space: pre-wrap;
+  line-height: 1.75;
+  font-size: 13.5px;
+  box-shadow: var(--shadow);
+}
+.lottery .empty {
+  text-align: center;
+  padding: 28px 12px;
+  color: var(--hint);
+  font-size: 13px;
+}
+
+@keyframes lot-float {
+  0%, 100% { transform: translateY(0) rotate(6deg); }
+  50% { transform: translateY(-6px) rotate(2deg); }
+}
+
+@media (max-width: 360px) {
+  .lottery .lot-hero {
+    padding: 16px 14px 14px;
+  }
+  .lottery .hero-art {
+    width: 86px;
+    height: 86px;
+    top: 38px;
+    right: 2px;
+  }
+  .lottery .lot-hero h3 {
+    font-size: 18px;
+    max-width: 62%;
+  }
+  .lottery .cd-unit {
+    min-width: 34px;
+    padding: 3px 5px 2px;
+  }
+  .lottery .cd-val {
+    font-size: 14.5px;
+  }
+  .lottery .prize-row {
+    padding: 10px 11px;
+    gap: 9px;
+  }
+  .lottery .prize-icon {
+    width: 40px;
+    height: 40px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .lottery * {
+    animation: none !important;
+    transition: none !important;
+  }
+  .lot-sheet-dim, .lot-sheet-card {
+    transition: none !important;
+  }
+}

@@ -81,7 +81,8 @@ def env(monkeypatch):
 
 
 def config(**kw):
-    return {'title': '星光福利', 'audience': 'all', 'chat_id': CHAT, 'thread_id': 9,
+    # Pre-consent helpers: the consented device check is covered in test_lottery_device.py.
+    return {'title': '星光福利', 'audience': 'all', 'chat_id': CHAT, 'thread_id': 9, 'device_check': False,
             'draw_mode': 'timed', 'deadline': int(time.time()) + 3600,
             'prizes': [{'kind': 'points', 'name': '500 积分', 'quantity': 3, 'amount': 500}], **kw}
 

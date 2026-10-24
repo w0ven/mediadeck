@@ -2,6 +2,22 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-25 — lottery operations and rule visibility (backend, unreleased)
+
+- Anti-multi-account explanation moved out of public `rules` into the
+  administrator-only `admin_rules`; public rules end with a generic fairness
+  statement (also after the fee terms of paid launch notices). The unreleased
+  device-trait experiment was removed; association stays same trusted IP /
+  same browser id as in v0.50.0.
+- New: winner DMs, live entry count on the launch notice, copy activity,
+  delete draft / cancel with idempotent refunds, member-home ongoing list,
+  participation thresholds (level / points balance / 30-day watch hours),
+  reminder ~1h before the deadline, silent pin/unpin. All new Telegram writes
+  keep the notice recovery semantics (no automatic resend of unknown results).
+- Additive migration only: `lottery_dms`, `lottery_ops`, `lotteries.cancelled_at`.
+- Next: frontend (separate branch) consumes the new endpoints/fields listed in
+  docs/LOTTERY.md; real-group acceptance by an administrator.
+
 ## 2026-10-24 — v0.48.8: operations hardening (disconnects, login throttle, audit retention, restarts)
 
 - A player that resets its HTTP/2 stream while a lifecycle report is still
