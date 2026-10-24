@@ -222,6 +222,7 @@ def test_lottery_ui_silent_association_admin_records(request, tmp_path):
         page.screenshot(path=str(output / '07-silent-joined.png'), full_page=True)
         viewer['id'] = ADMIN
         page.goto(url)
+        page.locator('#lot-to-manage').click()
         page.locator('#lot-records').click()
         page.locator('.lot-cluster').wait_for()
         assert '相同浏览器安装标识' in page.locator('.lot-cluster').inner_text()

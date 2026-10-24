@@ -36,7 +36,8 @@ def register(app, telegram_context):
     async def context(ctx=identity):
         return {'is_admin': ctx['is_admin'], 'registered': bool(ctx['member']),
                 'name': str(ctx['tg'].get('first_name') or 'Telegram用户'),
-                'bot_username': app.state.telegram._bot_username}
+                'bot_username': app.state.telegram._bot_username,
+                'points_balance': max(0, service().points.balance(ctx['member']['emby_user_id'])) if ctx['member'] else None}
 
     @app.get('/api/app/lottery/admin/options')
     async def options(ctx=manager):
@@ -80,7 +81,8 @@ def register(app, telegram_context):
         with errors():
             await service().join(lid, ctx['tg'],
                                  source_ip=trusted_ip(request, settings().mediadeck_lottery_ip_mode),
-                                 browser_id=raw.get('browser_id'))
+                                 browser_id=raw.get('browser_id'),
+                                 **({'expected_entry_fee': raw['expected_entry_fee']} if 'expected_entry_fee' in raw else {}))
             return service().view(lid, ctx['tg_id'], ctx['is_admin'])
 
     @app.post('/api/app/lottery/{lid}/claim')

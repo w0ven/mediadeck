@@ -168,6 +168,7 @@ def test_lottery_form_themes(request, tmp_path, theme, width, height):
         lid = create(env)
         env.service.db.execute("UPDATE lottery_notices SET state='failed',error='Mock delivery failure' WHERE lottery_id=?", (lid,))
         page.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
+        page.locator('#lot-to-manage').click()
         page.locator('[data-lot-recover]').click()
         _assert_forms(page)
         page.set_viewport_size({'width': width, 'height': 360})

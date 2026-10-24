@@ -7,10 +7,17 @@ import time
 
 import pytest
 
-from app.modules.lottery import EMOJI, LETTERS, normalize_notice_payload, notice_rejection
+from app.modules.lottery import (
+    EMOJI,
+    LETTERS,
+    emoji,
+    normalize_notice_payload,
+    notice_rejection,
+    winner_mention,
+)
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR
-from tests.test_lottery import ADMIN, config, create, req
+from tests.test_lottery import ADMIN, GUEST, browser_id, config, create, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
 
 # Public metadata transcribed from the supplied original sticker manifest.
@@ -59,7 +66,7 @@ def test_native_fallbacks_match_original_sticker_metadata(e):
     result = e.service.notice_payload(e.service.row(lid), 'result', [])
     for payload in (launch, result):
         tags = re.findall(r'<tg-emoji emoji-id="([0-9]+)">(.*?)</tg-emoji>', payload['text'])
-        assert tags[:5] == LETTERS
+        assert tags and not any(eid in dict(LETTERS) for eid, _ in tags)
         assert all(PACK_METADATA[eid][2] == alternative for eid, alternative in tags)
         assert '<img' not in payload['text'] and '&lt;b&gt;不是 HTML&lt;/b&gt;' in payload['text']
         button = payload['reply_markup']['inline_keyboard'][0][0]
@@ -73,6 +80,10 @@ def test_saved_legacy_payload_repaired_only_on_authorized_send(e, state, message
     lid = create(e, config(title='冻结标题 LUCKY & <test>'))
     n = notice(e, lid)
     canonical = json.loads(n['payload_json'])
+    # Persist an actual pre-redesign message. Recovery repairs legacy ASCII
+    # alternatives, but must NOT remove its decoration or frozen explanatory text.
+    canonical['text'] = (''.join(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>' for eid, fallback in LETTERS)
+                         + '\n' + canonical['text'] + '\n完整规则和私密领奖信息请打开活动。')
     legacy = old_payload(canonical)
     e.service.db.execute('UPDATE lottery_notices SET state=?,message_id=?,payload_json=? WHERE id=?',
                          (state, message_id, json.dumps(legacy, ensure_ascii=False), n['id']))
@@ -144,7 +155,7 @@ def test_existing_explicit_emoji_rejection_downgrades_body_and_button_once(e, de
     sent = sends(e)
     assert len(sent) == 2 and notice(e, lid)['state'] == 'sent'
     first, second = [p for _, p in sent]
-    assert first['text'].count('<tg-emoji') > 5 and '<tg-emoji' not in second['text']
+    assert first['text'].count('<tg-emoji') == 2 and '<tg-emoji' not in second['text']
     assert 'icon_custom_emoji_id' in first['reply_markup']['inline_keyboard'][0][0]
     assert 'icon_custom_emoji_id' not in second['reply_markup']['inline_keyboard'][0][0]
     assert first['chat_id'] == second['chat_id'] and first['message_thread_id'] == second['message_thread_id']
@@ -255,3 +266,92 @@ def test_definite_rejection_arriving_at_deadline_does_not_send_fallback(e, monke
     assert '<tg-emoji' in json.loads(notice(e, lid)['payload_json'])['text']
     assert e.service.row(lid)['state'] == 'published'
     assert not e.service.db.query('SELECT * FROM lottery_awards')
+
+
+@pytest.mark.parametrize('identity,display', [
+    ({'first_name': 'Jason', 'username': 'other_handle'}, '@Jason'),
+    ({'first_name': 'Jason', 'last_name': 'Smith', 'username': 'other_handle'}, '@Jason Smith'),
+    ({'username': 'test_handle'}, '@test_handle'),
+    ({}, 'Telegram用户'),
+    ({'first_name': '<b>J & "S"</b>'}, '@&lt;b&gt;J &amp; &quot;S&quot;&lt;/b&gt;'),
+])
+def test_result_mentions_use_stored_telegram_name_then_handle(e, identity, display):
+    lid = create(e, config(title='午夜 & <抽奖>'))
+    asyncio.run(e.service.join(lid, {'id': GUEST, **identity},
+                              source_ip=e.ip_for(GUEST), browser_id=browser_id(GUEST)))
+    e.service.draw(lid)
+    result = e.service.db.one("SELECT payload_json FROM lottery_notices WHERE lottery_id=? AND kind='result'", (lid,))
+    payload = json.loads(result['payload_json'])
+    assert payload['text'].splitlines() == [
+        emoji('notice') + ' <b>午夜 &amp; &lt;抽奖&gt;</b> · 已开奖',
+        f'<a href="tg://user?id={GUEST}">{display}</a> · 500 积分',
+    ]
+    button = payload['reply_markup']['inline_keyboard'][0][0]
+    assert button['text'] == '查看结果' and button['icon_custom_emoji_id'] == EMOJI['check'][0]
+    assert button['url'].endswith('?startapp=lottery_' + lid)
+    assert 'other_handle' not in payload['text'] and '@@' not in payload['text']
+    assert '名额不足' not in payload['text'] and '待绑定' not in payload['text'] and '🔡' not in payload['text']
+
+
+@pytest.mark.parametrize('tg_id', [None, '', True, False, -1, 0, '123" onclick="x', ' 123', '１２３',
+                                  '1.5', 1.5, '123\n', '000123', 2**52, '9' * 100])
+def test_invalid_telegram_id_falls_back_to_safe_plain_text(tg_id):
+    mention = winner_mention({'tg_id': tg_id, 'label': '@<b>&"test"</b>'})
+    assert mention == '@&lt;b&gt;&amp;&quot;test&quot;&lt;/b&gt;'
+    assert '<a' not in mention and 'tg://' not in mention
+
+
+@pytest.mark.parametrize('tg_id', [1, '888000333', 2**52 - 1])
+def test_valid_telegram_id_and_single_at(tg_id):
+    assert winner_mention({'tg_id': tg_id, 'label': '@@tester'}) == f'<a href="tg://user?id={tg_id}">@tester</a>'
+    assert winner_mention({'tg_id': tg_id, 'label': ''}) == f'<a href="tg://user?id={tg_id}">Telegram用户</a>'
+
+
+@pytest.mark.parametrize('count,long_labels', [(0, False), (1, False), (12, False), (13, False), (200, False), (200, True)])
+def test_result_list_limits_count_urls_and_escaping_honestly(e, count, long_labels):
+    lid = create(e, config(title='"' * 60 if long_labels else '午夜抽奖'), publish=False)
+    winners = [{'tg_id': str(2**52 - 1 - i), 'label': '"' * 40 if long_labels else 'Guest',
+                'prize_json': json.dumps({'name': '"' * 60 if long_labels else '奖品'})} for i in range(count)]
+    payload = e.service.notice_payload(e.service.row(lid), 'result', winners)
+    body = payload['text']
+    assert len(body.encode('utf-16-le')) // 2 <= 4096
+    shown = body.count('<a href="tg://user?id=')
+    assert shown == body.count('</a>')
+    if long_labels:
+        assert 0 < shown < 12  # HTML length budget, not just an arbitrary name count
+    else:
+        assert shown == min(count, 12)
+    if count > shown:
+        assert body.splitlines()[-1] == f'其余 {count - shown} 位见结果页'
+    elif not count:
+        assert body.splitlines()[-1] == '本期暂无中奖者'
+    else:
+        assert '其余' not in body
+    assert '名额不足' not in body and '人工奖品' not in body and '🔡' not in body
+
+
+def test_short_registration_launch_keeps_necessary_eligibility(e):
+    lid = create(e, config(prizes=[{'kind': 'registration', 'name': '本人资格', 'quantity': 2,
+                                    'group_id': 'standard', 'days': 10}]), publish=False)
+    before = e.service.db.query('SELECT * FROM lottery_notices')
+    preview = req(e, 'POST', f'/{lid}/preview').json()
+    assert '注册资格奖仅限开奖时未注册者本人。' in preview['text']
+    assert '参与对象：全部群友' in preview['text'] and '截止：' in preview['text']
+    assert '本人资格 × 2 名' in preview['text'] and '免费参与。' in preview['text']
+    assert '完整规则和私密领奖信息' not in preview['text'] and '其他奖随后抽取' not in preview['text']
+    assert '最多一奖' in preview['rules'] and '不可转赠' in preview['rules']
+    assert e.service.db.query('SELECT * FROM lottery_notices') == before
+
+
+def test_new_format_does_not_edit_already_sent_frozen_payload(e):
+    lid = create(e)
+    n = notice(e, lid)
+    old = old_payload(json.loads(n['payload_json']))
+    old['text'] = '<tg-emoji emoji-id="5364273836122463188">L</tg-emoji>\n' + old['text']
+    old['text'] += '\n原已发布说明'
+    e.service.db.execute('UPDATE lottery_notices SET payload_json=? WHERE id=?', (json.dumps(old), n['id']))
+    before = notice(e, lid)
+    count = len(sends(e))
+    req(e, 'POST', f'/{lid}/preview')
+    asyncio.run(e.service.deliver_notices(lid))
+    assert notice(e, lid) == before and len(sends(e)) == count
