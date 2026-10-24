@@ -95,6 +95,11 @@ class Settings(BaseSettings):
     mediadeck_data_dir: str = "data"
     # Persistent credential, never returned by runtime UI or generated implicitly.
     mediadeck_checkin_secret: str = ""
+    # Lottery only. Enable cloudflare_protected ONLY when every ingress to this
+    # server is restricted to a trusted CF edge/tunnel overwriting the CF header.
+    # ASGI scope.client may already be rewritten by Uvicorn; never infer trust
+    # from it. Unknown/unconfigured modes cannot provide lottery identity IPs.
+    mediadeck_lottery_ip_mode: str = "disabled"
 
     # Bootstrap-only: seeds the settings store on first run.
     emby_url: str = "http://127.0.0.1:8096"

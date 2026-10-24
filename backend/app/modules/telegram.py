@@ -4521,7 +4521,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         if not in_group:
             parts = text.split()
             token = parts[1] if command == '/start' and len(parts) == 2 else text
-            if looks_like_credential(token) and token.upper().startswith('GIFT'):
+            if looks_like_credential(token) and token.upper().startswith(('GIFT', 'LOT')):
                 # Validate recipient BEFORE the membership guide. A foreign
                 # link must not fall back to the clicker's own authorisation.
                 self._pending.pop(self._pkey(chat_id), None)
@@ -4535,7 +4535,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 claim = (time.time() + PENDING_TTL, tg_user_id, token)
             elif waiting and waiting[0] == 'username' and not text.startswith('/'):
                 admission = waiting[2].get('admission')
-                if str(getattr(admission, 'credential', '')).startswith('GIFT'):
+                if str(getattr(admission, 'credential', '')).startswith(('GIFT', 'LOT')):
                     claim = (waiting[1], tg_user_id, admission.credential)
         if (business_input and command not in ('/help', '/rules', '/cancel')
                 and not await self.membership.gate(chat_id, tg_user_id)):

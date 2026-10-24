@@ -22,7 +22,8 @@ class GiftReceipts:
     def stage(self, conn: Any, admission: Any, member: dict, group_name: str,
               *, recipient_label: str | None = None) -> int | None:
         """Called inside the SAME transaction as binding + credential consumption."""
-        if not admission:
+        if not admission or getattr(admission, 'detail', {}).get('lottery_award'):
+            # Lottery public results never disclose account names/login details.
             return None
         grant = None
         if admission.via == 'admin' and admission.credential:

@@ -710,6 +710,8 @@ class Database:
                 )
             from app.modules.economy_schema import migrate as migrate_economy
             migrate_economy(self)
+            from app.modules.lottery_schema import migrate as migrate_lottery
+            migrate_lottery(self)
             self._ensure_column(
                 "members", "overrides_json", "TEXT NOT NULL DEFAULT '{}'")
             # v0.14: groups replace plans; roles are additive job functions.

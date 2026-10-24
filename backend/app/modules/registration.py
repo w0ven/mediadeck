@@ -463,6 +463,22 @@ class RegistrationService:
         tg_user_id = str(tg_user_id or "").strip()
         cred = normalise(credential)
 
+        # Lottery credentials have their own persistent rows. An explicit link
+        # selects only that qualification, never overwrites an older admin gift.
+        if cred.startswith('LOT') and len(cred) == 12:
+            grant = self._db.one('SELECT * FROM lottery_admissions WHERE code=?', (cred,))
+            if not self.channel_enabled('admin_grant'):
+                return Admission(reason='管理员授权注册通道已关闭', tg_user_id=tg_user_id)
+            if not grant or grant['used_at']:
+                return Admission(reason='抽奖注册资格已使用或无效', tg_user_id=tg_user_id)
+            if grant['tg_id'] != tg_user_id:
+                return Admission(reason='这份抽奖注册资格仅属于中奖 Telegram 本人', tg_user_id=tg_user_id)
+            if self._groups is not None and not self._groups.get(grant['group_id']):
+                return Admission(reason='获奖用户组已不存在，请联系管理员', tg_user_id=tg_user_id)
+            return Admission(allowed=True, via='admin', tg_user_id=tg_user_id,
+                             group_id=grant['group_id'], days=grant['days'], credential=cred,
+                             reason='已获得本人专属抽奖注册资格', detail={'lottery_award': grant['award_id']})
+
         # Explicit gift links must be checked before any other qualification:
         # an authorised user opening somebody else's link must not spend it.
         if cred.startswith("GIFT") and len(cred) == 16:
@@ -552,6 +568,14 @@ class RegistrationService:
             return conn.execute(sql, params).rowcount if conn is not None else self._db.execute(sql, params)
         now = int(time.time())
         user_id = str(new_user_id or "")
+
+        if admission.via == 'admin' and admission.detail.get('lottery_award'):
+            if not self.channel_enabled('admin_grant'):
+                return False
+            return bool(execute(
+                'UPDATE lottery_admissions SET used_at=?,used_by=? WHERE code=? AND tg_id=? '
+                'AND award_id=? AND used_at IS NULL',
+                (now, user_id, admission.credential, admission.tg_user_id, admission.detail['lottery_award'])))
 
         if admission.via == "admin":
             sql = "UPDATE admin_grants SET used_at=? WHERE tg_user_id=? AND used_at IS NULL"
