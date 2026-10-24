@@ -157,7 +157,7 @@ def register(app: Any) -> None:
         b = bot()
         return b._cfg() if b is not None else {}
 
-    async def member_context(request: Request) -> dict[str, Any]:
+    async def telegram_context(request: Request) -> dict[str, Any]:
         b = bot()
         token = b._token() if b is not None else ''
         if not token or not str(tg_cfg().get('miniapp_url') or '').strip():
@@ -170,11 +170,20 @@ def register(app: Any) -> None:
             raise _fail(401, 'unsigned', '请从 Bot 里的「📱 会员面板」打开') from None
         tg_id = str(user['id'])
         member = await io(state.members.find_by_telegram, tg_id)
-        if not member:
+        return {'tg': user, 'tg_id': tg_id, 'member': member,
+                'uid': str(member['emby_user_id']) if member else '',
+                'is_admin': bool(b.is_admin(member))}
+
+    async def member_context(request: Request) -> dict[str, Any]:
+        ctx = await telegram_context(request)
+        if not ctx['member']:
             raise _fail(403, 'unbound', '这个 Telegram 还没有绑定账号，请先在 Bot 里注册或绑定')
-        return {'tg': user, 'tg_id': tg_id, 'member': member, 'uid': str(member['emby_user_id'])}
+        return ctx
 
     Ctx = Depends(member_context)
+    from app.modules.lottery_api import register as register_lottery
+    register_lottery(app, telegram_context)
+
 
     def refreshed(ctx):
         return state.members.get(ctx['uid']) or ctx['member']
@@ -190,7 +199,7 @@ def register(app: Any) -> None:
         except Exception:  # noqa: BLE001 - version stamping must never break the page
             ver = ''
         if ver:
-            for asset in ('app.css', 'app.js'):
+            for asset in ('app.css', 'app.js', 'lottery.css', 'lottery.js'):
                 html = html.replace(f'/app/assets/{asset}', f'/app/assets/{asset}?v={quote(ver)}')
         return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 
@@ -220,6 +229,7 @@ def register(app: Any) -> None:
         if info['shortfall']:
             blockers.append(f"积分不足，还差 {info['shortfall']} 积分")
         return {
+            'is_admin': ctx['is_admin'],
             'name': _display_name(ctx['tg'], profile) or str(member.get('username') or ''),
             'username': str(member.get('username') or ''),
             'state': str(member.get('state') or member.get('status') or ''),

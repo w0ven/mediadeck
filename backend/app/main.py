@@ -443,6 +443,12 @@ async def _startup() -> None:
                                json.dumps({'name': row['name'], 'app': row['app'], 'cap': row['cap']},
                                           ensure_ascii=False))
 
+    async def _lottery_work() -> None:
+        try:
+            await app.state.lottery.tick()
+        except Exception:  # noqa: BLE001 - durable rows remain for the next lifecycle tick
+            logging.getLogger(__name__).warning('Lottery maintenance interrupted; pending rows retained')
+
     async def usage_loop() -> None:
         """Verified viewing/rewards, playback safety and bounded cache housekeeping.
 
@@ -460,6 +466,12 @@ async def _startup() -> None:
                 await app.state.usage.tick(node_of=_node_for_item)
 
             now = time.time()
+            if hasattr(app.state, 'lottery'):
+                task = getattr(app.state, 'lottery_task', None)
+                if task is None or task.done():
+                    # Reuse this lifecycle cadence, but slow Telegram delivery
+                    # must not stall viewing credit / member maintenance.
+                    app.state.lottery_task = asyncio.create_task(_lottery_work())
             if membership['enforcement_enabled'] and app.state.levels.config()['config']['enabled']:
                 with contextlib.suppress(Exception):
                     await app.state.levels.sync_effects(_telegram_member_changed)
@@ -589,6 +601,11 @@ async def _startup() -> None:
         lambda: app.state.plugins.config("inventory"))
     app.state.titles = TitleService(app.state.db,app.state.members,app.state.telegram,
         lambda: app.state.plugins.config("inventory"))
+    from app.modules.lottery import LotteryService
+    app.state.lottery_task = None
+    app.state.lottery = LotteryService(app.state.db, app.state.members, app.state.points,
+                                      app.state.shop, app.state.registration, app.state.groups,
+                                      app.state.telegram)
     app.state.telegram._inventory = app.state.inventory
     app.state.telegram._titles = app.state.titles
     app.state.member_devices = MemberDevices(lambda: app.state.emby)
@@ -652,7 +669,7 @@ async def _shutdown() -> None:
     """Join background writers before releasing their shared database."""
     tasks = [getattr(app.state, name, None) for name in
              ("usage_task", "probe_task", "intake_prime_task", "restriction_notice_task",
-              "audit_retention_task")]
+              "audit_retention_task", "lottery_task")]
     tasks = [task for task in tasks if task is not None]
     for task in tasks:
         task.cancel()

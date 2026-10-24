@@ -32,6 +32,7 @@ button{cursor:pointer}
 .btn.danger{background:var(--bad);box-shadow:none}
 .link{background:none;border:0;color:var(--accent);padding:6px 0}
 .tabbar{flex:none;margin:0 12px calc(12px + env(safe-area-inset-bottom));display:flex;background:color-mix(in srgb,var(--bg2) 82%,transparent);border:1px solid var(--line);border-radius:22px;padding:6px;backdrop-filter:blur(18px);box-shadow:var(--shadow)}
+.tabbar[hidden]{display:none}
 .tabbar button{flex:1;text-align:center;padding:5px 0 4px;font-size:10.5px;color:var(--hint);border-radius:16px;background:none;border:0}
 .tabbar button i{display:block;font-style:normal;font-size:18px;line-height:22px}
 .tabbar button.on{color:var(--text);background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 30%,transparent),color-mix(in srgb,var(--accent2) 22%,transparent))}

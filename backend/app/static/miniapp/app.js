@@ -364,7 +364,15 @@
   // -- 我的 -------------------------------------------------------------------
 
   async function renderMe(alive) {
-    if (!S.me) loading();
+    if (!S.me) {
+      loading();
+      const ctx = await api('/api/app/lottery/context');
+      if (!alive()) return;
+      if (!ctx.registered) {
+        setScreen(stateView(icon('ticket'), '欢迎来到 Mini App', '从群抽奖消息按钮可直接参与活动，无需提前绑定。会员功能请先在 Bot 注册或绑定账号。'));
+        return;
+      }
+    }
     const me = await loadMe();
     if (!alive()) return;
     syncChrome();
@@ -419,6 +427,7 @@
         <button type="button" data-go="invites"><div class="ic" style="--c:#c07bff">${icon('user-plus')}</div>邀请</button>
       </div>
       <div class="list">
+        ${me.is_admin ? '<button class="it" type="button" data-go="lottery"><div class="ic sm" style="--c:#c07bff">' + icon('trophy') + '</div><span class="t">抽奖管理</span><span class="go">›</span></button>' : ''}
         <button class="it" type="button" data-go="ledger"><div class="ic sm" style="--c:#ffcc5c">${icon('receipt')}</div><span class="t">积分流水</span><span class="go">›</span></button>
         <button class="it" type="button" data-go="devices"><div class="ic sm" style="--c:#6aa6ff">${icon('monitor-smartphone')}</div><span class="t">我的设备 <span class="tiny muted">${me.devices != null ? esc(me.devices) + (me.rights.max_devices ? ' / ' + esc(me.rights.max_devices) : '') + ' 台已登录' : ''}</span></span><span class="go">›</span></button>
         <button class="it" type="button" data-go="password"><div class="ic sm" style="--c:#43d39e">${icon('key-round')}</div><span class="t">修改密码</span><span class="go">›</span></button>
@@ -428,7 +437,7 @@
         haptic.tap();
         const go = b.dataset.go;
         if (go === 'invites') goTab('bag', { bag: 'invites' });
-        else push({ lines: renderLines, level: renderLevel, titles: renderTitlesPage, ledger: renderLedger, devices: renderDevices, password: renderPassword }[go]);
+        else push({ lottery: lottery.list, lines: renderLines, level: renderLevel, titles: renderTitlesPage, ledger: renderLedger, devices: renderDevices, password: renderPassword }[go]);
       };
     });
     const renewBtn = $('#renew', screen);
@@ -1237,13 +1246,29 @@
     }
   }
 
+  const lottery = window.createLotteryUI({ api, esc, setScreen, push, back, toast, stamp, tg });
   const TABS = { me: renderMe, rank: renderRank, req: renderReq, bag: renderBag };
 
   if (!tg || !tg.initData) {
     setScreen(stateView(icon('smartphone'), '请在 Telegram 里打开', '会员面板需要从 Bot 首页的「📱 会员面板」按钮进入。'));
     return;
   }
-  const deepLink = { devices: renderDevices, password: renderPassword }[new URLSearchParams(location.search).get('page')];
-  if (deepLink) S.stack.push({ render: deepLink });
-  render();
+  const params = new URLSearchParams(location.search);
+  const start = tg.initDataUnsafe?.start_param || params.get('tgWebAppStartParam') || '';
+  const lotteryLink = /^lottery_([a-f0-9]{24})$/.exec(start);
+  if (lotteryLink) {
+    // Routing is not authority. Each lottery API independently verifies initData.
+    S.stack.push({ render: alive => lottery.detail(lotteryLink[1], alive) });
+    render();
+  } else {
+    api('/api/app/lottery/context').then(ctx => {
+      if (!ctx.registered) {
+        setScreen(stateView(icon('ticket'), '欢迎来到 Mini App', '从群抽奖消息按钮可直接参与活动，无需提前绑定。会员功能请先在 Bot 注册或绑定账号。'));
+        return;
+      }
+      const deepLink = { devices: renderDevices, password: renderPassword }[params.get('page')];
+      if (deepLink) S.stack.push({ render: deepLink });
+      render();
+    }).catch(err => { if (!fatal(err)) setScreen(failView(err)); });
+  }
 })();

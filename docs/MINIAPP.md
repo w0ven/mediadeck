@@ -5,7 +5,7 @@
 ## 组成
 
 - 页面：`GET /app`，静态资源在 `/app/assets/`（`backend/app/static/miniapp/`）。
-- 接口：`/api/app/*`。每个请求都在 `X-Telegram-Init-Data` 头里带 Telegram WebApp `initData`，后端用 Bot Token 校验签名（HMAC-SHA256，`WebAppData` 派生密钥），签名超过 24 小时视为过期。只信任签名覆盖的 Telegram 用户 ID，再按绑定关系找到账号；未绑定返回 403。
+- 接口：`/api/app/*`。每个请求都在 `X-Telegram-Init-Data` 头里带 Telegram WebApp `initData`，后端用 Bot Token 校验签名（HMAC-SHA256，`WebAppData` 派生密钥），签名超过 24 小时视为过期。只信任签名覆盖的 Telegram 用户 ID，再按绑定关系找到账号；会员 API 未绑定返回 403。抽奖 API 复用独立的已验签 TG 身份，可供未绑定群友报名，不会放开其他会员接口。
 - 海报：影片榜海报通过 `/api/app/poster/{id}?s=<签名>` 转发，签名为进程内随机密钥，只能取榜单里出现过的条目。
 
 ## 与 Bot 的对应
@@ -23,7 +23,7 @@
 | 修改密码 | Bot 改密的同一套步骤（设置 Emby 密码、解除登录锁定、使旧面板登录失效、审计）；随机密码在浏览器端生成，响应丢失时用户仍知道自己提交的密码 |
 | 移除设备 | 只能移除 Emby 设备记录里最后使用者是本人的设备；删除设备记录会吊销该客户端的登录，其他设备不受影响，之后可用密码重新登录 |
 
-注册、换绑、删号、签到命令、群内玩法和管理员功能留在 Bot 里。
+注册、换绑、删号、签到命令、原群内玩法留在 Bot 里。管理员首页另有「抽奖管理」，仅按服务端确认的 admin 角色显示；普通群友从群消息直达对应活动，未注册也可按规则报名。完整流程、奖励与失败恢复见 [LOTTERY.md](LOTTERY.md)。本人专属注册资格的领取仍进入原 Bot 注册及密码确认流程。
 
 ## 设备与推荐播放器
 
@@ -51,4 +51,4 @@
 
 1. 给面板一个独立的 HTTPS 域名，反向代理到后端，并**只放行** `/app`、`/app/*` 和 `/api/app/*`；管理后台路径不要经这个域名暴露。
 2. Deck「机器人 → 首页外观」里填写「会员面板地址」，例如 `https://app.example.com/app`。留空即隐藏 Bot 按钮，并让 `/api/app/*` 返回 503。
-3. 入口是私聊消息里的 `web_app` 按钮，不需要在 BotFather 注册 Mini App；群里不会出现这个按钮（Telegram 不允许）。
+3. 会员私聊入口使用 `web_app` 按钮，本身不要求 BotFather 注册。**群抽奖入口另外要求 BotFather 配置 Main Mini App**，使用普通 `https://t.me/<Bot用户名>?startapp=lottery_<活动ID>` URL 按钮；群里不能用 `web_app` 按钮。未确认主 Mini App 可用时服务器拒绝发布。
