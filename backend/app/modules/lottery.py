@@ -19,7 +19,8 @@ from app.modules.inventory import InventoryService
 from app.modules.registration import generate_code
 from app.modules.report_delivery import CALL_DELIVERY
 
-RULES = ('免费报名，每个 Telegram 每期仅一次、最多一奖；报名时须属于发布群且符合参与对象。'
+ENTRY_FEE_UNSET = object()
+RULES = ('每个 Telegram 每期仅一次、最多一奖；报名时须属于发布群且符合参与对象。'
          '截止后不能报名；管理员可提前手动开奖。人数不足如实少发。'
          '本人专属注册资格仅在开奖时仍未注册者中抽取，先抽该类奖，再抽其他奖，'
          '同类奖项随机排序，每个名额在剩余合资格报名者中等概率抽取。'
@@ -114,6 +115,13 @@ def text(value, label, maximum, required=True):
     return value.strip()
 
 
+def entry_terms(config):
+    fee = config.get('entry_fee', 0)
+    if fee:
+        return f'报名扣 {fee} 积分，成功报名后不退（未中奖不退）；须绑定已注册积分账户。'
+    return '免费参与。'
+
+
 def public_prize(prize):
     result = {k: v for k, v in prize.items() if k not in ('spec', 'instructions')}
     if 'spec' in prize:
@@ -138,6 +146,9 @@ class LotteryService:
         audience = raw.get('audience')
         if audience not in AUDIENCES:
             raise ValueError('参与对象无效')
+        entry_fee = integer(raw.get('entry_fee', 0), '报名积分', 0, 100000)
+        if entry_fee and audience == 'guest':
+            raise ValueError('收费活动需已注册积分账户，不能选择仅未注册参与')
         chat = str(raw.get('chat_id') or '')
         if chat not in self.bot._group_allowlist():
             raise ValueError('请选择已配置白名单群')
@@ -168,6 +179,8 @@ class LotteryService:
                 validate_bag_spec(spec)
                 item.update(item_id=item_id, spec=spec, name=spec['name'])
             elif kind == 'registration':
+                if entry_fee:
+                    raise ValueError('收费活动不能配置本人专属注册资格奖；请改为免费活动')
                 group = str(p.get('group_id') or '')
                 found = self.groups.get(group)
                 if not found:
@@ -184,7 +197,7 @@ class LotteryService:
         if sum(p['quantity'] for p in clean) > 200:
             raise ValueError('每期最多 200 个获奖名额')
         return {'title': title, 'audience': audience, 'chat_id': chat, 'thread_id': thread,
-                'deadline': deadline, 'draw_mode': mode, 'prizes': clean, 'anti_multi': anti_multi}
+                'deadline': deadline, 'draw_mode': mode, 'prizes': clean, 'anti_multi': anti_multi, 'entry_fee': entry_fee}
 
     def save(self, raw, actor, lottery_id=None, revision=None):
         config = self.validate(raw)
@@ -213,6 +226,7 @@ class LotteryService:
         if not row:
             raise KeyError('活动不存在')
         row['config'] = json.loads(row.pop('config_json'))
+        row['config'].setdefault('entry_fee', 0)
         return row
 
     def view(self, lottery_id, tg_id, admin=False):
@@ -228,7 +242,7 @@ class LotteryService:
         data = {k: row[k] for k in ('id', 'state', 'revision', 'published_at', 'settled_at')}
         mine = self.db.one('SELECT excluded,joined_at FROM lottery_entries WHERE lottery_id=? AND tg_id=?',
                            (lottery_id, tg_id))
-        rules = RULES
+        rules = entry_terms(config) + RULES
         if admin:
             rules += lottery_identity.RULE if config['anti_multi'] else '本期未开启 IP/浏览器关联排除。'
         data.update(config=config, rules=rules, count=self.db.one(
@@ -307,7 +321,7 @@ class LotteryService:
             lines += [f'参与对象：{AUDIENCES[c["audience"]]}', '截止：' + datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间'),
                       '定时开奖' if c['draw_mode'] == 'timed' else '截止后等待管理员开奖（可提前开奖）']
             lines += [f'{emoji("star")} {escape(p["name"])} × {p["quantity"]} 名' for p in c['prizes']]
-            lines += ['每人一次 · 免费参与 · 最多一奖',
+            lines += [entry_terms(c), '每人一次 · 最多一奖',
                       '本人专属注册资格只在开奖时未注册者中先行抽取；其他奖随后抽取。' if any(p['kind'] == 'registration' for p in c['prizes']) else '',
                       '完整规则和私密领奖信息请打开活动。']
         else:
@@ -352,7 +366,7 @@ class LotteryService:
             self.audit(conn, actor, 'publish', lottery_id)
         await self.deliver_notices(lottery_id)
 
-    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None):
+    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None, expected_entry_fee=ENTRY_FEE_UNSET):
         if not self.bot._cfg().get('enabled'):
             raise ValueError('Bot 暂未启用，无法确认群成员身份')
         row = self.row(lottery_id)
@@ -374,9 +388,22 @@ class LotteryService:
                 raise ValueError('报名已截止')
             if conn.execute('SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id)).fetchone():
                 return
-            registered = bool(conn.execute('SELECT 1 FROM members WHERE tg_user_id=?', (tg_id,)).fetchone())
+            account = conn.execute('SELECT emby_user_id FROM members WHERE tg_user_id=?', (tg_id,)).fetchone()
+            registered = bool(account)
             if c['audience'] != 'all' and (c['audience'] == 'member') != registered:
                 raise ValueError('你的注册状态不符合本期参与对象')
+            fee = integer(c.get('entry_fee', 0), '报名积分', 0, 100000)
+            if ((expected_entry_fee is not ENTRY_FEE_UNSET or fee) and
+                    (type(expected_entry_fee) is not int or expected_entry_fee != fee)):
+                raise ValueError('报名积分费用未确认或已变化，请刷新活动后确认报名')
+            if fee:
+                if not account:
+                    raise ValueError('收费活动须绑定已注册积分账户后报名')
+                # This write uses the same BEGIN IMMEDIATE boundary as entry /
+                # association insertion and all other points spenders. The entry
+                # PK is the receipt: retries return above, even after re-binding.
+                self.points._apply(conn, account['emby_user_id'], -fee, 'lottery.entry',
+                                   f'lottery.entry:{lottery_id}:{tg_id}', tg_id, now)
             label = ' '.join(str(tg.get(k) or '') for k in ('first_name', 'last_name')).strip()
             label = label or ('@' + tg['username'] if tg.get('username') else 'Telegram用户')
             conn.execute('INSERT INTO lottery_entries(lottery_id,tg_id,label,joined_at,registered) VALUES(?,?,?,?,?)',
