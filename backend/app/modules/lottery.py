@@ -115,6 +115,17 @@ def text(value, label, maximum, required=True):
     return value.strip()
 
 
+def winner_mention(winner):
+    """Use the stored Telegram identity, never an account name or supplied URL."""
+    label = str(winner.get('label') or '').strip().lstrip('@')
+    display = '@' + label if label and label != 'Telegram用户' else 'Telegram用户'
+    display = escape(display)
+    tg_id = str(winner.get('tg_id') or '')
+    if not re.fullmatch(r'[1-9][0-9]{0,15}', tg_id) or int(tg_id) > 2**52 - 1:
+        return display
+    return f'<a href="tg://user?id={tg_id}">{display}</a>'
+
+
 def entry_terms(config):
     fee = config.get('entry_fee', 0)
     if fee:
@@ -315,25 +326,32 @@ class LotteryService:
 
     def notice_payload(self, row, kind, winners=None):
         c = row['config']
-        header = ''.join(f'<tg-emoji emoji-id="{eid}">{fallback}</tg-emoji>' for eid, fallback in LETTERS)
-        lines = [header, emoji('notice' if kind == 'result' else 'gift') + ' <b>' + escape(c['title']) + '</b>']
+        lines = [emoji('notice' if kind == 'result' else 'gift') + ' <b>' + escape(c['title']) + '</b>'
+                 + (' · 已开奖' if kind == 'result' else '')]
         if kind == 'launch':
             lines += [f'参与对象：{AUDIENCES[c["audience"]]}', '截止：' + datetime.fromtimestamp(c['deadline'], BEIJING).strftime('%Y-%m-%d %H:%M 北京时间'),
-                      '定时开奖' if c['draw_mode'] == 'timed' else '截止后等待管理员开奖（可提前开奖）']
+                      '定时开奖' if c['draw_mode'] == 'timed' else '管理员开奖']
             lines += [f'{emoji("star")} {escape(p["name"])} × {p["quantity"]} 名' for p in c['prizes']]
-            lines += [entry_terms(c), '每人一次 · 最多一奖',
-                      '本人专属注册资格只在开奖时未注册者中先行抽取；其他奖随后抽取。' if any(p['kind'] == 'registration' for p in c['prizes']) else '',
-                      '完整规则和私密领奖信息请打开活动。']
+            lines += [entry_terms(c),
+                      '注册资格奖仅限开奖时未注册者本人。' if any(p['kind'] == 'registration' for p in c['prizes']) else '']
         else:
             winners = winners or []
-            lines += [f'已开奖 · {len(winners)} 位中奖者（名额不足不补抽）']
-            # Keep the public message bounded even with 200 winners/long labels.
-            lines += [f'{escape(w["label"])} · {escape(json.loads(w["prize_json"])["name"])}' for w in winners[:12]]
-            if len(winners) > 12:
-                lines += [f'其余 {len(winners) - 12} 位及完整公示请打开结果页。']
-            lines += ['账户奖励待绑定者可在绑定后领取；人工奖品由管理员确认发放。']
+            shown = 0
+            # Conservatively bound the serialized HTML in UTF-16 units, counting
+            # escaped labels AND mention URLs; reserve room for the honest tail.
+            tail = f'其余 {len(winners)} 位见结果页'
+            for w in winners[:12]:
+                line = f'{winner_mention(w)} · {escape(json.loads(w["prize_json"])["name"])}'
+                if len('\n'.join([*lines, line, tail]).encode('utf-16-le')) // 2 > 4096:
+                    break
+                lines.append(line)
+                shown += 1
+            if len(winners) > shown:
+                lines += [f'其余 {len(winners) - shown} 位见结果页']
+            if not winners:
+                lines += ['本期暂无中奖者']
         payload = {'chat_id': c['chat_id'], 'text': '\n'.join(x for x in lines if x), 'parse_mode': 'HTML',
-                   'reply_markup': {'inline_keyboard': [[{'text': '查看结果 / 领取奖励' if kind == 'result' else '参加抽奖',
+                   'reply_markup': {'inline_keyboard': [[{'text': '查看结果' if kind == 'result' else '参加抽奖',
                        'icon_custom_emoji_id': EMOJI['check' if kind == 'result' else 'gift'][0],
                        'url': f'https://t.me/{row["bot_username"]}?startapp=lottery_{row["id"]}'}]]}}
         if c['thread_id']:

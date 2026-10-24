@@ -354,7 +354,7 @@ def test_api_rules_and_launch_disclose_fee_and_keep_native_icons(e, fee):
     terms = entry_terms({'entry_fee': fee})
     preview = req(e, 'POST', f'/{lid}/preview').json()
     assert terms in preview['rules'] and terms in preview['text']
-    assert preview['text'].count('<tg-emoji') == 7 and '>🔡</tg-emoji>' in preview['text']
+    assert preview['text'].count('<tg-emoji') == 2 and '🔡' not in preview['text']
     req(e, 'POST', f'/{lid}/publish', json={'revision': 1})
     result = req(e, 'GET', '/' + lid, MEMBER).json()
     assert terms in result['rules']
