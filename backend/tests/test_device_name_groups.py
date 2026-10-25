@@ -140,12 +140,12 @@ def test_member_list_detail_bot_and_global_api_share_count_with_raw_api_unchange
         bot = TelegramBot(dict, app.state.members, stats=app.state.stats)
         # Members no longer see device groups; operator cards keep the statistic.
         assert "设备分组" not in bot._usage_text(member) and "设备分组" not in bot._account_card(member)
-        for text in (bot._account_card(member, managing=True), bot._admin_details(member)):
-            assert "设备分组：2 组" in text
+        for text in (bot._member_admin_card(member, public=False), bot._member_admin_card(member, public=True)):
+            assert "设备分组 2 组" in text
             assert "按设备名称归并" in text and "非硬件唯一识别" in text
             assert "空/未知按ID单计" in text
             assert "已登记设备" not in text
-        for text in (bot._account_card(member), bot._account_card(member, public=True)):
+        for text in (bot._account_card(member), bot._brief_card(member)):
             assert "设备分组" not in text
             assert "按设备名称归并" not in text and "非硬件唯一识别" not in text
         target = next(row for row in before if row["device_name"] == "iPhone")

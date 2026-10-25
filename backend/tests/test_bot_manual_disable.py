@@ -229,17 +229,19 @@ def test_held_disable_confirmation_rechecks_remote_state_and_refuses_changed_act
     asyncio.run(run())
 
 
-def test_more_management_cancels_hidden_confirmation_and_keeps_bound_target(bot):
+@pytest.mark.parametrize('away', ['admin_card', 'admin_more'])
+def test_leaving_confirmation_cancels_it_and_keeps_bound_target(bot, away):
     async def run():
         await bot._handle_message(message())
         first = bot.mid
         await bot._handle_callback(callback('admin_disable', mid=first))
         key = nonce(bot, mid=first)
-        await bot._handle_callback(callback('admin_more', mid=first))
+        await bot._handle_callback(callback(away, mid=first))
         panel = bot._admin_panels[('12', first)]
-        assert panel['user_id'] == 'u1' and panel['pending'] is None
+        assert panel['user_id'] == 'u1' and (panel['pending'] or ('',))[0] == 'admin_user'
         await bot._handle_callback(callback('admin_access_ok:' + key, mid=first))
         assert bot._restrictions.events() == []
+        assert bot._members.get('u1')['status'] == 'active'
     asyncio.run(run())
 
 

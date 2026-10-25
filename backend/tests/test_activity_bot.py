@@ -230,13 +230,15 @@ def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize('public,managing', [(False, False), (True, False), (False, True)])
-def test_non_exempt_account_views_no_longer_show_viewing_renewal_thresholds(env, public, managing):
-    body = env.bot._account_card(env.members.get('u1'), public=public, managing=managing)
+@pytest.mark.parametrize('view', ['private', 'group', 'admin'])
+def test_non_exempt_account_views_no_longer_show_viewing_renewal_thresholds(env, view):
+    member = env.members.get('u1')
+    body = {'private': env.bot._account_card, 'group': env.bot._brief_card,
+            'admin': lambda m: env.bot._member_admin_card(m, public=False)}[view](member)
     assert '80 积分 / 30 天' in body
     assert not any(word in body for word in ('80分钟', '有效日', '合格日', '近30天核验'))
-    if public or managing:
-        assert '观看记录' in body
+    if view != 'private':
+        assert '<b>🎬 观看</b>' in body
 
 
 @pytest.mark.parametrize('public', [False, True])
@@ -244,14 +246,15 @@ def test_whitelist_card_keeps_rewards_and_usage_without_renewal_clutter(env, pub
     from test_bot_reply_templates import plain
     e = env
     e.members.upsert('u1', '', {'group_id': 'whitelist'})
-    body = e.bot._account_card(e.members.get('u1'), public=public)
+    member = e.members.get('u1')
+    body = e.bot._brief_card(member) if public else e.bot._account_card(member)
     assert '白名单' in body and '♾ 永久' in body
     for text in ('积分', '成长', '偷得浮生半日闲'):
         assert text in body
     for text in ('续费预算', '本级续费', '缺口', '近30天核验', '合格日', '有效日', '自动保号', '删除候选'):
         assert text not in body
     if public:
-        for text in ('🚀 带宽', '📺 同播', '📥 下载', '🎞️ 转码', '🎬 <b>观看记录', '🪙', '📈'):
+        for text in ('🚀 带宽', '📺 同播', '📥 ', '🎞️ ', '<b>🎬 观看</b>', '<b>🪙 积分', '📈'):
             assert text in body
     assert len(plain(body).encode('utf-16-le')) // 2 <= 4096
 
@@ -352,7 +355,7 @@ def test_level_name_and_title_are_one_identity_on_account_home_and_activity(env)
     e.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u1',120,'test','level2',?)", (int(time.time()),))
     label = '🍃 Lv2 听风「风止星归」'
     member = e.members.get('u1')
-    for card in (e.bot._account_card(member), e.bot._account_card(member, public=True), e.bot._home(str(VIEWER), 'Demo')[0]):
+    for card in (e.bot._account_card(member), e.bot._brief_card(member), e.bot._home(str(VIEWER), 'Demo')[0]):
         assert label in plain(card)
         assert plain(card).count('风止星归') == 1
     async def run():

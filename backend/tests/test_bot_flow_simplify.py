@@ -336,21 +336,19 @@ def render_flow_previews(bot):
     snapshot('本人已撤回 · 操作后原卡只返回', mid=cancelled_card['message_id'])
     cancelled_notice = bot.db.one("SELECT message_id FROM request_outbox WHERE request_id=3 AND user_id='u1' AND kind='result'")
     snapshot('异步已撤回通知 · 独立投递记录', mid=cancelled_notice['message_id'])
-    page('/kk · 正常账号', demo._user_card(member) + demo._admin_access_text({'status':'active','emby_disabled':False}),
-         demo._user_admin_keyboard(member['emby_user_id'], {'status':'active','emby_disabled':False}))
-    page('/kk · 已禁用账号', demo._user_card(dict(member, status='suspended')) + demo._admin_access_text({'status':'suspended','emby_disabled':True}),
-         demo._user_admin_keyboard(member['emby_user_id'], {'status':'suspended','emby_disabled':True}))
+    def kk(local, remote, status=None):
+        access = {'status': local, 'emby_disabled': remote}
+        card = {**member, '_access_lines': demo._admin_access_lines(access), **({'status': status} if status else {})}
+        return demo._user_card(card), demo._user_admin_keyboard(member['emby_user_id'], access)
+    page('/kk · 正常账号', *kk('active', False))
+    page('/kk · 已禁用账号', *kk('suspended', True, 'suspended'))
     for title, local, remote in [('/kk · 仅Emby禁用可明确解除', 'active', True),
                                   ('/kk · 仅本地封禁可明确解除', 'suspended', False)]:
-        page(title, demo._user_card(dict(member, status=local))
-             + demo._admin_access_text({'status':local,'emby_disabled':remote}),
-             demo._user_admin_keyboard(member['emby_user_id'], {'status':local,'emby_disabled':remote}))
-    page('/kk · 远端未知只刷新', demo._user_card(member) + demo._admin_access_text({'status':'active','emby_disabled':None}),
-         demo._user_admin_keyboard(member['emby_user_id'], {'status':'active','emby_disabled':None}))
-    page('更多管理 · 私聊', '🛠 <b>更多管理</b>\n目标：DemoViewer', demo._user_admin_more(member['emby_user_id']))
+        page(title, *kk(local, remote, local))
+    page('/kk · 远端未知只刷新', *kk('active', None))
     demo._bot_username = 'synthetic_preview_bot'
     with demo._bind_session('-10055', '800', group=True):
-        page('更多管理 · 群内目标绑定深链', '🛠 <b>更多管理</b>\n目标：DemoViewer', demo._user_admin_more(member['emby_user_id']))
+        page('/kk · 群内不含私人资料，资料走私聊深链', *kk('active', False))
     return result
 
 
@@ -414,7 +412,7 @@ def test_account_actually_merges_usage_fields_permissions_note_and_unknowns(bot)
     assert '下载：允许' in card and '转码：不允许' in card and '备注：<合成备注>' in card
     # Device groups are an operator statistic; members see signed-in devices instead.
     assert '设备分组' not in card and '设备分组' not in usage
-    assert '备注' not in plain(local._account_card(member, public=True))
+    assert '备注' not in plain(local._brief_card(member))
     assert '统计口径' not in card and '历史未核验' not in card
     local._stats = None
     unknown = plain(local._account_card({'emby_user_id':'demo'}))

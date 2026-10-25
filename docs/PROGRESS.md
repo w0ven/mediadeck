@@ -2,6 +2,22 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-25 — v0.53.2: sectioned member cards, one-layer /kk
+
+- Group account card (`/me` in groups) heads with the member's Telegram nickname as a
+  mention (fallback: account name) and groups rights, viewing, and points/growth/
+  renewal into separate Telegram blockquote sections.
+- `/kk` shows the whole account on one card: ban state, rights with device groups,
+  viewing, points/growth/renewal/auto-renew; private chats add a profile section (TG,
+  registration channel, inviter/invitees, request quota, last active, raw login IDs,
+  note). In groups the profile section is left out, the nickname does not ping, and a
+  「资料 · 私聊」 deep link replaces it.
+- `/kk` buttons are one layer (renew, points, group; disable/enable, delete; refresh,
+  close). 更多管理, 管理入口 and the usage/profile sub-pages are gone; their callbacks
+  on older cards return to the card and cancel any hidden confirmation.
+- Card rendering lives in `app/modules/bot_member_card.py`; `_account_card` now only
+  renders the private member view. Tests' Telegram HTML checker accepts `blockquote`.
+
 ## 2026-10-25 — lottery operations and rule visibility (backend, unreleased)
 
 - Anti-multi-account explanation moved out of public `rules` into the

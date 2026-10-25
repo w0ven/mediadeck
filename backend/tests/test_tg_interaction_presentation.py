@@ -181,7 +181,9 @@ def test_card_has_compact_sections_and_truthful_unknown(env, chat, used):
     env.members.bind_metering(Metering(), cutover=True)
     asyncio.run(dispatch(env, '/me', chat=chat, user=VIEWER))
     text = next(p['text'] for m, p in env.tg.calls if m == 'sendMessage')
-    for section in ('带宽：<b>', '<b>观看记录</b>\n近24小时：', '<b>积分：50</b>'):
+    sections = (('🚀 带宽 ', '<b>🎬 观看</b>\n近24小时 ', '<b>🪙 积分 50</b>') if chat == GROUP else
+                ('带宽：<b>', '<b>观看记录</b>\n近24小时：', '<b>积分：50</b>'))
+    for section in sections:
         assert section in text
     assert '数据不完整' not in text
     for forbidden in ('来源', '采集', '更新于', 'hidden-node', '这是本人', '请选择', '《'):
