@@ -12,6 +12,7 @@ from html import escape
 from time import monotonic
 
 from app.modules.economy_rules import day_bounds, economy_write, encode
+from app.modules.game_center_board import BOARD_GAMES, BoardGame, BoardRobots
 from app.modules.game_center_config import DEFAULTS, deep_link, tiers
 from app.modules.game_center_holdem import HoldemGame
 from app.modules.game_center_zjh import ZjhGame
@@ -34,7 +35,9 @@ class GameCenter:
         self.cash = CashBook(points)
         self.config, self.enabled, self.bot = config, enabled, bot
         # Adapters own rule/escrow policy. The shell never serializes raw engine state to clients.
-        self.games = {'zjh': ZjhGame(), 'holdem': HoldemGame()}
+        self.games = {'zjh': ZjhGame(), 'holdem': HoldemGame(),
+                      **{game: BoardGame(game) for game in BOARD_GAMES}}
+        self.board_robots = BoardRobots()
         self._listeners = {}
         self._listener_lock = threading.Lock()
         self._online = {}
@@ -80,9 +83,10 @@ class GameCenter:
         return member
 
     def _gate(self, game):
-        if game not in ('zjh', 'holdem'):
+        if not isinstance(game, str) or game not in self.games:
             raise GameError('not_found', '游戏不存在', 404)
-        if not self.enabled() or not self.cfg()[game + '_enabled']:
+        if (not self.enabled() or not self.cfg()[game + '_enabled']
+                or not getattr(self.games[game], 'available', True)):
             raise GameError('disabled', '游戏暂未开放', 503)
 
     def _beans(self, conn, uid, clock):
@@ -99,7 +103,7 @@ class GameCenter:
     def _wallet(self, conn, uid, clock):
         beans = self._beans(conn, uid, clock)
         held = conn.execute("SELECT COALESCE(SUM(amount),0) n FROM play_escrows "
-                            "WHERE user_id=? AND amount>0 AND scope IN ('gc_zjh','gc_holdem')",
+                            "WHERE user_id=? AND amount>0 AND scope IN ('gc_zjh','gc_holdem','gc_xiangqi','gc_gomoku')",
                             (uid,)).fetchone()['n']
         return {'points': self.points.balance(uid), 'frozen': held, 'beans': beans['balance'],
                 'beans_day': beans['day'], 'daily_beans': self.cfg()['daily_beans']}
@@ -138,10 +142,11 @@ class GameCenter:
         cfg = self.cfg()
         counts = {r['game']: r['n'] for r in self.db.query('SELECT t.game,COUNT(*) n FROM gc_seats s JOIN gc_tables t ON t.id=s.table_id GROUP BY t.game')}
         names = [('zjh', '炸金花', 5), ('holdem', '德州扑克', 6), ('niuniu', '牛牛', 0),
-                 ('doudizhu', '斗地主', 0), ('gomoku', '五子棋', 0), ('xiangqi', '象棋', 0)]
+                 ('doudizhu', '斗地主', 0), ('gomoku', '五子棋', 2), ('xiangqi', '象棋', 2)]
         result.update(enabled=bool(self.enabled()), games=[
             {'id': game, 'name': name, 'enabled': bool(self.enabled() and cfg.get(game + '_enabled')),
-             'available': game in self.games, 'coming_soon': maximum == 0, 'min_players': 2 if maximum else 0,
+             'available': game in self.games and getattr(self.games[game], 'available', True),
+             'coming_soon': maximum == 0, 'min_players': 2 if maximum else 0,
              'max_players': maximum, 'seated': counts.get(game, 0)} for game, name, maximum in names])
         return result
 
@@ -183,8 +188,8 @@ class GameCenter:
         seat = body.get('seat', free[0])
         if type(seat) is not int or seat not in free:
             raise GameError('invalid', '座位不可用')
-        if table['game'] == 'zjh' and body.get('buy_in') is not None:
-            raise GameError('invalid', '炸金花入座不带入筹码')
+        if table['game'] != 'holdem' and body.get('buy_in') is not None:
+            raise GameError('invalid', '炸金花入座不带入筹码' if table['game'] == 'zjh' else '棋类入座不带入筹码')
         p = {'uid': uid, 'player': 'p_' + secrets.token_hex(8), 'name': str(name or '会员')[:40],
              'seat': seat, 'bot': False, 'ready': False, 'auto': False, 'auto_hands': 0,
              'away': False, 'leave_after': False, 'joined_at': clock, 'notice': ''}
@@ -192,7 +197,7 @@ class GameCenter:
             self.games['holdem'].buy_in(self, conn, table, p, body, clock)
         table['seats'].append(p)
         table['seats'].sort(key=lambda p: p['seat'])
-        if table['game'] == 'zjh':
+        if table['game'] != 'holdem':
             table['countdown_at'] = None
         conn.execute('INSERT INTO gc_seats VALUES(?,?,?)', (uid, table['currency'], table['id']))
         if table['host'] is None:
@@ -211,6 +216,8 @@ class GameCenter:
                  'countdown_at': None, 'turn_deadline': None, 'auto_at': None,
                  'idle_deadline': clock + 600, 'owner_uid': uid, 'seats': [], 'hand': None,
                  'last_hand': None, 'rules': self.games[game].rules(tier, self.cfg())}
+        if game in BOARD_GAMES and tier_id == 'practice':
+            table['rules']['robot_level'] = body.get('robot_level', 'normal')
         conn.execute('INSERT INTO gc_tables VALUES(?,?,?,?,?,?,?,?,?)',
                      (table['id'], game, tier_id, tier['currency'], 'waiting', 0, encode(table), clock, clock))
         self._join(conn, table, uid, name, body, clock)
@@ -218,7 +225,7 @@ class GameCenter:
             positions = [i for i in range(table['max_players']) if i != table['seats'][0]['seat']]
             for i, label in zip(positions, ('小智', '阿呆', '铁柱', '豆豆', '阿星')):
                 table['seats'].append({'uid': 'bot:' + str(i), 'player': 'bot_' + str(i), 'seat': i,
-                    'name': label, 'bot': True, 'ready': True, 'auto': True, 'auto_hands': 0,
+                    'name': label, 'bot': True, 'ready': True, 'auto': game not in BOARD_GAMES, 'auto_hands': 0,
                     'away': False, 'leave_after': False, 'joined_at': clock, 'notice': '',
                     **({'stack': 2000, 'auto_since': None, 'away_since': None} if game == 'holdem' else {})})
         else:
@@ -241,13 +248,13 @@ class GameCenter:
             conn.execute('DELETE FROM gc_seats WHERE user_id=? AND table_id=?', (player['uid'], table['id']))
         if table['host'] == player['player']:
             self._transfer_host(table, clock)
-        if table['game'] == 'zjh':
+        if table['game'] != 'holdem':
             table['countdown_at'] = None
         if not any(not p['bot'] for p in table['seats']):
             table.update(phase='closed', seats=[], host=None, countdown_at=None, idle_deadline=None)
 
     def _countdown(self, table, clock):
-        if table['game'] != 'zjh':
+        if table['game'] == 'holdem':
             return
         if table['phase'] == 'waiting' and len(table['seats']) >= 2 and all(p['ready'] for p in table['seats']):
             table['countdown_at'] = table['countdown_at'] or clock + 5
@@ -270,7 +277,7 @@ class GameCenter:
         for p in list(table['seats']):
             if p['player'] in hand['users'] and p['auto'] and not p['bot']:
                 p['auto_hands'] += 1
-            if p['leave_after'] or not p['bot'] and p['auto_hands'] >= table['rules']['auto_hands']:
+            if p['leave_after'] or not p['bot'] and p['auto_hands'] >= table['rules'].get('auto_hands', float('inf')):
                 self._remove(conn, table, p, clock)
             else:
                 p['ready'] = bool((p['auto'] or p['bot']) and self.can_fund(conn, table, p, clock))
@@ -294,9 +301,12 @@ class GameCenter:
 
     def _card(self, table):
         s = self._summary(table)
-        stake = (f"底注 {table['rules']['ante']}" if table['game'] == 'zjh' else
+        names = {'zjh': '炸金花', 'holdem': '德州扑克', 'xiangqi': '象棋', 'gomoku': '五子棋'}
+        unit = '欢乐豆' if table['currency'] == 'beans' else '积分'
+        stake = (f"每人押 {table['rules']['stake']} {unit}" if table['game'] in BOARD_GAMES else
+                 f"底注 {table['rules']['ante']}" if table['game'] == 'zjh' else
                  f"盲注 {table['rules']['small_blind']}/{table['rules']['big_blind']}")
-        return {'text': (f"🎮 <b>{'炸金花' if table['game'] == 'zjh' else '德州扑克'} · {escape(table['tier_name'])}</b>\n"
+        return {'text': (f"🎮 <b>{names[table['game']]} · {escape(table['tier_name'])}</b>\n"
                          f"{stake} · 房主 {escape(s['host_name'])}\n"
                          f"{s['players']}/{s['max_players']} 人 · 等你上桌"),
                 'reply_markup': {'inline_keyboard': [[{'text': '上桌', 'url': self.link(table['id'])}]]}}
@@ -340,6 +350,11 @@ class GameCenter:
             else:
                 outcome = {}
                 if op in ('create', 'quick'):
+                    if body.get('game') in BOARD_GAMES:
+                        level = body.get('robot_level', 'normal')
+                        if (level not in ('easy', 'normal', 'hard')
+                                or body.get('tier') != 'practice' and 'robot_level' in body):
+                            raise GameError('invalid', '练习场机器人难度须为 easy、normal 或 hard')
                     table = None
                     if op == 'quick':
                         self._gate(body.get('game'))
@@ -376,6 +391,8 @@ class GameCenter:
             response = {'table': self._view(conn, table, uid, clock)}
             if 'created' in outcome:
                 response['created'] = outcome['created']
+        if table['game'] in BOARD_GAMES:
+            self.board_robots.schedule(self.games[table['game']], table)
         self.notify(table['id'])
         return response
 
@@ -393,7 +410,7 @@ class GameCenter:
             elif p['leave_after'] and table['host'] == p['player']:
                 self._transfer_host(table, clock)
         elif op == 'ready':
-            if table['game'] != 'zjh':
+            if table['game'] == 'holdem':
                 raise GameError('invalid', '德州无需准备，带入筹码后按开局规则参与')
             if table['phase'] != 'waiting':
                 raise GameError('wrong_phase', '本手结束后才能准备', 409)
@@ -401,7 +418,7 @@ class GameCenter:
             if type(ready) is not bool:
                 raise GameError('invalid', 'ready 须为布尔值')
             if ready and not self.can_fund(conn, table, p, clock):
-                raise GameError('insufficient_funds', self.games['zjh'].funding_message(table))
+                raise GameError('insufficient_funds', self.games[table['game']].funding_message(table))
             p['ready'] = ready
             if ready:
                 p['notice'] = ''
@@ -413,6 +430,8 @@ class GameCenter:
                 raise GameError('wrong_phase', '牌局已经开始', 409)
             self.games[table['game']].start(self, conn, table, clock, manual=True)
         elif op == 'auto':
+            if table['game'] in BOARD_GAMES:
+                raise GameError('invalid', '棋类不提供托管，超时将判负')
             enabled = body.get('enabled')
             if type(enabled) is not bool:
                 raise GameError('invalid', 'enabled 须为布尔值')
@@ -452,6 +471,14 @@ class GameCenter:
             seen = self._presence.get(table_id, {})
             if uid in seen:
                 seen[uid] = monotonic()
+
+    def board_online(self, table, player):
+        if player['bot']:
+            return True
+        with self._listener_lock:
+            return bool(self._online.get((table['id'], player['uid'])) or
+                        monotonic() - self._presence.get(table['id'], {}).get(
+                            player['uid'], self._started_at) < 30)
 
     def _remove_offline(self, conn, table, clock):
         # The economy lock serializes HTTP activity; the listener lock covers SSE admission.
@@ -497,6 +524,11 @@ class GameCenter:
                 # Catch up from original deadlines, not restart time. Bounded per table for fairness.
                 for _ in range(256):
                     game = self.games[table['game']]
+                    if table['game'] in BOARD_GAMES and table['phase'] == 'playing':
+                        if game.tick(self, conn, table, clock):
+                            dirty = True
+                            self._save(conn, table, clock)
+                        break
                     candidates = []
                     if table['phase'] == 'playing':
                         candidates.append((table['auto_at'] if table['auto_at'] is not None else table['turn_deadline'], 'turn'))
@@ -546,6 +578,8 @@ class GameCenter:
                     self._save(conn, table, due)
                 if dirty:
                     changed.append(table['id'])
+            if table['game'] in BOARD_GAMES:
+                self.board_robots.schedule(self.games[table['game']], table)
         for tid in changed:
             self.notify(tid)
         return changed
@@ -554,7 +588,7 @@ class GameCenter:
         seats = [p for p in table['seats'] if not p['leave_after']]
         eligible = []
         if table['phase'] == 'waiting':
-            eligible = self.games['zjh'].eligible(self, conn, table, clock, manual=True)
+            eligible = self.games[table['game']].eligible(self, conn, table, clock, manual=True)
         if table['phase'] == 'closed':
             reason, message = 'closed', '本桌已结束，未使用的冻结额已退回'
         elif table['phase'] == 'playing':
@@ -570,6 +604,16 @@ class GameCenter:
             reason, message = 'waiting_host', '人数够了，等待房主开始'
         else:
             reason, message = 'ready', '人数够了，点「开始」就能开局；未准备的人本手旁观'
+        if table['game'] in BOARD_GAMES:
+            host = bool(viewer) and viewer['player'] == table['host']
+            message = {
+                'waiting_players': '等待对手入座，可以把桌链接分享给朋友',
+                'waiting_ready': '等待对手点准备' if host or not viewer else '点「准备」后，房主就能开局',
+                'ineligible_players': '双方的可用余额都要够本场押注才能开局',
+                'waiting_host': '你已准备，等待房主开始' if viewer else '双方已准备，等待房主开始',
+                'ready': '对手已准备，点「开始」即可开局',
+                'playing': '对局进行中，超时判负，不提供托管',
+            }.get(reason, message)
         return {'min_players': 2, 'seated_players': len(seats), 'eligible_players': len(eligible),
                 'can_start': reason == 'ready', 'reason': reason, 'message': message}
 
@@ -600,11 +644,17 @@ class GameCenter:
                 public.update({k: seat[k] for k in ('stack', 'away_since', 'auto_since')})
         else:
             out['start_status'] = self._zjh_start_status(conn, table, p, clock)
+        if table['game'] in BOARD_GAMES:
+            for public, seat in zip(out['seats'], table['seats']):
+                public['color'] = seat.get('color')
         for key in ('hand', 'last_hand'):
             hand = table[key]
             # A re-seated/departed member keeps their own per-hand identity, not a new seat occupant's.
             player = next((pid for pid, who in hand['users'].items() if who['uid'] == uid), None) if hand else None
-            out[key] = self.games[table['game']].view(hand, player) if hand else None
+            if table['game'] in BOARD_GAMES:
+                out[key] = self.games[table['game']].view(hand, player, clock) if hand else None
+            else:
+                out[key] = self.games[table['game']].view(hand, player) if hand else None
         return out
 
     def snapshot(self, table_id, uid, now=None):
@@ -616,7 +666,9 @@ class GameCenter:
     def proof(self, table_id, number):
         # Administrator-only: the revealed deck lets anyone rebuild folded and compared hands.
         with self.db.snapshot():
-            self._load(self.db._conn, table_id)
+            table = self._load(self.db._conn, table_id)
+            if table['game'] in BOARD_GAMES:
+                raise GameError('invalid', '棋类没有洗牌复核信息')
             row = self.db.one('SELECT state_json FROM gc_hands WHERE table_id=? AND hand_no=?', (table_id, number))
         if not row:
             raise GameError('not_found', '手牌不存在', 404)
@@ -632,7 +684,7 @@ class GameCenter:
         integer(limit, '条数', 1, 500)
         if not table_id and not user_id:
             raise GameError('invalid', '至少提供牌桌或用户条件')
-        sql = "SELECT * FROM play_cash_events WHERE (scope IN ('gc_zjh','gc_holdem') OR scope='poker' AND ref IN (SELECT table_id||':'||hand_no FROM gc_hands))"
+        sql = "SELECT * FROM play_cash_events WHERE (scope IN ('gc_zjh','gc_holdem','gc_xiangqi','gc_gomoku') OR scope='poker' AND ref IN (SELECT table_id||':'||hand_no FROM gc_hands))"
         args = []
         if table_id:
             sql += " AND (ref=? OR substr(ref,1,?)=?)"

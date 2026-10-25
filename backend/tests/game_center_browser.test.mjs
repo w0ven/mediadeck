@@ -47,7 +47,7 @@ with tempfile.TemporaryDirectory(prefix='gc-browser-') as directory:
     svc = app.state.game_center
     client.portal.call(app.state.game_center_task.cancel)
     client.portal.call(app.state.game_delivery_task.cancel)
-    app.state.plugins.save('game_center', enabled=True, config={**DEFAULTS, 'zjh_enabled': True, 'holdem_enabled': True})
+    app.state.plugins.save('game_center', enabled=True, config={**DEFAULTS, 'zjh_enabled': True, 'holdem_enabled': True, 'xiangqi_enabled': True, 'gomoku_enabled': True})
     # Keep deadline advances away from midnight's intentional daily-bean refill.
     clock = datetime.now().replace(hour=12, minute=0, second=0, microsecond=0).timestamp()
     svc._clock = lambda value=None: clock if value is None else float(value)
@@ -215,7 +215,19 @@ async function capture(page, name) {
   assert(await page.evaluate(() => { const s = document.querySelector('#screen'); return s.scrollWidth <= s.clientWidth; }), 'no screen horizontal overflow');
   await page.waitForFunction(() => [...document.querySelectorAll('.gc img')].every(i => i.complete && i.naturalWidth > 0));
   await page.waitForFunction(() => [...document.querySelectorAll('[data-gc-write][data-gc-disabled="false"]')].every(b => !b.disabled));
-  if (await page.locator('.gc-table').count() && !await page.locator('.gc-sheet').isVisible()) {
+  if (await page.locator('.gc-board-table').count() && !await page.locator('.gc-sheet').isVisible()) {
+    const layout = await page.evaluate(() => {
+      const box = s => document.querySelector(s).getBoundingClientRect();
+      const frame = box('.gc-board-frame'), board = box('[data-gc-board]');
+      const bars = [...document.querySelectorAll('.gc-duel-bar')].map(e => e.getBoundingClientRect());
+      return { overlap: bars.some(b => Math.min(b.bottom, frame.bottom) - Math.max(b.top, frame.top) > 1),
+        inset: [board.left - frame.left, frame.right - board.right, board.top - frame.top, frame.bottom - board.bottom],
+        actionBottom: document.querySelector('.gc-board-dock').getBoundingClientRect().bottom, height: innerHeight };
+    });
+    assert.equal(layout.overlap, false, 'board frame and player bars must not overlap');
+    assert(layout.inset.every(v => v >= 0 && v <= 9), `board sits inside its frame: ${layout.inset}`);
+    assert(layout.actionBottom <= layout.height + 1, 'board actions fit the viewport');
+  } else if (await page.locator('.gc-table').count() && !await page.locator('.gc-sheet').isVisible()) {
     const layout = await page.evaluate(() => {
       const targets = [...document.querySelectorAll('.gc-croupier,.gc-seat,.gc-holdem-center,.gc-pot,.gc-me-row')];
       const boxes = targets.map(e => ({label:e.className, r:e.getBoundingClientRect()}));
@@ -255,7 +267,8 @@ test('real ZJH member UI, host/ready/action/auto, deep links, native SSE reconne
     await host.locator('#tabbar [data-tab="games"]').click();
     await host.locator('.gc-lobby').waitFor();
     await host.locator('#gc-waiting .empty').waitFor();
-    assert.equal(await host.locator('.gc-game-card').count(), 4);
+    assert.equal(await host.locator('.gc-game-card[data-gc-soon]').count(), 2, 'niuniu and doudizhu are still coming soon');
+    assert.deepEqual(await host.locator('.gc-board-card .gc-play-tag').allInnerTexts(), ['可玩', '可玩']);
     assert.equal(await host.locator('#i-gamepad-2').count(), 1);
     await matrix(host, '01-lobby');
     await host.locator('[data-gc-tiers="holdem"]').click();
@@ -987,6 +1000,210 @@ test('connection warning waits for repeated failures; token renewal is quiet and
     await snapshot();
     assert.equal(countRequests(env, '/stream-token'), tokensBefore + 3);
     assert.equal(await status.getAttribute('data-state'), 'live');
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
+
+// Board games: real rules engine, clocks and settlement behind the shipped board UI.
+const boardView = (env, id, user) => tableFor(env, id, user);
+async function boardMove(env, id, user, move) {
+  const v = await boardView(env, id, user);
+  return (await env.request(user, `/tables/${id}/actions`, 'POST', { hand_no: v.hand_no, turn: v.hand.turn, action: 'move', move })).table;
+}
+const pieceCount = page => page.locator('.gc-xq-piece').count();
+const stoneCount = page => page.locator('.gc-stone:not(.ghost)').count();
+
+test('real xiangqi: colours and flipped board, tap-to-move, capture with check, draw offer, resign and rematch', { timeout: 90000 }, async () => {
+  const env = await environment();
+  try {
+    let t = (await env.request(1, '/tables', 'POST', { game: 'xiangqi', tier: 'normal' })).table;
+    const id = t.id;
+    await env.request(2, `/tables/${id}/seat`, 'POST', {});
+    const host = await env.pageFor(1, 'dark', 400, 860, false, true), guest = await env.pageFor(2, 'dark', 400, 860, false, true);
+    for (const page of [host, guest]) {
+      await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + id);
+      await page.locator('.gc-board-table[data-phase="waiting"]').waitFor();
+    }
+    assert.equal(await host.locator('[data-gc-board-act]').count(), 0, 'no board actions before the game starts');
+    await capture(host, '20-xiangqi-waiting.png');
+    await env.request(2, `/tables/${id}/ready`, 'POST', { ready: true });
+    await env.request(1, `/tables/${id}/start`, 'POST', {});
+    t = await boardView(env, id, 1);
+    const red = t.hand.players.find(p => p.color === 'red').player === t.me.player ? 1 : 2;
+    const black = 3 - red, pages = { 1: host, 2: guest };
+    for (const page of [host, guest]) await syncTable(page, await boardView(env, id, page === host ? 1 : 2));
+    // Each side sees its own colour at the bottom: red's king low on red's board, high on black's.
+    const kingY = async (page, sq) => (await page.locator(`[data-gc-sq="${sq}"]`).boundingBox()).y;
+    assert(await kingY(pages[red], 'e0') > await kingY(pages[red], 'e9'), 'red plays from the bottom');
+    assert(await kingY(pages[black], 'e0') < await kingY(pages[black], 'e9'), 'black sees a flipped board');
+    assert.match(await pages[red].locator('.gc-duel-bar.bottom').innerText(), /红方/);
+    assert.match(await pages[black].locator('.gc-duel-bar.bottom').innerText(), /黑方/);
+    // Only the side to move gets legal targets; selecting shows them, tapping one moves.
+    await pages[black].locator('[data-gc-sq="h7"]').click();
+    assert.equal(await pages[black].locator('.gc-xq-dot').count(), 0, 'waiting side cannot select');
+    await pages[red].locator('[data-gc-sq="h2"]').click();
+    await pages[red].locator('.gc-xq-piece.sel[data-gc-sq="h2"]').waitFor();
+    assert(await pages[red].locator('.gc-xq-dot').count() >= 5, 'legal destinations are shown');
+    await capture(pages[red], '21-xiangqi-selected.png');
+    await pages[red].locator('.gc-xq-dot[data-gc-sq="e2"]').click();
+    await pages[red].locator('.gc-xq-piece[data-gc-sq="e2"]').waitFor();
+    assert.equal(await pages[red].locator('.gc-xq-last').count(), 2, 'last move is marked');
+    await syncTable(pages[black], await boardView(env, id, black));
+    await pages[black].locator('[data-gc-sq="h7"]').click();
+    await pages[black].locator('.gc-xq-dot[data-gc-sq="e7"]').click();
+    await pages[black].locator('.gc-xq-piece[data-gc-sq="e7"]').waitFor();
+    // Red's cannon jumps its pawn, takes the centre pawn and checks through black's own cannon.
+    await syncTable(pages[red], await boardView(env, id, red));
+    await pages[red].locator('[data-gc-sq="e2"]').click();
+    await pages[red].locator('.gc-xq-piece.target[data-gc-sq="e6"]').click();
+    await pages[red].waitForFunction(() => document.querySelectorAll('.gc-xq-piece').length === 31);
+    await syncTable(pages[black], await boardView(env, id, black));
+    await pages[black].locator('.gc-xq-piece.check[data-gc-sq="e9"]').waitFor();
+    await pages[black].locator(`.gc-fx-bubble`, { hasText: '将军' }).waitFor();
+    assert.match(await pages[black].locator('.gc-turn-line').innerText(), /被将军/);
+    assert.equal(await pieceCount(pages[black]), 31);
+    await capture(pages[black], '22-xiangqi-check-flipped.png');
+    // Draw offer: the other side may answer out of turn; rejecting keeps the game going.
+    await pages[black].locator('[data-gc-board-act="offer_draw"]').click();
+    await pages[black].locator('.gc-wait-reason', { hasText: '已提出和棋' }).waitFor();
+    await syncTable(pages[red], await boardView(env, id, red));
+    await pages[red].locator('.gc-draw-offer').waitFor();
+    await capture(pages[red], '23-xiangqi-draw-offer.png');
+    await pages[red].locator('[data-gc-board-act="reject_draw"]').click();
+    await pages[red].locator('.gc-draw-offer').waitFor({ state: 'detached' });
+    await syncTable(pages[black], await boardView(env, id, black));
+    assert.equal(await pages[black].locator('.gc-wait-reason').count(), 0, 'the rejected offer is gone for the offerer too');
+    // Resign through the confirmation sheet; both boards keep the final position under a ribbon.
+    const total = w => w.points + w.frozen, before = total((await boardView(env, id, red)).me.wallet);
+    await pages[black].locator('[data-gc-board-act="resign"]').click();
+    await pages[black].locator('.gc-sheet [data-gc-resign]').click();
+    await pages[black].locator('.gc-board-result.loss').waitFor();
+    assert.match(await pages[black].locator('.gc-board-result').innerText(), /你输了[\s\S]*你认输了 · [−-]50 积分/);
+    await syncTable(pages[red], await boardView(env, id, red));
+    await pages[red].locator('.gc-board-result.win').waitFor();
+    assert.match(await pages[red].locator('.gc-board-result').innerText(), /你赢了[\s\S]*对方认输 · \+50 积分/);
+    assert.equal(total((await boardView(env, id, red)).me.wallet), before + 50, 'winner takes both stakes, no rake');
+    assert.equal(await pieceCount(pages[red]), 31, 'final position stays on the board');
+    assert.equal(await pages[red].locator('.gc-board-frame .gc-board-result').count(), 0, 'the result never covers the board');
+    assert.match(await pages[black].locator('.gc-board-dock').innerText(), /点「准备」后，房主就能开局|等待对手点准备/);
+    await shots(pages[red], '24-xiangqi-result');
+    await pages[red].locator('.gc-board-result').click();
+    await pages[red].locator('.gc-sheet .gc-result-head', { hasText: '你赢了' }).waitFor();
+    assert.match(await pages[red].locator('.gc-sheet').innerText(), /共 3 手/);
+    await closeSheet(pages[red]);
+    // Rematch: each side readies again and the colours swap.
+    assert.match(await pages[red].locator('[data-gc-ready]').innerText(), /再来一局/);
+    await pages[red].locator('[data-gc-ready]').click();
+    await env.request(black, `/tables/${id}/ready`, 'POST', { ready: true });
+    if (red !== 1) await pages[red].locator('[data-gc-ready]').waitFor();
+    const starter = (await boardView(env, id, 1)).host === (await boardView(env, id, 1)).me.player ? 1 : 2;
+    await env.request(starter, `/tables/${id}/start`, 'POST', {});
+    t = await boardView(env, id, red);
+    assert.equal(t.hand.players.find(p => p.player === t.me.player).color, 'black', 'colours swap each game');
+    await syncTable(pages[red], t);
+    assert(await kingY(pages[red], 'e0') < await kingY(pages[red], 'e9'), 'the board flips with the new colour');
+    await matrix(pages[red]);
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
+
+test('real gomoku: two humans, preview-then-confirm placement, five in a row and clocks', { timeout: 90000 }, async () => {
+  const env = await environment();
+  try {
+    let t = (await env.request(1, '/tables', 'POST', { game: 'gomoku', tier: 'normal' })).table;
+    const id = t.id;
+    await env.request(2, `/tables/${id}/seat`, 'POST', {});
+    await env.request(2, `/tables/${id}/ready`, 'POST', { ready: true });
+    await env.request(1, `/tables/${id}/start`, 'POST', {});
+    t = await boardView(env, id, 1);
+    const blackUser = t.hand.players.find(p => p.color === 'black').player === t.me.player ? 1 : 2, whiteUser = 3 - blackUser;
+    const page = await env.pageFor(blackUser, 'dark', 400, 860, false, true);
+    await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + id);
+    await page.locator('.gc-board-table[data-phase="playing"]').waitFor();
+    assert.match(await page.locator('.gc-duel-bar.bottom').innerText(), /执黑/);
+    assert.match(await page.locator('.gc-duel-bar.bottom .gc-clock').innerText(), /^\d+:\d\d/, 'clock shows minutes:seconds');
+    const tap = async (x, y) => {
+      const box = await page.locator('[data-gc-board]').boundingBox();
+      await page.mouse.click(box.x + box.width * (50 + x * 100) / 1500, box.y + box.height * (50 + y * 100) / 1500);
+    };
+    // Black builds four on row 7 via the UI and API; white answers elsewhere.
+    const whites = [[0, 0], [0, 2], [0, 4], [0, 6]];
+    for (let i = 0; i < 4; i++) {
+      await tap(5 + i, 7);
+      await page.locator('.gc-stone.ghost').waitFor();
+      assert.equal(await page.locator('[data-gc-board-act="place"]').isDisabled(), false);
+      if (i === 0) await capture(page, '25-gomoku-preview.png');
+      if (i % 2) await tap(5 + i, 7); else await page.locator('[data-gc-board-act="place"]').click();
+      await page.waitForFunction(n => document.querySelectorAll('.gc-stone:not(.ghost)').length === n, i * 2 + 1);
+      await boardMove(env, id, whiteUser, whites[i]);
+      await syncTable(page, await boardView(env, id, blackUser));
+    }
+    assert.equal(await stoneCount(page), 8);
+    assert.equal(await page.locator('.gc-stone.last').count(), 1, 'the last stone is marked');
+    // Occupied points are ignored; the fifth stone wins and the line is highlighted.
+    await tap(5, 7);
+    assert.equal(await page.locator('.gc-stone.ghost').count(), 0, 'occupied points cannot be previewed');
+    await tap(9, 7);
+    await page.locator('[data-gc-board-act="place"]').click();
+    await page.locator('.gc-board-result.win').waitFor();
+    assert.equal(await page.locator('.gc-stone-win').count(), 5, 'winning five is highlighted');
+    const covered = await page.evaluate(() => [...document.querySelectorAll('.gc-stone-win')].some(w => {
+      const r = w.getBoundingClientRect(), top = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+      return top && !top.closest('[data-gc-board]');
+    }));
+    assert.equal(covered, false, 'nothing covers the winning line');
+    assert.match(await page.locator('.gc-board-result').innerText(), /你赢了[\s\S]*连成五子 · \+50 积分/);
+    await capture(page, '26-gomoku-five.png');
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
+
+test('real gomoku practice: robot replies on the server clock, undo takes back a full round, beans only', { timeout: 90000 }, async () => {
+  const env = await environment();
+  try {
+    const page = await env.pageFor(1, 'dark', 400, 860, false, true);
+    let t = (await env.request(1, '/tables', 'POST', { game: 'gomoku', tier: 'practice', robot_level: 'easy' })).table;
+    const id = t.id;
+    assert.equal(t.seats.length, 2, 'the robot takes the other seat');
+    const opening = t.me.wallet;
+    await env.request(1, `/tables/${id}/start`, 'POST', {});
+    await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + id);
+    await page.locator('.gc-board-table[data-phase="playing"]').waitFor();
+    assert.match(await page.locator('.gc-board-meta').innerText(), /入门机器人/);
+    const robotTurn = async () => {
+      t = await env.call({ kind: 'advance', table: id, seconds: 2 });
+      await syncTable(page, await boardView(env, id, 1));
+    };
+    t = await boardView(env, id, 1);
+    if (t.hand.current_player !== t.me.player) await robotTurn();
+    const tap = async (x, y) => {
+      const box = await page.locator('[data-gc-board]').boundingBox();
+      await page.mouse.click(box.x + box.width * (50 + x * 100) / 1500, box.y + box.height * (50 + y * 100) / 1500);
+    };
+    const start = await stoneCount(page);
+    for (const x of [3, 11]) {
+      const before = await stoneCount(page);
+      await tap(x, 3);
+      await tap(x, 3);
+      await page.waitForFunction(n => document.querySelectorAll('.gc-stone:not(.ghost)').length === n, before + 1);
+      assert.match(await page.locator('.gc-duel-bar.top').innerText(), /思考中/);
+      await robotTurn();
+      assert.equal(await stoneCount(page), before + 2, 'the robot answered');
+    }
+    await page.locator('[data-gc-board-act="undo"]').waitFor();
+    await capture(page, '27-gomoku-practice.png');
+    await page.locator('[data-gc-board-act="undo"]').click();
+    await page.waitForFunction(n => document.querySelectorAll('.gc-stone:not(.ghost)').length === n, start + 2);
+    t = await boardView(env, id, 1);
+    assert.equal(t.hand.current_player, t.me.player, 'undo returns the turn to the human');
+    await page.locator('[data-gc-board-act="resign"]').click();
+    assert.match(await page.locator('.gc-sheet').innerText(), /本局判负。/);
+    await page.locator('.gc-sheet [data-gc-resign]').click();
+    await page.locator('.gc-board-result.loss').waitFor();
+    assert.match(await page.locator('.gc-board-result').innerText(), /你认输了 · [−-]100 欢乐豆/);
+    t = await boardView(env, id, 1);
+    assert.equal(t.me.wallet.beans, opening.beans - 100, 'the loser pays one stake of beans');
+    assert.deepEqual([t.me.wallet.points, t.me.wallet.frozen], [opening.points, opening.frozen], 'practice never touches points');
     assert.equal(env.errors.length, 0, env.errors.join('\n'));
   } finally { await env.close(); }
 });

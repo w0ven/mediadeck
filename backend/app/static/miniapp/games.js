@@ -11,6 +11,8 @@ window.createGamesUI = ({
   const signed = n => (n > 0 ? '+' : n < 0 ? '−' : '') + num(Math.abs(n || 0));
   const names = { zjh: '炸金花', holdem: '德州扑克', niuniu: '牛牛', doudizhu: '斗地主', gomoku: '五子棋', xiangqi: '象棋' };
   const tierClasses = { practice: 'tp', novice: 't1', normal: 't2', pro: 't3', master: 't4', supreme: 't5' };
+  const isBoard = game => game === 'xiangqi' || game === 'gomoku';
+  const levels = [['easy', '入门'], ['normal', '普通'], ['hard', '困难']];
   const img = (key, cls = '', alt = '') => `<img class="gc-art ${cls}" src="/app/assets/game-assets/${key}.webp" alt="${esc(alt)}">`;
   const unit = t => t.currency === 'beans' ? '欢乐豆' : '积分';
   const funds = (w, t) => Number(w?.[t.currency === 'beans' ? 'beans' : 'points'] || 0);
@@ -173,8 +175,23 @@ window.createGamesUI = ({
           </div>
         </article>`;
     }).join('');
-    const soon = ['niuniu', 'doudizhu', 'gomoku', 'xiangqi'].map((id, i) => `
-      <button class="gc-game-card" data-gc-soon>${img('emblem-' + id)}<span><b>${names[id]}</b><span class="tiny muted">${['坐庄比牌', '三人对战', '1v1 对弈', '1v1 对弈'][i]}</span><em>即将上线</em></span></button>`).join('');
+    const boards = ['xiangqi', 'gomoku'].map(id => {
+      const g = data.games.find(x => x.id === id);
+      const available = !!(g && data.enabled && g.enabled && g.available);
+      return `
+        <article class="gc-board-card" data-gc-game="${id}">${img('emblem-' + id, 'gc-board-art')}
+          <div class="grow">
+            <b>${names[id]}</b> <span class="gc-play-tag">${available ? '可玩' : g?.available ? '未开放' : '待开放'}</span>
+            <div class="tiny muted">${id === 'xiangqi' ? '1v1 · 红先黑后' : '1v1 · 15 路自由五子'} · 可陪机器人练习</div>
+            <div class="gc-feature-buttons">
+              <button class="btn sm" data-gc-quick="${id}" ${disabled(!available)}>快速开始</button>
+              <button class="btn sm ghost" data-gc-tiers="${id}">选场次</button>
+            </div>
+          </div>
+        </article>`;
+    }).join('');
+    const soon = ['niuniu', 'doudizhu'].map((id, i) => `
+      <button class="gc-game-card" data-gc-soon>${img('emblem-' + id)}<span><b>${names[id]}</b><span class="tiny muted">${['坐庄比牌', '三人对战'][i]}</span><em>即将上线</em></span></button>`).join('');
     setScreen(`
       <section class="gc gc-lobby">
         <header class="gc-head">
@@ -189,6 +206,8 @@ window.createGamesUI = ({
         ${(data.active_tables || []).map(t => `
           <button class="gc-resume" data-gc-table="${esc(t.table_id)}">${icon('rotate-cw')} 回到原桌 · ${esc(names[t.game] || t.game)} <span>›</span></button>`).join('')}
       ${featured}
+        <div class="h">棋类对弈</div>
+        <div class="gc-boards">${boards}</div>
         <div class="h"><span>正在等人</span>
           <button class="link" data-gc-broadcast>群播报说明</button>
         </div>
@@ -201,6 +220,8 @@ window.createGamesUI = ({
         <div class="gc-rule-links">
           <button class="link" data-gc-rules="zjh">炸金花玩法</button>
           <button class="link" data-gc-rules="holdem">德州扑克玩法</button>
+          <button class="link" data-gc-rules="xiangqi">象棋玩法</button>
+          <button class="link" data-gc-rules="gomoku">五子棋玩法</button>
         </div>
       </section>`);
     const root = $('.gc-lobby');
@@ -217,7 +238,7 @@ window.createGamesUI = ({
     $$('[data-gc-rules]', root).forEach(b => b.onclick = () => rules(b.dataset.gcRules));
     $('[data-gc-broadcast]', root).onclick = broadcast;
     bindTables(root); bindPending(root);
-    const lists = await Promise.all(['zjh', 'holdem'].map(g => loadTiers(g).catch(() => [])));
+    const lists = await Promise.all(['zjh', 'holdem', 'xiangqi', 'gomoku'].map(g => loadTiers(g).catch(() => [])));
     if (!alive()) return;
     $('#gc-waiting').innerHTML = waitingHtml(lists.flat());
     bindTables($('#gc-waiting'));
@@ -239,6 +260,7 @@ window.createGamesUI = ({
   }
   function bindTables(root) { $$('[data-gc-table]', root).forEach(b => b.onclick = () => openTable(b.dataset.gcTable)); }
   function tierDetails(game, t) {
+    if (isBoard(game)) return `每局押 ${num(t.stake)} ${unit(t)} · 赢家全拿 · 和棋退回`;
     if (game === 'holdem') return `盲注 ${num(t.small_blind)}/${num(t.big_blind)} · 带入 ${num(t.buy_min)}${t.buy_max == null ? ' 起，不设上限' : '–' + num(t.buy_max)}`;
     return `底注 ${num(t.ante)} · ${t.cap == null ? '单局不封顶' : '封顶 ' + num(t.cap)}`;
   }
@@ -253,7 +275,7 @@ window.createGamesUI = ({
       const short = funds(w, t) < t.min_balance;
       return `
         <article class="gc-tier ${tierClasses[t.id] || ''}" data-gc-tier="${esc(t.id)}">
-          <div class="gc-tier-badge">${img('tier-' + t.id)}<b>${esc(t.name.replace('场', ''))}<small>${t.id === 'supreme' ? '无上限' : t.currency === 'beans' ? '欢乐豆' : ''}</small></b></div>
+          <div class="gc-tier-badge">${img('tier-' + t.id)}<b>${esc(t.name.replace('场', ''))}<small>${t.id === 'supreme' && !isBoard(game) ? '无上限' : t.currency === 'beans' ? '欢乐豆' : ''}</small></b></div>
           <div class="grow"><b class="gc-tier-title">${t.currency === 'beans' ? '机器人陪玩' : esc(t.name)}</b>
             <div class="small">${esc(tierDetails(game, t))}</div>
             <div class="tiny muted">${short ? `还差 ${num(t.min_balance - funds(w, t))} ${unit(t)}` : t.currency === 'beans' ? '只花欢乐豆，不花积分' : `在桌 ${num(t.seated)} 人 · 需 ${num(t.min_balance)} 可用积分`}</div>
@@ -274,6 +296,7 @@ window.createGamesUI = ({
         <div class="gc-note">${game === 'zjh'
           ? '入座不扣分；开局冻结单局封顶，结算立即退回没用完的部分。'
             + '<br>至尊场需 2,500 可用积分（以场次参数为准），每手冻结全部可用积分，输赢没有固定封顶。'
+          : isBoard(game) ? '入座不扣分；开局时双方各冻结一份押注，赢家拿走两份，和棋或开局作废原额退回。超时判负，掉线时本步放宽到 2 分钟。'
           : '确认带入后冻结为桌上筹码；两手之间可补码，离桌退回剩余。至尊场带入不设上限，但不能超过可用余额。'}
           <br>积分场只有真人；练习场机器人陪玩。全场不抽水。
         </div>
@@ -299,6 +322,7 @@ window.createGamesUI = ({
       toast(data.created ? '已开桌，你是房主' : '已回到牌桌');
     };
     if (game === 'holdem') return buySheet(tier, wallet, false, 0, amount => write(path, { ...body, buy_in: amount }, success, alive));
+    if (isBoard(game)) return boardEnter(game, tier, mode, path, body, success, alive);
     showSheet(`
       <h3>${mode === 'create' ? '开桌' : '快速开始'} · ${esc(tier.name)}</h3>
       <p>${esc(tierDetails(game, tier))}</p>
@@ -311,6 +335,28 @@ window.createGamesUI = ({
       <button class="btn block" data-gc-confirm ${disabled(false)}>确认${mode === 'create' ? '开桌' : '开始'}</button>
       <button class="link gc-close" data-cancel>取消</button>`, root => {
       $('[data-gc-confirm]', root).onclick = () => write(path, body, success, alive);
+      bindPending(root);
+    });
+  }
+  function boardEnter(game, tier, mode, path, body, success, alive) {
+    const practice = tier.currency === 'beans';
+    let level = 'normal';
+    const clock = tier.total_seconds ? `每方 ${Math.round(tier.total_seconds / 60)} 分钟、每步 ${num(tier.step_seconds)} 秒，超时判负。` : '超时判负。';
+    showSheet(`
+      <h3>${practice ? '陪机器人练习' : mode === 'create' ? '开桌' : '快速开始'} · ${names[game]}</h3>
+      <p>${esc(tierDetails(game, tier))}</p>${practice ? `
+      <div class="tiny muted">机器人难度</div>
+      <div class="seg gc-levels">${levels.map(([v, l]) => `<button data-gc-level="${v}" class="${v === level ? 'on' : ''}">${l}</button>`).join('')}</div>` : ''}
+      <div class="gc-note">${practice ? '只用欢乐豆，入门难度适合刚学的朋友；练习场可以悔棋。'
+        : '开局时冻结押注，赢家拿走双方押注，和棋退回，不抽水。找不到空桌时会新开一桌，你成为房主。'}<br>${clock}</div>
+      <div data-gc-retry-slot>${pendingHtml()}</div>
+      <button class="btn block" data-gc-confirm ${disabled(false)}>${practice ? '开始练习' : mode === 'create' ? '确认开桌' : '确认开始'}</button>
+      <button class="link gc-close" data-cancel>取消</button>`, root => {
+      $$('[data-gc-level]', root).forEach(b => b.onclick = () => {
+        level = b.dataset.gcLevel;
+        $$('[data-gc-level]', root).forEach(x => x.classList.toggle('on', x === b));
+      });
+      $('[data-gc-confirm]', root).onclick = () => write(path, practice ? { ...body, robot_level: level } : body, success, alive);
       bindPending(root);
     });
   }
@@ -461,7 +507,16 @@ window.createGamesUI = ({
     if (t.hand && t.hand.number !== ph?.number) {
       c.celebrate = null;
       c.dealAt = performance.now();
-      if (previous) sound.play('deal');
+      if (previous && !isBoard(t.game)) sound.play('deal');
+    }
+    if (t.hand?.turn !== ph?.turn || t.hand?.number !== ph?.number) { c.sel = null; c.preview = null; }
+    if (isBoard(t.game) && ph) {
+      const h = t.hand?.number === ph.number ? t.hand : t.last_hand?.number === ph.number ? t.last_hand : null;
+      if ((h?.moves?.length || 0) > (ph.moves?.length || 0)) {
+        const fewer = t.game === 'xiangqi' && Object.keys(xqParse(h.board?.fen)).length < Object.keys(xqParse(ph.board?.fen)).length;
+        sound.play(fewer ? 'check' : 'flip');
+        if (t.game === 'xiangqi' && h.in_check && h.last_move) fx.push({ player: h.last_move.player, kind: 'raise', label: '将军' });
+      }
     }
     if (t.me.player && t.hand?.current_player === t.me.player
       && (ph?.current_player !== t.me.player || ph?.number !== t.hand.number)) sound.play('turn');
@@ -525,7 +580,7 @@ window.createGamesUI = ({
   }
   function seatPoint(c, player) {
     const root = $('.gc-table');
-    const ring = $(`.gc-felt [data-gc-player="${CSS.escape(player)}"] .gc-avatar-ring`)
+    const ring = $(`.gc-table [data-gc-player="${CSS.escape(player)}"] .gc-avatar-ring`)
       || (player === c.table.me.player ? $('.gc-me-row .gc-avatar-ring') : null);
     if (!root || !ring) return null;
     const r = ring.getBoundingClientRect(), o = root.getBoundingClientRect();
@@ -628,14 +683,14 @@ window.createGamesUI = ({
     let reason = empty ? `还差 ${empty} 人入座才能开局，可以点「群播报说明」分享桌链接`
       : missing ? t.game === 'zjh' ? `等待 ${missing} 位玩家点准备` : `等待 ${missing} 位玩家带入筹码`
       : t.me.is_host ? '人数够了，点「开始」就能开局' : `人数够了，等房主 ${host?.name || ''} 开始`;
-    if (t.game === 'zjh' && ss.message) reason = ss.message;
+    if ((t.game === 'zjh' || isBoard(t.game)) && ss.message) reason = ss.message;
     if (t.game === 'holdem' && ss.reason) reason = {
       paused_for_players: '发牌已暂停：至少 2 人有筹码且没暂离才会继续',
       practice_player_unavailable: '练习桌已暂停；恢复入局或补码后继续',
       next_hand: '等待下一手自动发牌', closed: '本桌已结束',
     }[ss.reason] || reason;
     if (t.game === 'zjh' && t.me.is_host && !enough) reason = `你需 ${num(need)} 可用${unit(t)}才能参与；${eligible >= 2 ? '其他人已够开局，你本手旁观' : '人数还不够开局'}`;
-    const can = t.game === 'zjh' && ss.can_start != null ? ss.can_start : t.me.is_host && (ss.can_start ?? eligible >= 2);
+    const can = t.game !== 'holdem' && ss.can_start != null ? ss.can_start : t.me.is_host && (ss.can_start ?? eligible >= 2);
     return { eligible, enough, can, reason, host };
   }
   function croupier(t) {
@@ -707,13 +762,13 @@ window.createGamesUI = ({
           : t.countdown_at ? '<span data-gc-countdown>4</span> 秒后继续发牌' : esc(state.reason)}</div>`;
       return `
         <div class="gc-wait-reason">${t.countdown_at ? '全员已准备 · <b data-gc-countdown>5</b> 秒后开局' : esc(state.reason)}</div>
-        <div class="gc-actions">${t.game === 'zjh' ? `
+        <div class="gc-actions">${t.game !== 'holdem' ? `
           <button class="gc-action ${me.ready ? '' : 'main'}" data-gc-ready ${disabled(!me.ready && !state.enough)}>
-            ${me.ready ? '取消准备' : !state.enough ? '余额不足' : '准备'}
-            <small>${me.ready ? t.me.is_host ? '人够了就点开始' : '等待房主开始' : '每手需重新准备'}</small>
+            ${me.ready ? '取消准备' : !state.enough ? '余额不足' : t.last_hand && isBoard(t.game) ? '再来一局' : '准备'}
+            <small>${me.ready ? t.me.is_host ? '人够了就点开始' : '等待房主开始' : isBoard(t.game) ? '每局需重新准备' : '每手需重新准备'}</small>
           </button>` : ''}${t.me.is_host ? `
           <button class="gc-action gold" data-gc-start ${disabled(!state.can)}>开始
-            <small>${state.can ? t.game === 'holdem' ? '有筹码且未暂离者参加' : '未准备的人本手旁观' : '人数还不够'}</small>
+            <small>${state.can ? t.game === 'holdem' ? '有筹码且未暂离者参加' : isBoard(t.game) ? '对手已准备' : '未准备的人本手旁观' : '人数还不够'}</small>
           </button>` : '<div class="gc-wait-bar grow">等待房主开始</div>'}
         </div>`;
     }
@@ -739,8 +794,270 @@ window.createGamesUI = ({
         <button class="link" data-gc-rules>了解托管</button>
       </div>`;
   }
+  // Board games. Xiangqi uses Pikafish coordinates (files a–i, red on rank 0); Gomoku uses [x, y] from the top-left.
+  const XQ_CHARS = { K: '帅', A: '仕', B: '相', N: '马', R: '车', C: '炮', P: '兵', k: '将', a: '士', b: '象', n: '马', r: '车', c: '炮', p: '卒' };
+  const XQ_START = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w';
+  const XQ_GRID = (() => {
+    const X = c => 50 + c * 100, Y = r => 50 + r * 100, d = [];
+    for (let r = 0; r < 10; r++) d.push(`M${X(0)} ${Y(r)}H${X(8)}`);
+    for (let c = 0; c < 9; c++) d.push(c % 8 ? `M${X(c)} ${Y(0)}V${Y(4)}M${X(c)} ${Y(5)}V${Y(9)}` : `M${X(c)} ${Y(0)}V${Y(9)}`);
+    d.push(`M${X(3)} ${Y(0)}L${X(5)} ${Y(2)}M${X(5)} ${Y(0)}L${X(3)} ${Y(2)}M${X(3)} ${Y(7)}L${X(5)} ${Y(9)}M${X(5)} ${Y(7)}L${X(3)} ${Y(9)}`);
+    for (const [c, r] of [[1, 2], [7, 2], [1, 7], [7, 7], [0, 3], [2, 3], [4, 3], [6, 3], [8, 3], [0, 6], [2, 6], [4, 6], [6, 6], [8, 6]]) {
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+        if (c + sx < 0 || c + sx > 8) continue;
+        const x = X(c) + sx * 9, y = Y(r) + sy * 9;
+        d.push(`M${x + sx * 20} ${y}H${x}V${y + sy * 20}`);
+      }
+    }
+    return `<svg class="gc-board-lines" viewBox="0 0 900 1000" aria-hidden="true"><rect class="edge" x="38" y="38" width="824" height="924"/>
+      <path d="${d.join('')}"/><text x="250" y="518">楚 河</text><text x="650" y="518">汉 界</text></svg>`;
+  })();
+  const GO_GRID = (() => {
+    const d = [];
+    for (let i = 0; i < 15; i++) d.push(`M50 ${50 + i * 100}H1450M${50 + i * 100} 50V1450`);
+    const stars = [[3, 3], [11, 3], [7, 7], [3, 11], [11, 11]].map(([x, y]) => `<circle cx="${50 + x * 100}" cy="${50 + y * 100}" r="13"/>`);
+    return `<svg class="gc-board-lines" viewBox="0 0 1500 1500" aria-hidden="true"><path d="${d.join('')}"/>${stars.join('')}</svg>`;
+  })();
+  function xqParse(fen) {
+    const out = {};
+    (fen || XQ_START).split(' ')[0].split('/').forEach((row, i) => {
+      let col = 0;
+      for (const ch of row) {
+        if (/\d/.test(ch)) col += Number(ch);
+        else out['abcdefghi'[col++] + (9 - i)] = ch;
+      }
+    });
+    return out;
+  }
+  const xqAt = (sq, flip) => {
+    const c = sq.charCodeAt(0) - 97, r = Number(sq.slice(1)), x = flip ? 8 - c : c, y = flip ? r : 9 - r;
+    return `left:${(50 + x * 100) / 9}%;top:${(50 + y * 100) / 10}%`;
+  };
+  const goAt = (x, y) => `left:${(50 + x * 100) / 15}%;top:${(50 + y * 100) / 15}%`;
+  const myTurn = t => !!(t.hand && t.me.player && t.hand.current_player === t.me.player);
+  function xqBoard(t, c, h, color) {
+    const fen = h?.board?.fen || XQ_START, pieces = xqParse(fen), flip = color === 'black';
+    const legal = myTurn(t) && h === t.hand ? h.legal_moves || [] : [];
+    const sel = c.sel && legal.some(m => m.startsWith(c.sel)) ? c.sel : null;
+    const targets = sel ? legal.filter(m => m.startsWith(sel)).map(m => m.slice(2)) : [];
+    const king = fen.split(' ')[1] === 'b' ? 'k' : 'K';
+    const last = typeof h?.last_move?.move === 'string' ? [h.last_move.move.slice(0, 2), h.last_move.move.slice(2)] : [];
+    const own = ch => (ch === ch.toUpperCase()) === (color === 'red');
+    return `
+      <div class="gc-xq-board" data-gc-board>${XQ_GRID}
+        ${last.map(sq => `<i class="gc-xq-last" style="${xqAt(sq, flip)}"></i>`).join('')}
+        ${Object.entries(pieces).map(([sq, ch]) => `
+          <button class="gc-xq-piece ${ch === ch.toUpperCase() ? 'red' : 'black'} ${sq === sel ? 'sel' : ''} ${targets.includes(sq) ? 'target' : ''}
+            ${h?.in_check && ch === king ? 'check' : ''}" style="${xqAt(sq, flip)}" data-gc-sq="${sq}"
+            ${legal.length && (own(ch) || targets.includes(sq)) ? '' : 'tabindex="-1"'}
+            aria-label="${ch === ch.toUpperCase() ? '红' : '黑'}${XQ_CHARS[ch]}"><span>${XQ_CHARS[ch]}</span></button>`).join('')}
+        ${targets.filter(sq => !pieces[sq]).map(sq => `
+          <button class="gc-xq-dot" style="${xqAt(sq, flip)}" data-gc-sq="${sq}" aria-label="走到这里"></button>`).join('')}
+      </div>`;
+  }
+  // The snapshot has no winning line; it ends with the stone that made five, so search from there.
+  function goLine(moves) {
+    if (!moves.length) return [];
+    const side = (moves.length - 1) % 2;
+    const own = new Set(moves.filter((_, i) => i % 2 === side).map(([x, y]) => x + ',' + y));
+    const [lx, ly] = moves[moves.length - 1];
+    for (const [dx, dy] of [[1, 0], [0, 1], [1, 1], [1, -1]]) {
+      const line = [[lx, ly]];
+      for (const s of [1, -1]) {
+        for (let k = 1; own.has(`${lx + dx * k * s},${ly + dy * k * s}`); k++) line.push([lx + dx * k * s, ly + dy * k * s]);
+      }
+      if (line.length >= 5) return line;
+    }
+    return [];
+  }
+  function goBoard(t, c, h) {
+    const moves = h?.board?.moves || [];
+    const taken = new Set(moves.map(([x, y]) => x + ',' + y));
+    const preview = myTurn(t) && h === t.hand && c.preview && !taken.has(c.preview.join(',')) ? c.preview : null;
+    const win = h?.result?.reason === 'five' ? goLine(moves) : [];
+    return `
+      <div class="gc-go-board ${myTurn(t) ? 'gc-turn-mine' : ''}" data-gc-board>${GO_GRID}
+        ${moves.map(([x, y], i) => `<i class="gc-stone ${i % 2 ? 'white' : 'black'} ${i === moves.length - 1 ? 'last' : ''}" style="${goAt(x, y)}"></i>`).join('')}
+        ${win.map(([x, y]) => `<i class="gc-stone-win" style="${goAt(x, y)}"></i>`).join('')}
+        ${preview ? `<i class="gc-stone ghost ${moves.length % 2 ? 'white' : 'black'}" style="${goAt(...preview)}"></i>` : ''}
+      </div>`;
+  }
+  const colorOf = (t, h, seat) => seat && (h?.players?.find(p => p.player === seat.player)?.color || seat.color) || null;
+  const sideName = (t, color) => !color ? '' : t.game === 'gomoku' ? color === 'black' ? '执黑' : '执白' : color === 'red' ? '红方' : '黑方';
+  function duelBar(t, seat, pos, h) {
+    if (!seat) return `
+      <div class="gc-duel-bar ${pos} gc-duel-empty">
+        <div class="gc-avatar-ring"><span>＋</span></div>
+        <div class="grow"><b>等待对手</b><div class="tiny muted">${t.currency === 'beans' ? '机器人马上就位' : '分享桌链接，邀请朋友来下'}</div></div>
+      </div>`;
+    const color = colorOf(t, h, seat), moving = t.hand?.current_player === seat.player;
+    const status = t.hand ? moving ? seat.bot ? '思考中…' : '走棋中' : '等待对方'
+      : seat.bot ? '机器人已准备' : seat.ready ? '已准备' : seat.player === t.host ? '房主' : '未准备';
+    return `
+      <div class="gc-duel-bar ${pos} ${moving ? 'on' : ''}" data-gc-player="${esc(seat.player)}">
+        <div class="gc-avatar-ring ${moving ? 'gc-active' : ''}" ${moving ? 'data-gc-ring' : ''}>${avatar(seat, t)}</div>
+        <div class="grow">
+          <div class="gc-duel-name">${esc(seat.name)}${seat.player === t.host ? '<span class="gc-host">房主</span>' : ''}
+            ${color ? `<span class="gc-side ${color}">${sideName(t, color)}</span>` : ''}${label(seat, t)}</div>
+          <div class="tiny muted">${status}</div>
+        </div>${h?.clocks ? `
+        <div class="gc-clock ${moving ? 'on' : ''}"><b class="num" data-gc-clock="${esc(seat.player)}">--:--</b>${moving ? '<small data-gc-step></small>' : ''}</div>` : ''}
+      </div>`;
+  }
+  function boardOutcome(t, h) {
+    const r = h.result || {}, net = r.net?.[t.me.player], won = r.winner === t.me.player;
+    const winner = t.seats.find(s => s.player === r.winner)?.name || '对手';
+    const why = {
+      checkmate: '将死', stalemate: '困毙，无子可走', perpetual_check: '长将判负', repetition: '重复局面，判和',
+      move_limit: '60 回合无吃子，判和', insufficient: '双方都没有进攻子力，判和', five: '连成五子', board_full: '棋盘下满，判和',
+      draw_agreed: '双方议和', aborted: '开局没走第一步，本局作废、押注退回',
+      timeout: net == null ? '超时' : won ? '对方超时' : '你超时了', resign: net == null ? '认输' : won ? '对方认输' : '你认输了',
+    }[r.reason] || '';
+    const title = r.reason === 'aborted' ? '本局作废' : !r.winner ? '和棋' : won ? '你赢了' : net != null ? '你输了' : `${winner} 胜`;
+    return { title, why, net };
+  }
+  function boardRibbon(t, h) {
+    const o = boardOutcome(t, h);
+    return `
+      <button class="gc-board-result ${o.net > 0 ? 'win' : o.net < 0 ? 'loss' : ''}" data-gc-history>${o.net > 0 ? img('crown') : ''}
+        <b>${esc(o.title)}</b><span>${esc(o.why)}${o.net ? ` · ${signed(o.net)} ${unit(t)}` : ''}</span><em>详情 ›</em>
+      </button>`;
+  }
+  function boardControls(t, me, c) {
+    const outcome = !t.hand && t.last_hand?.result ? boardRibbon(t, t.last_hand) : '';
+    if (t.phase === 'closed') return outcome + '<button class="btn block" data-gc-back>返回游戏中心</button>';
+    if (!me) return outcome + `
+      <div class="gc-note">你正在观战，入座后就能对弈。${t.currency === 'beans' ? '' : `每局押 ${num(t.rules.stake)} 积分，开局才冻结。`}</div>
+      <button class="btn block" data-gc-seat ${disabled(t.seats.length >= 2)}>${t.seats.length >= 2 ? '本桌已满' : '入座 · 不扣分'}</button>`;
+    const h = t.hand;
+    if (!h) return outcome + controls(t, me);
+    const legal = h.legal_actions || {}, offer = h.draw_offer, mine = myTurn(t);
+    return `
+      ${offer && offer.player !== t.me.player ? `
+        <div class="gc-draw-offer">对方提出和棋
+          <button class="btn sm" data-gc-board-act="accept_draw" ${disabled(!legal.accept_draw)}>接受</button>
+          <button class="btn sm ghost" data-gc-board-act="reject_draw" ${disabled(!legal.reject_draw)}>拒绝</button>
+        </div>` : offer ? '<div class="gc-wait-reason">已提出和棋，等待对方回应</div>' : ''}
+      <div class="gc-actions">${legal.undo ? `
+        <button class="gc-action" data-gc-board-act="undo" ${disabled(false)}>悔棋<small>撤回一个回合</small></button>` : ''}
+        <button class="gc-action" data-gc-board-act="offer_draw" ${disabled(!legal.offer_draw)}>求和<small>${offer ? '已提出' : '对方可接受或拒绝'}</small></button>
+        <button class="gc-action warm" data-gc-board-act="resign" ${disabled(!legal.resign)}>认输<small>本局判负</small></button>${t.game === 'gomoku' && mine ? `
+        <button class="gc-action gold" data-gc-board-act="place" ${disabled(!c.preview)}>落子<small>${c.preview ? '确认这一手' : '先点棋盘选位置'}</small></button>` : ''}
+      </div>
+      <div class="gc-turn-line">${mine ? '轮到你走' : '等待对方走棋'} · 本步剩 <b data-gc-seconds>—</b> 秒${mine && h.in_check ? ' · <b class="gc-check">被将军</b>' : ''}</div>`;
+  }
+  function paintBoard(c) {
+    const t = c.table, me = t.seats.find(s => s.player === t.me.player), h = t.hand || t.last_hand;
+    const firstColor = t.game === 'gomoku' ? 'black' : 'red';
+    const bottom = me || t.seats.find(s => colorOf(t, h, s) === firstColor) || t.seats[0] || null;
+    const top = t.seats.find(s => s !== bottom) || null;
+    const oldScroll = $('#screen').scrollTop;
+    setScreen(`
+      <section class="gc gc-table gc-board-table gc-${t.game} gc-felt-${Object.hasOwn(tierClasses, t.tier) ? t.tier : 'practice'}"
+        data-table-id="${esc(t.id)}" data-revision="${t.revision}" data-phase="${esc(t.phase)}">
+        <header class="gc-table-bar">
+          <button class="gc-tool" data-gc-back>‹ 返回</button>
+          <div class="grow"><b>${esc(names[t.game])} <span class="gc-tier-chip ${tierClasses[t.tier] || ''}">${esc(t.tier_name)}</span></b>
+            <div class="tiny muted">每局押 ${num(t.rules.stake)} ${unit(t)} · ${t.game === 'xiangqi' ? '红先黑后' : '黑先白后'} · 不抽水</div>
+          </div>
+          <button class="gc-tool gc-sound-btn" data-gc-sound aria-label="声音">${icon(sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x')}</button>
+          <button class="gc-tool" data-gc-rules>玩法</button>
+        </header>
+        <div class="gc-tools">
+          <span class="gc-board-meta">${t.currency === 'beans' ? `练习 · ${esc(levels.find(([v]) => v === t.rules.robot_level)?.[1] || '普通')}机器人` : `第 ${num(t.hand_no || 0)} 局`}</span>
+          <button class="link" data-gc-history ${t.last_hand ? '' : 'disabled'}>上局结果</button>
+          <button class="link" data-gc-leave ${disabled(!me)}>离桌</button>
+        </div>
+        <div class="gc-connection-row">
+          <button class="gc-connection" data-gc-connection data-state="${c.status}"></button>
+          ${t.currency === 'beans' ? '<span>练习场 · 可悔棋</span>' : '<button class="link" data-gc-broadcast>群播报说明</button>'}
+        </div>
+        <div data-gc-retry-slot>${pendingHtml()}</div>
+        <div class="gc-duel">
+          ${duelBar(t, top, 'top', h)}
+          <div class="gc-board-frame">${t.game === 'xiangqi' ? xqBoard(t, c, h, colorOf(t, h, bottom) === 'black' ? 'black' : 'red') : goBoard(t, c, h)}
+            ${!h ? `
+              <div class="gc-board-note"><b>${t.seats.length}<small>/2</small></b><span>等待开局</span><span class="gc-idle" data-gc-idle></span></div>` : ''}
+          </div>
+          ${duelBar(t, bottom, 'bottom', h)}
+        </div>
+        <div class="gc-dock gc-board-dock">${boardControls(t, me, c)}</div>
+      </section>`);
+    $('#screen').scrollTop = oldScroll;
+    bindTable(c);
+    bindBoard(c);
+    tick(c);
+    streamStatus(c, c.status);
+    drawFx(c);
+  }
+  function bindBoard(c) {
+    const root = $('.gc-table'), board = $('[data-gc-board]', root);
+    if (c.table.game === 'xiangqi') $$('[data-gc-sq]', root).forEach(b => b.onclick = () => xqTap(c, b.dataset.gcSq));
+    else if (board) board.onclick = e => goTap(c, e, board);
+    $$('[data-gc-board-act]', root).forEach(b => b.onclick = () => boardAct(c, b.dataset.gcBoardAct));
+  }
+  function xqTap(c, sq) {
+    const h = c.table.hand;
+    if (!myTurn(c.table)) return;
+    const legal = h.legal_moves || [];
+    if (c.sel && legal.includes(c.sel + sq)) {
+      const move = c.sel + sq;
+      c.sel = null;
+      return action(c, 'move', { move });
+    }
+    c.sel = c.sel !== sq && legal.some(m => m.startsWith(sq)) ? sq : null;
+    if (c.sel) sound.play('tap', .6);
+    paintTable(c);
+  }
+  function goTap(c, e, board) {
+    const h = c.table.hand;
+    if (!myTurn(c.table)) return;
+    const r = board.getBoundingClientRect();
+    const x = Math.round(((e.clientX - r.left) / r.width * 1500 - 50) / 100);
+    const y = Math.round(((e.clientY - r.top) / r.height * 1500 - 50) / 100);
+    if (x < 0 || y < 0 || x > 14 || y > 14 || (h.board?.moves || []).some(([a, b]) => a === x && b === y)) return;
+    if (c.preview?.[0] === x && c.preview?.[1] === y) return boardAct(c, 'place');
+    c.preview = [x, y];
+    sound.play('tap', .6);
+    paintTable(c);
+  }
+  function boardAct(c, op) {
+    const t = c.table;
+    if (op === 'place') {
+      const move = c.preview;
+      c.preview = null;
+      return move && action(c, 'move', { move });
+    }
+    if (op !== 'resign') return action(c, op);
+    showSheet(`
+      <h3>确认认输？</h3>
+      <p>本局判负${t.currency === 'beans' ? '。' : `，押注 ${num(t.rules.stake)} 积分归对方。`}</p>
+      <button class="btn block danger" data-gc-resign ${disabled(false)}>认输</button>
+      <button class="link gc-close" data-cancel>继续下</button>`, (root, close) => {
+      $('[data-gc-resign]', root).onclick = async () => { if (await action(c, 'resign')) close(); };
+    });
+  }
+  function boardResult(c, h) {
+    if (!h) return;
+    const t = c.table, o = boardOutcome(t, h), r = h.result || {};
+    showSheet(`
+      <div class="gc-result-head">${img('crown')}
+        <h3>${esc(o.title)}</h3>
+        <span class="tiny muted">${esc(o.why)} · 共 ${num(h.moves?.length || 0)} 手 · 不抽水</span>
+      </div>
+      ${(h.players || []).map(p => `
+        <div class="gc-result-row ${r.winner === p.player ? 'winner' : ''}">
+          <div class="grow"><b>${esc(t.seats.find(s => s.player === p.player)?.name || '已离桌玩家')}</b>
+            <div class="tiny muted">${sideName(t, p.color)}</div></div>
+          <b class="${(r.net?.[p.player] || 0) >= 0 ? 'gc-up' : 'gc-down'}">${r.net?.[p.player] == null ? '—' : signed(r.net[p.player])}</b>
+        </div>`).join('')}
+      <div class="gc-note">${t.currency === 'beans' ? '练习场只用欢乐豆。' : '押注已结算；和棋或作废原额退回。'}
+        <br>可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分</div>
+      <button class="btn block" data-cancel>回到棋盘</button>`);
+  }
   function paintTable(c) {
     if (!live(c)) return;
+    if (isBoard(c.table.game)) return paintBoard(c);
     const t = c.table, me = t.seats.find(s => s.player === t.me.player);
     const anchor = me?.seat ?? 0;
     const bottom = me || t.seats.find(s => s.seat === anchor);
@@ -836,6 +1153,19 @@ window.createGamesUI = ({
     const idle = Math.max(0, Math.ceil((t.idle_deadline || 0) - now(c)));
     $$('[data-gc-idle]').forEach(el => el.textContent = t.idle_deadline && t.phase === 'waiting'
       ? `${Math.floor(idle / 60)} 分 ${String(idle % 60).padStart(2, '0')} 秒内无人操作将自动散桌` : '');
+    if (isBoard(t.game)) {
+      const h = t.hand || t.last_hand, clocks = h?.clocks;
+      $$('[data-gc-clock]').forEach(el => {
+        const p = el.dataset.gcClock;
+        let left = clocks?.remaining?.[p];
+        if (left == null) return;
+        if (t.hand && clocks.running === p) left -= now(c) - t.server_time;
+        left = Math.max(0, Math.ceil(left));
+        el.textContent = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}`;
+        el.parentElement.classList.toggle('low', left < 60);
+      });
+      $$('[data-gc-step]').forEach(el => el.textContent = `本步 ${seconds}s`);
+    }
     if (t.me.player && t.hand?.current_player === t.me.player && seconds > 0 && seconds <= 5 && c.ticked !== seconds) {
       c.ticked = seconds;
       sound.play('tick', .7);
@@ -859,8 +1189,9 @@ window.createGamesUI = ({
     $('[data-gc-connection]', root).onclick = () => connect(c);
     $$('[data-gc-rules]', root).forEach(b => b.onclick = () => rules(t.game, t.rules));
     $('[data-gc-sound]', root).onclick = soundSheet;
-    $$('[data-gc-history]', root).forEach(b => b.onclick = () => resultSheet(c, c.history[0]));
-    $('[data-gc-auto]', root).onclick = () => tableWrite(c, 'auto', { enabled: !me.auto });
+    $$('[data-gc-history]', root).forEach(b => b.onclick = () => isBoard(t.game) ? boardResult(c, t.last_hand) : resultSheet(c, c.history[0]));
+    const auto = $('[data-gc-auto]', root);
+    if (auto) auto.onclick = () => tableWrite(c, 'auto', { enabled: !me.auto });
     const takeover = $('[data-gc-takeover]', root);
     if (takeover) takeover.onclick = () => tableWrite(c, 'auto', { enabled: false });
     const ready = $('[data-gc-ready]', root);
@@ -1087,7 +1418,38 @@ window.createGamesUI = ({
       };
     });
   }
+  function boardRules(game, config) {
+    const total = Math.round((config.total_seconds || (game === 'xiangqi' ? 600 : 300)) / 60);
+    const step = config.step_seconds || (game === 'xiangqi' ? 60 : 30);
+    showSheet(`
+      <h3>${names[game]} · 一看就懂</h3>
+      <div class="gc-rule-body">${game === 'xiangqi' ? `
+        <h4>怎么玩？</h4>
+        <p>两人对弈，红方先走，轮流走一步。把对方的帅（将）将死就赢。自己的颜色总在下方。</p>
+        <ul>
+          <li><b>车：</b>横竖直走，格数不限。<b>马：</b>走"日"字，紧挨着的方向有棋子挡住（蹩马腿）就不能走。</li>
+          <li><b>炮：</b>不吃子时和车一样走；吃子时中间必须隔一个棋子。</li>
+          <li><b>相（象）：</b>走"田"字，田字中心有子（塞象眼）不能走，不能过河。<b>仕（士）：</b>在九宫里斜走一格。</li>
+          <li><b>帅（将）：</b>在九宫里走一格；两边的帅和将不能在同一条直线上直接见面。</li>
+          <li><b>兵（卒）：</b>过河前只能向前一格，过河后也可以左右走，但不能后退。</li>
+        </ul>
+        <h4>怎么算赢、算和？</h4>
+        <p>将死对方，或者对方无子可走（困毙），就赢。反复将军（长将）的一方判负；同一局面重复三次判和；连续 60 回合没有吃子判和；双方都没有车、马、炮、兵也判和。随时可以认输，也可以向对方求和。</p>` : `
+        <h4>怎么玩？</h4>
+        <p>15×15 棋盘，黑方先下，轮流在交叉点落子。横、竖、斜任意一个方向连成五子（或更多）就赢，下满全盘算和棋。每局交换先后手。</p>
+        <ul>
+          <li><b>落子：</b>点棋盘选位置，会出现半透明的棋子；再点「落子」，或在同一位置再点一下确认。</li>
+          <li><b>最后一手</b>会用红点标出；赢棋时，连成的五子会高亮。</li>
+        </ul>`}
+        <h4>时间</h4>
+        <p>每方共 ${total} 分钟，每步最多 ${step} 秒，任一项用完判负。掉线时，轮到你的这一步放宽到 2 分钟，回来就能接着下。开局后先手方没在时间内走第一步，本局作废，押注退回。</p>
+        <h4>积分</h4>
+        <p>入座不扣分；开局时双方各冻结一份押注，赢家拿走两份，和棋或作废原额退回，不抽水。练习场陪机器人，只用欢乐豆，可以悔棋。</p>
+      </div>
+      <button class="btn block" data-cancel>知道了</button>`);
+  }
   function rules(game = 'zjh', config = {}) {
+    if (isBoard(game)) return boardRules(game, config);
     const zjh = game === 'zjh';
     showSheet(`
       <h3>${names[game]} · 一看就懂</h3>
