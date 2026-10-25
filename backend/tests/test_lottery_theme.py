@@ -177,7 +177,7 @@ def test_lottery_form_themes(request, tmp_path, theme, width, height):
         page.locator('#lot-cancel').click()
         page.locator('#lot-edit').wait_for()
         # Recover known failed mock notices: exercise the same form styling and actual action.
-        lid = create(env)
+        lid = create(env, config(draw_mode='manual'))
         env.service.db.execute("UPDATE lottery_notices SET state='failed',error='Mock delivery failure' WHERE lottery_id=?", (lid,))
         page.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         page.locator('#lot-to-manage').click()

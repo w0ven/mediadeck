@@ -5,7 +5,8 @@ values (ux.js) ONLY after the user tapped 「同意并报名」; without that co
 activity with ``device_check`` cannot be entered at all. This module keeps
 nothing but an activity-domain HMAC-SHA256 digest under the existing
 ``lottery_identity_key``. Every activity is judged on its own entries only;
-nothing is carried over or compared across activities.
+nothing is carried over or compared across activities. iPhone/iPad entries keep
+no digest at all: identical models report identical values.
 
 Raw values, the client blob and the digest are never logged or returned by
 any API. Ordinary participants receive identical responses whatever the
@@ -161,7 +162,14 @@ def admit(conn, config, consent_version, blob):
     if trait is None:
         raise ValueError(FAILED)
     _guard(conn)
-    return {'token': token, 'trait': trait, 'version': consent_version}
+    return {'token': token, 'trait': None if apple_mobile(trait) else trait, 'version': consent_version}
+
+
+def apple_mobile(trait):
+    """iOS/iPadOS WebKit: masked "Apple GPU", touch screen and no deviceMemory (which every
+    Chromium WebView reports). A same-model collision there proves nothing."""
+    values = json.loads(trait)
+    return values.get('i', '0') != '0' and 'h' not in values and values.get('b', 'Apple').startswith('Apple')
 
 
 def browser(admitted, fallback):
@@ -171,7 +179,7 @@ def browser(admitted, fallback):
 
 def record(conn, lottery_id, tg_id, admitted, now):
     """New entry only, same BEGIN IMMEDIATE transaction as the entry row."""
-    if not admitted:
+    if not admitted or not admitted['trait']:
         return
     key = lottery_identity._key(conn)
     conn.execute('INSERT INTO lottery_device_entries(lottery_id,tg_id,consent_version,consented_at,digest) '
