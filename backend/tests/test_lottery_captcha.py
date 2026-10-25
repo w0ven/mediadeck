@@ -5,6 +5,7 @@ are sent to Cloudflare/Telegram and no production data is read or written.
 """
 import asyncio
 import json
+import re
 import sqlite3
 import threading
 import time
@@ -75,13 +76,17 @@ def test_real_challenge_verify_join_is_private_bound_and_idempotent(e, tg, fee):
     c = challenge(e, lid, tg)
     assert set(c) == {'challenge_id', 'cdata', 'site_key', 'action', 'expires_at'}
     assert 298 <= c['expires_at']-time.time() <= 300 and c['challenge_id'] != c['cdata']
-    assert str(tg) not in c['cdata'] and lid not in c['cdata']
+    # Opaque random values may contain identity-like substrings by chance.
+    assert re.fullmatch(r'[A-Za-z0-9_-]{1,255}', c['cdata'])
+    assert c['cdata'] not in {str(tg), lid, 'u1', 'u2'}
     proof = answer(e.turnstile, c)
     result = join(e, lid, tg, expected_entry_fee=fee, **proof)
     assert result.status_code == 200 and result.json()['joined'] and not result.json()['captcha']['required']
     assert len(e.turnstile.calls) == 1
     assert e.turnstile.calls[0] == {'secret': SECRET, 'response': proof['captcha_token'], 'remoteip': e.ip_for(tg)}
-    assert e.service.db.one('SELECT state FROM lottery_captcha_challenges WHERE id=?', (c['challenge_id'],))['state'] == 'consumed'
+    assert e.service.db.one('SELECT state,cdata,lottery_id,tg_id FROM lottery_captcha_challenges WHERE id=?',
+                            (c['challenge_id'],)) == {
+        'state': 'consumed', 'cdata': c['cdata'], 'lottery_id': lid, 'tg_id': str(tg)}
     before = snapshot(e)
     assert join(e, lid, tg, captcha_token='expired', captcha_challenge_id='bad').status_code == 200
     assert snapshot(e) == before and len(e.turnstile.calls) == 1
@@ -431,15 +436,24 @@ def test_challenge_capacity_expiry_cleanup_and_restart_persistence(e, monkeypatc
     assert join(e, lid, captcha_token='expired').status_code == 200
 
 
-def test_no_secret_token_or_identity_in_public_surfaces_persistent_challenge_or_logs(e, caplog):
+@pytest.mark.parametrize('token_suffix', ['', f'-u2-{MEMBER}'], ids=['random-token', 'identity-like-token'])
+def test_no_secret_token_or_identity_in_public_surfaces_persistent_challenge_or_logs(e, caplog, token_suffix):
     lid = activity(e)
     proof = credentials(e, lid)
+    if token_suffix:
+        # Preserve the random token; deliberately exercise harmless substring collisions.
+        original = proof['captcha_token']
+        proof['captcha_token'] += token_suffix
+        e.turnstile.tokens[proof['captcha_token']] = e.turnstile.tokens.pop(original)
     assert join(e, lid, **proof).status_code == 200
     surfaces = ''.join(req(e, 'GET', path).text for path in ('/'+lid, '/context', '/admin/options', '/ongoing'))
     rows = str(e.service.db.query('SELECT * FROM lottery_captcha_challenges'))
     for secret in (SECRET, proof['captcha_token']):
         assert secret not in surfaces+rows+caplog.text+repr(settings())
-    assert 'u2' not in json.dumps(e.turnstile.calls) and str(MEMBER) not in json.dumps(e.turnstile.calls)
+    # Exact keys and value sources forbid extra identity fields/content, while
+    # treating the provider token as opaque rather than scanning its substrings.
+    assert e.turnstile.calls == [{
+        'secret': SECRET, 'response': proof['captcha_token'], 'remoteip': e.ip_for(MEMBER)}]
 
 
 @pytest.mark.parametrize('change', ['expiry', 'site', 'secret'])
