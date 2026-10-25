@@ -9,9 +9,11 @@ from urllib.parse import urlsplit
 import pytest
 
 from app.main import app
+from tests.lottery_captcha_helpers import answer
 from tests.lottery_private_helpers import private_start
 from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create
 from tests.test_lottery import env as lottery_env  # noqa: F401
+from tests.test_lottery_turnstile_browser import MOCK_TURNSTILE_SCRIPT
 from tests.test_miniapp import TELEGRAM_STUB, headers
 
 
@@ -33,6 +35,8 @@ def test_lottery_count_mode_early_draw_and_private_start(request, tmp_path):
             if u.hostname == 'telegram.org':
                 return route.fulfill(content_type='application/javascript',
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname == 'challenges.cloudflare.com':
+                return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
             if u.hostname != 'app.example.test':
                 return route.abort()
             res = env.client.request(r.method, u.path + ('?' + u.query if u.query else ''),
@@ -192,6 +196,18 @@ def test_lottery_count_mode_early_draw_and_private_start(request, tmp_path):
         assert not page.locator('#lot-draw').count()
         assert '满 3 人自动开奖 · 进度 0/3 人' in page.locator('.hero-bottom').inner_text()
 
+        # Complete captcha for ADMIN
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(ADMIN))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
         page.locator('#lot-join').click()
         page.locator('.ticket strong', has_text='报名已记录').wait_for()
 
@@ -223,8 +239,21 @@ def test_lottery_count_mode_early_draw_and_private_start(request, tmp_path):
         # Click "我已启动，刷新报名"
         page.locator('#lot-retry-private').click()
         page.locator('#lot-join').wait_for()
-        assert '立即参与' in page.locator('#lot-join').inner_text()
         assert '进度 1/3 人' in page.locator('.hero-bottom').inner_text()
+
+        # Complete captcha for GUEST
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(GUEST))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
+        assert '立即参与' in page.locator('#lot-join').inner_text()
 
         # Guest signs up
         page.locator('#lot-join').click()
@@ -237,6 +266,18 @@ def test_lottery_count_mode_early_draw_and_private_start(request, tmp_path):
         page.locator('#lot-join').wait_for()
         assert '进度 2/3 人' in page.locator('.hero-bottom').inner_text()
 
+        # Complete captcha for MEMBER
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(MEMBER))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
         # Member signs up (3rd entry triggers immediate synchronous auto-settle on server)
         page.locator('#lot-join').click()
 

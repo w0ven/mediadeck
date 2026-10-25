@@ -14,7 +14,7 @@ import time
 from datetime import datetime
 from html import escape, unescape
 
-from app.modules import lottery_device, lottery_identity, telegram_private, viewing
+from app.modules import lottery_captcha, lottery_device, lottery_identity, telegram_private, viewing
 from app.modules.economy_rules import BEIJING, economy_write, encode, validate_bag_spec
 from app.modules.inventory import InventoryService
 from app.modules.registration import generate_code
@@ -451,6 +451,7 @@ class LotteryService:
         return {'title': title, 'audience': audience, 'chat_id': chat, 'thread_id': thread,
                 'deadline': deadline, 'draw_mode': mode, 'max_entries': max_entries,
                 'prizes': clean, 'anti_multi': anti_multi, 'entry_fee': entry_fee, 'require_private_start': True,
+                'require_captcha': True,
                 **limits, **switches, 'device_check': lottery_device.flag(raw),
                 'public_rules_version': PUBLIC_RULES_VERSION, 'eligibility_version': 1 if legacy else ELIGIBILITY_VERSION}
 
@@ -579,6 +580,7 @@ class LotteryService:
         row['config'].setdefault('entry_fee', 0)
         row['config'].setdefault('max_entries', 0)
         row['config'].setdefault('require_private_start', False)
+        row['config'].setdefault('require_captcha', False)
         row['config']['eligibility_version'] = eligibility_version(row['config'])
         for key, value in LEGACY_DEFAULTS.items():
             row['config'].setdefault(key, value)
@@ -623,6 +625,9 @@ class LotteryService:
         data.update(config=config, rules=rules, count=self.db.one(
             'SELECT COUNT(*) AS n FROM lottery_entries WHERE lottery_id=?', (lottery_id,))['n'],
             joined=bool(mine), winners=[], my_award=None)
+        data['captcha'] = lottery_captcha.public(self.bot, config.get('require_captcha') and not mine
+            and row['state'] == 'published' and accepting(config, int(time.time()))
+            and not (config['draw_mode'] == 'count' and data['count'] >= config.get('max_entries', 0)))
         for award in self.db.query('SELECT * FROM lottery_awards WHERE lottery_id=? ORDER BY id', (lottery_id,)):
             prize = json.loads(award['prize_json'])
             data['winners'].append({'label': award['label'], 'prize': public_prize(prize)})
@@ -913,6 +918,9 @@ class LotteryService:
                     if key not in json.loads(stored['config_json']):
                         row['config'].pop(key, None)  # do not backfill an unedited old draft
             row['config']['chat_id'] = chat_id
+            # Every future publication is protected, including an unedited old
+            # draft; other historical participation policies remain frozen.
+            row['config']['require_captcha'] = True
             # Only activities published from now on get winner DMs and the live
             # entry count; legacy published rows keep their stored (absent = off) config.
             row['config'].update(winner_dm=True, live_count=True)
@@ -953,19 +961,60 @@ class LotteryService:
                 return uid, f'需要近 30 天观看满 {hours} 小时（当前约 {int(seconds // 360) / 10:g} 小时）'
         return uid, None
 
-    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None, expected_entry_fee=ENTRY_FEE_UNSET,
-                   consent_version=None, device=None):
+    def captcha_precheck(self, row, tg_id):
+        """Read-only public eligibility; never expose risk/exclusion verdicts."""
+        c = row['config']
         if not self.bot._cfg().get('enabled'):
             raise ValueError('Bot 暂未启用，无法确认群成员身份')
+        if row['state'] != 'published' or not accepting(c, int(time.time())):
+            raise ValueError('报名已截止或活动尚未发布')
+        if (c['draw_mode'] == 'count' and self.db.one('SELECT COUNT(*) AS n FROM lottery_entries WHERE lottery_id=?',
+                                                    (row['id'],))['n'] >= c.get('max_entries', 0)):
+            raise ValueError('报名人数已满，等待开奖')
+        if c.get('require_private_start') and not telegram_private.ready(self.db, telegram_private.identity(self.bot), tg_id):
+            raise ValueError(telegram_private.REASON)
+        account = self.db.one('SELECT emby_user_id FROM members WHERE tg_user_id=?', (tg_id,))
+        if c['audience'] != 'all' and (c['audience'] == 'member') != bool(account):
+            raise ValueError('你的注册状态不符合本期参与对象')
+        allowed, reason = prize_eligibility(c, bool(account))
+        if not allowed:
+            raise ValueError(reason)
+        _, reason = self.threshold(c, tg_id)
+        if reason:
+            raise ValueError(reason)
+        if account:
+            balance = self.points.balance(account['emby_user_id'])
+            if c.get('min_points', 0) > balance:
+                raise ValueError(f'需要积分余额不少于 {c["min_points"]}（当前 {balance}，只校验不扣）')
+            if c.get('entry_fee', 0) > balance:
+                raise ValueError('积分不足')
+        elif c.get('entry_fee'):
+            raise ValueError('收费活动须绑定已注册积分账户后报名')
+
+    def captcha_challenge(self, lottery_id, tg, *, source_ip=None):
+        row, tg_id = self.row(lottery_id), str(tg['id'])
+        if (not row['config'].get('require_captcha') or self.db.one(
+                'SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id))):
+            raise ValueError('本次报名无需验证，请刷新活动')
+        lottery_captcha.throttle(self.db, 'challenge', lottery_id, tg_id, source_ip)
+        self.captcha_precheck(row, tg_id)
+        return lottery_captcha.issue(self.db, self.bot, lottery_id, tg_id, source_ip)
+
+    async def join(self, lottery_id, tg, *, source_ip=None, browser_id=None, expected_entry_fee=ENTRY_FEE_UNSET,
+                   consent_version=None, device=None, captcha_token=None, captcha_challenge_id=None):
         row = self.row(lottery_id)
         tg_id = str(tg['id'])
-        if (row['state'] == 'settled' and row['config']['draw_mode'] == 'count' and self.db.one(
+        if (row['state'] in ('published', 'settled') and self.db.one(
                 'SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id))):
-            return  # the successful last-entry response may have been lost
+            return  # receipt survives expired tokens/deadlines, settlement and configuration outages
+        if not self.bot._cfg().get('enabled'):
+            raise ValueError('Bot 暂未启用，无法确认群成员身份')
         if row['state'] == 'cancelled':
             raise ValueError('活动已取消，不能报名')
         if row['state'] != 'published' or not accepting(row['config'], int(time.time())):
             raise ValueError('报名已截止或活动尚未发布')
+        if row['config'].get('require_captcha'):
+            lottery_captcha.throttle(self.db, 'join', lottery_id, tg_id, source_ip)
         # No unavailable-check fail-open, including Telegram's restricted status.
         member = await self.bot._call('getChatMember', {'chat_id': row['config']['chat_id'], 'user_id': tg['id']})
         if not isinstance(member, dict):
@@ -974,6 +1023,17 @@ class LotteryService:
                 (member.get('status') == 'restricted' and member.get('is_member') is True)):
             raise ValueError('仅发布群的群成员可报名')
         gate_uid, gate_error = self.threshold(row['config'], tg_id)
+        proof = None
+        if row['config'].get('require_captcha'):
+            try:
+                proof = await lottery_captcha.verify(self.db, self.bot, lottery_id, tg_id,
+                                                      captcha_challenge_id, captcha_token, source_ip)
+            except lottery_captcha.CaptchaError:
+                # Another legitimate request may have completed while verification awaited I/O.
+                if self.row(lottery_id)['state'] in ('published', 'settled') and self.db.one(
+                        'SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id)):
+                    return
+                raise
         bot_id = telegram_private.identity(self.bot)
         with economy_write(self.db) as conn:
             current = conn.execute('SELECT * FROM lotteries WHERE id=?', (lottery_id,)).fetchone()
@@ -982,7 +1042,7 @@ class LotteryService:
             if current['state'] == 'cancelled':
                 raise ValueError('活动已取消，不能报名')
             joined = conn.execute('SELECT 1 FROM lottery_entries WHERE lottery_id=? AND tg_id=?', (lottery_id, tg_id)).fetchone()
-            if current['state'] == 'settled' and c['draw_mode'] == 'count' and joined:
+            if current['state'] in ('published', 'settled') and joined:
                 return
             if current['state'] != 'published' or not accepting(c, now):
                 raise ValueError('报名已截止')
@@ -1016,6 +1076,10 @@ class LotteryService:
                                            (gate_uid,)).fetchone()[0]
                     if balance < c['min_points']:
                         raise ValueError(f'需要积分余额不少于 {c["min_points"]}（当前 {balance}，只校验不扣）')
+            if c.get('require_captcha'):
+                # No network here. Consumption, debit, entry, risk association and
+                # count-mode settlement commit or roll back as one transaction.
+                lottery_captcha.consume(conn, self.bot, proof, lottery_id, tg_id, now)
             if fee:
                 if not account:
                     raise ValueError('收费活动须绑定已注册积分账户后报名')
@@ -1478,6 +1542,7 @@ class LotteryService:
                         (state, reason, int(time.time()), next_at, lottery_id, kind))
 
     async def tick(self):
+        lottery_captcha.prune(self.db)
         for row in self.db.query("SELECT id,config_json FROM lotteries WHERE state='published'"):
             c = json.loads(row['config_json'])
             counted = c['draw_mode'] == 'count'

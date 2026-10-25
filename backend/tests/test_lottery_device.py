@@ -8,6 +8,7 @@ import pytest
 from app.core.db import Database
 from app.modules import lottery_device
 from app.modules.lottery_device import CONSENT_VERSION, FAILED, NEED_CONSENT
+from tests.lottery_captcha_helpers import captcha_args
 from tests.lottery_device_helpers import blob, device_ctx, traits
 from tests.test_lottery import ADMIN, BASE, GUEST, MEMBER, browser_id, config, create, draw, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
@@ -46,6 +47,7 @@ def legacy_create(e, raw=None, publish=True):
     saved = e.service.validate(raw, legacy=True)
     saved.pop('eligibility_version')
     saved.pop('require_private_start')
+    saved.pop('require_captcha')
     saved.pop('max_entries')
     saved.pop('public_rules_version')  # real pre-upgrade records have no public-text version
     saved['device_check'] = raw.get('device_check', raw.get('anti_multi', True)) and raw.get('anti_multi', True)
@@ -59,7 +61,7 @@ def legacy_create(e, raw=None, publish=True):
 
 
 def enter(e, lid, tg, *, ip=None, seed=None, k=None, s=None, consent=CONSENT_VERSION, ctx=UNSET, extra=None):
-    body = {'browser_id': browser_id(tg), **(extra or {})}
+    body = {'browser_id': browser_id(tg), **captcha_args(e.service, lid, tg), **(extra or {})}
     if consent is not UNSET:
         body['consent_version'] = consent
     body['ctx'] = device_ctx(tg, seed, k=k, s=s) if ctx is UNSET else ctx
@@ -244,7 +246,7 @@ def test_switched_off_activity_is_unchanged_and_collects_nothing(e):
         payload['prizes'] = [{'kind': 'manual', 'name': '人工奖', 'quantity': 3, 'instructions': '私密'}]
         lid = create(e, payload)
         assert 'consent' not in req(e, 'GET', '/' + lid, GUEST).json()
-        r = e.client.post(BASE + f'/{lid}/join', json={'browser_id': browser_id(GUEST)},
+        r = e.client.post(BASE + f'/{lid}/join', json={'browser_id': browser_id(GUEST), **captcha_args(e.service, lid, GUEST)},
                           headers={**headers(GUEST), 'CF-Connecting-IP': e.ip_for(GUEST)})
         assert r.status_code == 200 and 'consent' not in r.json()
         # Even a client that sends consent + device data has it ignored, not stored.
@@ -256,7 +258,7 @@ def test_switched_off_activity_is_unchanged_and_collects_nothing(e):
     raw = e.service.row(legacy)['config']
     raw.pop('device_check')
     e.service.db.execute('UPDATE lotteries SET config_json=? WHERE id=?', (json.dumps(raw), legacy))
-    assert e.client.post(BASE + f'/{legacy}/join', json={'browser_id': browser_id(GUEST)},
+    assert e.client.post(BASE + f'/{legacy}/join', json={'browser_id': browser_id(GUEST), **captcha_args(e.service, legacy, GUEST)},
                          headers={**headers(GUEST), 'CF-Connecting-IP': e.ip_for(GUEST)}).status_code == 200
     assert not e.service.db.query('SELECT * FROM lottery_device_entries')
     migrated = Database(e.service.db.path)

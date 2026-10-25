@@ -13,6 +13,7 @@ from app.core.db import Database
 from app.modules import lottery_identity
 from app.modules.lottery import entry_terms
 from app.modules.points import PointsService
+from tests.lottery_captcha_helpers import captcha_args
 from tests.lottery_legacy_helpers import legacy_create
 from tests.test_lottery import ADMIN, BASE, GUEST, MEMBER, browser_id, create, draw, req
 from tests.test_lottery import config as base_config
@@ -230,7 +231,7 @@ def test_failure_after_debit_rolls_back_entire_transaction(e, monkeypatch, stage
             raise sqlite3.OperationalError('mock failure after write')
         monkeypatch.setattr(owner, attr, broken)
     with pytest.raises(sqlite3.DatabaseError):
-        asyncio.run(e.service.join(lid, {'id': MEMBER}, expected_entry_fee=40,
+        asyncio.run(e.service.join(lid, {'id': MEMBER}, expected_entry_fee=40, **captcha_args(e.service, lid, MEMBER),
                                   source_ip=e.ip_for(MEMBER), browser_id=browser_id(MEMBER)))
     assert_empty(e, lid)
 
@@ -261,7 +262,7 @@ def test_concurrent_duplicate_across_connections_and_response_lost_retry(e):
 
     def join(service):
         gate.wait()
-        asyncio.run(service.join(lid, {'id': MEMBER}, expected_entry_fee=40,
+        asyncio.run(service.join(lid, {'id': MEMBER}, expected_entry_fee=40, **captcha_args(service, lid, MEMBER),
                                  source_ip=e.ip_for(MEMBER), browser_id=browser_id(MEMBER)))
     try:
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -291,7 +292,7 @@ def test_fee_and_other_points_spender_cannot_overspend(e):
             return False
 
     def join():
-        asyncio.run(e.service.join(lid, {'id': MEMBER}, expected_entry_fee=80,
+        asyncio.run(e.service.join(lid, {'id': MEMBER}, expected_entry_fee=80, **captcha_args(e.service, lid, MEMBER),
                                  source_ip=e.ip_for(MEMBER), browser_id=browser_id(MEMBER)))
     try:
         with ThreadPoolExecutor(max_workers=2) as pool:
@@ -403,7 +404,7 @@ def test_concurrent_linked_paid_entries_both_debit_and_exclude(e, reason):
 
     def signup(service, tg, ip):
         gate.wait()
-        asyncio.run(service.join(lid, {'id': tg}, expected_entry_fee=40,
+        asyncio.run(service.join(lid, {'id': tg}, expected_entry_fee=40, **captcha_args(service, lid, tg),
                                  source_ip=first_ip if reason == 'ip' else ip,
                                  browser_id=browser_id(MEMBER if reason == 'device' else tg)))
     try:
@@ -433,7 +434,7 @@ def test_failed_linked_entry_rolls_back_prior_accounts_exclusion_and_own_fee(e, 
         raise sqlite3.OperationalError('mock failure after associated accounts were updated')
     monkeypatch.setattr(lottery_identity, 'record', broken)
     with pytest.raises(sqlite3.OperationalError):
-        asyncio.run(e.service.join(lid, {'id': ADMIN}, expected_entry_fee=40,
+        asyncio.run(e.service.join(lid, {'id': ADMIN}, expected_entry_fee=40, **captcha_args(e.service, lid, ADMIN),
                                   source_ip=e.ip_for(MEMBER), browser_id=browser_id(ADMIN)))
     assert fees(e) == before and e.service.points.balance('u1') == 100
     assert e.service.records(lid)['excluded'] == 0 and e.service.records(lid)['total'] == 1

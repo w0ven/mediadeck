@@ -15,7 +15,7 @@ import json
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     # ASGI scope.client may already be rewritten by Uvicorn; never infer trust
     # from it. Unknown/unconfigured modes cannot provide lottery identity IPs.
     mediadeck_lottery_ip_mode: str = "disabled"
+    # Turnstile credentials stay process-side; only the site key is public.
+    mediadeck_turnstile_site_key: str = ""
+    mediadeck_turnstile_secret_key: SecretStr = SecretStr("")
+    mediadeck_turnstile_hostnames: str = ""
 
     # Bootstrap-only: seeds the settings store on first run.
     emby_url: str = "http://127.0.0.1:8096"

@@ -20,6 +20,95 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
   let detailLoad = 0;
   let activeTimer = null;
   let activeSheetResolve = null;
+  let turnstileScriptState = 'idle'; // 'idle' | 'loading' | 'loaded' | 'error'
+  let turnstileLoadPromise = null;
+  let turnstileScriptAttempt = 0;
+  let activeCaptchaState = null;
+
+  function clearActiveCaptcha() {
+    if (activeCaptchaState) {
+      activeCaptchaState.generation = (activeCaptchaState.generation || 0) + 1;
+      if (activeCaptchaState.widgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
+        try { window.turnstile.remove(activeCaptchaState.widgetId); } catch (_) {}
+      }
+      activeCaptchaState.widgetId = null;
+      activeCaptchaState.token = null;
+      activeCaptchaState = null;
+    }
+  }
+
+  function loadTurnstileScript() {
+    if (window.turnstile && typeof window.turnstile.render === 'function') {
+      turnstileScriptState = 'loaded';
+      return Promise.resolve(window.turnstile);
+    }
+    if (turnstileScriptState === 'loaded') return Promise.resolve(window.turnstile);
+    if (turnstileScriptState === 'loading' && turnstileLoadPromise) return turnstileLoadPromise;
+
+    turnstileScriptState = 'loading';
+    const attempt = ++turnstileScriptAttempt;
+    turnstileLoadPromise = new Promise((resolve, reject) => {
+      let script = document.querySelector('script[src*="challenges.cloudflare.com/turnstile"]');
+      if (script) {
+        script.remove();
+      }
+
+      script = document.createElement('script');
+      let timer = null;
+
+      const cleanup = () => {
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        script.removeEventListener('load', onLoad);
+        script.removeEventListener('error', onError);
+      };
+
+      const onLoad = () => {
+        cleanup();
+        if (attempt !== turnstileScriptAttempt) return;
+        turnstileScriptState = 'loaded';
+        if (window.turnstile && typeof window.turnstile.ready === 'function') {
+          window.turnstile.ready(() => resolve(window.turnstile));
+        } else {
+          resolve(window.turnstile);
+        }
+      };
+
+      const onError = () => {
+        cleanup();
+        if (attempt !== turnstileScriptAttempt) return;
+        turnstileScriptState = 'error';
+        turnstileLoadPromise = null;
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+        reject(new Error('人机验证服务加载失败，请重试'));
+      };
+
+      const onTimeout = () => {
+        cleanup();
+        if (attempt !== turnstileScriptAttempt) return;
+        turnstileScriptState = 'error';
+        turnstileLoadPromise = null;
+        if (script && script.parentNode) script.parentNode.removeChild(script);
+        reject(new Error('人机验证加载超时，请重试'));
+      };
+
+      script.addEventListener('load', onLoad);
+      script.addEventListener('error', onError);
+      timer = setTimeout(onTimeout, 12000);
+
+      script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      script.async = true;
+      script.defer = true;
+      document.head.appendChild(script);
+
+      if (window.turnstile && typeof window.turnstile.render === 'function') {
+        onLoad();
+      }
+    });
+    return turnstileLoadPromise;
+  }
 
   function clearTimer() {
     if (activeTimer) {
@@ -87,6 +176,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
 
   function page(html) {
     clearTimer();
+    clearActiveCaptcha();
     if (activeSheetResolve) closeSheet(false);
     setScreen(`<section class="lottery">${html}</section>`);
   }
@@ -401,20 +491,40 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     const needPrivateStart = Boolean(!d.joined && isOpen && d.bot_private_required && !d.bot_private_ready);
     const privateStartReason = d.bot_private_reason || '报名须先私聊启动 Bot';
 
-    let joinText = d.joined ? '已报名 · 等待开奖'
-      : isCancelled ? '活动已取消'
-      : closed ? '报名已截止'
-      : needPrivateStart ? '须先私聊启动 Bot'
-      : thresholdBlocked ? '须绑定已注册账户'
-      : pointsShort > 0 ? `积分不足（差 ${pointsShort} 积分）`
-      : !eligible ? '当前身份不可参与'
-      : !prizeEligible ? prizeIneligibleReason
-      : fee > 0 && balance == null ? '须绑定已注册账户'
-      : fee > 0 && !hasEnough ? `积分不足（需 ${fee} 积分）`
-      : fee > 0 ? `支付 ${fee} 积分报名`
-      : '立即参与';
+    const eligibleToEnter = eligible && prizeEligible && !thresholdBlocked && pointsShort === 0;
 
-    const canJoin = !isCancelled && !closed && !d.joined && !needPrivateStart && eligible && prizeEligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null);
+    const captchaCfg = d.captcha || {};
+    const needsCaptcha = !isManage && !d.joined && isOpen && !needPrivateStart && eligibleToEnter && Boolean(captchaCfg.required);
+    const captchaAvailable = Boolean(captchaCfg.available);
+
+    const captchaState = {
+      lid,
+      load,
+      generation: 0,
+      challenge: null,
+      token: null,
+      widgetId: null,
+      expired: false
+    };
+    function getJoinText() {
+      return d.joined ? '已报名 · 等待开奖'
+        : isCancelled ? '活动已取消'
+        : closed ? '报名已截止'
+        : needPrivateStart ? '须先私聊启动 Bot'
+        : thresholdBlocked ? '须绑定已注册账户'
+        : pointsShort > 0 ? `积分不足（差 ${pointsShort} 积分）`
+        : !eligible ? '当前身份不可参与'
+        : !prizeEligible ? prizeIneligibleReason
+        : (needsCaptcha && !captchaAvailable) ? '人机验证暂不可用'
+        : (needsCaptcha && !captchaState.token) ? '请先完成人机验证'
+        : fee > 0 && balance == null ? '须绑定已注册账户'
+        : fee > 0 && !hasEnough ? `积分不足（需 ${fee} 积分）`
+        : fee > 0 ? `支付 ${fee} 积分报名`
+        : '立即参与';
+    }
+
+    const canJoinBase = !isCancelled && !closed && !d.joined && !needPrivateStart && eligible && prizeEligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null) && (!needsCaptcha || captchaAvailable);
+    const canJoin = canJoinBase && (!needsCaptcha || Boolean(captchaState.token && !captchaState.expired));
 
     const statsHtml = isSettled
       ? `<div class="lot-stats cols-3">
@@ -443,6 +553,14 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       <h3>本期奖池 <span class="section-tag">${esc(audience[c.audience])}可参与</span></h3>${prizes(c)}
       ${isSettled ? `<h3>本期幸运名单 · ${d.winners.length} 位</h3><div class="prize-list">${d.winners.map((w, i) => `<div class="winner"><span class="muted tiny num">${i + 1}</span><div class="avatar">${esc(w.label.slice(0, 1))}</div><div class="grow"><b>${esc(w.label)}</b><div class="prize-desc">${esc(w.prize.name)}</div></div>${image('party', 22)}</div>`).join('') || '<div class="empty">本期未产生中奖者</div>'}</div>` : ''}
       ${needPrivateStart ? `<div class="rule-note banner bad" id="lot-private-banner">${image('notice', 18)}<span>${esc(privateStartReason)}</span></div>` : ''}
+      ${needsCaptcha ? `
+      <div class="lot-captcha-wrap" id="lot-captcha-area">
+        ${!captchaAvailable ? `<div class="rule-note banner bad lot-captcha-banner">${image('notice', 18)}<span>人机验证暂不可用，请稍后重试</span><button class="btn secondary text-btn" id="lot-captcha-retry">重试</button></div>` : `
+        <div id="lot-cf-turnstile-container" class="cf-turnstile-box"><div class="lot-captcha-loading">人机验证加载中...</div></div>
+        <div id="lot-captcha-msg" class="tiny muted" style="margin-top:6px;display:none"></div>
+        `}
+      </div>
+      ` : ''}
       <details class="lot-fold">
         <summary><span>查看活动规则与说明</span><span class="fold-arrow">${icon ? icon('chevron-down') : '▼'}</span></summary>
         <div class="rule-note">${image('star', 18)}<span>${esc(d.rules)}</span></div>
@@ -451,29 +569,209 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         ${thresholdLabels.length ? `<div class="lot-threshold-pills">${thresholdLabels.map(t => `<span class="pill">${image('starCute', 13)} ${esc(t)}</span>`).join('')}</div>` : ''}
         ${needPrivateStart
           ? `<button class="btn" id="lot-start-bot">${image('megaphone', 16)} 先私聊启动 Bot</button><button class="btn secondary" id="lot-retry-private">我已启动，刷新报名</button>`
-          : (!isSettled ? `<button class="btn" id="lot-join" ${canJoin ? '' : 'disabled'}>${joinText}</button>` : '<button class="btn secondary" id="lot-result-refresh">刷新领奖状态</button>')}
+          : (!isSettled ? `<button class="btn" id="lot-join" ${canJoin ? '' : 'disabled'}>${getJoinText()}</button>` : '<button class="btn secondary" id="lot-result-refresh">刷新领奖状态</button>')}
       </div>` : ''}
       <div class="lot-bottom-spacer"></div>`);
 
     startCountdown();
     if (admin) bind('#lot-to-manage', () => push(a => detail(lid, a, 'manage')));
-    bind('#lot-refresh,#lot-result-refresh,#lot-retry-private', refresh);
+    bind('#lot-refresh,#lot-result-refresh,#lot-retry-private,#lot-captcha-retry', refresh);
     bind('#lot-start-bot', () => {
       if (d.bot_start_url) openBot(d.bot_start_url);
       else toast('未获取到 Bot 私聊链接，请稍后刷新');
     });
     bind('#lot-claim', async () => { await call(`/${lid}/claim`); await refresh(); });
     bind('#lot-register', () => openBot(d.my_award.registration_url));
+
+    function updateJoinBtn() {
+      const btn = $('#lot-join');
+      if (!btn) return;
+      if (needsCaptcha) {
+        if (!captchaAvailable) {
+          btn.disabled = true;
+          btn.textContent = '人机验证暂不可用';
+        } else if (captchaState.expired) {
+          btn.disabled = true;
+          btn.textContent = '验证已过期，请重试';
+        } else if (!captchaState.token) {
+          btn.disabled = true;
+          btn.textContent = '请先完成人机验证';
+        } else {
+          btn.disabled = !canJoinBase;
+          btn.textContent = getJoinText();
+        }
+      } else {
+        btn.disabled = !canJoin;
+        btn.textContent = getJoinText();
+      }
+    }
+
+    async function initCaptchaWidget() {
+      if (!needsCaptcha || !captchaAvailable) return;
+      const gen = ++captchaState.generation;
+
+      // Remove existing widget if any before recreating
+      if (captchaState.widgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
+        try { window.turnstile.remove(captchaState.widgetId); } catch (_) {}
+      }
+      captchaState.widgetId = null;
+      captchaState.token = null;
+      captchaState.expired = false;
+      updateJoinBtn();
+
+      let container = $('#lot-cf-turnstile-container');
+      const wrap = $('#lot-captcha-area');
+      if (wrap) {
+        wrap.innerHTML = '<div id="lot-cf-turnstile-container" class="cf-turnstile-box"><div class="lot-captcha-loading">人机验证加载中...</div></div><div id="lot-captcha-msg" class="tiny muted" style="margin-top:6px;display:none"></div>';
+        container = $('#lot-cf-turnstile-container');
+      }
+      if (!container) return;
+
+      try {
+        const turnstile = await loadTurnstileScript();
+        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+
+        // Fetch challenge from server
+        let ch = null;
+        try {
+          ch = await call(`/${lid}/captcha`);
+        } catch (err) {
+          if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+          const retryHint = (err && err.status === 429) ? '请求频繁，请稍后重试' : (err.message || '获取验证失败');
+          if (wrap) {
+            wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(retryHint)}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
+            const rb = $('#lot-captcha-reissue', wrap);
+            if (rb) rb.onclick = () => initCaptchaWidget();
+          }
+          updateJoinBtn();
+          return;
+        }
+
+        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+        captchaState.challenge = ch;
+        captchaState.token = null;
+        captchaState.expired = false;
+        container = $('#lot-cf-turnstile-container');
+        if (!container && wrap) {
+          wrap.innerHTML = '<div id="lot-cf-turnstile-container" class="cf-turnstile-box"></div><div id="lot-captcha-msg" class="tiny muted" style="margin-top:6px;display:none"></div>';
+          container = $('#lot-cf-turnstile-container');
+        }
+        if (container) container.innerHTML = '';
+        const curMsgEl = () => $('#lot-captcha-msg');
+
+        if (!turnstile || typeof turnstile.render !== 'function') {
+          throw new Error('人机验证组件未就绪');
+        }
+
+        // Measure container width for responsive sizing
+        const containerWidth = container ? container.getBoundingClientRect().width : window.innerWidth;
+        const size = (containerWidth > 0 && containerWidth < 300) ? 'compact' : 'flexible';
+
+        // Detect current theme: dark or light
+        const tgScheme = (window.Telegram && window.Telegram.WebApp && window.Telegram.WebApp.colorScheme);
+        const isDark = tgScheme ? (tgScheme !== 'light') : ((document.documentElement.dataset && document.documentElement.dataset.theme) === 'dark' || document.documentElement.getAttribute('data-theme') === 'dark');
+        const theme = isDark ? 'dark' : 'light';
+
+        const showRetryError = (msg) => {
+          captchaState.token = null;
+          captchaState.expired = true;
+          if (wrap) {
+            wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(msg)}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
+            const rb = $('#lot-captcha-reissue', wrap);
+            if (rb) rb.onclick = () => initCaptchaWidget();
+          }
+          updateJoinBtn();
+        };
+
+        const widgetId = turnstile.render(container, {
+          sitekey: ch.site_key || captchaCfg.site_key,
+          action: ch.action || 'lottery_join',
+          cData: ch.cdata,
+          theme,
+          size,
+          retry: 'never',
+          'refresh-expired': 'manual',
+          callback: (token) => {
+            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            captchaState.token = token;
+            captchaState.expired = false;
+            const m = curMsgEl();
+            if (m) { m.style.display = 'none'; m.textContent = ''; }
+            updateJoinBtn();
+          },
+          'expired-callback': () => {
+            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            showRetryError('验证已过期，请点击重新验证');
+          },
+          'error-callback': (code) => {
+            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            showRetryError('验证失败，请重新验证');
+          },
+          'timeout-callback': () => {
+            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            showRetryError('验证超时，请重新验证');
+          }
+        });
+        captchaState.widgetId = widgetId;
+      } catch (err) {
+        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+        if (wrap) {
+          wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(err.message || '验证服务加载失败')}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
+          const rb = $('#lot-captcha-reissue', wrap);
+          if (rb) rb.onclick = () => initCaptchaWidget();
+        }
+        updateJoinBtn();
+      }
+    }
+
+    if (needsCaptcha) {
+      activeCaptchaState = captchaState;
+      updateJoinBtn();
+      initCaptchaWidget();
+    }
+
     bind('#lot-join', async () => {
       async function doJoin(devicePayload) {
+        if (needsCaptcha) {
+          if (!captchaState.token || captchaState.expired) {
+            throw new Error('请先完成人机验证');
+          }
+          if (captchaState.challenge && captchaState.challenge.expires_at) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            if (nowSec >= captchaState.challenge.expires_at) {
+              closeSheet(false);
+              initCaptchaWidget();
+              throw new Error('验证凭证已过期，请重新完成验证');
+            }
+          }
+        }
+
         const body = { browser_id: browserId(), expected_entry_fee: fee };
+        if (needsCaptcha) {
+          body.captcha_token = captchaState.token;
+          body.captcha_challenge_id = captchaState.challenge ? captchaState.challenge.challenge_id : '';
+        }
         if (devicePayload) {
           body.consent_version = devicePayload.consent_version;
           body.ctx = devicePayload.ctx;
         }
-        await call(`/${lid}/join`, body);
-        toast('报名已记录');
-        await refresh();
+
+        try {
+          await call(`/${lid}/join`, body);
+          toast('报名已记录');
+          clearActiveCaptcha();
+          await refresh();
+        } catch (err) {
+          // Token consumption or rejection invalidates challenge
+          if (needsCaptcha) {
+            captchaState.token = null;
+            captchaState.expired = true;
+            updateJoinBtn();
+            // Re-initialize a fresh challenge
+            initCaptchaWidget();
+          }
+          throw err;
+        }
       }
 
       async function collectDevice() {

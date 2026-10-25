@@ -8,8 +8,10 @@ from urllib.parse import urlsplit
 import pytest
 
 from app.main import app
+from tests.lottery_captcha_helpers import answer
 from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create, draw
 from tests.test_lottery import env as lottery_env  # noqa: F401
+from tests.test_lottery_turnstile_browser import MOCK_TURNSTILE_SCRIPT
 from tests.test_miniapp import TELEGRAM_STUB, headers
 
 
@@ -29,6 +31,8 @@ def test_admin_participation_and_manage_toggle(request, tmp_path):
             if u.hostname == 'telegram.org':
                 return route.fulfill(content_type='application/javascript',
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname == 'challenges.cloudflare.com':
+                return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
             if u.hostname != 'app.example.test':
                 return route.abort()
             res = env.client.request(r.method, u.path + ('?' + u.query if u.query else ''),
@@ -49,6 +53,19 @@ def test_admin_participation_and_manage_toggle(request, tmp_path):
         page.locator('#lot-join').wait_for()
         assert page.locator('#lot-to-manage').is_visible()
         assert not page.locator('#lot-records,#lot-draw').count()
+
+        # Complete captcha for ADMIN
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(ADMIN))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
         assert page.locator('#lot-join').inner_text() in ('立即参与', '收下我的幸运号码')
 
         # Admin takes participation screenshot
@@ -96,6 +113,8 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
             if u.hostname == 'telegram.org':
                 return route.fulfill(content_type='application/javascript',
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname == 'challenges.cloudflare.com':
+                return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
             if u.hostname != 'app.example.test':
                 return route.abort()
             content = r.post_data_buffer
@@ -137,6 +156,19 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
         viewer['id'] = MEMBER
         page.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         page.locator('#lot-join').wait_for()
+
+        # Complete captcha for Member
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(MEMBER))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
         assert page.locator('#lot-join').inner_text() == '支付 50 积分报名'
         assert '我的余额：100 积分' in page.locator('.lottery').inner_text()
 

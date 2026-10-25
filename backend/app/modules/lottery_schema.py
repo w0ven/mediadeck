@@ -1,7 +1,7 @@
 """Additive lottery storage; existing member/economy tables are never rewritten."""
 import json
 
-from app.modules import lottery_device
+from app.modules import lottery_captcha, lottery_device
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS lotteries (
@@ -58,7 +58,7 @@ CREATE INDEX IF NOT EXISTS idx_lottery_ops_message ON lottery_ops(kind,chat_id,m
 
 
 def migrate(db):
-    db._conn.executescript(SCHEMA)
+    db._conn.executescript(SCHEMA + lottery_captcha.SCHEMA)
     db._ensure_column('lottery_awards', 'next_at', 'INTEGER NOT NULL DEFAULT 0')
     db._ensure_column('lottery_entries', 'excluded', 'INTEGER NOT NULL DEFAULT 0')
     # Additive only: published rows treat missing new config fields as off/unlimited.
