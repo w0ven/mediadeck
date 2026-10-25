@@ -22,9 +22,9 @@ class GiftReceipts:
     def stage(self, conn: Any, admission: Any, member: dict, group_name: str,
               *, recipient_label: str | None = None) -> int | None:
         """Called inside the SAME transaction as binding + credential consumption."""
-        if not admission or getattr(admission, 'detail', {}).get('lottery_award'):
-            # Lottery public results never disclose account names/login details.
+        if not admission:
             return None
+        lottery = bool(getattr(admission, 'detail', {}).get('lottery_award'))
         grant = None
         if admission.via == 'admin' and admission.credential:
             grant = conn.execute('SELECT * FROM admin_grants WHERE tg_user_id=? AND gift_code=?',
@@ -49,8 +49,9 @@ class GiftReceipts:
         inviter = self._inviter_mention(conn, admission)
         body = (f'🎉 <a href="tg://user?id={tg_id}">{label}</a> 注册成功\n'
                 + (f'🤝 邀请人：{inviter}\n' if inviter else '')
-                + f'账号：<b>{escape(str(member["username"]))}</b>\n'
-                f'{escape(group_name)} · {term}')
+                # Lottery receipts confirm success without publishing login details.
+                + (f'账号：<b>{escape(str(member["username"]))}</b>\n' if not lottery else '')
+                + f'{escape(group_name)} · {term}')
         now = int(time.time())
         # Keep legacy gift keys stable; other channels have one receipt per
         # created account even when an invite permits several registrations.
