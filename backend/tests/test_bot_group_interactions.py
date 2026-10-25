@@ -151,7 +151,7 @@ def test_allowed_group_start_is_private_entry_only(bot):
 def test_group_myinfo_is_own_brief_card(bot):
     run(bot._handle_message(_msg("/myinfo", user=ALICE, username="alice_tg")))
     body = last_text(bot)
-    assert "alice" in body
+    assert body.startswith(f'👤 <a href="tg://user?id={ALICE}">')
     assert "普通用户 · ✅ 正常" in body and "到期" in body
     assert "密码" not in body and "token" not in body
     assert "选择要查看的内容" not in body
@@ -161,7 +161,7 @@ def test_group_myinfo_is_own_brief_card(bot):
 def test_group_me_does_not_show_other_people(bot):
     run(bot._handle_message(_msg("/me", user=ALICE, username="alice_tg")))
     assert "root" not in last_text(bot)
-    assert "alice" in last_text(bot)
+    assert f"tg://user?id={ALICE}" in last_text(bot)
 
 
 def test_group_rank_matches_scheduled_calendar_board(bot):

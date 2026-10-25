@@ -19,8 +19,8 @@ from app.modules.economy_rules import day_bounds
 
 def cards(e):
     member = e.members.get('u1')
-    return [e.bot._account_card(member), e.bot._account_card(member, public=True),
-            e.bot._account_card(member, managing=True)]
+    return [e.bot._account_card(member), e.bot._brief_card(member),
+            e.bot._member_admin_card(member, public=False)]
 
 
 @pytest.mark.parametrize('seconds,points,growth', [(299, 0, 0), (300, 8, 5), (600, 16, 10)])

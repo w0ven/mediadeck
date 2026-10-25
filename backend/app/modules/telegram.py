@@ -44,6 +44,7 @@ from app.core.errors import ConfigError, ConflictError
 from app.modules.bot_accounts import AccountBotMixin
 from app.modules.bot_activity import ActivityBotMixin, growth_line
 from app.modules.bot_invites import InviteBotMixin
+from app.modules.bot_member_card import MemberCardMixin
 from app.modules.bot_packets import PacketBotMixin
 from app.modules.bot_passwords import PasswordBotMixin, validate_password
 from app.modules.bot_play import PLAY_CALLBACKS, PlayBotMixin
@@ -269,7 +270,7 @@ _CALL_ERROR: contextvars.ContextVar[str | None] = contextvars.ContextVar('tg_cal
 _QUIET_CALL: contextvars.ContextVar[bool] = contextvars.ContextVar('tg_quiet_call', default=False)
 
 
-class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
+class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, AccountBotMixin, PasswordBotMixin, RequestBotMixin, RebindBotMixin, GroupPointsBotMixin, PacketBotMixin, PlayBotMixin):
     """Long-polling bot bound to the panel's member records."""
 
     def __init__(self, config_provider: Any, members: Any, emby: Any = None,
@@ -2787,30 +2788,17 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
 
     def _user_admin_keyboard(self, user_id: str, access=None) -> list[list[dict[str, str]]]:
         action = self._admin_access_action(access)
-        first = [{"text": "⏳ 续期", "callback_data": "admin_renew"}]
-        if action:
-            first.append({"text": "⛔ 禁用账号" if action == "admin_disable" else "🔓 解除禁用",
-                          "callback_data": action})
-        return [first,
-                [{"text": "更多管理", "callback_data": "admin_more"},
-                 {"text": "刷新状态", "callback_data": "admin_card"}],
-                [{"text": "◀ 管理入口", "callback_data": "admin_root"},
-                 {"text": "关闭", "callback_data": "panel_close"}]]
-
-    def _user_admin_more(self, user_id: str) -> list[list[dict[str, str]]]:
-        rows = [[{"text": "👥 用户组 / 白名单", "callback_data": "admin_groups"},
-                 {"text": "💰 调整积分", "callback_data": "admin_score"}],
-                [{"text": "📊 使用详情", "callback_data": "admin_usage"},
-                 {"text": "🗑 删除账号", "callback_data": "admin_rm"}]]
+        second = [{"text": "⛔ 禁用账号" if action == "admin_disable" else "🔓 解除禁用",
+                   "callback_data": action}] if action else []
+        last = [{"text": "🔄 刷新", "callback_data": "admin_card"},
+                {"text": "关闭", "callback_data": "panel_close"}]
         if _GROUP.get():
-            links = self._private_button('manage_' + user_id, '资料 / 绑定 · 私聊')
-            if links:
-                rows[0].append(rows[1][0])
-                rows[1] = [links[0][0], rows[1][1]]
-        else:
-            rows[1].insert(0, {"text": "📋 资料 / 绑定", "callback_data": "admin_binding"})
-        rows.append([{"text": "◀ 目标账号", "callback_data": "admin_card"}])
-        return rows
+            last = [*(row[0] for row in self._private_button('manage_' + user_id, '📋 资料 · 私聊')), *last]
+        return [[{"text": "⏳ 续期", "callback_data": "admin_renew"},
+                 {"text": "💰 调整积分", "callback_data": "admin_score"},
+                 {"text": "👥 用户组", "callback_data": "admin_groups"}],
+                [*second, {"text": "🗑 删除账号", "callback_data": "admin_rm"}],
+                last]
 
     async def _admin_read_access(self, target):
         if self._restrictions is None:
@@ -2822,45 +2810,19 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
             remote = None
         return self._restrictions.access_state(uid, remote, available=remote is not None)
 
-    @staticmethod
-    def _admin_access_text(access: dict[str, Any]) -> str:
+    @classmethod
+    def _admin_access_lines(cls, access: dict[str, Any]) -> list[str]:
         local = '已封禁' if access.get('status') == 'suspended' else '未封禁'
         remote = ('未知，请刷新核实' if access.get('emby_disabled') is None else
                   '已禁用' if access['emby_disabled'] else '未禁用')
         limits = '、'.join(access.get('remaining_restrictions') or []) or '无'
-        return f"\n本地封禁：{local} · Emby：{remote}\n其他限制：{escape(limits)}\n"
+        lines = [f"本地封禁：{local} · Emby：{remote}", f"其他限制：{escape(limits)}"]
+        if not cls._admin_access_action(access):
+            lines.append('禁用状态暂不可用；请刷新核实。')
+        return lines
 
     def _user_card(self, target: dict[str, Any]) -> str:
-        return self._account_card(target, public=_GROUP.get(), managing=True, compact=True) + target.get('_access_text', '')
-
-    def _admin_details(self, target: dict[str, Any]) -> str:
-        if _GROUP.get():
-            return self._account_card(target, public=True, managing=True)
-        user_id = str(target.get("emby_user_id"))
-        devices = len(self._members.devices(user_id) or [])
-        seen = target.get("last_seen_at")
-        invitee_count = target.get("invitee_count")
-        if invitee_count is None:
-            invitee_count = len(self._members.invitees_of(user_id) or [])
-        inviter = self._members.inviter_of(user_id) or {}
-        left = (self._requests.remaining(user_id)
-                if self._requests_ready() else None)
-        return (
-            self._whitelist_decoration(target)
-            + f"🛠 <b>管理目标 · {escape(str(target.get('username') or '-'))}</b>\n\n"
-            f"状态：{self._status_label(target)} · 用户组：{self._group_label(target)}\n"
-            f"有效期：{_member_expiry_label(target)}\n"
-            f"积分：{self._balance(user_id)}\n"
-            f"注册渠道：{escape(str(target.get('register_via') or 'legacy'))}\n"
-            f"邀请人：{escape(str(inviter.get('username') or '—'))} · 下级：{invitee_count} 人\n"
-            f"Telegram：{escape(str(target.get('tg_user_id') or '未关联'))}\n"
-            + self._device_count_text(target) + "\n"
-            f"原始登录标识记录：{devices} 条\n"
-            f"最近活跃："
-            f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(seen)) if seen else '—'}\n"
-            f"求片剩余：{self._remaining_text(left)}\n\n"
-            + self._usage_brief(target) + "\n\n" + self._watch_text(target)
-        )
+        return self._member_admin_card(target, public=bool(_GROUP.get()), access_lines=target.get('_access_lines'))
 
     def _hold_admin_user(self, chat_id: Any, target: dict[str, Any],
                          actor: str) -> None:
@@ -3025,9 +2987,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                                actor: str, notice: str = '') -> bool:
         access = await self._admin_read_access(target)
         if access:
-            target = {**target, '_access_text': self._admin_access_text(access)}
-            if not self._admin_access_action(access):
-                target['_access_text'] += '禁用状态暂不可用；请刷新核实。\n'
+            target = {**target, '_access_lines': self._admin_access_lines(access)}
         previous = self._admin_panel(chat_id)
         if previous and previous['user_id'] != str(target.get('emby_user_id') or ''):
             # A card is never silently retargeted; late buttons still name the
@@ -3125,26 +3085,8 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         if data in ('admin_disable', 'admin_enable') or data.startswith('admin_access_ok:'):
             await self._admin_manual_access(chat_id, message_id, member, target, actor, data)
             return
-        if data == "admin_more":
-            self._pending.pop(self._pkey(chat_id), None)
-            self._save_admin_pending(chat_id)
-            await self._edit(chat_id, message_id, "🛠 <b>更多管理</b>\n目标："
-                             + escape(str(target.get("username") or user_id)),
-                             self._user_admin_more(user_id))
-            return
         if data == "admin_prouser":
             await self._grant_whitelist(chat_id, actor, target)
-            return
-        if data == "admin_usage":
-            await self._edit(chat_id, message_id,
-                             '🛠 <b>管理目标 · ' + escape(str(target.get('username') or '—')) + '</b>\n\n' + self._usage_text(target),
-                             self._target_back())
-            return
-        if data == "admin_binding":
-            await self._edit(chat_id, message_id,
-                self._admin_details(target) + '\n\n'
-                + "更换 TG 由新 Telegram 私聊验证 Emby 密码后提交申请，管理员在绑定群审核。",
-                self._user_admin_more(user_id))
             return
         if data == "admin_groups":
             choices = [{'text': str(g['name']), 'callback_data': 'admin_group_pick:'+g['id']}
@@ -3158,7 +3100,7 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
         if data.startswith('admin_group_apply:'):
             await self._apply_group_change(chat_id, message_id, target, actor, data)
             return
-        if data == "admin_card":
+        if data in ("admin_card", "admin_more", "admin_usage", "admin_binding"):
             await self._admin_show_user(chat_id, target, actor)
             return
         if data == "admin_renew":
@@ -3328,9 +3270,8 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
             ]
         return "\n".join(lines)
 
-    def _account_card(self, member: dict[str, Any], *, public: bool = False,
-                       managing: bool = False, compact: bool = False) -> str:
-        if member.get('activity_level') and not public and not managing:
+    def _account_card(self, member: dict[str, Any]) -> str:
+        if member.get('activity_level'):
             try:
                 lines, _ = self._activity_summary(member)
                 return '\n'.join(lines)
@@ -3338,35 +3279,26 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 pass
         name = escape(str(member.get('username') or '—'))
         badge = self._whitelist_decoration(member) or '👤 '
-        heading = f'🛠 <b>管理目标 · {name}</b>' if managing else badge + f'<b>{name}</b>'
+        heading = badge + f'<b>{name}</b>'
         expiry = member.get('expires_at_effective', member.get('expires_at'))
         term = ((datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M 到期')
                  if member.get('activity_level') else time.strftime('%Y-%m-%d 到期', time.localtime(expiry))) if expiry else
                 '♾ 永久' if 'expires_at_effective' in member or 'expires_at' in member else '暂不可用')
         if member.get('activity_exempt'):
             term = '🛡️ 白名单 · ♾ 永久'
-        if managing and compact:
-            return '\n'.join([
-                heading, self._group_label(member) + ' · ' + self._status_label(member),
-                '⏳ 有效期：' + term,
-                *quota_lines(member, public=public, compact=True), *bandwidth_lines(member, compact=True),
-                f"🪙 积分：{self._balance(str(member.get('emby_user_id') or ''))}",
-            ])
         lines = [heading,
                  self._group_label(member) + ' · ' + self._status_label(member),
                  '有效期：' + term, '',
-                 *quota_lines(member, public=public), *bandwidth_lines(member)]
+                 *quota_lines(member), *bandwidth_lines(member)]
         streams = member.get('max_streams')
         stream_text = ('暂不可用' if streams in (None, '') else
                        f'{int(streams)} 路' if int(streams) else '不限')
         lines.append('同时播放：' + stream_text)
-        if managing:
-            lines.append(self._device_count_text(member))
         for field, label in (('allow_download', '下载权限'), ('allow_transcode', '转码权限')):
             if field in member:
                 value = member[field]
                 lines.append(label + '：' + ('暂不可用' if value is None else '允许' if value else '不允许'))
-        if not public and member.get('note'):
+        if member.get('note'):
             lines.append('备注：' + escape(str(member['note'])))
         balance = None
         if self._points is not None:
@@ -3380,10 +3312,6 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                       '近24小时：<b>' + duration((summary or {}).get('seconds_24h')) + '</b>',
                       '近30天：<b>' + duration((summary or {}).get('seconds_30d')) + '</b>',
                       '累计观看：<b>' + duration((summary or {}).get('recorded_seconds')) + '</b>'])
-        if managing and (summary or {}).get('coverage_note'):
-            lines.append(escape(str(summary['coverage_note'])))
-        if managing and (summary or {}).get('unverified_playback_now'):
-            lines.append('当前播放待核验，暂不计时。')
         lines += ['', '<b>积分：' + (str(balance) if balance is not None else '暂不可用') + '</b>']
         levels = getattr(self._members, '_levels', None)
         if levels is not None and member.get('activity_level'):
@@ -3399,29 +3327,28 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                               + (f" · 还差 {info['shortfall']}" if info['shortfall'] else '')]
             except Exception:  # noqa: BLE001 - explicitly unknown, never invent a price or balance
                 lines.append('等级与续期信息暂不可读取')
-        if not managing:
-            lines = [line.replace('本周期暂无播放记录', '暂无记录') for line in lines]
-            for old, new in (('同时播放：', '同播：'), ('下载权限：', '下载：'), ('转码权限：', '转码：')):
-                lines = [new + line[len(old):] if line.startswith(old) else line for line in lines]
-            icons = (('有效期：', '⏳'), ('<b>本月流量', '📊'), ('带宽：', '🚀'),
-                     ('同播：', '📺'), ('下载：', '📥'),
-                     ('转码：', '🎞️'), ('<b>观看记录', '🎬'), ('<b>积分：', '🪙'), ('备注：', '📝'))
-            lines = [next((icon + ' ' + line for prefix, icon in icons if line.startswith(prefix)), line)
-                     for line in lines]
-            # Compact pairs retain known/unknown values and their original units.
-            for left, right in (('已用：', '剩余：'), ('📥 下载：', '🎞️ 转码：'), ('近24小时：', '近30天：')):
-                for i in range(len(lines) - 1):
-                    if lines[i].startswith(left) and lines[i + 1].startswith(right):
-                        pair = lines[i] + ' · ' + lines[i + 1]
-                        width = sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
-                                    for c in re.sub(r'<[^>]*>', '', pair))
-                        if width <= 32:
-                            lines[i:i + 2] = [pair]
-                        break
+        lines = [line.replace('本周期暂无播放记录', '暂无记录') for line in lines]
+        for old, new in (('同时播放：', '同播：'), ('下载权限：', '下载：'), ('转码权限：', '转码：')):
+            lines = [new + line[len(old):] if line.startswith(old) else line for line in lines]
+        icons = (('有效期：', '⏳'), ('<b>本月流量', '📊'), ('带宽：', '🚀'),
+                 ('同播：', '📺'), ('下载：', '📥'),
+                 ('转码：', '🎞️'), ('<b>观看记录', '🎬'), ('<b>积分：', '🪙'), ('备注：', '📝'))
+        lines = [next((icon + ' ' + line for prefix, icon in icons if line.startswith(prefix)), line)
+                 for line in lines]
+        # Compact pairs retain known/unknown values and their original units.
+        for left, right in (('已用：', '剩余：'), ('📥 下载：', '🎞️ 转码：'), ('近24小时：', '近30天：')):
+            for i in range(len(lines) - 1):
+                if lines[i].startswith(left) and lines[i + 1].startswith(right):
+                    pair = lines[i] + ' · ' + lines[i + 1]
+                    width = sum(2 if unicodedata.east_asian_width(c) in ('W', 'F') else 1
+                                for c in re.sub(r'<[^>]*>', '', pair))
+                    if width <= 32:
+                        lines[i:i + 2] = [pair]
+                    break
         return '\n'.join(lines)
 
     def _brief_card(self, member: dict[str, Any]) -> str:
-        return self._account_card(member, public=True)
+        return self._member_group_card(member)
 
     def _group_account_menu(self) -> list[list[dict[str, str]]]:
         return [[{'text': '刷新', 'callback_data': 'me'},
@@ -4915,7 +4842,8 @@ class TelegramBot(ActivityBotMixin, InviteBotMixin, GroupCommandCleanupMixin, Ac
                 await self._retire_menu(chat_id, int(message_id))
                 self._panel.pop(self._pkey(chat_id), None)
                 return
-            if panel and data in ('admin_card', 'admin', 'home', 'admin_cancel'):
+            if panel and data in ('admin_card', 'admin', 'home', 'admin_cancel',
+                                  'admin_more', 'admin_usage', 'admin_binding'):
                 await self._return_admin_target(chat_id, int(message_id),
                     '\n已取消，未执行本次修改。' if data == 'admin_cancel' else '')
                 return

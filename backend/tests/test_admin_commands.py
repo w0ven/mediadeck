@@ -216,22 +216,22 @@ def test_help_lists_every_command(bot) -> None:
 
 # -- /kk ---------------------------------------------------------------------
 
-def test_kk_reports_the_account_at_a_glance(bot) -> None:
+def test_kk_reports_the_whole_account_on_one_card_with_flat_buttons(bot) -> None:
     bot.points.add("u1", 120, "test", actor="test")
     reply = _run(bot, "/kk alice")
-    for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "带宽", "积分：120"):
+    for fragment in ("管理目标 · alice", "普通用户", "✅ 正常", "到期", "带宽", "同播", "🪙 积分 120",
+                     "<b>🎬 观看</b>", "设备分组", "按设备名称归并", "非硬件唯一识别",
+                     "本地封禁", "注册渠道", "邀请人", "下级", "Telegram", "原始登录标识记录",
+                     "最近活跃", "求片剩余"):
         assert fragment in reply
     # Byte usage is retired from the admin card (docs/TRAFFIC_RETIREMENT.md).
-    assert "本月流量" not in reply
-    assert len(reply.splitlines()) <= 12
-    for text in ('按设备名称归并', '非硬件唯一识别', '观看记录', '核验', '发奖依据'):
-        assert text not in reply
-    details = _tap(bot, 'admin_binding')
-    for fragment in ("alice", "状态", "用户组", "有效期", "积分", "注册渠道",
-                     "邀请人", "下级", "Telegram", "设备分组", "按设备名称归并",
-                     "原始登录标识记录", "最近活跃", "求片剩余"):
-        assert fragment in details
-    assert "120" in details
+    assert "本月流量" not in reply and "发奖依据" not in reply
+    actions = [b.get("callback_data") for row in bot.sent[-1][2] for b in row]
+    assert {"admin_renew", "admin_score", "admin_groups", "admin_rm", "admin_card", "panel_close"} <= set(actions)
+    assert not {"admin_more", "admin_root", "admin_usage", "admin_binding"} & set(actions)
+    assert len(bot.sent[-1][2]) == 3
+    # Buttons left on cards sent before the flat layout land back on the card.
+    assert "注册渠道" in _tap(bot, 'admin_binding') and "注册渠道" in _tap(bot, 'admin_more')
 
 
 def test_kk_short_prompts_do_not_grant_or_create_accounts(bot) -> None:
@@ -251,11 +251,11 @@ def test_kk_short_card_preserves_escaping_unknowns_and_access_warning(bot) -> No
     from test_bot_reply_templates import plain
 
     member = {'emby_user_id': 'missing', 'username': '<User&>', 'group_name': '<Group&>',
-              '_access_text': '\n本地封禁：未封禁 · Emby：未知，请刷新核实\n'}
+              '_access_lines': ['本地封禁：未封禁 · Emby：未知，请刷新核实']}
     bot._points = None
     body = bot._user_card(member)
     assert '&lt;User&amp;&gt;' in body and '&lt;Group&amp;&gt;' in body
-    assert '有效期：暂不可用' in body and '积分：暂不可用' in body
+    assert '有效期暂不可用' in body and '🪙 积分 暂不可用' in body
     # The retired usage block is gone rather than shown as unknown.
     assert '计量暂不可用' not in body and '本月流量' not in body
     assert 'Emby：未知，请刷新核实' in body
