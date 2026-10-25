@@ -8,6 +8,7 @@ from uuid import uuid4
 
 from app.modules import member_ops
 from app.modules.economy_rules import BEIJING, economy_write
+from app.modules.expiry_notices import ExpiryNotices
 from app.modules.levels import DAY
 from app.modules.members import MANUAL_STATES
 from app.modules.plugins import Plugin, Spec
@@ -32,8 +33,9 @@ def unsettled(conn, uid):
 
 
 class LevelLifecycle:
-    def __init__(self, levels, emby):
+    def __init__(self, levels, emby, *, receipts=None):
         self.levels, self.db, self.emby = levels, levels.db, emby
+        self.receipts = receipts
 
     def candidate(self, uid, now):
         member = self.levels.members.get(uid)
@@ -110,6 +112,10 @@ class LevelLifecycle:
             return bool(row and row['deletion_token'] == token and row['lifecycle'] == 'deleting'
                         and self.candidate(uid, now) and self.levels.config()['config']['delete_enabled'])
         emby = self.emby
+        # Capture public identity before deletion removes the member. Only a
+        # confirmed DELETE (not allow_absent recovery) can enqueue this event.
+        member = self.levels.members.get(uid)
+        on_deleted = (lambda: self.receipts.stage(member)) if self.receipts else None
         class CheckedDeletion:
             async def list_users(self):
                 return await emby.list_users()
@@ -117,7 +123,8 @@ class LevelLifecycle:
             async def delete_user(self, user_id):
                 # Existing self-service adapter rechecks remote administrator
                 # identity immediately before DELETE and local exclusion after I/O.
-                confirmed = await emby.delete_selfservice_user(user_id, authorize=authorize, allow_absent=True)
+                receipt = {'on_deleted': on_deleted} if on_deleted is not None else {}
+                confirmed = await emby.delete_selfservice_user(user_id, authorize=authorize, allow_absent=True, **receipt)
                 if not confirmed:
                     raise ValueError('远端删除即时复核未确认，保留本地账号')
                 return True
@@ -192,7 +199,8 @@ class LevelLifecyclePlugin(Plugin):
             except ValueError as exc:
                 errors.append({'user_id': uid, 'reason': str(exc)})
         notices = await self.notices(levels, now)
-        service = LevelLifecycle(levels, self.ctx.emby)
+        receipts = ExpiryNotices(levels.db, lambda: self.ctx.store.section('telegram'))
+        service = LevelLifecycle(levels, self.ctx.emby, receipts=receipts)
         candidates = await run_usage_io(service.preview, now)
         deleted = 0
         if levels.config()['config']['delete_enabled']:
@@ -204,5 +212,8 @@ class LevelLifecyclePlugin(Plugin):
                     deleted += bool(result.get('deleted'))
                 except Exception:  # noqa: BLE001 - retain unknown remote result, retry without losing history
                     errors.append({'user_id': row['user_id'], 'reason': '远端删除未确认，保留重试'})
+        # Delivery/retry is independent of account cleanup, including when the
+        # delete switch is now off or no member remains after a process restart.
+        broadcasts = await receipts.deliver(self.ctx.telegram)
         return {'ok': True, '已续期': renewed, '已提醒': notices, '删除候选': len(candidates), '已删除': deleted,
-                '待处理': errors[:30]}
+                '已播报': broadcasts, '待处理': errors[:30]}

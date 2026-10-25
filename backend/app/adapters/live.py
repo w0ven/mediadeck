@@ -151,8 +151,9 @@ class LiveEmby:
             )
             return r.status_code in (200, 204)
 
-    async def delete_selfservice_user(self, user_id: str, *, authorize: Any, allow_absent: bool = False) -> bool:
-        """Fail closed on unknown/admin policy; recheck binding after remote I/O."""
+    async def delete_selfservice_user(self, user_id: str, *, authorize: Any, allow_absent: bool = False,
+                                      on_deleted: Any = None) -> bool:
+        """Fail closed; on_deleted runs only on confirmed DELETE, never a pre-existing 404."""
         base, headers, timeout, verify = self._conn()
         async with self._client(timeout, verify) as client:
             r = self._check(await client.get(f"{base}/emby/Users/{user_id}", headers=headers))
@@ -170,7 +171,10 @@ class LiveEmby:
                 return False
             r = self._check(await client.post(
                 f"{base}/emby/Users/{user_id}/Delete", headers=headers))
-            return r.status_code in (200, 204)
+            deleted = r.status_code in (200, 204)
+            if deleted and on_deleted is not None:
+                on_deleted()
+            return deleted
 
     async def set_user_disabled(self, user_id: str, disabled: bool) -> bool:
         return await self.apply_policy(user_id, {"IsDisabled": disabled})
