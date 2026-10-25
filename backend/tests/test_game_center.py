@@ -79,6 +79,24 @@ def gc(tmp_path):
     db.close()
 
 
+@pytest.fixture
+def presence(gc, monkeypatch):
+    assert GameCenter.OFFLINE_SECONDS == 180
+    monkeypatch.setattr('app.modules.game_center.monotonic', lambda: gc.clock)
+    monkeypatch.setattr(GameCenter, 'OFFLINE_SECONDS', 90)
+    gc.s._started_at = gc.clock
+    return gc
+
+
+def waiting_table(gc, game, n=2, tier='novice'):
+    gc.cfg[game + '_enabled'] = True
+    buy = {'buy_in': 100} if game == 'holdem' and tier != 'practice' else {}
+    t = gc.op('u0', 'create', game=game, tier=tier, **buy)
+    for i in range(1, n):
+        t = gc.op(f'u{i}', 'seat', t['id'], **buy)
+    return t
+
+
 def create(gc, n=2, tier='novice'):
     t = gc.op('u0', 'create', game='zjh', tier=tier)
     for i in range(1, n):
@@ -238,13 +256,13 @@ def test_atomic_freeze_settlement_and_commitment(gc):
     t = start(gc)
     assert gc.points.balance('u0') == 4950
     assert total(gc) == initial
-    proof = gc.s.verify(t['id'], 1, 'u0')
+    proof = gc.s.proof(t['id'], 1)
     assert set(proof) == {'table_id', 'hand_no', 'commitment', 'settled'}
     t = act(gc, t, 'fold')
     assert t['phase'] == 'waiting'
     assert total(gc) == initial
     assert gc.s.wallet('u0', gc.clock)['frozen'] == 0
-    proof = gc.s.verify(t['id'], 1, 'u0')
+    proof = gc.s.proof(t['id'], 1)
     assert hashlib.sha256((proof['deck_codes'] + '|' + proof['salt']).encode()).hexdigest() == proof['commitment']
     assert sorted(proof['deck']) == list(range(52))
     assert all(not p['ready'] for p in t['seats'])
@@ -496,7 +514,7 @@ def test_private_look_compare_no_other_cards_in_any_snapshot(gc, monkeypatch):
         assert v['hand']['comparisons'] == []
         assert all(p['cards'] is None and p['hand_name'] is None for p in v['hand']['players'])
         assert all(secret not in encode(v) for secret in ('private-login', 'owner_uid', 'salt', 'deck_codes', 'budget'))
-    assert 'deck' not in gc.s.verify(t['id'], 1, 'u7')
+    assert 'deck' not in gc.s.proof(t['id'], 1)
 
 
 def test_practice_daily_top_up_private_bots_and_no_point_ledger(gc):
@@ -756,3 +774,499 @@ def test_existing_renewal_notice_includes_table_frozen_amount(gc):
     start(gc)
     asyncio.run(plugin.notices(levels, int(time.time())))
     assert '有 49 积分正冻结在牌桌' in calls[0]
+
+
+def test_running_zjh_host_leave_transfers_before_settlement(gc):
+    t = start(gc, 3)
+    deadline = t['turn_deadline']
+    t = act(gc, t, 'call')
+    successor = t['seats'][1]['player']
+    t = gc.op('u0', 'leave', t['id'])
+    assert t['phase'] == 'playing' and t['seats'][0]['leave_after']
+    assert t['host'] == successor
+    assert t['turn_deadline'] == deadline
+    assert total(gc) == 40000
+
+
+def test_transfer_host_never_retains_a_departing_host(gc):
+    t = start(gc, 3)
+    raw = json.loads(gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'])
+    for p in raw['seats']:
+        p['leave_after'] = True
+    gc.s._transfer_host(raw, gc.clock)
+    assert raw['host'] is None
+
+
+def test_start_status_distinguishes_missing_seats_ready_and_funds(gc):
+    t = create(gc, 1)
+    assert t['start_status']['reason'] == 'waiting_players'
+    assert not t['start_status']['can_start']
+    t = gc.op('u1', 'seat', t['id'])
+    assert t['start_status']['reason'] == 'waiting_ready'
+    t = gc.op('u1', 'ready', t['id'], ready=True)
+    assert t['start_status']['reason'] == 'waiting_host'
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['start_status']['can_start'] and t['start_status']['eligible_players'] == 2
+    gc.points.add('u1', -4999, 'isolated.adjust')
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['start_status']['reason'] == 'ineligible_players'
+    assert t['start_status']['eligible_players'] == 1
+    assert not t['start_status']['can_start']
+    assert 'u1' not in encode(t['start_status']) and '4999' not in encode(t['start_status'])
+    gc.points.add('u1', 49, 'isolated.adjust')
+    t = gc.op('u0', 'start', t['id'])
+    assert t['start_status']['reason'] == 'playing' and not t['start_status']['can_start']
+
+
+def test_start_status_allows_underfunded_host_to_start_two_ready_players(gc):
+    t = create(gc, 3)
+    for uid in ('u1', 'u2'):
+        gc.op(uid, 'ready', t['id'], ready=True)
+    gc.points.add('u0', -4999, 'isolated.adjust')
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['start_status']['can_start'] and t['start_status']['eligible_players'] == 2
+    t = gc.op('u0', 'start', t['id'])
+    assert len(t['hand']['players']) == 2
+    assert t['me']['wallet']['points'] == 1 and t['me']['wallet']['frozen'] == 0
+
+
+def test_supreme_insufficient_balance_explains_minimum_not_nonexistent_cap(gc):
+    t = create(gc, tier='supreme')
+    gc.points.add('u0', -4999, 'isolated.adjust')
+    with pytest.raises(GameError) as exc:
+        gc.op('u0', 'ready', t['id'], ready=True)
+    assert '2500' in str(exc.value) and '全部可用积分' in str(exc.value)
+    assert '封顶' not in str(exc.value)
+
+
+@pytest.mark.parametrize('automatic', [False, True])
+def test_successful_readiness_clears_old_funding_notice(gc, automatic):
+    t = create(gc)
+    for uid in ('u0', 'u1'):
+        gc.op(uid, 'ready', t['id'], ready=True)
+    gc.op('u1', 'auto', t['id'], enabled=automatic)
+    gc.points.add('u1', -4999, 'isolated.adjust')
+    gc.clock += 5
+    gc.s.tick(now=gc.clock)
+    assert gc.s.snapshot(t['id'], 'u1', gc.clock)['table']['me']['notice']
+    gc.points.add('u1', 49, 'isolated.adjust')
+    t = gc.op('u1', 'ready', t['id'], ready=True)
+    assert t['me']['notice'] == ''
+
+
+def test_successful_manual_start_clears_old_host_funding_notice(gc):
+    t = create(gc)
+    for uid in ('u0', 'u1'):
+        gc.op(uid, 'ready', t['id'], ready=True)
+    gc.points.add('u0', -4999, 'isolated.adjust')
+    gc.clock += 5
+    gc.s.tick(now=gc.clock)
+    assert gc.s.snapshot(t['id'], 'u0', gc.clock)['table']['me']['notice']
+    gc.points.add('u0', 49, 'isolated.adjust')
+    t = gc.op('u0', 'start', t['id'])
+    assert t['phase'] == 'playing' and t['me']['notice'] == ''
+
+
+def test_repeated_snapshots_do_not_write_beans_or_other_state(gc):
+    t = start(gc)
+    gc.s.snapshot(t['id'], 'u0', gc.clock)
+    before = gc.db._conn.total_changes
+    for _ in range(10):
+        gc.s.snapshot(t['id'], 'u0', gc.clock)
+    assert gc.db._conn.total_changes == before
+
+
+def test_settled_hand_and_unchanged_outbox_are_not_rewritten(gc):
+    gc.cfg.update(broadcast_enabled=True, broadcast_groups='-123456')
+    t = start(gc)
+    t = act(gc, t, 'fold')
+    gc.s.snapshot(t['id'], 'u0', gc.clock)
+    raw = json.loads(gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'])
+    before = gc.db._conn.total_changes
+    with economy_write(gc.db) as conn:
+        gc.s._save(conn, raw, gc.clock)
+    assert gc.db._conn.total_changes - before == 1  # table revision only
+
+
+def test_ready_and_auto_toggles_do_not_reedit_identical_recruitment_card(gc):
+    gc.cfg.update(broadcast_enabled=True, broadcast_groups='-123456')
+    t = create(gc)
+    d = GameDelivery(gc.s)
+    job = d.claim('123456', now=gc.clock)
+    d.done(job, {'message_id': 42}, now=gc.clock)
+    gc.op('u0', 'ready', t['id'], ready=True)
+    gc.op('u1', 'auto', t['id'], enabled=True)
+    assert d.claim('123456', now=gc.clock) is None
+
+
+def test_removed_broadcast_group_cannot_receive_pending_card(gc):
+    gc.cfg.update(broadcast_enabled=True, broadcast_groups='-123456')
+    create(gc, 1)
+    gc.cfg['broadcast_groups'] = ''
+    asyncio.run(GameDelivery(gc.s).deliver())
+    assert not any(method == 'sendMessage' for method, _ in gc.bot.calls)
+
+
+def test_wallet_held_query_uses_live_user_index(gc):
+    start(gc)
+    statements = []
+    gc.db._conn.set_trace_callback(statements.append)
+    try:
+        assert gc.s.wallet('u0', gc.clock)['frozen'] == 49
+    finally:
+        gc.db._conn.set_trace_callback(None)
+    sql = next(s for s in statements if 'SUM(amount)' in s and 'play_escrows' in s)
+    plan = gc.db.query('EXPLAIN QUERY PLAN ' + sql)
+    assert any('gc_escrows_held_user' in row['detail'] for row in plan)
+
+
+@pytest.mark.parametrize('high,low', [
+    ([12, 25, 38], [11, 24, 37]),
+    ([10, 11, 12], [13, 14, 25]),
+    ([12, 9, 5], [25, 21, 20]),
+    ([0, 14, 28], [12, 13, 27]),
+    ([12, 25, 0], [11, 24, 38]),
+    ([0, 13, 12], [26, 39, 11]),
+    ([12, 21, 4], [25, 20, 5]),
+])
+def test_same_category_compares_all_rank_tiebreakers(high, low):
+    assert engine.compare(high, low) == 1
+    assert engine.compare(low, high) == -1
+    other_suits = [(c + 13) % 52 for c in high]
+    assert engine.compare(high, other_suits) == 0
+
+
+def test_235_is_mixed_only_and_multiplayer_showdown_is_order_independent():
+    mixed, flush, trips, pair = [0, 14, 29], [0, 1, 3], [12, 25, 38], [2, 15, 6]
+    assert engine.compare(flush, trips, True) == -1
+    assert engine.compare(mixed, pair, True) == -1
+    other_mixed = [13, 27, 42]
+    for hands in ((mixed, trips, other_mixed), (trips, other_mixed, mixed)):
+        s = pure(*hands, budget=1, allow_235=True)
+        s = engine.apply_action(s, '0', 'all_in')
+        expected = [str(i) for i, cards in enumerate(hands) if cards != trips]
+        assert s['result']['winners'] == expected
+        assert sorted(s['result']['awards'].values()) == [0, 1, 2]
+        assert sum(s['result']['net'].values()) == 0
+
+
+def test_compare_requires_seen_second_round_and_double_seen_call_cost():
+    s = pure([12, 25, 38], [11, 24, 37], [0, 16, 33])
+    s = engine.apply_action(s, '0', 'look')
+    assert 'compare' not in engine.legal_actions(s, '0')
+    assert engine.legal_actions(s, '0')['call']['amount'] == 2
+    for actor in ('0', '1', '2'):
+        s = engine.apply_action(s, actor, 'call')
+    assert s['round'] == 2
+    options = engine.legal_actions(s, '0')
+    assert options['compare']['amount'] == 4
+    with pytest.raises(engine.EngineError):
+        engine.apply_action(s, '0', 'compare', target='0')
+    s = engine.apply_action(s, '0', 'compare', target='1')
+    assert s['players'][1]['folded'] and s['players'][0]['invested'] == 7
+    assert s['current_player'] == '2'
+    s = engine.force_fold(s, '2')
+    assert s['reason'] == 'last_player' and s['result']['winners'] == ['0']
+    assert s['showdown'] == []
+
+
+@pytest.mark.parametrize('method,action', [('consume', 'call'), ('release', 'fold'), ('payout', 'fold')])
+def test_action_and_settlement_cash_failure_roll_back_and_retry_once(gc, monkeypatch, method, action):
+    t = start(gc)
+    before = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+    events = gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n']
+    balances = gc.points.balances()
+    original = getattr(gc.s.cash, method)
+    def fail_after_movement(*args, **kwargs):
+        original(*args, **kwargs)
+        raise PlayError('isolated failure after cash write')
+    monkeypatch.setattr(gc.s.cash, method, fail_after_movement)
+    body = {'hand_no': 1, 'turn': 1, 'action': action, 'request_id': 'cash_retry_0001'}
+    with pytest.raises(PlayError, match='isolated failure'):
+        gc.op('u0', 'actions', t['id'], **body)
+    assert gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'] == before
+    assert gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n'] == events
+    assert gc.points.balances() == balances and total(gc) == 40000
+    monkeypatch.setattr(gc.s.cash, method, original)
+    t = gc.op('u0', 'actions', t['id'], **body)
+    events = gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n']
+    gc.op('u0', 'actions', t['id'], **body)
+    assert gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n'] == events
+    if t['phase'] == 'playing':
+        act(gc, t, 'fold')
+    assert total(gc) == 40000
+    assert gc.db.one('SELECT SUM(amount) n FROM play_escrows')['n'] == 0
+
+
+def test_manual_auto_looks_then_folds_and_takeover_resets_streak(gc, monkeypatch):
+    fix_deck(monkeypatch, deck_for([0, 16, 33], [12, 25, 38], [11, 24, 37]))
+    t = start(gc, 3)
+    deadline = t['turn_deadline']
+    t = gc.op('u0', 'auto', t['id'], enabled=True)
+    gc.s.tick(now=1001.5)
+    t = gc.s.snapshot(t['id'], 'u0', 1001.5)['table']
+    assert t['hand']['players'][0]['seen'] and t['turn_deadline'] == deadline
+    assert t['auto_at'] == 1003
+    gc.s.tick(now=1003)
+    t = gc.s.snapshot(t['id'], 'u0', 1003)['table']
+    assert t['hand']['players'][0]['folded']
+    assert t['hand']['players'][0]['invested'] == 1
+    gc.clock = 1003
+    t = act(gc, t, 'fold')
+    assert t['seats'][0]['auto_hands'] == 1 and t['seats'][0]['ready']
+    t = gc.op('u0', 'auto', t['id'], enabled=False)
+    assert not t['seats'][0]['auto'] and t['seats'][0]['auto_hands'] == 0
+    assert t['me']['notice'] == ''
+
+
+def test_outbox_removed_group_still_allows_bound_card_cleanup(gc):
+    gc.cfg.update(broadcast_enabled=True, broadcast_groups='-123456')
+    t = create(gc, 1)
+    d = GameDelivery(gc.s)
+    asyncio.run(d.deliver())
+    gc.cfg['broadcast_groups'] = ''
+    gc.op('u0', 'leave', t['id'])
+    asyncio.run(d.deliver())
+    assert gc.bot.calls[-1] == ('deleteMessage', {'chat_id': '-123456', 'message_id': 42})
+    assert gc.db.one('SELECT state FROM gc_outbox')['state'] == 'deleted'
+
+
+def test_old_live_state_survives_additive_migration_and_keeps_money_deadline(gc):
+    from app.modules.game_center_schema import migrate
+    t = start(gc)
+    raw = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+    assert 'start_status' not in raw
+    gc.db.execute('DROP INDEX gc_escrows_held_user')  # model the released schema in this test DB
+    migrate(gc.db)
+    migrate(gc.db)
+    gc.s = GameCenter(gc.db, gc.members, gc.points, lambda: gc.cfg, lambda: True)
+    recovered = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert recovered['hand'] == t['hand'] and recovered['turn_deadline'] == t['turn_deadline']
+    assert recovered['me']['wallet']['frozen'] == 49
+    gc.clock = t['turn_deadline'] + 1500
+    gc.s.tick(now=gc.clock)
+    assert total(gc) == 40000
+    assert gc.s.wallet('u0', gc.clock)['frozen'] == gc.s.wallet('u1', gc.clock)['frozen'] == 0
+
+
+def test_table_state_keeps_only_current_and_previous_hand(gc):
+    t = create(gc)
+    sizes = []
+    for _ in range(15):
+        gc.op('u1', 'ready', t['id'], ready=True)
+        t = gc.op('u0', 'start', t['id'])
+        t = act(gc, t, 'fold')
+        raw = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+        state = json.loads(raw)
+        assert state['hand'] is None and state['last_hand']['number'] == t['hand_no']
+        sizes.append(len(raw))
+    assert max(sizes) - min(sizes) < 100
+    assert gc.db.one('SELECT COUNT(*) n FROM gc_hands')['n'] == 15
+    assert total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_waiting_offline_leave_refunds_transfers_host_and_closes_once(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 3)
+    gc.clock = 1089.99
+    assert gc.s.tick(gc.clock) == []
+    gc.s.snapshot(t['id'], 'u1', gc.clock)
+    gc.op('u2', 'auto', t['id'], enabled=False)
+    gc.clock = 1090
+    assert gc.s.tick(gc.clock) == [t['id']]
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['me']['seat'] is None and t['me']['wallet']['frozen'] == 0
+    assert t['host'] == t['seats'][0]['player'] and t['seats'][0]['seat'] == 1
+    assert len(t['seats']) == 2 and t['phase'] == 'waiting'
+    assert gc.points.balance('u0') == 5000 and total(gc) == 40000
+    gc.clock = 1180
+    gc.s.tick(gc.clock)
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['phase'] == 'closed' and t['host'] is None and t['seats'] == []
+    assert gc.s.list_tiers(game)['tiers'][1]['waiting_tables'] == []
+    assert not gc.db.query('SELECT * FROM gc_seats')
+    assert gc.db.one('SELECT COALESCE(SUM(amount),0) n FROM play_escrows')['n'] == 0
+    events = gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n']
+    assert gc.s.tick(gc.clock) == []
+    assert gc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n'] == events
+    assert gc.s._presence == {} and total(gc) == 40000
+
+
+def test_offline_zjh_leave_recalculates_countdown_for_ready_survivors(presence):
+    gc = presence
+    t = create(gc, 3)
+    for uid in ('u1', 'u2'):
+        gc.op(uid, 'ready', t['id'], ready=True)
+    gc.clock = 1089
+    for uid in ('u1', 'u2'):
+        gc.s.snapshot(t['id'], uid, gc.clock)
+    gc.clock = 1090
+    gc.s.tick(gc.clock)
+    t = gc.s.snapshot(t['id'], 'u7', gc.clock)['table']
+    assert t['phase'] == 'waiting' and t['countdown_at'] == 1095
+    assert len(t['seats']) == 2 and all(p['ready'] for p in t['seats'])
+    gc.clock = 1095
+    gc.s.tick(gc.clock)
+    t = gc.s.snapshot(t['id'], 'u7', gc.clock)['table']
+    assert t['phase'] == 'playing' and len(t['hand']['players']) == 2
+    assert not gc.s.active_tables('u0') and total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_table_http_activity_precedes_offline_check_even_on_failed_or_retried_actions(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 1)
+    gc.clock = 1090
+    gc.s.snapshot(t['id'], 'u0', gc.clock)
+    assert gc.s.tick(gc.clock) == []
+    gc.clock = 1179
+    gc.op('u0', 'auto', t['id'], enabled=False, request_id='presence_retry_001')
+    gc.clock = 1268
+    gc.op('u0', 'auto', t['id'], enabled=False, request_id='presence_retry_001')
+    gc.clock = 1357
+    with pytest.raises(GameError, match='至少需要2'):
+        gc.op('u0', 'start', t['id'])
+    assert gc.s.tick(gc.clock) == [] and gc.s.active_tables('u0')
+    gc.clock = 1446.99
+    assert gc.s.tick(gc.clock) == []
+    gc.clock = 1447
+    gc.s.tick(gc.clock)
+    assert not gc.s.active_tables('u0') and total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_lobby_wallet_other_table_and_spectator_do_not_keep_seat_online(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 1)
+    other = gc.op('u1', 'create', game=game, tier='novice', **({'buy_in': 100} if game == 'holdem' else {}))
+    gc.clock = 1089
+    gc.s.lobby('u0', gc.clock)
+    gc.s.wallet('u0', gc.clock)
+    gc.s.snapshot(other['id'], 'u0', gc.clock)
+    gc.s.snapshot(t['id'], 'u1', gc.clock)
+    gc.clock = 1090
+    gc.s.tick(gc.clock)
+    assert not gc.s.active_tables('u0') and not gc.s.active_tables('u1')
+    assert total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_offline_rule_does_not_apply_during_playing(presence, game):
+    gc = presence
+    gc.cfg['step_seconds'] = 120
+    t = waiting_table(gc, game)
+    if game == 'zjh':
+        gc.op('u1', 'ready', t['id'], ready=True)
+    t = gc.op('u0', 'start', t['id'])
+    deadline = t['turn_deadline']
+    gc.clock = 1090
+    assert gc.s.tick(gc.clock) == []
+    t = gc.s.snapshot(t['id'], 'u7', gc.clock)['table']
+    assert t['phase'] == 'playing' and len(t['seats']) == 2
+    assert t['turn_deadline'] == deadline and t['hand']['turn'] == 1
+    assert all(not p['leave_after'] for p in t['seats']) and total(gc) == 40000
+
+
+def test_offline_rule_skips_between_but_applies_to_holdem_paused_table(presence):
+    gc = presence
+    gc.cfg['step_seconds'] = 120
+    t = waiting_table(gc, 'holdem')
+    t = gc.op('u0', 'start', t['id'])
+    gc.clock = 1091
+    t = gc.op('u0', 'actions', t['id'], hand_no=1, turn=1, action='fold')
+    assert t['phase'] == 'between'
+    gc.clock = 1092
+    gc.s.tick(gc.clock)
+    assert len(gc.s.snapshot(t['id'], 'u7', gc.clock)['table']['seats']) == 2
+    t = gc.op('u0', 'away', t['id'], enabled=True)
+    assert t['phase'] == 'waiting'
+    gc.s.tick(gc.clock)
+    t = gc.s.snapshot(t['id'], 'u1', gc.clock)['table']
+    assert t['me']['seat'] is None and t['me']['wallet']['frozen'] == 0
+    assert t['phase'] == 'waiting' and len(t['seats']) == 1 and total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_restart_grants_existing_waiting_seats_full_offline_grace(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 1)
+    raw = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+    gc.clock = 1200
+    gc.s = GameCenter(gc.db, gc.members, gc.points, lambda: gc.cfg, lambda: True, lambda: gc.bot)
+    assert gc.s._presence == {} and gc.s._online == {}
+    gc.clock = 1289.99
+    assert gc.s.tick(gc.clock) == []
+    assert gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'] == raw
+    assert gc.s.active_tables('u0')
+    gc.clock = 1290
+    gc.s.tick(gc.clock)
+    assert not gc.s.active_tables('u0')
+    assert gc.s.wallet('u0', gc.clock)['frozen'] == 0 and total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_practice_owner_offline_closes_waiting_table_and_returns_beans(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 1, tier='practice')
+    if game == 'holdem':
+        t = gc.op('u0', 'away', t['id'], enabled=True)
+        for _ in range(256):
+            if t['phase'] == 'waiting':
+                break
+            gc.clock = t['auto_at'] or t['turn_deadline']
+            gc.s.tick(gc.clock)
+            t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['phase'] == 'waiting'
+    before = t['me']['wallet']['beans']
+    stack = next(p.get('stack', 0) for p in t['seats'] if not p['bot'])
+    gc.clock += 90
+    gc.s.tick(gc.clock)
+    t = gc.s.snapshot(t['id'], 'u0', gc.clock)['table']
+    assert t['phase'] == 'closed' and t['seats'] == [] and t['me']['seat'] is None
+    assert t['me']['wallet']['beans'] == before + stack
+    assert t['me']['wallet']['frozen'] == 0 and total(gc) == 40000
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_offline_tick_racing_duplicate_leave_refunds_only_once(presence, game):
+    gc = presence
+    t = waiting_table(gc, game, 1)
+    gc.clock += 90
+    def race(i):
+        if i % 2:
+            return gc.s.tick(gc.clock)
+        try:
+            return gc.s.mutate('u0', '昵称', 'leave', {'request_id': 'offline_leave_0001'}, t['id'], gc.clock)
+        except GameError as exc:
+            assert exc.code == 'forbidden'
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(race, range(16)))
+    assert not gc.s.active_tables('u0') and gc.s.wallet('u0', gc.clock)['frozen'] == 0
+    refunds = [r for r in gc.points.ledger('u0') if r['reason'] == 'game.cash_out']
+    assert len(refunds) == (1 if game == 'holdem' else 0) and total(gc) == 40000
+
+
+def test_offline_refund_failure_rolls_back_all_removals_and_can_retry(presence, monkeypatch):
+    gc = presence
+    t = waiting_table(gc, 'holdem')
+    raw = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+    original = gc.s.cash.release
+    calls = []
+    def fail_second(*args, **kwargs):
+        result = original(*args, **kwargs)
+        calls.append(1)
+        if len(calls) == 2:
+            raise PlayError('offline refund failure')
+        return result
+    monkeypatch.setattr(gc.s.cash, 'release', fail_second)
+    gc.clock += 90
+    with pytest.raises(PlayError, match='offline refund failure'):
+        gc.s.tick(gc.clock)
+    assert gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'] == raw
+    assert gc.db.one('SELECT SUM(amount) n FROM play_escrows')['n'] == 200
+    assert gc.points.balance('u0') == gc.points.balance('u1') == 4900 and total(gc) == 40000
+    monkeypatch.setattr(gc.s.cash, 'release', original)
+    gc.s.tick(gc.clock)
+    assert gc.db.one('SELECT SUM(amount) n FROM play_escrows')['n'] == 0
+    assert gc.points.balance('u0') == gc.points.balance('u1') == 5000 and total(gc) == 40000

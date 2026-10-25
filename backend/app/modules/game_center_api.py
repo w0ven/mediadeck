@@ -73,7 +73,7 @@ async def call(fn, *args, **kwargs):
 
 
 async def stream(service, table_id, uid, valid, expires, disconnected, keepalive=15):
-    subscriber = service.subscribe(table_id)
+    subscriber = service.subscribe(table_id, uid)
     _, changed = subscriber
     revision = None
     try:
@@ -96,9 +96,10 @@ async def stream(service, table_id, uid, valid, expires, disconnected, keepalive
                 await asyncio.wait_for(changed.wait(), remaining)
             except TimeoutError:
                 if time.time() < expires:
+                    service.heartbeat(table_id, uid)
                     yield ': keepalive\n\n'
     finally:
-        service.unsubscribe(table_id, subscriber)
+        service.unsubscribe(table_id, subscriber, uid)
 
 
 def register(app, member_context):
@@ -157,9 +158,6 @@ def register(app, member_context):
     async def table(table_id: str, ctx=ctx_dep):
         return await call(service().snapshot, table_id, ctx['uid'])
 
-    @app.get(PREFIX + '/tables/{table_id}/hands/{hand_no}/verify')
-    async def verify(table_id: str, hand_no: int, ctx=ctx_dep):
-        return await call(service().verify, table_id, hand_no, ctx['uid'])
 
     @app.post(PREFIX + '/tables/{table_id}/stream-token')
     async def stream_token(table_id: str, ctx=ctx_dep):
@@ -206,3 +204,8 @@ def register_admin(app, auth):
     async def cash(response: Response, table_id: str = '', user_id: str = '', limit: int = 100):
         response.headers['Cache-Control'] = 'private, no-store'
         return await call(app.state.game_center.cash_detail, table_id, user_id, limit)
+
+    @app.get('/api/game-center/hand', dependencies=[Depends(auth)])
+    async def hand(response: Response, table_id: str, hand_no: int):
+        response.headers['Cache-Control'] = 'private, no-store'
+        return await call(app.state.game_center.proof, table_id, hand_no)

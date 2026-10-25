@@ -2,6 +2,31 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-26 — v0.57.0: game center polish (VIP room, table effects, sound, offline seats)
+
+- Game pages share a VIP-room scene in both themes: an AI-generated purple-and-gold lounge
+  backdrop, tier-coloured felts (teal, emerald, sapphire, amethyst, crimson, rose) inside a
+  gold-trimmed leather rail, gold avatar frames, glass toolbars, and purple-glass sheets.
+- Actions are visible to everyone: bubbles for look, call, raise, all-in, fold, compare and
+  check, derived from consecutive snapshots, with chips flying to the pot and cards dealt in.
+  A finished hand stays on the felt for about three seconds (winner, crown, per-seat nets,
+  shown cards) before the 炸金花 result sheet; reduced-motion users get the sheet at once.
+  The previous hand's sheet no longer reopens on every update of the next hand.
+- Optional sound: CC0 effects and a looping jazz track (`game-assets/audio`, see its
+  `SOURCES.md`), music only at a table and paused in the background, both switchable.
+- Seats show members' Telegram avatars through the existing signed avatar proxy.
+- Waiting seats whose member has had no table connection for three minutes are released as
+  if they had left, so abandoned tables close instead of lingering in the lobby; the waiting
+  centre shows the idle-close countdown. Playing hands keep the auto-play rules.
+- Members no longer receive revealed decks (they let anyone rebuild folded hands); the deck
+  proof moved to the administrator endpoint `GET /api/game-center/hand`. The member UI has no
+  verification entry.
+- `start_status` gives each game an authoritative start/pause reason; waiting hints now say
+  whether seats, readiness or the host are missing. Heads-up transitions no longer charge the
+  same big blind twice; host succession happens as soon as a seated host asks to leave.
+  Repeated snapshots no longer write bean rows, settled hands and unchanged recruitment cards
+  are not rewritten, and frozen-point lookups use a partial index.
+
 ## 2026-10-26 — v0.55.0: Mini App game center (炸金花 and Texas hold'em)
 
 - New 「游戏」 tab in the member Mini App: lobby, six tiers per game (practice with

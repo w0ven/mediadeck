@@ -1,4 +1,4 @@
-"""Durable multi-game table shell. SQLite is authority, process memory only wakes SSE."""
+"""Durable tables and money, with process-local SSE and waiting-seat presence."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +9,7 @@ import secrets
 import threading
 import time
 from html import escape
+from time import monotonic
 
 from app.modules.economy_rules import day_bounds, economy_write, encode
 from app.modules.game_center_config import DEFAULTS, deep_link, tiers
@@ -25,6 +26,8 @@ class GameError(PlayError):
 
 
 class GameCenter:
+    # Long enough to leave the Mini App and post an invitation in a group chat.
+    OFFLINE_SECONDS = 180
     def __init__(self, db, members, points, config=dict, enabled=lambda: False,
                  bot=lambda: None):
         self.db, self.members, self.points = db, members, points
@@ -34,6 +37,9 @@ class GameCenter:
         self.games = {'zjh': ZjhGame(), 'holdem': HoldemGame()}
         self._listeners = {}
         self._listener_lock = threading.Lock()
+        self._online = {}
+        self._presence = {}
+        self._started_at = monotonic()
 
     def cfg(self):
         return {**DEFAULTS, **self.config()}
@@ -81,6 +87,9 @@ class GameCenter:
 
     def _beans(self, conn, uid, clock):
         day = day_bounds(clock)[0]
+        row = conn.execute('SELECT * FROM gc_beans WHERE user_id=?', (uid,)).fetchone()
+        if row and row['day'] >= day:
+            return dict(row)
         amount = self.cfg()['daily_beans']
         conn.execute('INSERT INTO gc_beans VALUES(?,?,?) ON CONFLICT(user_id) DO UPDATE SET '
                      'balance=CASE WHEN day<excluded.day THEN MAX(balance,excluded.balance) ELSE balance END,day=MAX(day,excluded.day)',
@@ -89,7 +98,9 @@ class GameCenter:
 
     def _wallet(self, conn, uid, clock):
         beans = self._beans(conn, uid, clock)
-        held = conn.execute("SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND scope IN ('gc_zjh','gc_holdem')", (uid,)).fetchone()['n']
+        held = conn.execute("SELECT COALESCE(SUM(amount),0) n FROM play_escrows "
+                            "WHERE user_id=? AND amount>0 AND scope IN ('gc_zjh','gc_holdem')",
+                            (uid,)).fetchone()['n']
         return {'points': self.points.balance(uid), 'frozen': held, 'beans': beans['balance'],
                 'beans_day': beans['day'], 'daily_beans': self.cfg()['daily_beans']}
 
@@ -149,9 +160,12 @@ class GameCenter:
 
     def _summary(self, table):
         host = next((p['name'] for p in table['seats'] if p['player'] == table['host']), '')
-        return {'table_id': table['id'], 'game': table['game'], 'tier': table['tier'],
-                'host_name': host, 'players': len(table['seats']), 'max_players': table['max_players'],
-                'phase': table['phase'], 'deep_link': self.link(table['id'])}
+        summary = {'table_id': table['id'], 'game': table['game'], 'tier': table['tier'],
+                   'host_name': host, 'players': len(table['seats']), 'max_players': table['max_players'],
+                   'phase': table['phase'], 'deep_link': self.link(table['id'])}
+        if table['game'] == 'holdem':
+            summary['start_status'] = self.games['holdem'].start_status(table)
+        return summary
 
     def _join(self, conn, table, uid, name, body, clock):
         if self.seat(table, uid):
@@ -215,7 +229,7 @@ class GameCenter:
         candidates = [p for p in table['seats'] if not p['bot'] and p['player'] != table['host'] and not p['leave_after']]
         if candidates:
             table['host'] = min(candidates, key=lambda p: (p['joined_at'], p['seat']))['player']
-        elif not any(p['player'] == table['host'] for p in table['seats']):
+        elif not any(p['player'] == table['host'] and not p['leave_after'] for p in table['seats']):
             table['host'] = None
         table['host_active'] = clock
 
@@ -269,11 +283,14 @@ class GameCenter:
         for hand in (table['hand'], table['last_hand']):
             if hand:
                 conn.execute('INSERT INTO gc_hands VALUES(?,?,?,?,?) ON CONFLICT(table_id,hand_no) '
-                             'DO UPDATE SET state_json=excluded.state_json,settled_at=excluded.settled_at',
+                             'DO UPDATE SET state_json=excluded.state_json,settled_at=excluded.settled_at '
+                             'WHERE gc_hands.settled_at IS NULL AND gc_hands.state_json<>excluded.state_json',
                              (table['id'], hand['number'], encode(hand), hand['created_at'], hand['settled_at']))
-        conn.execute('UPDATE gc_outbox SET payload_json=?,revision=?,desired=? WHERE table_id=?',
-                     (encode(self._card(table)), table['revision'],
-                      'delete' if table['hand_no'] or table['phase'] == 'closed' else 'live', table['id']))
+        payload = encode(self._card(table))
+        desired = 'delete' if table['hand_no'] or table['phase'] == 'closed' else 'live'
+        conn.execute('UPDATE gc_outbox SET payload_json=?,revision=?,desired=? WHERE table_id=? '
+                     "AND state NOT IN ('deleted','unknown') AND (payload_json<>? OR desired<>?)",
+                     (payload, table['revision'], desired, table['id'], payload, desired))
 
     def _card(self, table):
         s = self._summary(table)
@@ -302,6 +319,9 @@ class GameCenter:
     def mutate(self, uid, name, op, body, table_id=None, now=None):
         uid = str(uid)
         clock = self._clock(now)
+        if table_id:
+            with self.db.snapshot():
+                self._seen(self._load(self.db._conn, table_id, uid), uid)
         if not isinstance(body, dict):
             raise GameError('invalid', '请求须为 JSON 对象')
         key = body.get('request_id')
@@ -370,6 +390,8 @@ class GameCenter:
             if not self.games[table['game']].leave(self, conn, table, p, clock):
                 self._remove(conn, table, p, clock)
                 self._countdown(table, clock)
+            elif p['leave_after'] and table['host'] == p['player']:
+                self._transfer_host(table, clock)
         elif op == 'ready':
             if table['game'] != 'zjh':
                 raise GameError('invalid', '德州无需准备，带入筹码后按开局规则参与')
@@ -379,8 +401,10 @@ class GameCenter:
             if type(ready) is not bool:
                 raise GameError('invalid', 'ready 须为布尔值')
             if ready and not self.can_fund(conn, table, p, clock):
-                raise GameError('insufficient_funds', '可用余额不足本场封顶')
+                raise GameError('insufficient_funds', self.games['zjh'].funding_message(table))
             p['ready'] = ready
+            if ready:
+                p['notice'] = ''
             self._countdown(table, clock)
         elif op == 'start':
             if p['player'] != table['host']:
@@ -418,15 +442,58 @@ class GameCenter:
         else:
             raise GameError('not_found', '操作不存在', 404)
 
+    def _seen(self, table, uid):
+        if self.seat(table, uid):
+            with self._listener_lock:
+                self._presence.setdefault(table['id'], {})[uid] = monotonic()
+
+    def heartbeat(self, table_id, uid):
+        with self._listener_lock:
+            seen = self._presence.get(table_id, {})
+            if uid in seen:
+                seen[uid] = monotonic()
+
+    def _remove_offline(self, conn, table, clock):
+        # The economy lock serializes HTTP activity; the listener lock covers SSE admission.
+        with self._listener_lock:
+            seated = {p['uid'] for p in table['seats'] if not p['bot']}
+            seen = self._presence.get(table['id'], {})
+            for uid in list(seen):
+                if uid not in seated:
+                    del seen[uid]
+            if table['phase'] != 'waiting':
+                return False
+            now = monotonic()
+            offline = [p for p in table['seats'] if not p['bot']
+                       and not self._online.get((table['id'], p['uid']))
+                       and now - seen.get(p['uid'], self._started_at) >= self.OFFLINE_SECONDS]
+            if not offline:
+                return False
+            for p in offline:
+                self._operation(conn, table, p['uid'], p['name'], 'leave', {}, clock)
+            table['last_activity'] = clock
+            if table['phase'] == 'waiting':
+                table['idle_deadline'] = clock + 600
+            if table['game'] == 'holdem':
+                self.games['holdem'].schedule(self, conn, table, clock)
+            self._save(conn, table, clock)
+            return True
+
     def tick(self, now=None, table_id=None):
         clock = self._clock(now)
         query = "SELECT id FROM gc_tables WHERE phase<>'closed'"
-        rows = self.db.query(query + (' AND id=?' if table_id else ''), (table_id,) if table_id else ())
+        with self.db.snapshot():
+            rows = self.db.query(query + (' AND id=?' if table_id else ''), (table_id,) if table_id else ())
+            live = {row['id'] for row in rows}
+            with self._listener_lock:
+                for tid in list(self._presence):
+                    if (table_id is None or tid == table_id) and tid not in live:
+                        del self._presence[tid]
         changed = []
         for row in rows:
             with economy_write(self.db) as conn:
                 table = self._load(conn, row['id'])
-                dirty = False
+                dirty = self._remove_offline(conn, table, clock)
                 # Catch up from original deadlines, not restart time. Bounded per table for fairness.
                 for _ in range(256):
                     game = self.games[table['game']]
@@ -483,21 +550,56 @@ class GameCenter:
             self.notify(tid)
         return changed
 
+    def _zjh_start_status(self, conn, table, viewer, clock):
+        seats = [p for p in table['seats'] if not p['leave_after']]
+        eligible = []
+        if table['phase'] == 'waiting':
+            eligible = self.games['zjh'].eligible(self, conn, table, clock, manual=True)
+        if table['phase'] == 'closed':
+            reason, message = 'closed', '本桌已结束，未使用的冻结额已退回'
+        elif table['phase'] == 'playing':
+            reason, message = 'playing', '本手进行中，新入座玩家从下一手参与'
+        elif len(seats) < 2:
+            reason, message = 'waiting_players', f'还差 {2 - len(seats)} 人入座才能开局'
+        elif len(eligible) < 2:
+            if sum(p['ready'] or p['player'] == table['host'] for p in seats) < 2:
+                reason, message = 'waiting_ready', '等待其他玩家点准备；房主点开始时自动算准备'
+            else:
+                reason, message = 'ineligible_players', '已准备且可用余额够本场的玩家至少需要 2 人'
+        elif not viewer or viewer['player'] != table['host']:
+            reason, message = 'waiting_host', '人数够了，等待房主开始'
+        else:
+            reason, message = 'ready', '人数够了，点「开始」就能开局；未准备的人本手旁观'
+        return {'min_players': 2, 'seated_players': len(seats), 'eligible_players': len(eligible),
+                'can_start': reason == 'ready', 'reason': reason, 'message': message}
+
     def _view(self, conn, table, uid, clock):
+        from app.modules.miniapp import avatar_url
+        self._seen(table, uid)
+        users = [p['uid'] for p in table['seats'] if not p['bot']]
+        avatars = {}
+        if users:
+            marks = ','.join('?' for _ in users)
+            avatars = {row['emby_user_id']: avatar_url(row['tg_user_id']) for row in conn.execute(
+                f'SELECT emby_user_id,tg_user_id FROM members WHERE emby_user_id IN ({marks})', users)}
         p = self.seat(table, uid)
         out = {k: table[k] for k in ('id', 'game', 'tier', 'tier_name', 'currency', 'phase', 'revision',
                'hand_no', 'host', 'max_players', 'created_at', 'last_activity', 'countdown_at',
                'turn_deadline', 'auto_at', 'idle_deadline', 'rules')}
         out.update(server_time=clock, deep_link=self.link(table['id']),
-                   seats=[{k: seat[k] for k in ('seat', 'player', 'name', 'bot', 'ready', 'auto', 'auto_hands',
-                                              'away', 'leave_after')} for seat in table['seats']],
+                   seats=[{**{k: seat[k] for k in ('seat', 'player', 'name', 'bot', 'ready', 'auto', 'auto_hands',
+                                                 'away', 'leave_after')},
+                           'avatar': avatars.get(seat['uid'], '')} for seat in table['seats']],
                    me={'player': p['player'] if p else None, 'seat': p['seat'] if p else None,
                        'is_host': bool(p and table['host'] == p['player']), 'notice': p['notice'] if p else '',
                        'wallet': self._wallet(conn, uid, clock)})
         if table['game'] == 'holdem':
             out['button'] = table.get('button')
+            out['start_status'] = self.games['holdem'].start_status(table)
             for public, seat in zip(out['seats'], table['seats']):
                 public.update({k: seat[k] for k in ('stack', 'away_since', 'auto_since')})
+        else:
+            out['start_status'] = self._zjh_start_status(conn, table, p, clock)
         for key in ('hand', 'last_hand'):
             hand = table[key]
             # A re-seated/departed member keeps their own per-hand identity, not a new seat occupant's.
@@ -511,9 +613,10 @@ class GameCenter:
             table = self._load(conn, table_id, uid)
             return {'table': self._view(conn, table, uid, clock)}
 
-    def verify(self, table_id, number, uid):
+    def proof(self, table_id, number):
+        # Administrator-only: the revealed deck lets anyone rebuild folded and compared hands.
         with self.db.snapshot():
-            self._load(self.db._conn, table_id, uid)
+            self._load(self.db._conn, table_id)
             row = self.db.one('SELECT state_json FROM gc_hands WHERE table_id=? AND hand_no=?', (table_id, number))
         if not row:
             raise GameError('not_found', '手牌不存在', 404)
@@ -539,19 +642,30 @@ class GameCenter:
             args += [user_id]
         return {'events': self.db.query(sql + ' ORDER BY id DESC LIMIT ?', (*args, limit))}
 
-    def subscribe(self, table_id):
+    def subscribe(self, table_id, uid=None):
         event = asyncio.Event()
         subscriber = (asyncio.get_running_loop(), event)
         with self._listener_lock:
             self._listeners.setdefault(table_id, set()).add(subscriber)
+            if uid is not None:
+                self._online.setdefault((table_id, uid), set()).add(subscriber)
         return subscriber
 
-    def unsubscribe(self, table_id, subscriber):
+    def unsubscribe(self, table_id, subscriber, uid=None):
         with self._listener_lock:
             listeners = self._listeners.get(table_id, set())
             listeners.discard(subscriber)
             if not listeners:
                 self._listeners.pop(table_id, None)
+            key = (table_id, uid)
+            online = self._online.get(key, set())
+            if subscriber in online:
+                online.remove(subscriber)
+                seen = self._presence.get(table_id, {})
+                if uid in seen:
+                    seen[uid] = monotonic()
+                if not online:
+                    del self._online[key]
 
     def notify(self, table_id):
         with self._listener_lock:

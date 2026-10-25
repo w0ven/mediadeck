@@ -9,6 +9,7 @@ def migrate(db):
         state_json TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL
     );
     CREATE INDEX IF NOT EXISTS gc_tables_live ON gc_tables(phase,game,tier);
+    CREATE INDEX IF NOT EXISTS gc_escrows_held_user ON play_escrows(user_id,scope,amount) WHERE amount>0;
     CREATE TABLE IF NOT EXISTS gc_seats (
         user_id TEXT NOT NULL, currency TEXT NOT NULL, table_id TEXT NOT NULL,
         PRIMARY KEY(user_id,currency), FOREIGN KEY(table_id) REFERENCES gc_tables(id)

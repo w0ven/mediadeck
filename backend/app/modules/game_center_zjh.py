@@ -20,15 +20,29 @@ class ZjhGame:
         return {**tier, 'step_seconds': cfg['step_seconds'], 'allow_235': cfg['allow_235'],
                 'auto_hands': cfg['zjh_auto_hands']}
 
+    @staticmethod
+    def eligible(service, conn, table, clock, manual=False):
+        return [p for p in table['seats'] if not p['leave_after']
+                and (p['ready'] or manual and p['player'] == table['host'])
+                and service.can_fund(conn, table, p, clock)]
+
+    @staticmethod
+    def funding_message(table):
+        rules = table['rules']
+        if rules['cap'] is None:
+            return f"可用余额不足：本场至少需要 {rules['min_balance']} 积分，每手冻结全部可用积分"
+        unit = '欢乐豆' if table['currency'] == 'beans' else '积分'
+        return f"可用余额不足：本场每手需 {rules['cap']} {unit}作为封顶预算，请补足后准备"
+
     def start(self, service, conn, table, clock, manual=False):
         from app.modules.game_center import GameError
-        players = []
+        players = self.eligible(service, conn, table, clock, manual)
         for p in table['seats']:
-            if p['ready'] or manual and p['player'] == table['host']:
-                if service.can_fund(conn, table, p, clock):
-                    players.append(p)
-                else:
-                    p.update(ready=False, notice='余额不足本场封顶，请补足后准备')
+            if p in players:
+                if '余额不足' in p['notice']:
+                    p['notice'] = ''
+            elif p['ready'] or manual and p['player'] == table['host']:
+                p.update(ready=False, notice=self.funding_message(table))
         if len(players) < 2:
             table['countdown_at'] = None
             if manual:

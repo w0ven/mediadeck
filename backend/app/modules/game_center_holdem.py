@@ -89,6 +89,22 @@ class HoldemGame:
         # A private practice table never burns through robot-only hands while its owner is away/broke.
         return players if table['currency'] != 'beans' or any(not p['bot'] for p in players) else []
 
+    @classmethod
+    def start_status(cls, table):
+        count = len(cls.eligible(table))
+        if table['phase'] == 'closed':
+            reason = 'closed'
+        elif table['phase'] == 'playing':
+            reason = None
+        elif table['currency'] == 'beans' and not count:
+            reason = 'practice_player_unavailable'
+        elif count < 2:
+            reason = 'paused_for_players' if table['hand_no'] else 'waiting_for_players'
+        else:
+            reason = 'next_hand' if table['hand_no'] else 'waiting_for_host'
+        return {'eligible_players': count, 'min_players': 2,
+                'can_start': reason == 'waiting_for_host', 'reason': reason}
+
     def schedule(self, service, conn, table, clock):
         if table['phase'] not in ('waiting', 'between'):
             return
@@ -110,8 +126,14 @@ class HoldemGame:
                 raise GameError('not_ready', '至少需要2名有筹码且未暂离的玩家', 409)
             return False
         previous = table.get('button')
+        last = table.get('last_hand')
         if previous is None:
             button = next((p['seat'] for p in players if p['player'] == table['host']), players[0]['seat'])
+        elif len(players) == 2 and last:
+            # On transition to heads-up, advance the big blind, not just the button.
+            previous_big = last['engine']['big_blind_seat']
+            big = min(players, key=lambda p: (p['seat'] - previous_big - 1) % 6)
+            button = next(p['seat'] for p in players if p is not big)
         else:
             button = min(players, key=lambda p: (p['seat'] - previous - 1) % 6)['seat']
         deck = list(range(52))
@@ -171,8 +193,14 @@ class HoldemGame:
     def leave(self, service, conn, table, player, clock):
         if not table['hand'] or player['player'] not in table['hand']['users']:
             return False
-        player.update(leave_after=True, auto=True, auto_since=player['auto_since'] or clock,
-                      notice='已申请离桌，轮到时自动弃牌；本手结束后退回剩余筹码')
+        state = next(p for p in table['hand']['engine']['seats'] if p['player'] == player['player'])
+        if state['folded']:
+            notice = '已申请离桌；你已弃牌，本手结束后退回剩余筹码'
+        elif state['stack'] == 0:
+            notice = '已申请离桌；你已全下，仍参与本手结算，结束后退回剩余筹码'
+        else:
+            notice = '已申请离桌，轮到时自动弃牌；本手结束后退回剩余筹码'
+        player.update(leave_after=True, auto=True, auto_since=player['auto_since'] or clock, notice=notice)
         if player['player'] == table['host']:
             service._transfer_host(table, clock)
         if engine.current_player(table['hand']['engine']) == player['player']:
