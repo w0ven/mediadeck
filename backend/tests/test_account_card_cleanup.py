@@ -26,7 +26,7 @@ def test_compact_card_keeps_values_not_explanatory_notes():
     assert '累计观看：8小时1分' in text and '近24小时：0秒' in text
     assert not any(s in text for s in ('按设备名称', '非硬件', '累计保留', '待核验', '不补算'))
     assert len(text.splitlines()) <= 17
-    assert '非硬件' in bot._account_card(member, managing=True)
+    assert '非硬件' in bot._member_admin_card(member, public=False)
 
 
 @pytest.mark.parametrize('verb', ['/me', '/myinfo'])

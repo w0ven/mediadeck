@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import Path
@@ -24,11 +25,16 @@ class TelegramHTML(HTMLParser):
         self.parts = []
 
     def handle_starttag(self, tag, attrs):
-        assert tag in {'b', 'i', 'a', 'pre', 'code'}
+        assert tag in {'b', 'i', 'a', 'pre', 'code', 'blockquote'}
+        assert tag != 'blockquote' or 'blockquote' not in self.stack
         self.stack.append(tag)
+        if tag == 'blockquote':
+            self.parts.append('\x00')
 
     def handle_endtag(self, tag):
         assert self.stack and self.stack.pop() == tag
+        if tag == 'blockquote':
+            self.parts.append('\x01')
 
     def handle_data(self, data):
         self.parts.append(data)
@@ -39,7 +45,9 @@ def plain(text):
     parser.feed(text)
     parser.close()
     assert not parser.stack
-    return ''.join(parser.parts)
+    # A quote box shows as a bar on each of its lines.
+    return re.sub('\x00(.*?)\x01', lambda m: '\n'.join('▎' + line for line in m.group(1).split('\n')),
+                  ''.join(parser.parts), flags=re.DOTALL)
 
 
 def demo_bot():
@@ -256,11 +264,11 @@ def test_duration_omits_zero_minutes_without_changing_input(seconds, expected):
 
 
 def test_access_no_other_limits_is_short_but_real_limits_remain_visible():
-    clear = TelegramBot._admin_access_text({'status': 'active', 'emby_disabled': False})
-    assert '其他限制：无\n' in clear and '无额外到期' not in clear
-    restricted = TelegramBot._admin_access_text({
+    clear = '\n'.join(TelegramBot._admin_access_lines({'status': 'active', 'emby_disabled': False}))
+    assert clear.endswith('其他限制：无') and '无额外到期' not in clear
+    restricted = '\n'.join(TelegramBot._admin_access_lines({
         'status': 'suspended', 'emby_disabled': None,
         'remaining_restrictions': ['已过期', '<额度不足>'],
-    })
+    }))
     assert '已封禁' in restricted and '未知，请刷新核实' in restricted
     assert '其他限制：已过期、&lt;额度不足&gt;' in restricted

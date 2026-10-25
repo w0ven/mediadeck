@@ -1,5 +1,6 @@
 """Current user UX via real local handlers; no network or production accounts."""
 import asyncio
+import contextlib
 import time
 from pathlib import Path
 
@@ -19,8 +20,18 @@ from test_tg_interaction_context import VIEWER
 
 from app.modules.economy_rules import DEFAULT_CARDS, economy_write
 from app.modules.inventory import InventoryService
+from app.modules.telegram import _GROUP
 
 PREVIEW = Path(__file__).with_name('fixtures') / 'bot_ux_previews.md'
+
+
+@contextlib.contextmanager
+def group_context():
+    token = _GROUP.set(True)
+    try:
+        yield
+    finally:
+        _GROUP.reset(token)
 
 
 def render_ux_previews(e):
@@ -88,8 +99,13 @@ def render_ux_previews(e):
     member.update(quota_source='measured', measured_used_bytes=int(43.4*1024**3),
                   traffic_quota_bytes=0, bandwidth_limit_kbps=280000, max_streams=10,
                   allow_download=True, allow_transcode=True)
-    page('白名单完整账号卡 · 无续期缺口', e.bot._account_card(member, public=True))
-    page('/kk · 简卡保留管理状态', e.bot._user_card(member) + e.bot._admin_access_text({'status':'active','emby_disabled':False}))
+    page('群内账号卡 · 昵称与分区', e.bot._brief_card(member))
+    access = e.bot._admin_access_lines({'status':'active','emby_disabled':False})
+    page('/kk · 私聊一屏看全', e.bot._member_admin_card(member, public=False, access_lines=access),
+         e.bot._user_admin_keyboard('u1', {'status':'active','emby_disabled':False}))
+    with group_context():
+        page('/kk · 群内不含私人资料', e.bot._user_card({**member, '_access_lines': access}),
+             e.bot._user_admin_keyboard('u1', {'status':'active','emby_disabled':False}))
     return pages
 
 
@@ -118,5 +134,10 @@ def test_current_user_ux_previews(request, monkeypatch):
     assert all('删除候选' not in body and '保留至：' not in body for body, rows in pages.values())
     assert all(not any(text in body for text in ('80分钟', '有效日', '合格日', '资格已达标'))
                for body, rows in pages.values())
-    assert not any(text in pages['白名单完整账号卡 · 无续期缺口'][0]
-                   for text in ('续期', '缺口', '近30天核验', '有效日', '删除候选'))
+    group_card = pages['群内账号卡 · 昵称与分区'][0]
+    assert not any(text in group_card for text in ('续期', '缺口', '近30天核验', '有效日', '删除候选'))
+    assert group_card.startswith('💠 <a href="tg://user?id=') and 'ViewerA' not in group_card
+    assert '📋 资料' in pages['/kk · 私聊一屏看全'][0]
+    group_kk, group_rows = pages['/kk · 群内不含私人资料']
+    assert '📋 资料' not in group_kk and 'tg://user' not in group_kk and 'Telegram <code>' not in group_kk
+    assert group_rows[-1][0] == '📋 资料 · 私聊'

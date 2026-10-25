@@ -465,7 +465,7 @@ def test_unlimited_and_numeric_measurement_text_remain_truthful(env, used):
     # Retired usage: a bound legacy ledger can no longer surface any figure.
     assert '剩余：' not in text and '已用：' not in text
     assert '0 B' not in text and '1.0 KiB' not in text
-    assert '有效期' in text and '带宽' in text
+    assert '♾ 永久有效' in text and '🚀 带宽' in text
 
 
 def test_receipt_label_uses_registration_handle(env):
