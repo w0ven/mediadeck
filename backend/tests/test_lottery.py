@@ -17,6 +17,7 @@ from app.main import app
 from app.modules.lottery import LotteryService
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
+from tests.lottery_captcha_helpers import captcha_args, install
 from tests.lottery_legacy_helpers import legacy_create
 from tests.lottery_private_helpers import private_start
 from tests.test_miniapp import TOKEN, headers
@@ -41,6 +42,7 @@ def browser_id(user):
 @pytest.fixture
 def env(monkeypatch):
     monkeypatch.setenv('MEDIADECK_LOTTERY_IP_MODE', 'cloudflare_protected')
+    turnstile = install(monkeypatch)
     ips = {}
 
     def ip_for(tg):
@@ -82,8 +84,9 @@ def env(monkeypatch):
         # Private-admission tests clear this evidence and exercise unknown users.
         for tg in (ADMIN, MEMBER, GUEST, 888000444, 888000555, 888000666, 888000777, 888000888, 777000444):
             private_start(app.state.lottery, tg)
+        app.state.telegram._test_turnstile = turnstile
         yield SimpleNamespace(client=client, service=app.state.lottery, calls=calls, replies=replies, ctl=ctl,
-                              ip_for=ip_for, ips=ips)
+                              ip_for=ip_for, ips=ips, turnstile=turnstile, auto_captcha=True)
 
 
 def config(**kw):
@@ -97,6 +100,8 @@ def req(e, method, path, user=ADMIN, **kw):
     signed = {**headers(user), 'CF-Connecting-IP': e.ip_for(user)}
     if path.endswith('/join') and 'json' not in kw:
         kw['json'] = {'browser_id': browser_id(user)}
+    if path.endswith('/join') and e.auto_captcha and 'captcha_token' not in kw.get('json', {}):
+        kw['json'] = {**kw.get('json', {}), **captcha_args(e.service, path.split('/')[1], user)}
     return e.client.request(method, BASE + path, headers=signed, **kw)
 
 
@@ -224,7 +229,8 @@ def test_deadline_and_timer_restart(env, monkeypatch):
     join(e, lid, MEMBER)
     deadline = e.service.row(lid)['config']['deadline']
     monkeypatch.setattr(time, 'time', lambda: deadline)
-    assert req(e, 'POST', f'/{lid}/join', MEMBER).status_code == 400
+    assert req(e, 'POST', f'/{lid}/join', MEMBER).status_code == 200  # already joined: receipt retry
+    assert req(e, 'POST', f'/{lid}/join', ADMIN).status_code == 400  # new entries remain closed
     # A second service / SQLite connection models restart & competing worker.
     other_db = Database(e.service.db._path)
     other = LotteryService(other_db, e.service.members, e.service.points, e.service.shop,

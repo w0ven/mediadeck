@@ -12,10 +12,12 @@ from urllib.parse import urlsplit
 import pytest
 
 from app.main import app
+from tests.lottery_captcha_helpers import answer
 from tests.lottery_device_helpers import device_ctx
 from tests.lottery_legacy_helpers import legacy_create
 from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create, draw, join
 from tests.test_lottery import env as lottery_env  # noqa: F401
+from tests.test_lottery_turnstile_browser import MOCK_TURNSTILE_SCRIPT
 from tests.test_miniapp import TELEGRAM_STUB, headers
 
 LOADED = "[...document.querySelectorAll('.lottery img')].every(i => i.complete && i.naturalWidth > 0)"
@@ -52,6 +54,8 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
                 if u.hostname == 'telegram.org':
                     return route.fulfill(content_type='application/javascript',
                                          body=TELEGRAM_STUB % json.dumps(headers(tid)['X-Telegram-Init-Data']))
+                if u.hostname == 'challenges.cloudflare.com':
+                    return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
                 if u.hostname != 'app.example.test':
                     return route.abort()
                 requests.append((tid, r.method, u.path))
@@ -102,6 +106,17 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         assert not [p for tid, m, p in requests if tid == GUEST and p == '/api/app/me']
         assert not guest.locator('#tabbar').is_visible()
         guest.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
+        # Complete captcha for GUEST
+        guest.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(GUEST))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = guest.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        guest.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+        guest.wait_for_function("!document.querySelector('#lot-join').disabled")
         guest.locator('#lot-join').click()
         guest.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert guest.locator('#lot-join').is_disabled()
@@ -113,6 +128,17 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         member.locator('.hero .plaque').wait_for()
         assert not member.locator('[data-go="lottery"]').count()
         member.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
+        # Complete captcha for MEMBER
+        member.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(MEMBER))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = member.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        member.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+        member.wait_for_function("!document.querySelector('#lot-join').disabled")
         member.locator('#lot-join').click()
         member.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert app.state.db.one('SELECT COUNT(*) AS n FROM lottery_device_entries WHERE lottery_id=?', (lid,))['n'] == 0
@@ -201,6 +227,8 @@ def test_lottery_ui_silent_association_admin_records(request, tmp_path):
             if u.hostname == 'telegram.org':
                 return route.fulfill(content_type='application/javascript',
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname == 'challenges.cloudflare.com':
+                return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
             if u.hostname != 'app.example.test':
                 return route.abort()
             if u.path.endswith('/join'):
@@ -217,6 +245,16 @@ def test_lottery_ui_silent_association_admin_records(request, tmp_path):
         for tg in (GUEST, MEMBER):
             viewer['id'] = tg
             page.goto(url)
+            page.locator('.mock-cf-turnstile').wait_for()
+            active_ch = app.state.db.one(
+                "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+                (lid, str(tg))
+            )
+            assert active_ch is not None
+            token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+            widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+            page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+            page.wait_for_function("!document.querySelector('#lot-join').disabled")
             page.locator('#lot-join').click()
             page.locator('.ticket strong', has_text='报名已记录').wait_for()
             assert page.locator('#lot-join').inner_text() == '已报名 · 等待开奖'

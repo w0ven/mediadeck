@@ -68,12 +68,23 @@
 
 抽奖注册真正成功后，沿用现有 `tg_gift_receipts` 群回执：与绑定/资格消费同事务生成，提交后发送至已配置的 `registration_notify_chat_id/thread_id`，不另猜抽奖群。正文保留 TG 提及、注册成功、用户组与有效期，**不包含账号名、密码或资格码**；普通注册回执样式不变。每个新账号只有一条回执，重复消息/密码确认不重复创建账号、消费资格或播报；群发送失败不把注册成功改判失败，仅走原私聊回执重试。未配置通知目标时不自动启用；历史已消费资格不扫描补发，原奖项与中奖公告不改写。`test_lottery_registration_notice.py` 从抽奖注册链接走实际 Bot 消息/密码回调，验证上述成功、失败、幂等及恢复边界。
 
+## Turnstile 防脚本报名
+
+- **范围**：新建、复制、主动保存草稿固定 `config.require_captcha=true`，客户端 false/legacy 标记不能关闭。今后发布任意草稿（包括旧未编辑草稿）也强制启用此字段，但不升级其 `eligibility_version`、`public_rules_version`、`require_private_start` 等历史策略。既有已发布活动缺字段仍按 false 读取，不自动回填；主控须在获授权发布时对当时 `published` 活动原子追加此字段，保留其费用、门槛、奖池和排除数据，并原子递增 revision。已结束活动与已有报名不追溯；已报名者包括截止/已开奖后的合法重试，不重复验证、不扣款或改结果。
+- **环境**：`MEDIADECK_TURNSTILE_SITE_KEY` 为公开站点键，`MEDIADECK_TURNSTILE_SECRET_KEY` 仅后端环境保护，`MEDIADECK_TURNSTILE_HOSTNAMES` 为逗号分隔的精确主机名（例如 `app.example.com`）；拒绝空项、URL、端口及通配符。Cloudflare 站点使用 Managed widget，无 pre-clearance，不开全站 WAF 挑战。缺失/格式错误时详情 `available=false`、新受保护报名返回 503，绝不静默降级；已有未启用 captcha 的活动仍按原规则工作。配置可用只表示本地配置齐备，真实密钥/网络仍由 Siteverify 验证。
+- **接口**：详情增加 `captcha={required,available,site_key,action:"lottery_join"}`；`required` 仅对仍可报名且本人未报名的启用活动为 true，已结束/截止/满员不误导去验证。鉴权 `POST /api/app/lottery/{lid}/captcha` 返回 `{challenge_id,cdata,site_key,action,expires_at}`。客户端把服务端 action/cdata 原样交给懒加载的托管 widget；原 join 同时提交 `captcha_token`、`captcha_challenge_id`。过期/错误/业务失败后须重新获取挑战并重置 widget；不能把一次验证成功当作永久免检。无私聊证据、注册对象/奖品资格不合、门槛不足等已知情况不发无用挑战；管理员不豁免。
+- **校验与事务**：挑战为随机 opaque 值，绑定已验签 TG、活动和当前 Bot/站点策略，最多 300 秒。只向官方 `https://challenges.cloudflare.com/turnstile/v0/siteverify` 发 HTTPS POST，包含 secret、最长2048字符的 token，以及仅在已有可信来源配置提供时的 remoteip；不把 TG/Emby ID 放 action/cdata 或 provider 请求。必须返回严格布尔 success、精确允许 hostname、action、cdata 和有效时间。网络请求限时8秒且不持 SQLite 写锁；先持久预占防并发验证重放，最终一次性消费与报名、扣费、关联及满员结算同一事务。失败不报名/扣费；响应丢失可读原报名回执。进程在验证途中退出，旧挑战不可重放，用户获取新挑战重试。
+- **限频/容量**：启用活动的挑战获取按 TG＋活动每60秒6次，未报名 join 每60秒12次；可靠源 IP 各额外300次/60秒，未知 IP 不猜来源，XFF/客户端 IP 无效。超限 HTTP 429＋`Retry-After`，不封号、不影响既有严格关联规则；验证码并不证明两个 TG 是不同人。挑战表最多20000行、限频表最多50000键，满时拒绝新请求；请求和原维护循环清理过期行，无新 Cron。
+- **持久化/隐私**：增量建 `lottery_captcha_challenges`、`lottery_captcha_rates` 两表和过期索引，不迁移历史业务数据。只保存挑战、内部身份绑定、策略摘要及短期限频计数，不保存 secret/token/provider 原始错误；普通接口无风控字段。环境密钥不进详情/context/options/日志。不能为恢复验证清理积分、报名、奖项或退款；本功能不包含报名费差额退款代码。
+- **部署边界**：本仓库 MiniApp 未设置 CSP；若外置代理另加策略，仅在原 `script-src`、`frame-src`、`connect-src` 精确加入 `https://challenges.cloudflare.com`，保留其他来源/限制，不移除 CSP 或改防火墙。上线前由主控确认受保护环境、widget 域名、后端到 Siteverify 的 HTTPS 连通性及 UI；本地 HTTP mock 不代表已验证真实 Cloudflare。存在启用活动时不可回滚到忽略 `require_captcha` 的旧后端。旧表/业务备份仍遵循下述一致性原则。
+- **依据/验证**：[Cloudflare 服务端验证文档](https://developers.cloudflare.com/turnstile/get-started/server-side-validation/)（2026-10-26读取）规定300秒、单次token、2048字符及返回字段。`test_lottery_captcha.py` 通过实际鉴权入口、真实验证HTTP客户端和隔离 SQLite 覆盖成功/失败/字段伪造/跨域绑定/重放/重启/收费回滚/满员及限频。原业务回归只增补合成有效挑战和 provider HTTP mock，未把新活动降为 legacy；原直接服务测试保留真实 verify/consume。浏览器与真实环境由各自授权验收负责。
+
 ## 严格关联排除与部署信任边界
 
 - 新建/复制活动仅按**相同可信公网 IP 摘要 OR 相同浏览器安装随机标识摘要**关联不同 TG，不使用硬件环境、型号、Canvas/WebGL 等摘要判定，也不生成环境「疑似关联」列表；历史已开启环境校验的活动保留原冻结规则（见下节），不追溯改结果。发现重复特征时，同特征的**所有报名账号（包括最先报名者）均排除本场全部奖项**，并保留报名与关联证据；并非只拒绝后来的账号。关联链可在管理端汇总为一个簇。
 - **规则可见性**：活动接口的 `rules` 对所有人（含管理员）只含公开规则；严格防小号说明只放在管理员响应的 `admin_rules`（简述为「关联账号全部不中奖（含先报名者），管理员可在报名记录页查看关联原因」），普通响应没有此字段。新建/复制活动的参与页公开规则、发布预览和群公告不出现多账号/防小号/关联/IP/浏览器/设备等检测提示；旧活动仍按原公开规则版本显示，旧环境校验的同意说明也保留。
 - 稳定 TG ID 是主体，同 TG 重试不更新信号、不添加名额、不触发自身关联，也不能借换标识解除排除。报名插入、关联识别及资格更新在同一个 `BEGIN IMMEDIATE` 事务中；开奖持有相同数据库写锁，只从 `excluded=0` 的最新报名集合抽取。关闭报名/已开奖后的新请求不写信号，不追溯污染结果。领取、注册资格流程仅消费已经确定的中奖记录，不能绕过排除。历史环境关联的区别是：报名事务只落摘要，是否排除在**开奖事务内**按本期报名判定后并入 `excluded`。
-- IP/浏览器规则不使用 UA、设备型号、时区等普通特征。共享出口 IP 会误伤；浏览器标识只是 `crypto.getRandomValues` 生成的 256 位随机值，保存在该 Mini App 同源 `localStorage`，不是硬件 ID、不可伪造凭证或“同一人证明”。不同 Telegram WebView、清缓存、更换浏览器/设备/IP，或主动伪造标识可能绕过检测。除下节仅为兼容历史活动保留、经用户逐场同意的环境校验外，没有外部追踪或全站认证改造；这些限制在管理员编辑/规则页如实说明。普通端仅有统一的校验数据隐私说明（设备校验活动另有同意说明），不显示个体风险判断。
+- IP/浏览器规则不使用 UA、设备型号、时区等普通特征。共享出口 IP 会误伤；浏览器标识只是 `crypto.getRandomValues` 生成的 256 位随机值，保存在该 Mini App 同源 `localStorage`，不是硬件 ID、不可伪造凭证或“同一人证明”。不同 Telegram WebView、清缓存、更换浏览器/设备/IP，或主动伪造标识可能绕过检测。除下节仅为兼容历史活动保留、经用户逐场同意的环境校验外，没有用外部追踪识别同人或全站认证改造；Turnstile 防脚本验证独立于这些关联判定。这些限制在管理员编辑/规则页如实说明。普通端仅有统一的校验数据隐私说明（设备校验活动另有同意说明），不显示个体风险判断。
 - 浏览器安装标识缺失或格式无效时仍拒绝报名、回滚扣费及报名写入；普通端仅提示「报名暂不可用，请关闭后重新打开活动，或稍后再试」，不展示本地存储等技术原因。已报名者的幂等回执不变。
 - 标识通过 HTTPS、已验签 initData 的报名请求提交；服务端只持久化 `HMAC-SHA256(key, [version, activity_id, kind, canonical_value])`，按活动和特征类型域隔离。不存原始 IP/浏览器标识、不记录请求体/这些头，不向任何 API 返回摘要。不启用防刷的活动不落信号。设备摘要的存储方式见下节。
 

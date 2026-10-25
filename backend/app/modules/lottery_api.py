@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from fastapi import Body, Depends, HTTPException, Request
 
 from app.core.config import settings
+from app.modules.lottery_captcha import CaptchaError
 from app.modules.lottery_identity import trusted_ip
 
 
@@ -27,6 +28,9 @@ def register(app, telegram_context):
     def errors():
         try:
             yield
+        except CaptchaError as exc:
+            raise HTTPException(exc.status, str(exc),
+                                headers={'Retry-After': str(exc.retry_after)} if exc.retry_after else None) from None
         except KeyError as exc:
             raise HTTPException(404, str(exc).strip("'")) from None
         except ValueError as exc:
@@ -85,6 +89,12 @@ def register(app, telegram_context):
         with errors():
             return service().records(lid, max(0, min(offset, 1000000)))
 
+    @app.post('/api/app/lottery/{lid}/captcha')
+    async def captcha(lid: str, request: Request, ctx=identity):
+        with errors():
+            return service().captcha_challenge(lid, ctx['tg'],
+                source_ip=trusted_ip(request, settings().mediadeck_lottery_ip_mode))
+
     @app.post('/api/app/lottery/{lid}/join')
     async def join(lid: str, request: Request, raw: dict = join_payload, ctx=identity):
         with errors():
@@ -92,6 +102,7 @@ def register(app, telegram_context):
                                  source_ip=trusted_ip(request, settings().mediadeck_lottery_ip_mode),
                                  browser_id=raw.get('browser_id'),
                                  consent_version=raw.get('consent_version'), device=raw.get('ctx'),
+                                 captcha_token=raw.get('captcha_token'), captcha_challenge_id=raw.get('captcha_challenge_id'),
                                  **({'expected_entry_fee': raw['expected_entry_fee']} if 'expected_entry_fee' in raw else {}))
             return service().view(lid, ctx['tg_id'], ctx['is_admin'])
 

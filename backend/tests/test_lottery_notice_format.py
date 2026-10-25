@@ -19,6 +19,7 @@ from app.modules.lottery import (
 )
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR
+from tests.lottery_captcha_helpers import captcha_args
 from tests.test_lottery import ADMIN, GUEST, browser_id, config, create, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
 
@@ -303,7 +304,7 @@ def test_definite_rejection_arriving_at_deadline_does_not_send_fallback(e, monke
 def test_result_mentions_use_stored_telegram_name_then_handle(e, identity, display):
     lid = create(e, config(title='午夜 & <抽奖>', prizes=[{'kind': 'manual', 'name': '人工奖',
                                                          'quantity': 1, 'instructions': '私密'}]))
-    asyncio.run(e.service.join(lid, {'id': GUEST, **identity},
+    asyncio.run(e.service.join(lid, {'id': GUEST, **identity}, **captcha_args(e.service, lid, GUEST),
                               source_ip=e.ip_for(GUEST), browser_id=browser_id(GUEST)))
     e.service.draw(lid)
     result = e.service.db.one("SELECT payload_json FROM lottery_notices WHERE lottery_id=? AND kind='result'", (lid,))

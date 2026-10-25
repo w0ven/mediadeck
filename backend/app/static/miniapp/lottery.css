@@ -962,6 +962,43 @@ html[data-theme="light"] .lottery select optgroup {
   height: 80px;
 }
 
+/* Cloudflare Turnstile Managed Widget */
+.lottery .lot-captcha-wrap {
+  margin: 14px 0 10px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  position: relative;
+  z-index: 2;
+  width: 100%;
+}
+.lottery .cf-turnstile-box {
+  min-height: 65px;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  width: 100%;
+  border-radius: 12px;
+}
+.lottery .cf-turnstile-box iframe {
+  border-radius: 12px !important;
+}
+.lottery .lot-captcha-banner {
+  width: 100%;
+  margin: 10px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.lottery .lot-captcha-loading {
+  font-size: 12px;
+  color: var(--hint);
+  padding: 12px;
+  text-align: center;
+}
+
 /* Modal Bottom Sheet */
 .lot-sheet-dim {
   position: fixed;

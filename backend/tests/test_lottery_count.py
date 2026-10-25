@@ -12,6 +12,7 @@ import pytest
 
 from app.core.db import Database
 from app.modules.points import PointsService
+from tests.lottery_captcha_helpers import captcha_args
 from tests.lottery_legacy_helpers import legacy_create
 from tests.lottery_private_helpers import private_start
 from tests.test_lottery import ADMIN, GUEST, MEMBER, browser_id, config, create, draw, join, req
@@ -74,7 +75,7 @@ def worker(e):
 
 
 def service_join(e, service, lid, tg, fee=0):
-    asyncio.run(service.join(lid, {'id': tg}, expected_entry_fee=fee,
+    asyncio.run(service.join(lid, {'id': tg}, expected_entry_fee=fee, **captcha_args(service, lid, tg),
                              source_ip=e.ip_for(tg), browser_id=browser_id(tg)))
 
 

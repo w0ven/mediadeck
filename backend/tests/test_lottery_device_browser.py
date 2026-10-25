@@ -16,10 +16,12 @@ import pytest
 
 from app.modules import lottery_device
 from app.modules.lottery_device import CONSENT_VERSION, FIELDS, LIMITS
+from tests.lottery_captcha_helpers import answer, captcha_args
 from tests.lottery_device_helpers import device_ctx
 from tests.test_lottery import BASE, GUEST, browser_id, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_lottery_device import OTHER, THIRD, legacy_create, strict
+from tests.test_lottery_turnstile_browser import MOCK_TURNSTILE_SCRIPT
 from tests.test_miniapp import headers
 
 HOST = 'https://app.example.test'
@@ -188,7 +190,8 @@ def test_ux_output_links_two_clients_on_one_device(request):
         browser.close()
     for tg, ctx in ((GUEST, blobs[0]), (OTHER, blobs[1]), (THIRD, device_ctx(THIRD))):
         r = env.client.post(BASE + f'/{lid}/join', headers={**headers(tg), 'CF-Connecting-IP': env.ip_for(tg)},
-                            json={'browser_id': browser_id(tg), 'consent_version': CONSENT_VERSION, 'ctx': ctx})
+                            json={'browser_id': browser_id(tg), 'consent_version': CONSENT_VERSION, 'ctx': ctx,
+                                  **captcha_args(env.service, lid, tg)})
         assert r.status_code == 200, r.text
     records = req(env, 'GET', f'/{lid}/records').json()
     [cluster] = records['clusters']
@@ -220,6 +223,8 @@ def test_lottery_device_consent_ui_full_flow(request):
             if u.hostname == 'telegram.org':
                 return route.fulfill(content_type='application/javascript',
                                      body=TELEGRAM_STUB % json.dumps(headers(viewer['id'])['X-Telegram-Init-Data']))
+            if u.hostname == 'challenges.cloudflare.com':
+                return route.fulfill(content_type='application/javascript', body=MOCK_TURNSTILE_SCRIPT)
             if u.hostname != 'app.example.test':
                 return route.abort()
             if r.method == 'POST' and u.path.endswith('/join'):
@@ -269,6 +274,19 @@ def test_lottery_device_consent_ui_full_flow(request):
         viewer['id'] = MEMBER
         page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid}')
         page.locator('#lot-join').wait_for()
+
+        # Complete captcha for Member
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (lid, str(MEMBER))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
+
         page.locator('#lot-join').click()
         page.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert page.locator('#lot-sheet').count() == 0
@@ -297,6 +315,18 @@ def test_lottery_device_consent_ui_full_flow(request):
         viewer['id'] = MEMBER
         page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_lid}')
         page.locator('#lot-join').wait_for()
+
+        # Complete captcha for Member
+        page.locator('.mock-cf-turnstile').wait_for()
+        active_ch = app.state.db.one(
+            "SELECT id, cdata FROM lottery_captcha_challenges WHERE lottery_id=? AND tg_id=? AND state='issued' ORDER BY created_at DESC",
+            (legacy_lid, str(MEMBER))
+        )
+        assert active_ch is not None
+        token_info = answer(env.turnstile, {'challenge_id': active_ch['id'], 'cdata': active_ch['cdata']})
+        widget_id = page.evaluate("window.__turnstileRenderCalls[window.__turnstileRenderCalls.length-1].id")
+        page.evaluate(f"window.__turnstileWidgets.get('{widget_id}').options.callback('{token_info['captcha_token']}')")
+        page.wait_for_function("!document.querySelector('#lot-join').disabled")
         assert '支付 50 积分报名' in page.locator('#lot-join').inner_text()
 
         join_payloads.clear()
@@ -332,7 +362,8 @@ def test_lottery_device_consent_ui_full_flow(request):
         r_other = env.client.post(BASE + f'/{legacy_lid}/join',
                                   headers={**headers(other_tg), 'CF-Connecting-IP': env.ip_for(other_tg)},
                                   json={'browser_id': browser_id(other_tg), 'consent_version': CONSENT_VERSION,
-                                        'ctx': paid_p['ctx'], 'expected_entry_fee': 50})
+                                        'ctx': paid_p['ctx'], 'expected_entry_fee': 50,
+                                        **captcha_args(env.service, legacy_lid, other_tg)})
         assert r_other.status_code == 200, r_other.text
 
         page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_lid}')

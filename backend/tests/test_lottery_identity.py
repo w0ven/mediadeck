@@ -12,6 +12,7 @@ from starlette.requests import Request
 from app.core.config import settings
 from app.core.db import Database
 from app.modules.lottery_identity import public_ip, trusted_ip
+from tests.lottery_captcha_helpers import captcha_args
 from tests.test_lottery import (
     BASE,
     GUEST,
@@ -48,7 +49,8 @@ def create(e, payload=None, publish=True):
 def signup(e, lid, tg, ip=None, device=None, extra=None):
     return e.client.post(BASE + f'/{lid}/join', headers={**headers(tg), **({'CF-Connecting-IP': ip} if ip else {}),
                                                        **(extra or {})},
-                         json={'browser_id': browser_id(tg) if device is None else device})
+                         json={'browser_id': browser_id(tg) if device is None else device,
+                               **captcha_args(e.service, lid, tg)})
 
 
 @pytest.mark.parametrize('reason', ['ip', 'device', 'both'])
@@ -136,7 +138,7 @@ def test_concurrent_same_signal_different_connections_both_excluded(e, reason):
 
     def enter(service, tg):
         gate.wait()
-        asyncio.run(service.join(lid, {'id': tg, 'first_name': 'Participant'},
+        asyncio.run(service.join(lid, {'id': tg, 'first_name': 'Participant'}, **captcha_args(service, lid, tg),
                                  source_ip=ip if reason == 'ip' else e.ip_for(tg),
                                  browser_id=browser_id(GUEST if reason == 'device' else tg)))
     try:
@@ -163,7 +165,7 @@ def test_join_draw_race_is_serializable_not_retroactive(e):
         def enter(gate=gate, other=other, lid=lid):
             gate.wait()
             try:
-                asyncio.run(other.join(lid, {'id': OTHER, 'first_name': 'Other'},
+                asyncio.run(other.join(lid, {'id': OTHER, 'first_name': 'Other'}, **captcha_args(other, lid, OTHER),
                                        source_ip=e.ip_for(GUEST), browser_id=browser_id(OTHER)))
                 return True
             except ValueError:
@@ -219,7 +221,7 @@ def test_activity_domain_and_restart_key_persistence(e):
     other = copy.copy(e.service)
     other.db = Database(e.service.db.path)
     try:
-        asyncio.run(other.join(a, {'id': OTHER, 'first_name': 'Other'}, source_ip=e.ip_for(GUEST), browser_id=browser_id(OTHER)))
+        asyncio.run(other.join(a, {'id': OTHER, 'first_name': 'Other'}, **captcha_args(other, a, OTHER), source_ip=e.ip_for(GUEST), browser_id=browser_id(OTHER)))
         assert other.db.one('SELECT secret FROM lottery_identity_key')['secret'] == key
         assert other.records(a)['excluded'] == 2 and other.records(b)['excluded'] == 0
         serialized = str(other.db.query('SELECT * FROM lottery_signals'))
@@ -303,7 +305,8 @@ def test_strict_missing_ip_forged_headers_and_missing_browser_fail_closed(e, mon
         monkeypatch.setattr(settings(), 'mediadeck_lottery_ip_mode', mode)
         r = e.client.post(BASE + f'/{lid}/join?ip_mode=cloudflare_protected',
                           headers={**headers(GUEST), **extra},
-                          json={'browser_id': browser_id(GUEST), 'ip': e.ip_for(GUEST), 'is_admin': True})
+                          json={'browser_id': browser_id(GUEST), 'ip': e.ip_for(GUEST), 'is_admin': True,
+                                **captcha_args(e.service, lid, GUEST)})
         assert r.status_code == 400 and '报名暂不可用' in r.text
     monkeypatch.setattr(settings(), 'mediadeck_lottery_ip_mode', 'cloudflare_protected')
     for device in ('', 'same-device', 'a' * 65):
