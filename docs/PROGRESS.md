@@ -2,7 +2,7 @@
 
 Newest entries first. Every working session appends one entry.
 
-## 2026-10-26 — v0.54.0: Mini App game center (炸金花 and Texas hold'em)
+## 2026-10-26 — v0.55.0: Mini App game center (炸金花 and Texas hold'em)
 
 - New 「游戏」 tab in the member Mini App: lobby, six tiers per game (practice with
   labelled robots and daily beans, then 新手/普通/高手/大师/至尊), tables, rules and
