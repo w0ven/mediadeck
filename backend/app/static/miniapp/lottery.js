@@ -155,13 +155,23 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     </div>`;
   }
 
-  function hero(c, state) {
+  function hero(c, state, count = 0) {
     const isSettled = state === 'settled';
     const isCancelled = state === 'cancelled';
     const statusText = isCancelled ? '已取消' : isSettled ? '已开奖' : '报名中';
     const statusPillClass = isCancelled ? 'red' : isSettled ? 'gold' : 'green';
-    const drawModeDesc = c.draw_mode === 'timed' ? '定时开奖' : '手动开奖';
+    const drawModeDesc = c.draw_mode === 'count' ? '满员开奖' : c.draw_mode === 'timed' ? '定时开奖' : '手动开奖';
     const initialSec = c.deadline ? c.deadline - Math.floor(Date.now() / 1000) : 0;
+    const isCount = c.draw_mode === 'count';
+
+    let timingHtml = '';
+    if (isCount) {
+      timingHtml = `<span>开奖：</span><b>满 ${c.max_entries || 0} 人自动开奖 · 进度 ${count || 0}/${c.max_entries || 0} 人</b>`;
+    } else if (c.deadline) {
+      timingHtml = `<span>截止：</span><b>${stamp(c.deadline, true)}</b>`;
+    } else {
+      timingHtml = `<span>截止：</span><b>${c.draw_mode === 'manual' ? '开奖前均可报名' : '待设置'}</b>`;
+    }
 
     return `<div class="lot-hero">
       <div class="hero-sheen"></div>
@@ -173,9 +183,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       ${!isSettled && !isCancelled && c.deadline ? `<div class="hero-countdown-box" id="lot-countdown-box">${renderCountdownBlocks(initialSec)}</div>` : ''}
       <img class="hero-art" src="/app/assets/lottery-assets/giftPink.png" alt="礼物">
       <div class="hero-bottom">
-        <div>
-          <span>截止：</span><b>${c.deadline ? stamp(c.deadline, true) : c.draw_mode === 'manual' ? '开奖前均可报名' : '待设置'}</b>
-        </div>
+        <div>${timingHtml}</div>
         <span class="hero-draw-mode">${drawModeDesc}</span>
       </div>
     </div>`;
@@ -277,9 +285,8 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (isManage) {
       // Admin Management Mode
       const adminRulesText = d.admin_rules ? `${d.rules}\n\n【防小号配置】\n${d.admin_rules}` : d.rules;
-      // Timed activities draw themselves at the deadline; the button is only a fallback once it has passed.
-      const drawButton = c.draw_mode === 'manual' ? '<button class="btn" id="lot-draw">手动开奖</button>'
-        : closed ? '<button class="btn" id="lot-draw">立即开奖</button>' : '';
+      // All published activities (timed, count, manual) offer explicit draw button for administrators
+      const drawButton = d.state === 'published' ? '<button class="btn" id="lot-draw">立即开奖</button>' : '';
       const statsHtml = d.state === 'settled'
         ? `<div class="lot-stats cols-3">
             <div class="stat"><b class="num">${d.count}</b><span>参与人数</span></div>
@@ -295,7 +302,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         <div class="lot-role-bar">
           <span class="pill">${image('shield', 15)} 管理模式</span>
         </div>
-        ${hero(c, d.state)}
+        ${hero(c, d.state, d.count)}
         ${statsHtml}
         <div class="notice">
           <div class="row between">
@@ -357,8 +364,8 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       bind('#lot-records', () => push(a => records(lid, a)));
       bind('#lot-draw', () => showSheet({
         title: '确认立即开奖？',
-        desc: `${c.title}\n${d.count} 人报名 · ${total} 个名额\n开奖后结果永久锁定。`,
-        okText: '确认开奖',
+        desc: `${c.title}\n${d.count} 人报名 · ${total} 个名额\n立即停止报名并开奖，开奖后结果永久锁定。`,
+        okText: '确认立即开奖',
         onConfirm: async () => { await call(`/${lid}/draw`); await refresh(); }
       }));
       bind('#lot-retry-awards', async () => { await call(`/${lid}/retry-awards`); await refresh(); });
@@ -390,10 +397,14 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     const thresholdBlocked = !ctx.registered && hasThreshold;
     const prizeEligible = d.prize_eligible !== false;
     const prizeIneligibleReason = d.prize_eligibility_reason || '当前无可抽奖项';
+    const isOpen = d.state === 'published' && !closed && !isCancelled;
+    const needPrivateStart = Boolean(!d.joined && isOpen && d.bot_private_required && !d.bot_private_ready);
+    const privateStartReason = d.bot_private_reason || '报名须先私聊启动 Bot';
 
     let joinText = d.joined ? '已报名 · 等待开奖'
       : isCancelled ? '活动已取消'
       : closed ? '报名已截止'
+      : needPrivateStart ? '须先私聊启动 Bot'
       : thresholdBlocked ? '须绑定已注册账户'
       : pointsShort > 0 ? `积分不足（差 ${pointsShort} 积分）`
       : !eligible ? '当前身份不可参与'
@@ -403,7 +414,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       : fee > 0 ? `支付 ${fee} 积分报名`
       : '立即参与';
 
-    const canJoin = !isCancelled && !closed && !d.joined && eligible && prizeEligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null);
+    const canJoin = !isCancelled && !closed && !d.joined && !needPrivateStart && eligible && prizeEligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null);
 
     const statsHtml = isSettled
       ? `<div class="lot-stats cols-3">
@@ -420,7 +431,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       <div class="lot-role-bar">
         <span class="pill">${image(admin ? 'shield' : ctx.registered ? 'verified' : 'starCute', 15)} ${admin ? '管理员参与' : ctx.registered ? '已注册会员' : '未注册群友'}</span>
       </div>
-      ${hero(c, d.state)}
+      ${hero(c, d.state, d.count)}
       ${statsHtml}
       ${isCancelled ? `<div class="result-banner consolation-card"><h3>本期活动已取消</h3><p class="small">${d.joined && fee > 0 ? '报名积分已全额退还。' : '本期不再报名和开奖。'}</p></div>` : ''}
       ${fee > 0 && !isCancelled ? `<div class="ticket"><div><strong>报名费用：${fee} 积分</strong><small>我的余额：${balance != null ? balance + ' 积分' : '未注册'} · 成功报名不退（未中奖不退）</small></div></div>` : ''}
@@ -431,19 +442,26 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       ${ctx.registered && hasRegPrize && !isCancelled ? '<div class="rule-note">已注册会员可报名本期其他奖项；本人专属注册资格仅在未注册者中抽取。</div>' : ''}
       <h3>本期奖池 <span class="section-tag">${esc(audience[c.audience])}可参与</span></h3>${prizes(c)}
       ${isSettled ? `<h3>本期幸运名单 · ${d.winners.length} 位</h3><div class="prize-list">${d.winners.map((w, i) => `<div class="winner"><span class="muted tiny num">${i + 1}</span><div class="avatar">${esc(w.label.slice(0, 1))}</div><div class="grow"><b>${esc(w.label)}</b><div class="prize-desc">${esc(w.prize.name)}</div></div>${image('party', 22)}</div>`).join('') || '<div class="empty">本期未产生中奖者</div>'}</div>` : ''}
+      ${needPrivateStart ? `<div class="rule-note banner bad" id="lot-private-banner">${image('notice', 18)}<span>${esc(privateStartReason)}</span></div>` : ''}
       <details class="lot-fold">
         <summary><span>查看活动规则与说明</span><span class="fold-arrow">${icon ? icon('chevron-down') : '▼'}</span></summary>
         <div class="rule-note">${image('star', 18)}<span>${esc(d.rules)}</span></div>
       </details>
       ${!isCancelled ? `<div class="lot-actions">
         ${thresholdLabels.length ? `<div class="lot-threshold-pills">${thresholdLabels.map(t => `<span class="pill">${image('starCute', 13)} ${esc(t)}</span>`).join('')}</div>` : ''}
-        ${!isSettled ? `<button class="btn" id="lot-join" ${canJoin ? '' : 'disabled'}>${joinText}</button>` : '<button class="btn secondary" id="lot-result-refresh">刷新领奖状态</button>'}
+        ${needPrivateStart
+          ? `<button class="btn" id="lot-start-bot">${image('megaphone', 16)} 先私聊启动 Bot</button><button class="btn secondary" id="lot-retry-private">我已启动，刷新报名</button>`
+          : (!isSettled ? `<button class="btn" id="lot-join" ${canJoin ? '' : 'disabled'}>${joinText}</button>` : '<button class="btn secondary" id="lot-result-refresh">刷新领奖状态</button>')}
       </div>` : ''}
       <div class="lot-bottom-spacer"></div>`);
 
     startCountdown();
     if (admin) bind('#lot-to-manage', () => push(a => detail(lid, a, 'manage')));
-    bind('#lot-refresh,#lot-result-refresh', refresh);
+    bind('#lot-refresh,#lot-result-refresh,#lot-retry-private', refresh);
+    bind('#lot-start-bot', () => {
+      if (d.bot_start_url) openBot(d.bot_start_url);
+      else toast('未获取到 Bot 私聊链接，请稍后刷新');
+    });
     bind('#lot-claim', async () => { await call(`/${lid}/claim`); await refresh(); });
     bind('#lot-register', () => openBot(d.my_award.registration_url));
     bind('#lot-join', async () => {
@@ -631,7 +649,12 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (!alive()) return;
     const gifts = ['giftPink', 'giftBlue', 'giftPurple'];
     page(`${head('抽奖中心', '<button class="btn" style="min-height:36px;padding:6px 14px;font-size:12.5px" id="lot-new">＋ 新建抽奖</button>')}
-      ${data.items.map((d, i) => `<button class="activity-item" data-lot-open="${esc(d.id)}"><img class="activity-icon" src="/app/assets/lottery-assets/${gifts[i % gifts.length]}.png" alt=""><div class="grow"><b>${esc(d.title)}</b><div class="prize-desc">${d.deadline ? stamp(d.deadline, true) + ' 截止 · 北京' : '未设截止 · 管理员开奖'}</div></div><span class="pill ${d.state === 'settled' ? 'gold' : 'green'}">${esc(titles[d.state])}</span></button>`).join('') || `<div class="empty"><img class="activity-icon" style="width:56px;height:56px;margin:0 auto 8px" src="/app/assets/lottery-assets/giftPink.png" alt=""><p>暂无活动，点击上方新建。</p></div>`}
+      ${data.items.map((d, i) => {
+        const desc = d.draw_mode === 'count'
+          ? `满 ${d.max_entries || 0} 人自动开奖 · 进度 ${d.count || 0}/${d.max_entries || 0} 人`
+          : d.deadline ? stamp(d.deadline, true) + ' 截止 · 北京' : '未设截止 · 管理员开奖';
+        return `<button class="activity-item" data-lot-open="${esc(d.id)}"><img class="activity-icon" src="/app/assets/lottery-assets/${gifts[i % gifts.length]}.png" alt=""><div class="grow"><b>${esc(d.title)}</b><div class="prize-desc">${desc}</div></div><span class="pill ${d.state === 'settled' ? 'gold' : 'green'}">${esc(titles[d.state])}</span></button>`;
+      }).join('') || `<div class="empty"><img class="activity-icon" style="width:56px;height:56px;margin:0 auto 8px" src="/app/assets/lottery-assets/giftPink.png" alt=""><p>暂无活动，点击上方新建。</p></div>`}
       <div class="lot-actions">
         ${offset ? '<button class="btn secondary" id="lot-prev">上一页</button>' : ''}
         ${data.more ? '<button class="btn secondary" id="lot-next">下一页</button>' : ''}
@@ -695,7 +718,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     const isLegacyDeviceChecked = Boolean(existing && existing.config && existing.config.device_check);
     const draft = structuredClone(existing ? existing.config : {
       title: '', chat_id: opts.chats[0] || '', thread_id: null,
-      audience: 'all', draw_mode: 'timed', deadline: null,
+      audience: 'all', draw_mode: 'timed', max_entries: 100, deadline: null,
       prizes: [], anti_multi: true, device_check: false, entry_fee: 0,
       min_level: 0, min_points: 0, min_watch_hours: 0,
       reminder: true, pin: true
@@ -704,6 +727,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     draft.min_level = draft.min_level || 0;
     draft.min_points = draft.min_points || 0;
     draft.min_watch_hours = draft.min_watch_hours || 0;
+    if (draft.max_entries === undefined || draft.max_entries === null) draft.max_entries = 100;
     if (draft.reminder === undefined) draft.reminder = true;
     if (draft.pin === undefined) draft.pin = true;
     if (draft.anti_multi === undefined) draft.anti_multi = true;
@@ -711,17 +735,19 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
 
     function renderEditor() {
       const isManual = draft.draw_mode === 'manual';
+      const isCount = draft.draw_mode === 'count';
+      const isTimed = draft.draw_mode === 'timed';
       const isMemberOnly = draft.audience === 'member';
       const date = draft.deadline ? new Date((draft.deadline + 8 * 3600) * 1000).toISOString().slice(0, 16) : '';
       const options = (rows, value) => rows.map(([id, name]) => `<option value="${esc(id)}" ${String(id) === String(value) ? 'selected' : ''}>${esc(name)}</option>`).join('');
       const levelOpts = [['0', '不限'], ['1', 'Lv1'], ['2', 'Lv2'], ['3', 'Lv3'], ['4', 'Lv4'], ['5', 'Lv5'], ['6', 'Lv6'], ['7', 'Lv7'], ['8', 'Lv8']];
-      const copiedNotice = isCopied && !draft.deadline && !isManual
+      const copiedNotice = isCopied && !draft.deadline && isTimed
         ? '<div class="banner bad" id="lot-copied-banner"><span>⚠️ 请重新设置截止时间（复制出的草稿截止时间已清空）</span></div>'
         : '';
 
       page(`${head(existing ? '编辑抽奖草稿' : '新建抽奖活动')}
         ${copiedNotice}
-        <form id="lot-form" class="lot-form">
+        <form id="lot-form" class="lot-form" novalidate>
           <div class="lot-field"><label for="lot-title">活动名称</label><input id="lot-title" required maxlength="60" value="${esc(draft.title)}" placeholder="请输入抽奖活动名称"></div>
           <div class="lot-field"><label for="lot-chat">发布白名单群</label><select id="lot-chat" required>${options(opts.chats.map(c => [c, c]), draft.chat_id)}</select></div>
           <div class="lot-field"><label for="lot-thread">话题 ID（仅话题群，可留空）</label><input id="lot-thread" type="number" min="1" value="${draft.thread_id || ''}"></div>
@@ -730,10 +756,11 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           <div class="lot-field"><label for="lot-fee">报名费用（积分，0 为免费）</label><input id="lot-fee" type="number" min="0" max="100000" step="1" value="${draft.entry_fee || 0}"><p class="tiny muted" id="lot-fee-note">成功报名后扣除且不退（未中奖不退）。收费活动需已注册账户，不能搭配注册资格奖。</p></div>
           ` : ''}
           <div class="${isManual ? 'lot-field' : 'grid2'}">
-            <div class="lot-field"><label for="lot-mode">开奖方式</label><select id="lot-mode">${options([['timed','定时开奖'],['manual','手动开奖']], draft.draw_mode)}</select></div>
-            ${!isManual ? `<div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" required value="${date}"></div>` : ''}
+            <div class="lot-field"><label for="lot-mode">开奖方式</label><select id="lot-mode">${options([['timed','定时开奖'],['count','满员开奖'],['manual','手动开奖']], draft.draw_mode)}</select></div>
+            ${isTimed ? `<div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" required value="${date}"></div>` : ''}
+            ${isCount ? `<div class="lot-field"><label for="lot-max-entries">开奖人数（1–100000）</label><input id="lot-max-entries" type="number" min="1" max="100000" step="1" required value="${draft.max_entries != null ? draft.max_entries : 100}"></div>` : ''}
           </div>
-          <p class="tiny muted" id="lot-date-note">${isManual ? '手动开奖模式：管理员开奖前均可报名。' : '定时开奖须填写截止时间，到点自动开奖。'}</p>
+          <p class="tiny muted" id="lot-date-note">${isCount ? '满员开奖模式：满 X 人自动开奖，也可由管理员提前开奖。' : isManual ? '手动开奖模式：管理员开奖前均可报名。' : '定时开奖须填写截止时间，到点自动开奖。'}</p>
 
           ${isMemberOnly ? `
           <div class="subpanel">
@@ -748,11 +775,11 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           ` : ''}
 
           <div class="subpanel">
-            ${!isManual ? `
+            ${isTimed ? `
             <label class="lot-check" for="lot-reminder"><input id="lot-reminder" type="checkbox" ${draft.reminder ? 'checked' : ''}><span>截止前 1 小时群内提醒（需设截止时间）</span></label>
             <p class="tiny muted">报名截止前约 1 小时自动在群内发送提醒公告。</p>
             ` : ''}
-            <label class="lot-check" for="lot-pin" style="${isManual ? '' : 'margin-top:10px'}"><input id="lot-pin" type="checkbox" ${draft.pin ? 'checked' : ''}><span>发布后静默置顶公告</span></label>
+            <label class="lot-check" for="lot-pin" style="${isTimed ? 'margin-top:10px' : ''}"><input id="lot-pin" type="checkbox" ${draft.pin ? 'checked' : ''}><span>发布后静默置顶公告</span></label>
             <p class="tiny muted">发布后在群内静默置顶发起公告，开奖或取消后自动取消置顶。</p>
             <label class="lot-check" for="lot-anti-multi" style="margin-top:10px"><input id="lot-anti-multi" type="checkbox" ${draft.anti_multi ? 'checked' : ''}><span>严格防小号（关联账号均不中奖）</span></label>
             <p class="tiny muted">开启后，关联账号全部不中奖；关联记录仅管理员可见。</p>
@@ -796,9 +823,14 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           }
           collect();
           draft.draw_mode = modeEl.value;
-          if (draft.draw_mode === 'manual') {
+          if (draft.draw_mode === 'manual' || draft.draw_mode === 'count') {
             draft.deadline = null;
             draft.reminder = false;
+          }
+          if (draft.draw_mode !== 'count') {
+            draft.max_entries = 0;
+          } else if (draft.max_entries === undefined || draft.max_entries === null || draft.max_entries === 0) {
+            draft.max_entries = 100;
           }
           renderEditor();
         };
@@ -840,7 +872,15 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         try {
           if ($('#lot-kind')) throw new Error('请先将编辑中的奖项加入奖池或取消该奖项');
           collect();
+          if (!draft.title) throw new Error('请输入抽奖活动名称');
+          if (!draft.chat_id) throw new Error('请选择发布白名单群');
           if (!draft.deadline && draft.draw_mode === 'timed') throw new Error('定时开奖须设置报名截止时间');
+          if (draft.draw_mode === 'count') {
+            const raw = draft.max_entries;
+            if (raw === '' || raw === null || raw === undefined || !Number.isInteger(Number(raw)) || Number(raw) < 1 || Number(raw) > 100000) {
+              throw new Error('满员开奖人数须为 1–100000 之间的整数');
+            }
+          }
           if (draft.audience === 'member' && draft.prizes.some(p => p.kind === 'registration')) {
             throw new Error('仅已注册活动不能配置本人专属注册资格奖');
           }
@@ -868,7 +908,8 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       const modeVal = $('#lot-mode') ? $('#lot-mode').value : draft.draw_mode;
       const audVal = $('#lot-audience') ? $('#lot-audience').value : draft.audience;
       const isMemberOnly = audVal === 'member';
-      const isManual = modeVal === 'manual';
+      const isTimed = modeVal === 'timed';
+      const isCount = modeVal === 'count';
 
       const feeEl = $('#lot-fee');
       const feeVal = feeEl ? Number(feeEl.value) : 0;
@@ -880,9 +921,22 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       const minWatchVal = minWatchEl ? Number(minWatchEl.value) || 0 : 0;
 
       const dateEl = $('#lot-date');
-      const dateVal = (!isManual && dateEl) ? dateEl.value : '';
+      const dateVal = (isTimed && dateEl) ? dateEl.value : '';
       const reminderEl = $('#lot-reminder');
-      const reminderVal = (!isManual && reminderEl) ? reminderEl.checked : false;
+      const reminderVal = (isTimed && reminderEl) ? reminderEl.checked : false;
+      const countEl = $('#lot-max-entries');
+      let countVal = draft.max_entries;
+      if (isCount && countEl) {
+        const trimmed = countEl.value.trim();
+        if (trimmed === '') {
+          countVal = '';
+        } else {
+          const num = Number(trimmed);
+          countVal = Number.isInteger(num) ? num : trimmed;
+        }
+      } else if (!isCount) {
+        countVal = 0;
+      }
 
       const antiMultiEl = $('#lot-anti-multi');
       const antiMultiVal = antiMultiEl ? antiMultiEl.checked : draft.anti_multi;
@@ -906,10 +960,11 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         audience: audVal,
         entry_fee: isMemberOnly && Number.isInteger(feeVal) && feeVal >= 0 ? feeVal : 0,
         draw_mode: modeVal,
+        max_entries: isCount ? countVal : 0,
         min_level: isMemberOnly ? minLevelVal : 0,
         min_points: isMemberOnly ? minPointsVal : 0,
         min_watch_hours: isMemberOnly ? minWatchVal : 0,
-        deadline: (!isManual && dateVal) ? Math.floor(new Date(dateVal + ':00+08:00').getTime() / 1000) : null
+        deadline: (isTimed && dateVal) ? Math.floor(new Date(dateVal + ':00+08:00').getTime() / 1000) : null
       });
     }
 

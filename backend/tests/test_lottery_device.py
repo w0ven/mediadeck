@@ -45,6 +45,8 @@ def legacy_create(e, raw=None, publish=True):
     raw = strict() if raw is None else raw
     saved = e.service.validate(raw, legacy=True)
     saved.pop('eligibility_version')
+    saved.pop('require_private_start')
+    saved.pop('max_entries')
     saved.pop('public_rules_version')  # real pre-upgrade records have no public-text version
     saved['device_check'] = raw.get('device_check', raw.get('anti_multi', True)) and raw.get('anti_multi', True)
     lid = secrets.token_hex(12)

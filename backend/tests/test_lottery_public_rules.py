@@ -68,7 +68,7 @@ def test_new_rules_preview_notice_preserve_qualification_fee_and_admin_scope(e, 
         assert_public(view)
         assert 'consent' not in view and view['rules'] == admin['rules'] == preview['rules']
         no_hints(view['rules'])
-    assert admin['rules'] == old_rules(fee).removesuffix(OLD_RULES) + ELIGIBILITY_RULES
+    assert admin['rules'] == old_rules(fee).removesuffix(OLD_RULES) + ELIGIBILITY_RULES + '报名须先私聊启动 Bot。'
     launch = json.loads(notices(e, lid)[0]['payload_json'])
     for text in (preview['text'], launch['text']):
         no_hints(text)
@@ -106,7 +106,7 @@ def test_existing_draft_keeps_stored_public_policy_and_legacy_consent(e, previou
         e.service.db.execute('UPDATE lotteries SET config_json=? WHERE id=?', (json.dumps(c), lid))
     new = previous == 2
     current_rules = old_rules(40).removesuffix(OLD_RULES) + ELIGIBILITY_RULES
-    expected = current_rules if new else current_rules + OLD_FAIRNESS
+    expected = (current_rules if new else current_rules + OLD_FAIRNESS) + '报名须先私聊启动 Bot。'
     original = stored(e, lid)
     assert req(e, 'POST', f'/{lid}/preview').json()['rules'] == (expected if new else old_rules(40))
     assert stored(e, lid) == original  # a read/preview never backfills the absent version

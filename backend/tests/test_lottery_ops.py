@@ -175,7 +175,7 @@ def test_new_public_wording_omits_detection_hints_but_keeps_paid_terms(e):
     for lid in (free, paid):
         for user in (MEMBER, GUEST, ADMIN):
             rules = req(e, 'GET', '/' + lid, user).json()['rules']
-            assert rules.endswith(ELIGIBILITY_RULES) and FAIRNESS not in rules and no_forbidden(rules)
+            assert rules.endswith(ELIGIBILITY_RULES + '报名须先私聊启动 Bot。') and FAIRNESS not in rules and no_forbidden(rules)
         assert FAIRNESS not in req(e, 'POST', f'/{lid}/preview').json()['rules']
     free_text = json.loads(notice(e, free, 'launch')['payload_json'])['text']
     paid_text = json.loads(notice(e, paid, 'launch')['payload_json'])['text']
@@ -538,7 +538,8 @@ def test_ongoing_lists_open_activities_locally_without_internal_fields(e):
         assert set(items) == {open_one, joined}
         assert items[joined]['joined'] is (user == GUEST) and items[open_one]['joined'] is False
         item = items[open_one]
-        assert set(item) == {'id', 'title', 'deadline', 'audience', 'entry_fee', 'joined', 'prizes', 'prize_summary', 'slots'}
+        assert set(item) == {'id', 'title', 'deadline', 'audience', 'entry_fee', 'joined', 'prizes', 'prize_summary', 'slots',
+                             'draw_mode', 'max_entries', 'count'}
         assert item['entry_fee'] == 5 and item['slots'] == 4 and item['prize_summary'] == '奖0 ×1、奖1 ×1、奖2 ×1 等 4 项'
         assert CHAT not in json.dumps(result.json()) and 'anti_multi' not in json.dumps(result.json())
     assert len(e.calls) == before  # no Telegram lookups for the list
