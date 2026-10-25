@@ -104,7 +104,7 @@ def render_ux_previews(e):
     page('/kk · 私聊一屏看全', e.bot._member_admin_card(member, public=False, access_lines=access),
          e.bot._user_admin_keyboard('u1', {'status':'active','emby_disabled':False}))
     with group_context():
-        page('/kk · 群内不含私人资料', e.bot._user_card({**member, '_access_lines': access}),
+        page('/kk · 群内同样一屏看全，备注只提示', e.bot._user_card({**member, '_access_lines': access, 'note': '<内部备注>'}),
              e.bot._user_admin_keyboard('u1', {'status':'active','emby_disabled':False}))
     return pages
 
@@ -138,6 +138,8 @@ def test_current_user_ux_previews(request, monkeypatch):
     assert not any(text in group_card for text in ('续期', '缺口', '近30天核验', '有效日', '删除候选'))
     assert group_card.startswith('💠 <a href="tg://user?id=') and 'ViewerA' not in group_card
     assert '📋 资料' in pages['/kk · 私聊一屏看全'][0]
-    group_kk, group_rows = pages['/kk · 群内不含私人资料']
-    assert '📋 资料' not in group_kk and 'tg://user' not in group_kk and 'Telegram <code>' not in group_kk
-    assert group_rows[-1][0] == '📋 资料 · 私聊'
+    group_kk, group_rows = pages['/kk · 群内同样一屏看全，备注只提示']
+    for text in ('📋 资料', 'Telegram <code>', '注册渠道', '邀请人', '求片剩余', '最近活跃', '📝 有备注，私聊 /kk 查看'):
+        assert text in group_kk
+    assert '内部备注' not in group_kk and 'tg://user' not in group_kk
+    assert group_rows == pages['/kk · 私聊一屏看全'][1] and group_rows[-1] == ['🔄 刷新', '关闭']

@@ -348,7 +348,7 @@ def render_flow_previews(bot):
     page('/kk · 远端未知只刷新', *kk('active', None))
     demo._bot_username = 'synthetic_preview_bot'
     with demo._bind_session('-10055', '800', group=True):
-        page('/kk · 群内不含私人资料，资料走私聊深链', *kk('active', False))
+        page('/kk · 群内同样一屏看全', *kk('active', False))
     return result
 
 

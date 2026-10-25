@@ -107,7 +107,7 @@ class MemberCardMixin:
 
     def _member_admin_card(self, member: dict[str, Any], *, public: bool,
                            access_lines: list[str] | None = None) -> str:
-        """Everything an operator needs at once; profile details stay out of groups."""
+        """Everything an operator needs at once, in a group as in private."""
         info = self._member_level_info(member)
         # A group card never pings the account being looked up.
         nickname = self._member_nickname(member, link=not public)
@@ -118,12 +118,11 @@ class MemberCardMixin:
         boxes = [box('🔒 封禁', access_lines or []),
                  box('✨ 权益', rights),
                  box('🎬 观看', self._member_watch(member, managing=True)),
-                 self._member_points(member, info, managing=True)]
-        if not public:
-            boxes.append(box('📋 资料', self._member_profile(member)))
+                 self._member_points(member, info, managing=True),
+                 box('📋 资料', self._member_profile(member, public=public))]
         return card([heading, *self._member_head(member, info)], boxes)
 
-    def _member_profile(self, member: dict[str, Any]) -> list[str]:
+    def _member_profile(self, member: dict[str, Any], *, public: bool) -> list[str]:
         uid = str(member.get('emby_user_id'))
         tg = str(member.get('tg_user_id') or '')
         handle = telegram_username(member.get('tg_username'))
@@ -145,5 +144,6 @@ class MemberCardMixin:
                  f"求片剩余 {left} · 最近活跃 {beijing_stamp(seen) if seen else '—'}",
                  f"原始登录标识记录 {devices}"]
         if member.get('note'):
-            lines.append('📝 ' + escape(str(member['note'])))
+            # Operator remarks are not read out to the whole group, the member included.
+            lines.append('📝 有备注，私聊 /kk 查看' if public else '📝 ' + escape(str(member['note'])))
         return lines
