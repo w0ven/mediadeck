@@ -97,7 +97,19 @@
 
 ### POST `/tables/{table_id}/leave`
 
-`{"request_id":"leave_12345678"}`。等待中立即离座；炸金花活跃手牌视为弃牌并立即结算该手应得部分后离座（若仍有其他玩家未结束，本人标记 leave_after=true，结算后移除）；德州本手参与者（包括已弃牌/全下者）标记 leave_after=true，延后到手结束结算离桌；未全下者轮到时约1.5秒自动弃牌，不再额外投入，已全下者仍保留分池资格。期间不能补码/手动动作/取消托管。非参与/已结算座位立即离开。房主移交最早入座的其他会员；无真人时散桌。返回统一桌响应。
+`{"request_id":"leave_12345678"}`。等待中立即离座；炸金花活跃手牌视为弃牌并立即结算该手应得部分后离座（若仍有其他玩家未结束，本人标记 leave_after=true，结算后移除）；德州本手参与者（包括已弃牌/全下者）标记 leave_after=true，延后到手结束结算离桌；未全下者轮到时约1.5秒自动弃牌，不再额外投入，已全下者仍保留分池资格。期间不能补码/手动动作/取消托管。私有 notice 区分待自动弃牌、已经弃牌和已全下仍参与本手结算，不将全下误提示为弃牌。非参与/已结算座位立即离开。房主移交最早入座的其他会员；无真人时散桌。返回统一桌响应。
+
+等待离线离座无需新增接口：仅 `phase=waiting` 时，每个在座真人连续 180 秒无本桌 SSE 连接、
+也无本桌会员 HTTP 请求，就由服务端 tick 按上述离桌路径处理。覆盖炸金花等待开局、德州首手前及
+人数不足暂停；`playing/between` 不适用。退回剩余筹码/冻结额、房主继任和开局倒计时与主动离桌一致，
+没有真人则散桌（包括练习主人离线），不发 Telegram 消息。
+
+- 本人的本桌快照、操作（含重试）及 stream-token 请求会刷新在线时间；其他人旁观、本人访问大厅、
+  钱包或另一桌不会替本桌座位续期。只记录在座者，不保存旁观者的长期在线记录。
+- 在线时间与 SSE 连接计数仅在内存；启动时旧座位统一获得完整 180 秒宽限，不从旧 `last_activity`
+  推算离线。其他持久化截止时间不重置。
+- 移除后通过已有响应体现：`seats` 不再含该座位、`me.player/seat=null`，`/me.active_tables` 不再含该桌；
+  真正离座时桌 revision 更新并正常通知 SSE。仅在线续期不更新 revision，也不新增在线时间字段。
 
 ### POST `/tables/{table_id}/ready`
 
@@ -166,8 +178,8 @@
   "deep_link":"https://t.me/example_bot?startapp=gc_abc123",
   "rules":{"ante":1,"cap":50,"min_balance":50,"step_seconds":30,"allow_235":false,"auto_hands":3},
   "seats":[
-    {"seat":0,"player":"p_abcd","name":"小明","bot":false,"ready":false,"auto":false,"auto_hands":0,"away":false,"leave_after":false},
-    {"seat":2,"player":"p_efgh","name":"小雨","bot":false,"ready":false,"auto":true,"auto_hands":1,"away":false,"leave_after":false}
+    {"seat":0,"player":"p_abcd","name":"小明","avatar":"/api/app/avatar/9000?s=<signature>","bot":false,"ready":false,"auto":false,"auto_hands":0,"away":false,"leave_after":false},
+    {"seat":2,"player":"p_efgh","name":"小雨","avatar":"/api/app/avatar/9001?s=<signature>","bot":false,"ready":false,"auto":true,"auto_hands":1,"away":false,"leave_after":false}
   ],
   "me":{"player":"p_abcd","seat":0,"is_host":true,"notice":"","wallet":{"points":3200,"frozen":50,"beans":10000,"beans_day":"2026-10-25","daily_beans":10000}},
   "hand":{
@@ -185,6 +197,10 @@
 ```
 
 - `phase`：`waiting/playing/closed`，德州另有 `between`（两手间4秒）。`seats` 只包含已坐位置，不是定长数组。未入座 `me.player/seat=null`，仍可看公开桌；`me.wallet` 永远只有本人余额。
+- 两款游戏的公开 `seats[].avatar` 为追加字符串字段：真人返回 `miniapp.avatar_url(绑定 Telegram ID)`
+  生成的 `/api/app/avatar/{tg}?s=...`；机器人、无绑定或会员记录已不存在时为 `''`。前端可直接用于图片，
+  为空或加载失败时显示名字首字。只追加头像 URL，不额外公开会员 ID 或独立 Telegram ID 字段。
+  快照通过一次批量读取绑定后签名，不把签名 URL 写进 `state_json`；旧座位直接兼容，重启后的新签名也可用。
 - `revision` 单调递增，任何桌变化都会更新；按 revision 去重 SSE。`hand_no` 桌内递增，动作 turn 在每手从 1 起递增。
 - `countdown_at` 炸金花全员准备开局时刻/德州下一手开局时刻；`turn_deadline` 原始行动截止；`auto_at` 托管行动时刻；`idle_deadline` 等待散桌时刻。无计时器为 null。房主等待 3 分钟无操作自动转给最早入座的其他玩家。
 - `hand` 当前进行中手牌；等待时 null，上一手放 `last_hand`，结构相同且 `finished:true`。结算的 result 为 `{"winners":["p_abcd"],"awards":{"p_abcd":4,"p_efgh":0},"net":{"p_abcd":2,"p_efgh":-2}}`，所有净额之和为 0。
@@ -192,12 +208,51 @@
 - 比牌双方的 `comparisons` 包含 `{"turn":3,"actor":"p_abcd","target":"p_efgh","loser":"p_efgh","cards":{"p_abcd":[12,25,7],"p_efgh":[0,16,32]}}`，第三人该数组无此项；不得把私人动作响应广播给整桌。
 - `notice` 仅本人的超时/余额不足等提示；超时文字为“已超时，进入托管；点「取消托管」接管”。
 
-### 德州 Snapshot 与 hand 结构
+### 开局状态（追加字段，炸金花与德州共用）
 
-通用桌壳不变，另有 `button`（尚未开手为 null，否则上次/当前按钮座位号）。德州 `ready` 不参与开局判定，不显示准备按钮；seats 增加以下字段：
+HTTP 与 SSE 的 Snapshot 新增 `start_status`；旧字段保持不变。例如，房主视角下两人入座、
+但另一人未准备：
 
 ```json
-{"seat":0,"player":"p_abcd","name":"小明","bot":false,"ready":false,
+{"start_status":{"min_players":2,"seated_players":2,"eligible_players":1,
+ "can_start":false,"reason":"waiting_ready","message":"请等待其他玩家准备；房主点开始时自动算准备"}}
+```
+
+- `seated_players`：未申请离桌的在座人数，包含练习机器人；不能用它计算空座，空座仍按 `seats`。
+- `eligible_players`：等待/两手间阶段按服务端实际条件计算的可参与人数。炸金花包含房主自动准备，
+  并检查会员资格及本场所需可用余额；德州按有筹码且未暂离判断。进行中/散桌时为 0。
+  不返回他人的余额或不合格者身份。开局事务仍会重新检查，快照不是资金预留。
+- `can_start`：**当前查看者**此刻能否调用 `/start`，只有满足开局条件的房主为 true。
+  德州已开过首手后恒为 false，不应再次显示手动开始按钮。
+- `reason`：`waiting_players` 人数不足；`waiting_ready` 等待准备；`ineligible_players` 实际合格人数不足；
+  `waiting_host` 人数已够、等待房主；`ready` 本人可以开始；`playing` 手中；`closed` 已散桌；
+  `automatic` 德州后续自动发牌/人数不足暂停（具体说明见 `message`）。
+- `message`：可直接展示的中文说明。前端应优先使用 `can_start/message`，不要凭他人的 `ready`
+  标记推测其当前余额。`countdown_at`、`idle_deadline` 继续提供自动开局和散桌时间。
+- 余额可能因桌外消费发生变化而不改变桌 `revision`。开始失败或主动刷新时应接受最新 HTTP
+  快照，即使 revision 相同；SSE 仍按桌 revision 推送，不额外广播钱包变化。
+- 炸金花准备不足额时，`insufficient_funds` 的消息现在说明具体预算/币种；至尊说明入场最低积分及
+  “每手冻结全部可用积分”，不再误称有封顶。成功重新准备、恢复资金后开局会清除过期余额提示。
+
+### 德州 Snapshot 与 hand 结构
+
+通用桌壳不变，另有 `button`（尚未开手为 null，否则上次/当前按钮座位号）。多人转为单挑时，先按上一手的大盲位置顺时针确定新的大盲，另一人是按钮/小盲，避免同一人连续两手大盲。
+
+德州 Snapshot 和场次 `waiting_tables` 摘要均增加 `start_status`，原有字段不变：
+
+```json
+{"eligible_players":2,"min_players":2,"can_start":true,"reason":"waiting_for_host"}
+```
+
+- `eligible_players` 使用服务端参与条件计算（有筹码、非暂离、非延后离桌；练习场无可参与真人则为 0）。仅在 waiting/between 阶段用于开局提示；playing 时筹码尚未结算，不能据此预测下一手人数。
+- `can_start` 表示本桌满足首手手动开局条件，不代表查看者权限；按钮还须结合 `me.is_host`。后续手数即使人数足够也为 false，不能再次 POST start。
+- `reason`：`waiting_for_players` 首手等人；`waiting_for_host` 人数足够、等待房主开始；`paused_for_players` 连续发牌因人数不足暂停；`practice_player_unavailable` 练习桌真人暂离或无筹码；`next_hand` 等待下一手（倒计时仍取 `countdown_at`）；`closed` 已散桌；进行中为 null。
+- 此字段由现存桌状态计算，不写入 `state_json`，旧牌桌无需迁移。不要用总座位数代替可参与人数，也不要把暂停后的恢复提示为“房主开始”。
+
+德州 `ready` 不参与开局判定，不显示准备按钮；seats 增加以下字段：
+
+```json
+{"seat":0,"player":"p_abcd","name":"小明","avatar":"/api/app/avatar/9000?s=<signature>","bot":false,"ready":false,
  "auto":false,"auto_hands":0,"auto_since":null,
  "away":false,"away_since":null,"leave_after":false,"stack":99}
 ```
@@ -238,6 +293,8 @@
 
 ## 6. 复核
 
+会员界面不调用此接口，也不展示复核入口；接口保留，供排查争议时核对牌序。
+
 ### GET `/tables/{table_id}/hands/{hand_no}/verify`
 
 正在进行：`{"table_id":"abc123","hand_no":1,"commitment":"<hex>","settled":false}`。
@@ -276,6 +333,10 @@ data: {"table": <Snapshot>}
 : keepalive
 
 ```
+
+连接按牌桌及会员单独计数；只要本人还有一条有效 SSE 连接，等待阶段就不会因 180 秒离线规则被移除。
+每次快照和保活都刷新内存在线时间；最后一条连接关闭后，重新起算完整 180 秒无访问期限。
+这不会延长行动截止、房主无操作继任或 10 分钟无人操作散桌时间。连接取消、失效或到期均清理在线计数。
 
 `Last-Event-ID` 无需补历史：重连总是给最新全量快照，不播发旧动作。`snapshot` data 与 GET 桌完全相同。连接时验证 token 签名、到期、桌绑定、用户仍存在和练习桌归属。到期/权限失效关闭连接；发卡故障不影响 SSE。仅发送当前查看者视图，无跨用户私牌缓存。
 

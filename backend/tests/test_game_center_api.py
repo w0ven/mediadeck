@@ -8,8 +8,9 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
-from test_game_center import act, start
+from test_game_center import act, deck_for, fix_deck, start, waiting_table
 from test_game_center import gc as game_env  # noqa: F401
+from test_game_center import presence as presence_env  # noqa: F401
 from test_miniapp import sign
 
 from app.modules import miniapp
@@ -23,6 +24,11 @@ BASE = '/api/app/games'
 @pytest.fixture
 def gc(request):
     return request.getfixturevalue('game_env')
+
+
+@pytest.fixture
+def presence(request):
+    return request.getfixturevalue('presence_env')
 
 
 @pytest.fixture
@@ -78,6 +84,7 @@ def test_http_catalog_balance_defaults_and_holdem_boundary(api):
     response = client.post(BASE+'/tables',headers=headers(),json={'request_id':'holdem_00001','game':'holdem','tier':'novice','buy_in':100})
     assert response.status_code == 503 and response.json()['detail']['code'] == 'disabled'
     assert client.get('/api/game-center/cash?user_id=u0').status_code == 401
+    assert client.get('/api/game-center/hand?table_id=x&hand_no=1').status_code == 401
 
 
 def test_http_flow_own_views_idempotency_and_stale_action(api):
@@ -102,7 +109,7 @@ def test_http_flow_own_views_idempotency_and_stale_action(api):
     assert client.post(BASE+f'/tables/{tid}/actions',headers=headers(),json={**action,'request_id':'fold_http_001','action':'fold'}).status_code == 200
     response = client.post(BASE+f'/tables/{tid}/actions',headers=headers(),json={**action,'request_id':'stale_http_001','action':'call'})
     assert response.status_code == 409
-    assert client.get(BASE+f'/tables/{tid}/hands/1/verify',headers=headers()).json()['settled']
+    assert client.get(BASE+f'/tables/{tid}/hands/1/verify',headers=headers()).status_code == 404
     assert client.get(BASE+'/wallet',headers=headers()).json()['frozen'] == 0
 
 
@@ -164,7 +171,7 @@ def test_sse_first_snapshot_changes_keepalive_privacy_and_unsubscribe(gc):
         assert await anext(a) == ': keepalive\n\n'
         await a.aclose()
         await b.aclose()
-        assert gc.s._listeners == {}
+        assert gc.s._listeners == {} and gc.s._online == {}
     asyncio.run(run())
 
 
@@ -180,11 +187,11 @@ def test_sse_token_lifetime_and_membership_revocation_close_stream(gc):
         gc.s.notify(t['id'])
         with pytest.raises(StopAsyncIteration):
             await anext(s)
-        assert not gc.s._listeners
+        assert not gc.s._listeners and not gc.s._online
         expired = stream(gc.s,t['id'],'u0',lambda:True,time.time()-.1,disconnected)
         with pytest.raises(StopAsyncIteration):
             await anext(expired)
-        assert not gc.s._listeners
+        assert not gc.s._listeners and not gc.s._online
     asyncio.run(run())
 
 
@@ -279,7 +286,7 @@ def test_holdem_http_contract_flow_and_private_sse(api):
     assert t['hand']['turn'] == 1 and t['hand']['engine']['small_blind_seat'] == 0
     assert t['hand']['legal_actions'] == t['hand']['engine']['legal_actions']
     assert 'hole' in t['hand']['engine']['seats'][0] and 'hole' not in t['hand']['engine']['seats'][1]
-    assert client.get(BASE+f'/tables/{tid}/hands/1/verify', headers=headers()).json()['settled'] is False
+    assert service.proof(tid, 1)['settled'] is False
     token = client.post(BASE+f'/tables/{tid}/stream-token', headers=headers(9001)).json()['token']
     assert service.stream_tokens.verify(token, tid)['uid'] == 'u1'
     async def connected():
@@ -305,9 +312,194 @@ def test_holdem_http_contract_flow_and_private_sse(api):
     t = post(f'/tables/{tid}/actions', uid=9001, hand_no=1, turn=2, action='fold')['table']
     assert t['phase'] == 'between' and t['hand'] is None and t['last_hand']['finished']
     assert t['last_hand']['result'] == t['last_hand']['engine']['results']
-    assert client.get(BASE+f'/tables/{tid}/hands/1/verify', headers=headers()).json()['settled'] is True
+    assert service.proof(tid, 1)['settled'] is True
     post(f'/tables/{tid}/leave')
     t = post(f'/tables/{tid}/leave', uid=9001)['table']
     assert t['phase'] == 'closed'
     assert client.get(BASE+'/wallet',headers=headers()).json()['frozen'] == 0
     assert client.get(BASE+'/me',headers=headers()).json()['active_tables'] == []
+
+
+def test_http_start_status_is_authoritative_without_other_balances(api, gc):
+    client, _ = api
+    t = create(client)
+    tid = t['id']
+    assert t['start_status']['reason'] == 'waiting_players'
+    client.post(BASE+f'/tables/{tid}/seat', headers=headers(9001),
+                json={'request_id': 'status_seat_0001'})
+    client.post(BASE+f'/tables/{tid}/ready', headers=headers(9001),
+                json={'request_id': 'status_ready_001', 'ready': True})
+    gc.points.add('u1', -4999, 'isolated.adjust')
+    response = client.get(BASE+f'/tables/{tid}', headers=headers())
+    status = response.json()['table']['start_status']
+    assert status == {'min_players': 2, 'seated_players': 2, 'eligible_players': 1,
+                      'can_start': False, 'reason': 'ineligible_players',
+                      'message': '已准备且可用余额够本场的玩家至少需要 2 人'}
+    assert 'balance' not in encode(status) and 'u1' not in encode(status)
+    result = client.post(BASE+f'/tables/{tid}/start', headers=headers(),
+                         json={'request_id': 'status_start_001'})
+    assert result.status_code == 409 and result.json()['detail']['code'] == 'not_ready'
+
+
+def test_sse_reconnect_matches_http_after_private_compare_and_settlement(gc, monkeypatch):
+    fix_deck(monkeypatch, deck_for([12, 25, 38], [11, 24, 37], [0, 16, 33]))
+    t = start(gc, 3)
+    async def disconnected():
+        return False
+    async def run():
+        original = stream(gc.s, t['id'], 'u2', lambda: True, time.time()+10, disconnected)
+        await anext(original)
+        await original.aclose()
+        state = t
+        for _ in range(3):
+            state = act(gc, state, 'call')
+        state = act(gc, state, 'look')
+        state = act(gc, state, 'compare', target=state['seats'][1]['player'])
+        state = act(gc, state, 'fold')
+        assert state['phase'] == 'waiting'
+        for uid in ('u0', 'u1', 'u2', 'u7'):
+            reconnected = stream(gc.s, t['id'], uid, lambda: True, time.time()+10, disconnected)
+            frame = await anext(reconnected)
+            snapshot = json.loads(frame.split('data: ', 1)[1])['table']
+            fetched = gc.s.snapshot(t['id'], uid)['table']
+            snapshot.pop('server_time')
+            fetched.pop('server_time')
+            assert snapshot == fetched
+            last = snapshot['last_hand']
+            assert len(last['comparisons']) == (1 if uid in ('u0', 'u1') else 0)
+            if uid in ('u2', 'u7'):
+                assert all(p['cards'] is None for p in last['players'])
+            assert all(secret not in encode(snapshot) for secret in ('salt', 'deck_codes', 'owner_uid'))
+            await reconnected.aclose()
+        assert gc.s._listeners == {}
+    asyncio.run(run())
+
+
+def test_shared_start_status_and_host_departure_for_holdem(api):
+    client, application = api
+    application.state.game_center.config()['holdem_enabled'] = True
+    t = client.post(BASE+'/tables', headers=headers(),
+                    json={'request_id': 'shared_holdem_create', 'game': 'holdem',
+                          'tier': 'novice', 'buy_in': 100}).json()['table']
+    assert t['start_status']['reason'] == 'waiting_for_players'
+    tid = t['id']
+    for uid in (9001, 9002):
+        client.post(BASE+f'/tables/{tid}/seat', headers=headers(uid),
+                    json={'request_id': 'shared_holdem_seat', 'buy_in': 100})
+    t = client.get(BASE+f'/tables/{tid}', headers=headers()).json()['table']
+    assert t['start_status']['can_start'] and t['start_status']['eligible_players'] == 3
+    client.post(BASE+f'/tables/{tid}/start', headers=headers(),
+                json={'request_id': 'shared_holdem_start'})
+    for uid in (9000, 9001, 9002):
+        t = client.post(BASE+f'/tables/{tid}/leave', headers=headers(uid),
+                        json={'request_id': 'shared_holdem_leave'}).json()['table']
+    assert t['host'] is None and all(p['leave_after'] for p in t['seats'])
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_open_sse_connections_protect_only_their_member_until_last_disconnect(presence, game):
+    gc = presence
+    t = waiting_table(gc, game)
+    async def disconnected():
+        return False
+    async def run():
+        streams = [stream(gc.s, t['id'], 'u0', lambda: True, time.time()+30,
+                          disconnected, keepalive=.001) for _ in range(2)]
+        try:
+            for connection in streams:
+                await anext(connection)
+            assert len(gc.s._online[(t['id'], 'u0')]) == 2
+            gc.clock = 1090
+            gc.s.tick(gc.clock)
+            assert gc.s.active_tables('u0') and not gc.s.active_tables('u1')
+            await streams[0].aclose()
+            assert len(gc.s._online[(t['id'], 'u0')]) == 1
+            gc.clock = 1190
+            gc.s.tick(gc.clock)
+            assert gc.s.active_tables('u0')
+            frame = await anext(streams[1])
+            assert 'event: snapshot' in frame
+            assert gc.s._presence[t['id']]['u0'] == gc.clock
+            gc.clock = 1200
+            before = gc.db._conn.total_changes
+            assert await anext(streams[1]) == ': keepalive\n\n'
+            assert gc.s._presence[t['id']]['u0'] == gc.clock
+            assert gc.db._conn.total_changes == before
+        finally:
+            for connection in streams:
+                await connection.aclose()
+        assert gc.s._listeners == {} and gc.s._online == {}
+        gc.clock = 1289.99
+        gc.s.tick(gc.clock)
+        assert gc.s.active_tables('u0')
+        gc.clock = 1290
+        gc.s.tick(gc.clock)
+        assert not gc.s.active_tables('u0') and gc.s.wallet('u0', gc.clock)['frozen'] == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_member_http_refreshes_presence_and_offline_reopen_is_not_seated(api, presence, game, monkeypatch):
+    client, _ = api
+    gc = presence
+    gc.cfg[game + '_enabled'] = True
+    monkeypatch.setattr(GameCenter, '_clock', staticmethod(lambda now: gc.clock if now is None else float(now)))
+    payload = {'request_id': 'presence_http_create', 'game': game, 'tier': 'novice'}
+    if game == 'holdem':
+        payload['buy_in'] = 100
+    t = client.post(BASE+'/tables', headers=headers(), json=payload).json()['table']
+    tid = t['id']
+    gc.clock += 90
+    t = client.get(BASE+f'/tables/{tid}', headers=headers()).json()['table']
+    assert t['me']['seat'] == 0
+    gc.s.tick(gc.clock)
+    assert gc.s.active_tables('u0')
+    gc.clock += 89
+    t = client.post(BASE+f'/tables/{tid}/auto', headers=headers(),
+                    json={'request_id': 'presence_http_auto', 'enabled': False}).json()['table']
+    assert t['phase'] == 'waiting'
+    gc.clock += 89
+    assert client.post(BASE+f'/tables/{tid}/stream-token', headers=headers()).status_code == 200
+    gc.s.tick(gc.clock)
+    assert gc.s.active_tables('u0')
+    gc.clock += 90
+    gc.s.tick(gc.clock)
+    t = client.get(BASE+f'/tables/{tid}', headers=headers()).json()['table']
+    assert t['phase'] == 'closed' and t['me']['seat'] is None and t['me']['wallet']['frozen'] == 0
+    assert client.get(BASE+'/me', headers=headers()).json()['active_tables'] == []
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_public_avatars_use_current_signed_proxy_and_old_seats_need_no_migration(api, gc, game, monkeypatch):
+    client, _ = api
+    t = waiting_table(gc, game)
+    raw = gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json']
+    assert all('avatar' not in p for p in json.loads(raw)['seats'])
+    response = client.get(BASE+f"/tables/{t['id']}", headers=headers(9007))
+    seats = response.json()['table']['seats']
+    assert [p['avatar'] for p in seats] == [miniapp.avatar_url('9000'), miniapp.avatar_url('9001')]
+    assert all(p['avatar'].startswith('/api/app/avatar/') and '?s=' in p['avatar'] for p in seats)
+    assert all(not {'uid', 'emby_user_id', 'tg_user_id', 'tg_id'} & p.keys() for p in seats)
+    monkeypatch.setattr(miniapp, '_POSTER_KEY', b'isolated-new-process-avatar-key')
+    gc.db.execute("UPDATE members SET tg_user_id='' WHERE emby_user_id=?", ('u1',))
+    new = client.get(BASE+f"/tables/{t['id']}", headers=headers()).json()['table']['seats']
+    assert new[0]['avatar'] == miniapp.avatar_url('9000') != seats[0]['avatar']
+    assert new[1]['avatar'] == ''
+    assert gc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))['state_json'] == raw
+    async def disconnected():
+        return False
+    async def run():
+        connection = stream(gc.s, t['id'], 'u0', lambda: True, time.time()+10, disconnected)
+        try:
+            frame = await anext(connection)
+            assert json.loads(frame.split('data: ', 1)[1])['table']['seats'] == new
+        finally:
+            await connection.aclose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize('game', ['zjh', 'holdem'])
+def test_practice_robots_have_empty_avatars(gc, game):
+    t = waiting_table(gc, game, 1, tier='practice')
+    assert next(p['avatar'] for p in t['seats'] if not p['bot']) == miniapp.avatar_url('9000')
+    assert all(p['avatar'] == '' for p in t['seats'] if p['bot'])

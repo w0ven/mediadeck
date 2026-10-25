@@ -76,7 +76,8 @@ class GameDelivery:
             # Revoking broadcast permission never permits new sends. Bound deletion is
             # cleanup, so it still runs after the game/broadcast switch is turned off.
             if job['op'] != 'delete':
-                permitted = self.service.cfg()['broadcast_enabled']
+                cfg = self.service.cfg()
+                permitted = cfg['broadcast_enabled'] and job['chat_id'] in cfg['broadcast_groups'].split()
                 allowed = bot._group_chat_allowed({'id': job['chat_id'], 'type': 'supergroup'})
                 if permitted and not allowed:
                     try:

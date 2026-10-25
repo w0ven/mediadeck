@@ -162,8 +162,8 @@ async function environment() {
     assert.equal(response.status, 200, JSON.stringify(data));
     return data;
   }
-  async function pageFor(user = 1, theme = 'dark', width = 400, height = 860, controlledStream = false) {
-    const context = await browser.newContext({ viewport: { width, height }, reducedMotion: 'reduce' });
+  async function pageFor(user = 1, theme = 'dark', width = 400, height = 860, controlledStream = false, motion = false) {
+    const context = await browser.newContext({ viewport: { width, height }, reducedMotion: motion ? 'no-preference' : 'reduce' });
     const page = await context.newPage(); pages.push(page);
     page.setDefaultTimeout(12000);
     page.on('pageerror', e => errors.push(String(e)));
@@ -247,7 +247,7 @@ async function matrix(page, label) {
   await page.evaluate(() => document.documentElement.dataset.theme = 'dark');
 }
 
-test('real ZJH member UI, host/ready/action/auto/verify, deep links, native SSE reconnect and cleanup', { timeout: 180000 }, async () => {
+test('real ZJH member UI, host/ready/action/auto, deep links, native SSE reconnect and cleanup', { timeout: 180000 }, async () => {
   const env = await environment();
   try {
     const host = await env.pageFor(1), guest = await env.pageFor(2);
@@ -274,8 +274,8 @@ test('real ZJH member UI, host/ready/action/auto/verify, deep links, native SSE 
     let t = (await env.request(1, '/tables/' + id)).table;
     assert.equal(t.me.is_host, true); assert.equal(t.me.wallet.frozen, 0);
     assert(await host.locator('[data-gc-start]').isDisabled());
-    assert.match(await host.locator('.gc-wait-reason').innerText(), /还差 1 人/);
-    await matrix(host, null); // Waiting text also stays below the dealer at both sizes/themes.
+    assert.match(await host.locator('.gc-wait-reason').innerText(), /还差 1 人入座/);
+    await matrix(host, '02b-zjh-waiting'); // Waiting text also stays below the dealer at both sizes/themes.
     // Opening a deep link never seats/freezes; explicit click does.
     await guest.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + id);
     await guest.locator('[data-gc-seat]').waitFor();
@@ -369,14 +369,8 @@ test('real ZJH member UI, host/ready/action/auto/verify, deep links, native SSE 
     await closeSheet(host);
     await host.locator('[data-gc-history]').first().click();
     assert.match(await host.locator('.gc-result-head').innerText(), /结算/);
-    await host.locator('[data-gc-result-verify]').click();
-    await host.locator('[data-gc-recheck]').click();
-    await host.locator('[data-gc-verify-result] .gc-up').waitFor();
-    await capture(host, '06-zjh-verify.png');
-    // Fallback hash also recomputes correctly without WebCrypto.
-    await host.evaluate(() => Object.defineProperty(crypto, 'subtle', { value: undefined, configurable: true }));
-    await host.locator('[data-gc-recheck]').click();
-    await host.locator('[data-gc-verify-result] .gc-up').waitFor();
+    assert.equal(await host.locator('[data-gc-result-verify]').count(), 0);
+    await capture(host, '06-zjh-result.png');
     await closeSheet(host);
     // Leaving the game page closes every native stream and stops reconnect timers.
     await host.locator('[data-gc-back]').click();
@@ -540,10 +534,7 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
     assert.equal(await host.locator('.gc-hand .gc-card:not(.gc-card-back)').count(), 2);
     assert.equal(await host.locator('.gc-seat .gc-card:not(.gc-card-back)').count(), 0);
     assert(await host.locator('[data-gc-topup]').isDisabled());
-    await host.locator('[data-gc-verify]').click();
-    assert.match(await host.locator('.gc-sheet').innerText(), /尚未结束/);
-    assert.equal(await host.locator('[data-gc-recheck]').count(), 0);
-    await closeSheet(host);
+    assert.equal(await host.locator('[data-gc-verify]').count(), 0);
 
     // Three more members join mid-hand; they do not alter the existing action deadline.
     const deadline = t.turn_deadline;
@@ -569,10 +560,6 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
     await matrix(host, null);
     await host.locator('[data-gc-history]').first().click();
     assert.equal(await host.locator('.gc-best-five .gc-card').count(), 5);
-    await host.locator('[data-gc-result-verify]').click();
-    await host.locator('[data-gc-recheck]').click();
-    await host.locator('[data-gc-verify-result] p.gc-up').waitFor();
-    assert.match(await host.locator('[data-gc-verify-result]').innerText(), /烧牌顺序/);
     await closeSheet(host);
     await env.call({ kind: 'advance', table: id, seconds: 2 });
     await syncTable(host, await tableFor(env, id));
@@ -725,20 +712,6 @@ test('real Holdem multiway all-ins: side pots, uncalled return, deferred cash-ou
     await host.locator(`[data-gc-focus="${otherShown.player}"]`).click();
     assert.equal(await host.locator('.gc-best-five .gc-card').count(), 5);
     await shots(host, '08-holdem-results');
-    await host.locator('[data-gc-result-verify]').click();
-    await host.locator('[data-gc-recheck]').click();
-    await host.locator('[data-gc-verify-result] p.gc-up').waitFor();
-    const verify = await env.request(1, `/tables/${id}/hands/1/verify`);
-    const n = verify.deal_order.length;
-    assert.equal(n, 3);
-    assert.deepEqual(t.last_hand.engine.board, [1,2,3,5,7].map(i => verify.deck[2*n+i]));
-    for (const player of t.last_hand.engine.seats) {
-      const i = verify.deal_order.indexOf(player.player);
-      assert.deepEqual(player.hole, [verify.deck[i], verify.deck[n+i]]);
-    }
-    await host.evaluate(() => Object.defineProperty(crypto, 'subtle', { value: undefined, configurable: true }));
-    await host.locator('[data-gc-recheck]').click();
-    await host.locator('[data-gc-verify-result] p.gc-up').waitFor();
     assert.equal(env.errors.length, 0, env.errors.join('\n'));
   } finally { await env.close(); }
 });
@@ -843,6 +816,81 @@ test('real Holdem practice: five robots, beans-only bust/pause/top-up, away/resu
     assert.equal(wallet.points, initial.points);
     assert.equal(wallet.frozen, 0);
     assert.equal(wallet.beans, beforeLeave.beans + stack);
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
+
+test('table effects: action bubbles and an on-felt celebration precede exactly one result sheet', { timeout: 60000 }, async () => {
+  const env = await environment();
+  try {
+    const host = await env.pageFor(1, 'dark', 400, 860, false, true);
+    let t = (await env.request(1, '/tables', 'POST', { game: 'zjh', tier: 'novice' })).table;
+    const id = t.id;
+    const startHand = async () => {
+      await env.request(2, `/tables/${id}/ready`, 'POST', { ready: true });
+      await env.request(1, `/tables/${id}/start`, 'POST', {});
+    };
+    const act = async (user, action) => {
+      const view = await tableFor(env, id, user);
+      await env.request(user, `/tables/${id}/actions`, 'POST', { hand_no: view.hand_no, turn: view.hand.turn, action });
+      await syncTable(host, await tableFor(env, id));
+    };
+    await env.request(2, `/tables/${id}/seat`, 'POST', {});
+    await startHand();
+    await host.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + id);
+    await host.locator('.gc-table[data-phase="playing"]').waitFor();
+    const decoded = await host.evaluate(async () => {
+      const ctx = new AudioContext();
+      const names = ['deal', 'flip', 'chip', 'raise', 'allin', 'fold', 'check', 'turn', 'tick', 'win', 'lose', 'tap', 'music'];
+      return Promise.all(names.map(async name => {
+        const data = await (await fetch(`/app/assets/game-assets/audio/${name}.mp3`)).arrayBuffer();
+        return (await ctx.decodeAudioData(data)).duration;
+      }));
+    });
+    assert(decoded.every(seconds => seconds > .05), `every sound decodes: ${decoded}`);
+    // Looking is out of turn and silent on the server; everyone else still sees it happen.
+    await act(2, 'look');
+    await host.locator('.gc-fx-bubble', { hasText: '看牌' }).waitFor();
+    t = await tableFor(env, id);
+    if (t.hand.current_player === t.me.player) {
+      await act(1, 'call');
+      await host.locator('.gc-fx-bubble', { hasText: '跟注' }).waitFor();
+    }
+    await act(2, 'fold');
+    await host.locator('.gc-fx-bubble', { hasText: '弃牌' }).waitFor();
+    await host.locator('.gc-celebrate').waitFor();
+    assert.match(await host.locator('.gc-celebrate').innerText(), /可乐 赢了/);
+    assert.equal(await host.locator('.gc-sheet').count(), 0, 'the result sheet waits for the celebration');
+    await capture(host, '13-zjh-celebrate.png');
+    await host.locator('.gc-result-head').waitFor({ timeout: 6000 });
+    await closeSheet(host);
+    await startHand();
+    await syncTable(host, await tableFor(env, id));
+    await host.locator('.gc-table[data-phase="playing"]').waitFor();
+    t = await tableFor(env, id);
+    await act(t.hand.current_player === t.me.player ? 1 : 2, 'call');
+    await host.waitForTimeout(500);
+    assert.equal(await host.locator('.gc-sheet').count(), 0, 'hand 1 result must not reopen during hand 2');
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
+
+test('hold\'em celebrates in its own centre without colliding with six-seat positions', { timeout: 60000 }, async () => {
+  const env = await environment();
+  try {
+    const host = await env.pageFor(1, 'dark', 400, 860, false, true);
+    let h = (await env.request(1, '/tables', 'POST', { game: 'holdem', tier: 'novice', buy_in: 100 })).table;
+    await env.request(2, `/tables/${h.id}/seat`, 'POST', { buy_in: 100 });
+    await env.request(1, `/tables/${h.id}/start`, 'POST', {});
+    await host.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + h.id);
+    await host.locator('.gc-table[data-phase="playing"]').waitFor();
+    h = await tableFor(env, h.id);
+    const folder = h.hand.current_player === h.me.player ? 1 : 2;
+    const view = await tableFor(env, h.id, folder);
+    await env.request(folder, `/tables/${h.id}/actions`, 'POST', { hand_no: view.hand_no, turn: view.hand.turn, action: 'fold' });
+    await syncTable(host, await tableFor(env, h.id));
+    await host.locator('.gc-celebrate').waitFor();
+    await capture(host, '14-holdem-celebrate.png');
     assert.equal(env.errors.length, 0, env.errors.join('\n'));
   } finally { await env.close(); }
 });

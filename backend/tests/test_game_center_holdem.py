@@ -9,10 +9,12 @@ from types import SimpleNamespace
 
 import pytest
 from test_game_center import gc, total  # noqa: F401 - shared real SQLite fixture
+from test_game_center_api import api, headers  # noqa: F401 - shared authenticated HTTP fixture
 
 from app.core.db import Database
 from app.modules import holdem_engine as engine
 from app.modules.game_center import GameCenter, GameError
+from app.modules.game_center_api import stream
 from app.modules.game_center_config import GameCenterPlugin, tiers
 from app.modules.game_center_delivery import GameDelivery
 from app.modules.game_center_holdem import robot_action
@@ -170,6 +172,87 @@ def test_new_join_in_play_waits_next_hand_and_does_not_change_deadline(hc):
     assert len(t['hand']['engine']['seats']) == 3 and t['button'] == 1
 
 
+@pytest.mark.parametrize('absent', [0, 1, 2])
+@pytest.mark.parametrize('operation', ['leave', 'away'])
+def test_transition_to_heads_up_advances_big_blind(hc, absent, operation):
+    t = start(hc, 3)
+    previous_big = t['hand']['engine']['big_blind_seat']
+    t = finish(hc, t, 'fold')
+    kwargs = {'enabled': True} if operation == 'away' else {}
+    t = hc.op(f'u{absent}', operation, t['id'], **kwargs)
+    eligible = [p['seat'] for p in t['seats'] if not p['away']]
+    next_big = min(eligible, key=lambda seat: (seat - previous_big - 1) % 6)
+    t = next_hand(hc, t)
+    state = t['hand']['engine']
+    assert state['big_blind_seat'] == next_big
+    assert state['small_blind_seat'] == state['button'] != next_big
+    button = next(p for p in state['seats'] if p['seat'] == state['button'])
+    assert state['current_player'] == button['player']
+    t = act(hc, t, 'call')
+    t = act(hc, t, 'check')
+    assert t['hand']['engine']['street'] == 'flop'
+    assert t['hand']['current_player'] != button['player']
+    assert total(hc) == 40000
+
+
+def test_heads_up_sparse_seats_resumes_using_legacy_last_hand(hc):
+    t = hc.op('u0', 'create', game='holdem', tier='novice', buy_in=100, seat=4)
+    for uid, seat in [('u1', 0), ('u2', 2)]:
+        hc.op(uid, 'seat', t['id'], buy_in=100, seat=seat)
+    t = hc.op('u0', 'start', t['id'])
+    assert t['hand']['engine']['big_blind_seat'] == 2
+    t = finish(hc, t, 'fold')
+    t = hc.op('u0', 'away', t['id'], enabled=True)
+    before = raw(hc, t)
+    assert 'start_status' not in before
+    hc.s = GameCenter(hc.db, hc.members, hc.points, lambda: hc.cfg, lambda: True, lambda: hc.bot)
+    assert raw(hc, t) == before
+    t = next_hand(hc, t)
+    assert t['button'] == 2 and t['hand']['engine']['big_blind_seat'] == 0
+
+
+def test_waiting_status_distinguishes_first_start_pause_and_practice(hc):
+    t = create(hc, 1)
+    assert t['start_status'] == {
+        'eligible_players': 1, 'min_players': 2, 'can_start': False, 'reason': 'waiting_for_players',
+    }
+    t = hc.op('u1', 'seat', t['id'], buy_in=100)
+    assert t['start_status']['can_start']
+    assert t['start_status']['reason'] == 'waiting_for_host'
+    tier = next(tier for tier in hc.s.list_tiers('holdem')['tiers'] if tier['id'] == 'novice')
+    assert tier['waiting_tables'][0]['start_status'] == t['start_status']
+    t = hc.op('u0', 'start', t['id'])
+    assert t['start_status']['reason'] is None and not t['start_status']['can_start']
+    t = finish(hc, t, 'fold')
+    assert t['start_status']['reason'] == 'next_hand'
+    t = hc.op('u1', 'away', t['id'], enabled=True)
+    assert t['start_status']['reason'] == 'paused_for_players'
+    assert t['start_status']['eligible_players'] == 1
+    tier = next(tier for tier in hc.s.list_tiers('holdem')['tiers'] if tier['id'] == 'novice')
+    assert tier['waiting_tables'][0]['start_status'] == t['start_status']
+    t = hc.op('u2', 'seat', t['id'], buy_in=100)
+    assert t['start_status']['reason'] == 'next_hand' and t['countdown_at'] == hc.clock + 4
+    for uid in ('u0', 'u1', 'u2'):
+        t = hc.op(uid, 'leave', t['id'])
+    assert t['start_status']['reason'] == 'closed' and not t['start_status']['can_start']
+    t = create(hc, 1, 2000, 'practice')
+    hc.op('u0', 'away', t['id'], enabled=True)
+    for _ in range(200):
+        if not t['hand']:
+            break
+        r = raw(hc, t)
+        current = engine.current_player(r['hand']['engine'])
+        if r['hand']['users'][current]['bot']:
+            hc.clock = r['auto_at']
+            hc.s.tick(hc.clock)
+            t = snap(hc, t)
+        else:
+            t = act(hc, t, 'fold')
+    assert t['start_status'] == {
+        'eligible_players': 0, 'min_players': 2, 'can_start': False, 'reason': 'practice_player_unavailable',
+    }
+
+
 def test_topup_phase_limit_balance_concurrency_and_reentry(hc):
     t = create(hc)
     def topup():
@@ -211,12 +294,13 @@ def test_departing_participant_defers_release_including_already_folded(hc):
     t = act(hc, t, 'fold')  # seat 0 folds but is still a participant awaiting results
     t = hc.op('u0', 'leave', t['id'])
     assert t['me']['seat'] == 0 and t['seats'][0]['leave_after']
+    assert '自动弃牌' not in t['me']['notice']
     assert held(hc, t)['u0'] == 100 and hc.points.balance('u0') == 4900
     t = finish(hc, t, 'fold')
     assert all(p['seat'] != 0 for p in t['seats']) and held(hc, t)['u0'] == 0
     assert hc.points.balance('u0') == 5000 and t['button'] == 0
     t = next_hand(hc, t)
-    assert t['button'] == 1  # rotate past the departed button
+    assert t['button'] == 2  # Previous big blind becomes the heads-up button, not big blind again.
 
 
 def test_departing_turn_folds_on_auto_tick_and_spectator_leaves_now(hc):
@@ -245,6 +329,7 @@ def test_all_in_departure_still_eligible_to_win(hc, monkeypatch):
     t = start(hc, 3, buy=[40, 80, 120])
     t = act(hc, t, 'all_in')
     t = hc.op('u0', 'leave', t['id'])
+    assert '仍参与本手结算' in t['me']['notice'] and '自动弃牌' not in t['me']['notice']
     assert held(hc, t)['u0'] == 40
     t = act(hc, t, 'all_in')
     t = act(hc, t, 'call')  # no opponent can contest another raise
@@ -370,6 +455,42 @@ def test_restart_actual_db_connection_mid_hand_preserves_deck_deadlines_and_sett
     hc.db.close()
 
 
+def test_restart_catches_up_auto_away_and_releases_all_frozen_points(hc):
+    t = start(hc, 6)
+    before = raw(hc, t)
+    hc.s = GameCenter(hc.db, hc.members, hc.points, lambda: hc.cfg, lambda: True, lambda: hc.bot)
+    assert raw(hc, t) == before
+    hc.clock += 1800
+    for _ in range(10):
+        hc.s.tick(hc.clock)
+        if snap(hc, t)['phase'] == 'closed':
+            break
+    assert snap(hc, t)['phase'] == 'closed'
+    assert not hc.db.query('SELECT * FROM gc_seats')
+    assert all(amount == 0 for amount in held(hc, t).values())
+    assert total(hc) == 40000
+    count = hc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n']
+    hc.s.tick(hc.clock)
+    assert hc.db.one('SELECT COUNT(*) n FROM play_cash_events')['n'] == count
+
+
+def test_many_hands_keep_live_state_bounded_and_preserve_archives(hc):
+    t = start(hc)
+    first_size = None
+    for hand in range(100):
+        t = finish(hc, t, 'fold')
+        row = hc.db.one('SELECT state_json FROM gc_tables WHERE id=?', (t['id'],))
+        size = len(row['state_json'])
+        if first_size is None:
+            first_size = size
+        assert size < first_size + 512
+        if hand < 99:
+            t = next_hand(hc, t)
+    assert hc.db.one('SELECT COUNT(*) n FROM gc_hands WHERE table_id=?', (t['id'],))['n'] == 100
+    assert hc.s.proof(t['id'], 1)['settled']
+    assert total(hc) == 40000
+
+
 @pytest.mark.parametrize('seed', range(6))
 def test_random_multihand_actual_escrows_zero_sum_and_final_cashout(hc, seed):
     rng = random.Random(seed)
@@ -449,7 +570,7 @@ def test_deck_commitment_deal_order_and_all_private_views(hc):
     t = start(hc, 3)
     r = raw(hc, t)
     h = r['hand']
-    verify = hc.s.verify(t['id'], 1, 'u7')
+    verify = hc.s.proof(t['id'], 1)
     assert not verify['settled'] and 'salt' not in verify and 'deck' not in verify
     assert hashlib.sha256((h['deck_codes'] + '|' + h['salt']).encode()).hexdigest() == verify['commitment']
     for uid in ('u0', 'u1', 'u2', 'u7'):
@@ -460,13 +581,44 @@ def test_deck_commitment_deal_order_and_all_private_views(hc):
         wire = json.dumps(v)
         assert all(field not in wire for field in ('"deck"', '"salt"', '"burned"', '"cursor"', '"users"', 'private-login'))
     t = finish(hc, t)
-    verify = hc.s.verify(t['id'], 1, 'u7')
+    verify = hc.s.proof(t['id'], 1)
     assert verify['settled'] and len(verify['deck']) == 52
     n = len(verify['deal_order'])
     for index, pid in enumerate(verify['deal_order']):
         p = next(p for p in t['last_hand']['engine']['seats'] if p['player'] == pid)
         assert p['hole'] == [verify['deck'][index], verify['deck'][index+n]]
     assert t['last_hand']['engine']['board'] == [verify['deck'][i] for i in (2*n+1, 2*n+2, 2*n+3, 2*n+5, 2*n+7)]
+
+
+def test_http_sse_reconnect_uses_latest_view_without_folded_holes(hc, request, monkeypatch):
+    client, _ = request.getfixturevalue('api')
+    monkeypatch.setattr('app.modules.game_center.time.time', lambda: hc.clock)
+    t = start(hc, 3)
+    path = '/api/app/games/tables/' + t['id']
+    async def connected():
+        return False
+    async def snapshot(uid):
+        events = stream(hc.s, t['id'], uid, lambda: True, hc.clock + 30, connected)
+        try:
+            return json.loads((await anext(events)).split('data: ')[1])['table']
+        finally:
+            await events.aclose()
+    for uid, telegram in [('u0', 9000), ('u1', 9001), ('u7', 9007)]:
+        public = client.get(path, headers=headers(telegram)).json()['table']
+        assert asyncio.run(snapshot(uid)) == public
+        assert all(('hole' in p) == (p['player'] == public['me']['player'])
+                   for p in public['hand']['engine']['seats'])
+    folded = t['seats'][0]['player']
+    t = act(hc, t, 'fold')
+    t = finish(hc, t)
+    for uid, telegram in [('u1', 9001), ('u7', 9007)]:
+        public = client.get(path, headers=headers(telegram)).json()['table']
+        restored = asyncio.run(snapshot(uid))
+        assert restored == public and restored['revision'] == t['revision']
+        assert restored['start_status']['reason'] == 'next_hand'
+        hidden = next(p for p in restored['last_hand']['engine']['seats'] if p['player'] == folded)
+        assert 'hole' not in hidden and not hidden['shown']
+    assert not hc.s._listeners
 
 
 def test_folded_cards_never_in_others_snapshot_even_when_member_reseats(hc):
@@ -485,6 +637,7 @@ def test_folded_cards_never_in_others_snapshot_even_when_member_reseats(hc):
 @pytest.mark.parametrize('seed', range(10))
 def test_robot_legal_decisions_all_streets_and_only_own_cards(seed):
     rng = random.Random(seed)
+    actions = set()
     for hand in range(20):
         deck = list(range(52))
         rng.shuffle(deck)
@@ -495,9 +648,11 @@ def test_robot_legal_decisions_all_streets_and_only_own_cards(seed):
                 break
             who = engine.current_player(s)
             action, amount = robot_action(s, who, rng)
+            actions.add(action)
             s = engine.apply_action(s, who, action, amount)
         assert engine.is_finished(s)
         assert sum(p['net'] for p in engine.results(s)['players'].values()) == 0
+    assert {'check', 'call', 'fold'} <= actions
 
 
 def test_practice_beans_only_bot_ticks_and_midhand_leave(hc):
