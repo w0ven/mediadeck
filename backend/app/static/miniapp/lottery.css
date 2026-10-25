@@ -826,6 +826,56 @@ html[data-theme="light"] .lottery select optgroup {
   font-weight: 600;
   cursor: pointer;
 }
+.lottery .text-btn.danger {
+  color: var(--bad);
+}
+.lottery .prize-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+}
+.lottery .prize-handle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 36px;
+  color: var(--hint);
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+  flex: none;
+  padding: 0 2px;
+}
+.lottery .prize-handle:active {
+  cursor: grabbing;
+}
+.lottery .prize-handle svg {
+  width: 14px;
+  height: 18px;
+  fill: currentColor;
+  opacity: 0.6;
+}
+.lottery .prize-row.dragging {
+  opacity: 0.45;
+  background: color-mix(in srgb, var(--accent) 15%, var(--glass2));
+}
+.lottery .prize-row.drag-over {
+  border-top: 2px solid var(--accent);
+}
+.lottery .prize-order-btn {
+  background: none;
+  border: 0;
+  color: var(--hint);
+  padding: 2px 4px;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+}
+.lottery .prize-order-btn:hover {
+  color: var(--accent);
+}
 
 /* Button & Actions bar (Seamless edge-to-edge gradient blur, white text, no boxy edge) */
 .lottery .btn {
@@ -1091,12 +1141,26 @@ html[data-theme="light"] .lottery select optgroup {
     font-size: 14.5px;
   }
   .lottery .prize-row {
-    padding: 10px 11px;
-    gap: 9px;
+    padding: 10px 8px;
+    gap: 6px;
+  }
+  .lottery .prize-handle {
+    width: 16px;
+    padding: 0;
+  }
+  .lottery .prize-row-actions {
+    gap: 2px;
+  }
+  .lottery .prize-order-btn {
+    padding: 2px 2px;
+  }
+  .lottery .prize-row .text-btn {
+    padding: 4px;
+    font-size: 11px;
   }
   .lottery .prize-icon {
-    width: 40px;
-    height: 40px;
+    width: 36px;
+    height: 36px;
   }
 }
 

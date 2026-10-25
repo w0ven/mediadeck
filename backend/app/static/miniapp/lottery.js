@@ -763,8 +763,8 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
             </div>` : ''}
           </div>
 
-          <h3>奖池设置 · ${draft.prizes.reduce((s, p) => s + p.quantity, 0)} 个名额</h3>
-          <div class="prize-list">${draft.prizes.map((p, i) => `<div class="prize-row">${image(art[p.kind], 30)}<div class="grow"><b>${esc(p.name)}</b>${prizeTag(p, true)}<div class="prize-desc">${p.quantity} 名 · ${description(p)}</div></div><button type="button" class="text-btn" data-lot-remove="${i}" aria-label="移除${esc(p.name)}">移除</button></div>`).join('') || '<div class="empty">添加第一份奖励</div>'}</div>
+          <h3 id="lot-prize-heading">奖池设置 · ${draft.prizes.reduce((s, p) => s + p.quantity, 0)} 个名额</h3>
+          <div class="prize-list" id="lot-prize-list">${renderPrizeListHtml()}</div>
           <button type="button" class="add-prize" id="lot-add">＋ 添加一份奖励</button>
           <div id="lot-prize-editor"></div>
           <p class="error" id="lot-form-error" role="alert"></p>
@@ -776,8 +776,14 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         </form>`);
 
       bind('#lot-cancel', back);
-      bind('[data-lot-remove]', b => { collect(); draft.prizes.splice(Number(b.dataset.lotRemove), 1); renderEditor(); });
-      bind('#lot-add', () => { if ($('#lot-kind')) return; addPrize(); });
+      bindPrizeRowActions();
+      bind('#lot-add', () => {
+        if ($('#lot-kind')) {
+          $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+          return;
+        }
+        openPrizeEditor(-1);
+      });
 
       // Interactive linkage for draw_mode & audience
       const modeEl = $('#lot-mode');
@@ -907,63 +913,290 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       });
     }
 
-    function addPrize() {
-      collect();
+    function renderPrizeListHtml() {
+      const gripSvg = '<svg viewBox="0 0 10 16" aria-hidden="true"><circle cx="3" cy="2" r="1.5"/><circle cx="7" cy="2" r="1.5"/><circle cx="3" cy="8" r="1.5"/><circle cx="7" cy="8" r="1.5"/><circle cx="3" cy="14" r="1.5"/><circle cx="7" cy="14" r="1.5"/></svg>';
+      const total = draft.prizes.length;
+      return draft.prizes.map((p, i) => `<div class="prize-row" id="lot-prize-row-${i}" data-index="${i}">
+        <div class="prize-handle" data-lot-drag="${i}" title="按住拖拽排序" aria-label="按住拖动排序" role="button" tabindex="0">${gripSvg}</div>
+        ${image(art[p.kind], 30)}
+        <div class="grow">
+          <b>${esc(p.name)}</b>${prizeTag(p, true)}
+          <div class="prize-desc">${p.quantity} 名 · ${description(p)}</div>
+        </div>
+        <div class="prize-row-actions">
+          ${i > 0 ? `<button type="button" class="prize-order-btn" data-lot-move-up="${i}" title="上移" aria-label="上移${esc(p.name)}">▲</button>` : ''}
+          ${i < total - 1 ? `<button type="button" class="prize-order-btn" data-lot-move-down="${i}" title="下移" aria-label="下移${esc(p.name)}">▼</button>` : ''}
+          <button type="button" class="text-btn" data-lot-edit="${i}" aria-label="编辑${esc(p.name)}">编辑</button>
+          <button type="button" class="text-btn danger" data-lot-remove="${i}" aria-label="移除${esc(p.name)}">移除</button>
+        </div>
+      </div>`).join('') || '<div class="empty">添加第一份奖励</div>';
+    }
+
+    function syncPrizeListDom() {
+      const heading = $('#lot-prize-heading');
+      if (heading) heading.textContent = `奖池设置 · ${draft.prizes.reduce((s, p) => s + p.quantity, 0)} 个名额`;
+      const listEl = $('#lot-prize-list');
+      if (listEl) {
+        listEl.innerHTML = renderPrizeListHtml();
+        bindPrizeRowActions();
+      }
+    }
+
+    function bindPrizeRowActions() {
+      bind('[data-lot-edit]', b => {
+        if ($('#lot-kind')) {
+          $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+          return;
+        }
+        openPrizeEditor(Number(b.dataset.lotEdit));
+      });
+      bind('[data-lot-remove]', b => {
+        if ($('#lot-kind')) {
+          $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+          return;
+        }
+        const idx = Number(b.dataset.lotRemove);
+        draft.prizes.splice(idx, 1);
+        syncPrizeListDom();
+      });
+      bind('[data-lot-move-up]', b => {
+        if ($('#lot-kind')) {
+          $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+          return;
+        }
+        const idx = Number(b.dataset.lotMoveUp);
+        if (idx > 0) {
+          const item = draft.prizes.splice(idx, 1)[0];
+          draft.prizes.splice(idx - 1, 0, item);
+          syncPrizeListDom();
+        }
+      });
+      bind('[data-lot-move-down]', b => {
+        if ($('#lot-kind')) {
+          $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+          return;
+        }
+        const idx = Number(b.dataset.lotMoveDown);
+        if (idx < draft.prizes.length - 1) {
+          const item = draft.prizes.splice(idx, 1)[0];
+          draft.prizes.splice(idx + 1, 0, item);
+          syncPrizeListDom();
+        }
+      });
+
+      // Pointer-based touch and mouse drag and drop
+      $$('#lot-prize-list [data-lot-drag]').forEach(handle => {
+        handle.onpointerdown = e => {
+          if ($('#lot-kind')) {
+            $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项';
+            return;
+          }
+          // Only primary pointer and left-click / single-touch (ignore secondary touches / right click)
+          if (!e.isPrimary || (e.pointerType === 'mouse' && e.button !== 0)) return;
+
+          const fromIdx = Number(handle.dataset.lotDrag);
+          const row = $(`#lot-prize-row-${fromIdx}`);
+          if (!row) return;
+
+          const activePointerId = e.pointerId;
+          try { handle.setPointerCapture(activePointerId); } catch (_) {}
+          row.classList.add('dragging');
+          let currentTargetIdx = fromIdx;
+          let cleanupDone = false;
+
+          const removeListeners = () => {
+            handle.removeEventListener('pointermove', onPointerMove);
+            handle.removeEventListener('pointerup', onPointerUp);
+            handle.removeEventListener('pointercancel', onPointerCancel);
+            handle.removeEventListener('lostpointercapture', onPointerCancel);
+          };
+
+          const cleanupUi = () => {
+            if (cleanupDone) return;
+            cleanupDone = true;
+            removeListeners();
+            row.classList.remove('dragging');
+            $$('#lot-prize-list .prize-row').forEach(r => r.classList.remove('drag-over'));
+            try {
+              if (handle.hasPointerCapture && handle.hasPointerCapture(activePointerId)) {
+                handle.releasePointerCapture(activePointerId);
+              }
+            } catch (_) {}
+          };
+
+          const onPointerMove = moveEvent => {
+            if (moveEvent.pointerId !== activePointerId) return;
+            const listEl = $('#lot-prize-list');
+            if (!listEl) return;
+            const rows = $$('.prize-row', listEl);
+            let foundIdx = fromIdx;
+            for (let i = 0; i < rows.length; i++) {
+              const r = rows[i];
+              const rect = r.getBoundingClientRect();
+              if (moveEvent.clientY >= rect.top && moveEvent.clientY <= rect.bottom) {
+                foundIdx = Number(r.dataset.index);
+                break;
+              }
+            }
+            if (foundIdx !== currentTargetIdx) {
+              rows.forEach(r => r.classList.remove('drag-over'));
+              currentTargetIdx = foundIdx;
+              const targetRow = $(`#lot-prize-row-${currentTargetIdx}`);
+              if (targetRow && currentTargetIdx !== fromIdx) {
+                targetRow.classList.add('drag-over');
+              }
+            }
+          };
+
+          const onPointerUp = upEvent => {
+            if (upEvent.pointerId !== activePointerId) return;
+            const targetIdx = currentTargetIdx;
+            cleanupUi();
+            // Valid pointerup: commit reorder if index changed
+            if (targetIdx !== fromIdx && targetIdx >= 0 && targetIdx < draft.prizes.length) {
+              const moved = draft.prizes.splice(fromIdx, 1)[0];
+              draft.prizes.splice(targetIdx, 0, moved);
+              syncPrizeListDom();
+            }
+          };
+
+          const onPointerCancel = cancelEvent => {
+            if (cancelEvent && cancelEvent.pointerId !== undefined && cancelEvent.pointerId !== activePointerId) return;
+            // Cancel / lostpointercapture: clean up and preserve original order, do not reorder
+            cleanupUi();
+          };
+
+          handle.addEventListener('pointermove', onPointerMove);
+          handle.addEventListener('pointerup', onPointerUp);
+          handle.addEventListener('pointercancel', onPointerCancel);
+          handle.addEventListener('lostpointercapture', onPointerCancel);
+        };
+      });
+    }
+
+    function openPrizeEditor(editIndex = -1) {
+      $('#lot-form-error').textContent = '';
+      const isEditing = editIndex >= 0 && editIndex < draft.prizes.length;
+      const initial = isEditing ? draft.prizes[editIndex] : null;
       const aud = draft.audience;
-      // Filter prize kinds by audience:
-      // - member: no registration
-      // - guest: only registration and manual (no points/invite/shop)
-      // - all: all kinds allowed
+      // Filter prize kinds by audience
       const allowedKinds = Object.entries(kinds).filter(([k]) => {
         if (aud === 'member') return k !== 'registration';
         if (aud === 'guest') return k === 'registration' || k === 'manual';
         return true;
       });
 
-      $('#lot-prize-editor').innerHTML = `<div class="subpanel">
-        <h3>添加奖项</h3>
-        <div class="lot-field"><label for="lot-kind">奖励类型</label><select id="lot-kind">${allowedKinds.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></div>
+      const initialKind = (initial && allowedKinds.some(([k]) => k === initial.kind))
+        ? initial.kind
+        : (allowedKinds[0] ? allowedKinds[0][0] : 'manual');
+      const initialQty = initial ? initial.quantity : 1;
+
+      const editorContainer = $('#lot-prize-editor');
+      if (!editorContainer) return;
+      editorContainer.innerHTML = `<div class="subpanel">
+        <h3>${isEditing ? '编辑奖项' : '添加奖项'}</h3>
+        <div class="lot-field"><label for="lot-kind">奖励类型</label><select id="lot-kind">${allowedKinds.map(([v, t]) => `<option value="${v}" ${v === initialKind ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
         <div id="lot-kind-fields"></div>
-        <div class="lot-field"><label for="lot-quantity">中奖人数</label><input type="number" id="lot-quantity" min="1" max="200" step="1" value="1"></div>
+        <div class="lot-field"><label for="lot-quantity">中奖人数</label><input type="number" id="lot-quantity" min="1" max="200" step="1" value="${initialQty}"></div>
         <p class="error" id="lot-prize-error" role="alert"></p>
         <div class="row">
-          <button type="button" class="btn secondary" id="lot-prize-cancel">取消奖项</button>
-          <button type="button" class="btn" id="lot-prize-ok">加入奖池</button>
+          <button type="button" class="btn secondary" id="lot-prize-cancel">取消</button>
+          <button type="button" class="btn" id="lot-prize-ok">${isEditing ? '保存修改' : '加入奖池'}</button>
         </div>
       </div>`;
 
-      const fields = () => {
+      // Smooth scroll editorContainer into view within #screen
+      editorContainer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+
+      let currentKind = initialKind;
+      const renderKindFields = (preset) => {
         const k = $('#lot-kind').value;
-        $('#lot-kind-fields').innerHTML = k === 'shop' ? `<div class="lot-field"><label for="lot-item">当前商城商品（每人一件）</label><select id="lot-item">${opts.items.map(i => `<option value="${i.id}">${esc(i.name)}</option>`).join('')}</select></div>` : k === 'registration' ? `<div class="lot-field"><label for="lot-group">账号分组</label><select id="lot-group">${opts.groups.map(g => `<option value="${esc(g.id)}">${esc(g.name)}</option>`).join('')}</select></div><div class="lot-field"><label for="lot-days">有效天数</label><input id="lot-days" type="number" min="1" max="3650" value="30"></div>` : k === 'manual' ? '<div class="lot-field"><label for="lot-prize-name">奖品名称（公开）</label><input id="lot-prize-name" maxlength="60"></div><div class="lot-field"><label for="lot-instructions">私密领取说明（仅中奖者/管理员）</label><textarea id="lot-instructions" maxlength="2000"></textarea></div>' : `<div class="lot-field"><label for="lot-amount">每人获得的${k === 'points' ? '积分' : '可用邀请名额'}</label><input type="number" id="lot-amount" min="1" max="${k === 'points' ? 100000 : 100}" value="${k === 'points' ? 500 : 1}"></div>`;
+        currentKind = k;
+        if (k === 'shop') {
+          const selItemId = preset && preset.kind === 'shop' ? String(preset.item_id) : (opts.items[0]?.id || '');
+          $('#lot-kind-fields').innerHTML = `<div class="lot-field"><label for="lot-item">当前商城商品（每人一件）</label><select id="lot-item">${opts.items.map(i => `<option value="${i.id}" ${String(i.id) === String(selItemId) ? 'selected' : ''}>${esc(i.name)}</option>`).join('')}</select></div>`;
+        } else if (k === 'registration') {
+          const selGroupId = preset && preset.kind === 'registration' ? String(preset.group_id) : (opts.groups[0]?.id || '');
+          const days = preset && preset.kind === 'registration' ? (preset.days || 30) : 30;
+          $('#lot-kind-fields').innerHTML = `<div class="lot-field"><label for="lot-group">账号分组</label><select id="lot-group">${opts.groups.map(g => `<option value="${esc(g.id)}" ${String(g.id) === String(selGroupId) ? 'selected' : ''}>${esc(g.name)}</option>`).join('')}</select></div><div class="lot-field"><label for="lot-days">有效天数</label><input id="lot-days" type="number" min="1" max="3650" value="${days}"></div>`;
+        } else if (k === 'manual') {
+          const name = preset && preset.kind === 'manual' ? (preset.name || '') : '';
+          const instructions = preset && preset.kind === 'manual' ? (preset.instructions || '') : '';
+          $('#lot-kind-fields').innerHTML = `<div class="lot-field"><label for="lot-prize-name">奖品名称（公开）</label><input id="lot-prize-name" maxlength="60" value="${esc(name)}"></div><div class="lot-field"><label for="lot-instructions">私密领取说明（仅中奖者/管理员）</label><textarea id="lot-instructions" maxlength="2000">${esc(instructions)}</textarea></div>`;
+        } else {
+          const amount = preset && preset.kind === k ? (preset.amount || (k === 'points' ? 500 : 1)) : (k === 'points' ? 500 : 1);
+          $('#lot-kind-fields').innerHTML = `<div class="lot-field"><label for="lot-amount">每人获得的${k === 'points' ? '积分' : '可用邀请名额'}</label><input type="number" id="lot-amount" min="1" max="${k === 'points' ? 100000 : 100}" value="${amount}"></div>`;
+        }
       };
-      fields();
-      $('#lot-kind').onchange = fields;
-      bind('#lot-prize-cancel', () => { $('#lot-prize-editor').innerHTML = ''; });
+
+      renderKindFields(initial);
+
+      $('#lot-kind').onchange = () => {
+        // If type changed from initial, don't pass stale preset values
+        const changedKind = $('#lot-kind').value;
+        const preset = (initial && initial.kind === changedKind) ? initial : null;
+        renderKindFields(preset);
+      };
+
+      bind('#lot-prize-cancel', () => {
+        editorContainer.innerHTML = '';
+        if (isEditing) {
+          const targetRow = $(`#lot-prize-row-${editIndex}`);
+          if (targetRow) targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
+      });
+
       bind('#lot-prize-ok', () => {
-        const kind = $('#lot-kind').value, quantity = Number($('#lot-quantity').value), p = { kind, quantity };
+        const kind = $('#lot-kind').value;
+        const quantity = Number($('#lot-quantity').value);
+        const p = { kind, quantity };
         const fail = s => { $('#lot-prize-error').textContent = s; };
+
         collect();
         const hasGate = draft.min_level > 0 || draft.min_points > 0 || draft.min_watch_hours > 0;
-        if ((draft.entry_fee > 0 || hasGate) && kind === 'registration') return fail(hasGate ? '设置参与门槛后不能配置本人专属注册资格奖' : '收费活动不能配置本人专属注册资格奖；请将报名费用设为 0');
-        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 200) return fail('中奖人数应为 1–200 的整数');
+        if ((draft.entry_fee > 0 || hasGate) && kind === 'registration') {
+          return fail(hasGate ? '设置参与门槛后不能配置本人专属注册资格奖' : '收费活动不能配置本人专属注册资格奖；请将报名费用设为 0');
+        }
+        if (!Number.isInteger(quantity) || quantity < 1 || quantity > 200) {
+          return fail('中奖人数应为 1–200 的整数');
+        }
+
         if (kind === 'shop') {
           const item = opts.items.find(i => String(i.id) === $('#lot-item').value);
           if (!item) return fail('请先在商城启用商品');
           Object.assign(p, { item_id: item.id, name: item.name });
         } else if (kind === 'registration') {
-          const g = opts.groups.find(g => g.id === $('#lot-group').value), days = Number($('#lot-days').value);
-          if (!g || !Number.isInteger(days) || days < 1 || days > 3650) return fail('请选择分组和 1–3650 有有效天数');
+          const g = opts.groups.find(g => g.id === $('#lot-group').value);
+          const days = Number($('#lot-days').value);
+          if (!g || !Number.isInteger(days) || days < 1 || days > 3650) return fail('请选择分组和 1–3650 的有效天数');
           Object.assign(p, { name: '本人专属注册资格', group_id: g.id, group_name: g.name, days });
         } else if (kind === 'manual') {
-          Object.assign(p, { name: $('#lot-prize-name').value.trim(), instructions: $('#lot-instructions').value.trim() });
-          if (!p.name || !p.instructions) return fail('请填写名称和领取说明');
+          const name = $('#lot-prize-name').value.trim();
+          const instructions = $('#lot-instructions').value.trim();
+          if (!name || !instructions) return fail('请填写名称和领取说明');
+          Object.assign(p, { name, instructions });
         } else {
           const amount = Number($('#lot-amount').value);
-          if (!Number.isInteger(amount) || amount < 1 || amount > (kind === 'points' ? 100000 : 100)) return fail('奖励数量超出范围');
+          if (!Number.isInteger(amount) || amount < 1 || amount > (kind === 'points' ? 100000 : 100)) {
+            return fail('奖励数量超出范围');
+          }
           Object.assign(p, { amount, name: kind === 'points' ? `${amount} 积分` : `${amount} 个可用邀请名额` });
         }
-        draft.prizes.push(p);
-        renderEditor();
+
+        if (isEditing) {
+          draft.prizes[editIndex] = p;
+        } else {
+          draft.prizes.push(p);
+        }
+
+        editorContainer.innerHTML = '';
+        syncPrizeListDom();
+
+        const targetIdx = isEditing ? editIndex : draft.prizes.length - 1;
+        const targetRow = $(`#lot-prize-row-${targetIdx}`);
+        if (targetRow) {
+          targetRow.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
       });
     }
     renderEditor();
