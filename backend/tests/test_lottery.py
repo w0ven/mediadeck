@@ -382,8 +382,8 @@ def test_lottery_enters_existing_bot_password_flow_without_auto_account(env, mon
     bot = e.service.bot
     emby = Emby()
     monkeypatch.setattr(bot, '_emby', emby)
-    # Ensure the ordinary registration receipt cannot expose account details
-    # for this lottery even when global registration receipts are configured.
+    # Lottery registrations use the normal receipt queue/target, but never
+    # include account names, passwords or admission credentials in the group.
     e.client.post('/api/settings/telegram', json={'registration_notify_chat_id': CHAT})
 
     async def run_flow():
@@ -413,6 +413,12 @@ def test_lottery_enters_existing_bot_password_flow_without_auto_account(env, mon
     assert abs(member['expires_at'] - time.time() - 19 * 86400) < 5
     assert not app.state.registration.resolve(str(GUEST), code).allowed
     assert e.service.db.one('SELECT used_by FROM lottery_admissions WHERE code=?', (code,))['used_by'] == 'new-LotteryMember'
+    receipts = e.service.db.query('SELECT * FROM tg_gift_receipts')
+    assert len(receipts) == 1 and receipts[0]['status'] == 'sent' and receipts[0]['attempts'] == 1
+    posts = [p for method, p in e.calls if method == 'sendMessage' and str(p.get('chat_id')) == CHAT
+             and '注册成功' in p.get('text', '')]
+    assert len(posts) == 1 and f'tg://user?id={GUEST}' in posts[0]['text']
+    assert code not in posts[0]['text'] and '账号：' not in posts[0]['text']
     for method, payload in e.calls:
         if payload and str(payload.get('chat_id', '')).startswith('-'):
             assert 'LotteryMember' not in str(payload) and 'Chosen-Test-Password' not in str(payload)
