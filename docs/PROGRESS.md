@@ -2,6 +2,12 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-26 — v0.57.1: version the game center's script and stylesheet
+
+- The Mini App page now stamps `games.js` and `games.css` with the release commit like the
+  other scripts and styles. `/app/assets` is cached at the edge for four hours, so after
+  v0.57.0 members kept the v0.55.0 game UI. A test now covers every cached script/style.
+
 ## 2026-10-26 — v0.57.0: game center polish (VIP room, table effects, sound, offline seats)
 
 - Game pages share a VIP-room scene in both themes: an AI-generated purple-and-gold lounge

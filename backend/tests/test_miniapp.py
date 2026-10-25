@@ -473,3 +473,12 @@ def test_mini_app_browser_flows(client, tmp_path):
         fits('miniapp-level-narrow-light.png')
         assert not errors, errors
         browser.close()
+
+
+def test_page_versions_every_cdn_cached_script_and_style(client, monkeypatch):
+    # /app/assets is cached at the edge for hours; an unversioned file keeps the old release.
+    monkeypatch.setattr(app.state.updater, 'version', lambda: {'commit': 'abc1234'})
+    html = client.get('/app').text
+    for asset in ('app.css', 'app.js', 'games.css', 'games.js', 'lottery.css', 'lottery.js', 'ux.js'):
+        assert f'/app/assets/{asset}?v=abc1234' in html
+    assert '/app/assets/games.js"' not in html and '/app/assets/games.css"' not in html
