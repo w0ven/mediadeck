@@ -194,8 +194,16 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     return `${effect} · ${term}`;
   }
 
+  function prizeTag(p, isV2 = false) {
+    if (!isV2) return '';
+    if (p.kind === 'registration') return '<span class="prize-tag tag-guest">仅未注册</span>';
+    if (p.kind === 'manual') return '<span class="prize-tag tag-all">通用奖品</span>';
+    return '<span class="prize-tag tag-member">仅已注册</span>';
+  }
+
   function prizes(c) {
-    return `<div class="prize-list">${c.prizes.map(p => `<div class="prize-row"><div class="prize-icon">${image(art[p.kind], 34)}</div><div class="grow"><div class="prize-name">${esc(p.name)}</div><div class="prize-desc">${description(p)}</div></div><div class="prize-count num">${p.quantity} 名</div></div>`).join('')}</div>`;
+    const isV2 = c.eligibility_version === 2;
+    return `<div class="prize-list">${c.prizes.map(p => `<div class="prize-row"><div class="prize-icon">${image(art[p.kind], 34)}</div><div class="grow"><div class="prize-name">${esc(p.name)}${prizeTag(p, isV2)}</div><div class="prize-desc">${description(p)}</div></div><div class="prize-count num">${p.quantity} 名</div></div>`).join('')}</div>`;
   }
 
   function awardCard(a) {
@@ -380,6 +388,8 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
 
     const pointsShort = (minP > 0 && balance != null && balance < minP) ? (minP - balance) : 0;
     const thresholdBlocked = !ctx.registered && hasThreshold;
+    const prizeEligible = d.prize_eligible !== false;
+    const prizeIneligibleReason = d.prize_eligibility_reason || '当前无可抽奖项';
 
     let joinText = d.joined ? '已报名 · 等待开奖'
       : isCancelled ? '活动已取消'
@@ -387,12 +397,13 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       : thresholdBlocked ? '须绑定已注册账户'
       : pointsShort > 0 ? `积分不足（差 ${pointsShort} 积分）`
       : !eligible ? '当前身份不可参与'
+      : !prizeEligible ? prizeIneligibleReason
       : fee > 0 && balance == null ? '须绑定已注册账户'
       : fee > 0 && !hasEnough ? `积分不足（需 ${fee} 积分）`
       : fee > 0 ? `支付 ${fee} 积分报名`
       : '立即参与';
 
-    const canJoin = !isCancelled && !closed && !d.joined && eligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null);
+    const canJoin = !isCancelled && !closed && !d.joined && eligible && prizeEligible && hasEnough && !thresholdBlocked && pointsShort === 0 && (fee === 0 || balance != null);
 
     const statsHtml = isSettled
       ? `<div class="lot-stats cols-3">
@@ -588,7 +599,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     const d = await api(`${root}/${lid}/records?offset=${offset}`);
     if (!alive()) return;
     const outcomes = { excluded: '异常排除 · 不参与中奖', winner: '已中奖', not_selected: '未抽中', eligible: '待开奖 · 资格核验中' };
-    const defaultReasonMap = { ip: '相同可信公网 IP', device: '相同浏览器安装标识', hardware: '相同设备' };
+    const defaultReasonMap = { ip: '相同可信公网 IP', device: '相同浏览器安装标识', hardware: '设备环境特征相同' };
     const linkReason = l => l.label || defaultReasonMap[l.reason] || l.reason;
     const clusterLabels = c => (c.labels && c.labels.length) ? c.labels.join(' / ') : (c.reasons || []).map(r => defaultReasonMap[r] || r).join(' / ');
 
@@ -633,7 +644,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     bind('#lot-next', () => list(alive, offset + 50));
   }
 
-  async function preview(lid, alive) {
+  async function preview(lid, alive, fromManage = true) {
     const [d, p] = await Promise.all([api(root + '/' + lid), call(`/${lid}/preview`)]);
     if (!alive()) return;
     const copy = new DOMParser().parseFromString(p.text, 'text/html').body.textContent;
@@ -648,7 +659,15 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       <div class="lot-bottom-spacer"></div>`);
 
     bind('#lot-cancel', back);
-    bind('#lot-publish', async () => { await call(`/${lid}/publish`, { revision: d.revision }); toast('发布已处理'); back(); });
+    bind('#lot-publish', async () => {
+      await call(`/${lid}/publish`, { revision: d.revision });
+      toast('发布已处理');
+      if (fromManage) {
+        push(a => detail(lid, a, 'manage'));
+      } else {
+        back();
+      }
+    });
   }
 
   function recover(lid, n, alive) {
@@ -673,10 +692,11 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
   async function editor(alive = () => true, existing = null, isCopied = false) {
     const opts = await api(root + '/admin/options');
     if (!alive()) return;
+    const isLegacyDeviceChecked = Boolean(existing && existing.config && existing.config.device_check);
     const draft = structuredClone(existing ? existing.config : {
       title: '', chat_id: opts.chats[0] || '', thread_id: null,
       audience: 'all', draw_mode: 'timed', deadline: null,
-      prizes: [], anti_multi: true, device_check: true, entry_fee: 0,
+      prizes: [], anti_multi: true, device_check: false, entry_fee: 0,
       min_level: 0, min_points: 0, min_watch_hours: 0,
       reminder: true, pin: true
     });
@@ -687,13 +707,15 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     if (draft.reminder === undefined) draft.reminder = true;
     if (draft.pin === undefined) draft.pin = true;
     if (draft.anti_multi === undefined) draft.anti_multi = true;
-    if (draft.device_check === undefined) draft.device_check = Boolean(draft.anti_multi);
+    draft.device_check = isLegacyDeviceChecked;
 
     function renderEditor() {
+      const isManual = draft.draw_mode === 'manual';
+      const isMemberOnly = draft.audience === 'member';
       const date = draft.deadline ? new Date((draft.deadline + 8 * 3600) * 1000).toISOString().slice(0, 16) : '';
       const options = (rows, value) => rows.map(([id, name]) => `<option value="${esc(id)}" ${String(id) === String(value) ? 'selected' : ''}>${esc(name)}</option>`).join('');
       const levelOpts = [['0', '不限'], ['1', 'Lv1'], ['2', 'Lv2'], ['3', 'Lv3'], ['4', 'Lv4'], ['5', 'Lv5'], ['6', 'Lv6'], ['7', 'Lv7'], ['8', 'Lv8']];
-      const copiedNotice = isCopied && !draft.deadline && draft.draw_mode === 'timed'
+      const copiedNotice = isCopied && !draft.deadline && !isManual
         ? '<div class="banner bad" id="lot-copied-banner"><span>⚠️ 请重新设置截止时间（复制出的草稿截止时间已清空）</span></div>'
         : '';
 
@@ -704,38 +726,45 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           <div class="lot-field"><label for="lot-chat">发布白名单群</label><select id="lot-chat" required>${options(opts.chats.map(c => [c, c]), draft.chat_id)}</select></div>
           <div class="lot-field"><label for="lot-thread">话题 ID（仅话题群，可留空）</label><input id="lot-thread" type="number" min="1" value="${draft.thread_id || ''}"></div>
           <div class="lot-field"><label for="lot-audience">参与对象</label><select id="lot-audience">${options(Object.entries(audience), draft.audience)}</select></div>
+          ${isMemberOnly ? `
           <div class="lot-field"><label for="lot-fee">报名费用（积分，0 为免费）</label><input id="lot-fee" type="number" min="0" max="100000" step="1" value="${draft.entry_fee || 0}"><p class="tiny muted" id="lot-fee-note">成功报名后扣除且不退（未中奖不退）。收费活动需已注册账户，不能搭配注册资格奖。</p></div>
-          <div class="grid2">
+          ` : ''}
+          <div class="${isManual ? 'lot-field' : 'grid2'}">
             <div class="lot-field"><label for="lot-mode">开奖方式</label><select id="lot-mode">${options([['timed','定时开奖'],['manual','手动开奖']], draft.draw_mode)}</select></div>
-            <div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" value="${date}"></div>
+            ${!isManual ? `<div class="lot-field"><label for="lot-date">报名截止 · 北京时间</label><input id="lot-date" type="datetime-local" required value="${date}"></div>` : ''}
           </div>
-          <p class="tiny muted" id="lot-date-note">定时开奖须填写，到点自动开奖；手动开奖可不填，不填则开奖前都能报名。</p>
+          <p class="tiny muted" id="lot-date-note">${isManual ? '手动开奖模式：管理员开奖前均可报名。' : '定时开奖须填写截止时间，到点自动开奖。'}</p>
 
+          ${isMemberOnly ? `
           <div class="subpanel">
             <h3>参与门槛</h3>
-            <p class="tiny muted" style="margin-bottom:10px">留空或填 0 表示不限。设置任一门槛后，活动需已注册账户参与，不能选「仅未注册」，不能配置本人专属注册资格奖。</p>
+            <p class="tiny muted" style="margin-bottom:10px">留空或填 0 表示不限。设置任一门槛后，活动需已注册账户参与。</p>
             <div class="grid2">
               <div class="lot-field"><label for="lot-min-level">最低等级</label><select id="lot-min-level">${options(levelOpts, draft.min_level)}</select></div>
               <div class="lot-field"><label for="lot-min-points">最低积分余额</label><input id="lot-min-points" type="number" min="0" max="1000000" step="1" value="${draft.min_points || 0}"></div>
             </div>
             <div class="lot-field"><label for="lot-min-watch">近 30 天观看时长（小时）</label><input id="lot-min-watch" type="number" min="0" max="720" step="1" value="${draft.min_watch_hours || 0}"></div>
           </div>
+          ` : ''}
 
           <div class="subpanel">
+            ${!isManual ? `
             <label class="lot-check" for="lot-reminder"><input id="lot-reminder" type="checkbox" ${draft.reminder ? 'checked' : ''}><span>截止前 1 小时群内提醒（需设截止时间）</span></label>
             <p class="tiny muted">报名截止前约 1 小时自动在群内发送提醒公告。</p>
-            <label class="lot-check" for="lot-pin" style="margin-top:10px"><input id="lot-pin" type="checkbox" ${draft.pin ? 'checked' : ''}><span>发布后静默置顶公告</span></label>
+            ` : ''}
+            <label class="lot-check" for="lot-pin" style="${isManual ? '' : 'margin-top:10px'}"><input id="lot-pin" type="checkbox" ${draft.pin ? 'checked' : ''}><span>发布后静默置顶公告</span></label>
             <p class="tiny muted">发布后在群内静默置顶发起公告，开奖或取消后自动取消置顶。</p>
             <label class="lot-check" for="lot-anti-multi" style="margin-top:10px"><input id="lot-anti-multi" type="checkbox" ${draft.anti_multi ? 'checked' : ''}><span>严格防小号（关联账号均不中奖）</span></label>
             <p class="tiny muted">开启后，关联账号全部不中奖；关联记录仅管理员可见。</p>
-            <div id="lot-device-check-wrap" style="margin-top:10px;margin-left:14px;padding-left:10px;border-left:2px solid var(--line);${draft.anti_multi ? '' : 'opacity:0.5;pointer-events:none'}">
-              <label class="lot-check" for="lot-device-check"><input id="lot-device-check" type="checkbox" ${draft.anti_multi && draft.device_check ? 'checked' : ''} ${draft.anti_multi ? '' : 'disabled'}><span>报名前需用户同意设备校验</span></label>
-              <p class="tiny muted">开启后，用户报名前会看到设备校验说明，同意后才能参加。</p>
-            </div>
+            ${isLegacyDeviceChecked ? `
+            <div id="lot-device-check-wrap" style="margin-top:10px;margin-left:14px;padding-left:10px;border-left:2px solid var(--line);">
+              <label class="lot-check" for="lot-device-check" style="opacity:0.8"><input id="lot-device-check" type="checkbox" checked disabled><span>历史设备校验设置（只读）</span></label>
+              <p class="tiny muted">仅严格防小号开启时生效；新活动不再使用。</p>
+            </div>` : ''}
           </div>
 
           <h3>奖池设置 · ${draft.prizes.reduce((s, p) => s + p.quantity, 0)} 个名额</h3>
-          <div class="prize-list">${draft.prizes.map((p, i) => `<div class="prize-row">${image(art[p.kind], 30)}<div class="grow"><b>${esc(p.name)}</b><div class="prize-desc">${p.quantity} 名 · ${description(p)}</div></div><button type="button" class="text-btn" data-lot-remove="${i}" aria-label="移除${esc(p.name)}">移除</button></div>`).join('') || '<div class="empty">添加第一份奖励</div>'}</div>
+          <div class="prize-list">${draft.prizes.map((p, i) => `<div class="prize-row">${image(art[p.kind], 30)}<div class="grow"><b>${esc(p.name)}</b>${prizeTag(p, true)}<div class="prize-desc">${p.quantity} 名 · ${description(p)}</div></div><button type="button" class="text-btn" data-lot-remove="${i}" aria-label="移除${esc(p.name)}">移除</button></div>`).join('') || '<div class="empty">添加第一份奖励</div>'}</div>
           <button type="button" class="add-prize" id="lot-add">＋ 添加一份奖励</button>
           <div id="lot-prize-editor"></div>
           <p class="error" id="lot-form-error" role="alert"></p>
@@ -747,33 +776,71 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         </form>`);
 
       bind('#lot-cancel', back);
-      const antiMultiEl = $('#lot-anti-multi');
-      if (antiMultiEl) {
-        antiMultiEl.onchange = () => {
-          const deviceWrap = $('#lot-device-check-wrap');
-          const deviceEl = $('#lot-device-check');
-          if (deviceWrap && deviceEl) {
-            if (antiMultiEl.checked) {
-              deviceWrap.style.opacity = '1';
-              deviceWrap.style.pointerEvents = 'auto';
-              deviceEl.disabled = false;
-            } else {
-              deviceWrap.style.opacity = '0.5';
-              deviceWrap.style.pointerEvents = 'none';
-              deviceEl.disabled = true;
-              deviceEl.checked = false;
-            }
-          }
-        };
-      }
       bind('[data-lot-remove]', b => { collect(); draft.prizes.splice(Number(b.dataset.lotRemove), 1); renderEditor(); });
       bind('#lot-add', () => { if ($('#lot-kind')) return; addPrize(); });
+
+      // Interactive linkage for draw_mode & audience
+      const modeEl = $('#lot-mode');
+      if (modeEl) {
+        modeEl.onchange = () => {
+          if ($('#lot-kind')) {
+            $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项，再切换开奖方式';
+            modeEl.value = draft.draw_mode;
+            return;
+          }
+          collect();
+          draft.draw_mode = modeEl.value;
+          if (draft.draw_mode === 'manual') {
+            draft.deadline = null;
+            draft.reminder = false;
+          }
+          renderEditor();
+        };
+      }
+      const audEl = $('#lot-audience');
+      if (audEl) {
+        audEl.onchange = () => {
+          if ($('#lot-kind')) {
+            $('#lot-form-error').textContent = '请先将编辑中的奖项加入奖池或取消该奖项，再切换参与对象';
+            audEl.value = draft.audience;
+            return;
+          }
+          const prevAud = draft.audience;
+          const target = audEl.value;
+          if (target === 'member' && draft.prizes.some(p => p.kind === 'registration')) {
+            $('#lot-form-error').textContent = '当前奖池包含本人专属注册资格奖，与「仅已注册」冲突；请先调整或移除该奖项后再切换';
+            audEl.value = prevAud;
+            return;
+          }
+          if (target === 'guest' && draft.prizes.some(p => ['points', 'invite', 'shop'].includes(p.kind))) {
+            $('#lot-form-error').textContent = '当前奖池包含积分/邀请/商城等会员奖品，与「仅未注册」冲突；请先调整或移除该奖项后再切换';
+            audEl.value = prevAud;
+            return;
+          }
+          collect();
+          draft.audience = target;
+          if (draft.audience !== 'member') {
+            draft.entry_fee = 0;
+            draft.min_level = 0;
+            draft.min_points = 0;
+            draft.min_watch_hours = 0;
+          }
+          renderEditor();
+        };
+      }
+
       $('#lot-form').onsubmit = async e => {
         e.preventDefault(); const b = $('#lot-save'); b.disabled = true;
         try {
           if ($('#lot-kind')) throw new Error('请先将编辑中的奖项加入奖池或取消该奖项');
           collect();
           if (!draft.deadline && draft.draw_mode === 'timed') throw new Error('定时开奖须设置报名截止时间');
+          if (draft.audience === 'member' && draft.prizes.some(p => p.kind === 'registration')) {
+            throw new Error('仅已注册活动不能配置本人专属注册资格奖');
+          }
+          if (draft.audience === 'guest' && draft.prizes.some(p => ['points', 'invite', 'shop'].includes(p.kind))) {
+            throw new Error('仅未注册活动不能配置积分、邀请名额或商城奖品；请选注册资格或人工奖品');
+          }
           const hasGate = draft.min_level > 0 || draft.min_points > 0 || draft.min_watch_hours > 0;
           if (hasGate) {
             if (draft.audience === 'guest') throw new Error('设有参与门槛的活动不能选择仅未注册参与');
@@ -792,36 +859,70 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
     }
 
     function collect() {
-      const feeVal = Number($('#lot-fee').value);
-      const minLevelVal = Number($('#lot-min-level').value) || 0;
-      const minPointsVal = Number($('#lot-min-points').value) || 0;
-      const minWatchVal = Number($('#lot-min-watch').value) || 0;
-      const dateVal = $('#lot-date').value;
-      const antiMultiVal = $('#lot-anti-multi').checked;
-      const deviceCheckEl = $('#lot-device-check');
-      const deviceCheckVal = antiMultiVal && deviceCheckEl ? deviceCheckEl.checked : false;
+      const modeVal = $('#lot-mode') ? $('#lot-mode').value : draft.draw_mode;
+      const audVal = $('#lot-audience') ? $('#lot-audience').value : draft.audience;
+      const isMemberOnly = audVal === 'member';
+      const isManual = modeVal === 'manual';
+
+      const feeEl = $('#lot-fee');
+      const feeVal = feeEl ? Number(feeEl.value) : 0;
+      const minLevelEl = $('#lot-min-level');
+      const minLevelVal = minLevelEl ? Number(minLevelEl.value) || 0 : 0;
+      const minPointsEl = $('#lot-min-points');
+      const minPointsVal = minPointsEl ? Number(minPointsEl.value) || 0 : 0;
+      const minWatchEl = $('#lot-min-watch');
+      const minWatchVal = minWatchEl ? Number(minWatchEl.value) || 0 : 0;
+
+      const dateEl = $('#lot-date');
+      const dateVal = (!isManual && dateEl) ? dateEl.value : '';
+      const reminderEl = $('#lot-reminder');
+      const reminderVal = (!isManual && reminderEl) ? reminderEl.checked : false;
+
+      const antiMultiEl = $('#lot-anti-multi');
+      const antiMultiVal = antiMultiEl ? antiMultiEl.checked : draft.anti_multi;
+      const pinEl = $('#lot-pin');
+      const pinVal = pinEl ? pinEl.checked : draft.pin;
+      const titleEl = $('#lot-title');
+      const titleVal = titleEl ? titleEl.value.trim() : draft.title;
+      const chatEl = $('#lot-chat');
+      const chatVal = chatEl ? chatEl.value : draft.chat_id;
+      const threadEl = $('#lot-thread');
+      const threadVal = threadEl && threadEl.value ? Number(threadEl.value) : null;
+
       Object.assign(draft, {
         anti_multi: antiMultiVal,
-        device_check: deviceCheckVal,
-        reminder: $('#lot-reminder').checked,
-        pin: $('#lot-pin').checked,
-        title: $('#lot-title').value.trim(),
-        chat_id: $('#lot-chat').value,
-        thread_id: $('#lot-thread').value ? Number($('#lot-thread').value) : null,
-        audience: $('#lot-audience').value,
-        entry_fee: Number.isInteger(feeVal) && feeVal >= 0 ? feeVal : 0,
-        draw_mode: $('#lot-mode').value,
-        min_level: minLevelVal,
-        min_points: minPointsVal,
-        min_watch_hours: minWatchVal,
-        deadline: dateVal ? Math.floor(new Date(dateVal + ':00+08:00').getTime() / 1000) : null
+        device_check: isLegacyDeviceChecked,
+        reminder: reminderVal,
+        pin: pinVal,
+        title: titleVal,
+        chat_id: chatVal,
+        thread_id: threadVal,
+        audience: audVal,
+        entry_fee: isMemberOnly && Number.isInteger(feeVal) && feeVal >= 0 ? feeVal : 0,
+        draw_mode: modeVal,
+        min_level: isMemberOnly ? minLevelVal : 0,
+        min_points: isMemberOnly ? minPointsVal : 0,
+        min_watch_hours: isMemberOnly ? minWatchVal : 0,
+        deadline: (!isManual && dateVal) ? Math.floor(new Date(dateVal + ':00+08:00').getTime() / 1000) : null
       });
     }
 
     function addPrize() {
+      collect();
+      const aud = draft.audience;
+      // Filter prize kinds by audience:
+      // - member: no registration
+      // - guest: only registration and manual (no points/invite/shop)
+      // - all: all kinds allowed
+      const allowedKinds = Object.entries(kinds).filter(([k]) => {
+        if (aud === 'member') return k !== 'registration';
+        if (aud === 'guest') return k === 'registration' || k === 'manual';
+        return true;
+      });
+
       $('#lot-prize-editor').innerHTML = `<div class="subpanel">
         <h3>添加奖项</h3>
-        <div class="lot-field"><label for="lot-kind">奖励类型</label><select id="lot-kind">${Object.entries(kinds).map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></div>
+        <div class="lot-field"><label for="lot-kind">奖励类型</label><select id="lot-kind">${allowedKinds.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select></div>
         <div id="lot-kind-fields"></div>
         <div class="lot-field"><label for="lot-quantity">中奖人数</label><input type="number" id="lot-quantity" min="1" max="200" step="1" value="1"></div>
         <p class="error" id="lot-prize-error" role="alert"></p>

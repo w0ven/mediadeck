@@ -17,6 +17,7 @@ from app.main import app
 from app.modules.lottery import LotteryService
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
+from tests.lottery_legacy_helpers import legacy_create
 from tests.test_miniapp import TOKEN, headers
 
 ADMIN, MEMBER, GUEST = 888000111, 888000222, 888000333
@@ -180,14 +181,14 @@ def test_group_check_never_fails_open(env, membership):
 
 @pytest.mark.parametrize('aud,ok,no', [('guest', GUEST, MEMBER), ('member', MEMBER, GUEST)])
 def test_audience(env, aud, ok, no):
-    lid = create(env, config(audience=aud))
+    lid = create(env, config(audience=aud, prizes=[{'kind': 'manual', 'name': '人工奖', 'quantity': 1, 'instructions': '私密'}]))
     join(env, lid, ok)
     assert req(env, 'POST', f'/{lid}/join', no).status_code == 400
 
 
 def test_concurrent_join_draw_claim_and_ledger(env):
     e = env
-    lid = create(e)
+    lid = legacy_create(e)  # old guest account awards must still bind/claim exactly once
     # Independent requests exercise the guarded SQL primary key under contention.
     with ThreadPoolExecutor(max_workers=8) as pool:
         results = list(pool.map(lambda _: req(e, 'POST', f'/{lid}/join', GUEST).status_code, range(24)))
@@ -215,7 +216,7 @@ def test_concurrent_join_draw_claim_and_ledger(env):
 def test_deadline_and_timer_restart(env, monkeypatch):
     e = env
     lid = create(e)
-    join(e, lid)
+    join(e, lid, MEMBER)
     deadline = e.service.row(lid)['config']['deadline']
     monkeypatch.setattr(time, 'time', lambda: deadline)
     assert req(e, 'POST', f'/{lid}/join', MEMBER).status_code == 400
@@ -343,7 +344,7 @@ def test_notice_failure_no_blind_duplicate_and_recovery(env, error, state):
         assert r.json()['notices'][0]['state'] == 'sent'
         assert e.calls[-1][0] == 'editMessageText'
         assert e.calls[-1][1]['message_id'] == 777
-    join(e, lid)
+    join(e, lid, MEMBER)
     e.replies.append({'error_code': 500})
     d = draw(e, lid)
     assert d['state'] == 'settled' and d['notices'][1]['state'] == 'unknown'

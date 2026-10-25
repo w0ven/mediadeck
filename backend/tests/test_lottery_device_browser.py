@@ -19,7 +19,7 @@ from app.modules.lottery_device import CONSENT_VERSION, FIELDS, LIMITS
 from tests.lottery_device_helpers import device_ctx
 from tests.test_lottery import BASE, GUEST, browser_id, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
-from tests.test_lottery_device import OTHER, THIRD, create, strict
+from tests.test_lottery_device import OTHER, THIRD, legacy_create, strict
 from tests.test_miniapp import headers
 
 HOST = 'https://app.example.test'
@@ -175,7 +175,7 @@ def test_ux_collects_only_on_call_is_stable_and_offline(request):
 def test_ux_output_links_two_clients_on_one_device(request):
     env = request.getfixturevalue('lottery_env')
     sync_playwright = pytest.importorskip('playwright.sync_api').sync_playwright
-    lid = create(env, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
+    lid = legacy_create(env, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
     requests, events = [], []
     with sync_playwright() as driver:
         browser = driver.chromium.launch(executable_path=shutil.which('chromium'), args=['--no-sandbox'])
@@ -192,7 +192,7 @@ def test_ux_output_links_two_clients_on_one_device(request):
         assert r.status_code == 200, r.text
     records = req(env, 'GET', f'/{lid}/records').json()
     [cluster] = records['clusters']
-    assert cluster['labels'] == ['相同设备']
+    assert cluster['labels'] == ['设备环境特征相同']
     assert {a['tg_id'] for a in cluster['accounts']} == {str(GUEST), str(OTHER)}
     assert records['excluded'] == 2 and events == []
 
@@ -236,26 +236,18 @@ def test_lottery_device_consent_ui_full_flow(request):
         page.set_default_timeout(8000)
         page.route('**/*', bridge)
 
-        # 1. Admin creates activity and checks device_check switch
+        # 1. Admin creates activity: verify no device_check switch in new draft, device_check is False
         page.goto('https://app.example.test/app')
         page.locator('[data-go="lottery"]').click()
         page.locator('#lot-new').click()
-        page.locator('#lot-title').fill('设备校验与合并弹层活动')
+        page.locator('#lot-title').fill('新版严格防小号活动')
         from datetime import datetime
 
         from app.modules.economy_rules import BEIJING
         deadline = int(time.time()) + 7200
         page.locator('#lot-date').fill(datetime.fromtimestamp(deadline, BEIJING).strftime('%Y-%m-%dT%H:%M'))
         assert page.locator('#lot-anti-multi').is_checked()
-        assert page.locator('#lot-device-check').is_checked()
-
-        # Uncheck anti_multi -> device_check disabled
-        page.locator('#lot-anti-multi').uncheck()
-        assert page.locator('#lot-device-check').is_disabled()
-        # Re-check anti_multi -> device_check enabled
-        page.locator('#lot-anti-multi').check()
-        assert not page.locator('#lot-device-check').is_disabled()
-        page.locator('#lot-device-check').check()
+        assert page.locator('#lot-device-check').count() == 0  # removed from new draft
 
         # Add prize and save
         page.locator('#lot-add').click()
@@ -266,46 +258,44 @@ def test_lottery_device_consent_ui_full_flow(request):
         page.locator('#lot-preview').wait_for()
 
         lid = app.state.db.one('SELECT id FROM lotteries ORDER BY created_at DESC')['id']
-        assert env.service.row(lid)['config']['device_check'] is True
+        assert env.service.row(lid)['config']['device_check'] is False
 
         page.locator('#lot-preview').click()
         page.locator('#lot-publish').click()
         page.locator('#lot-cancel-act').wait_for()
-        assert '设备校验' in page.locator('.notice').first.inner_text()
+        assert '设备校验' not in page.locator('.notice').first.inner_text()
 
-        # 2. Member joins: test decline -> no request sent
+        # 2. Member joins new activity: directly joins without consent sheet or collect
         viewer['id'] = MEMBER
         page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid}')
         page.locator('#lot-join').wait_for()
         page.locator('#lot-join').click()
-        page.locator('#lot-sheet').wait_for()
-        assert '设备校验' in page.locator('#lot-sheet h3').inner_text()
-
-        # Click decline ("不同意")
-        page.locator('#lot-cancel').click()
-        page.locator('#lot-sheet').wait_for(state='detached')
-        assert len(join_payloads) == 0
-        assert page.locator('#lot-join').inner_text() in ('立即参与', '收下我的幸运号码')
-
-        # Click accept ("同意并报名")
-        page.locator('#lot-join').click()
-        page.locator('#lot-sheet').wait_for()
-        page.locator('#lot-ok').click()
         page.locator('.ticket strong', has_text='报名已记录').wait_for()
-
+        assert page.locator('#lot-sheet').count() == 0
         assert len(join_payloads) == 1
-        p = join_payloads[0]
-        assert p.get('consent_version') == CONSENT_VERSION
-        assert p.get('ctx')
-        assert re.fullmatch(r'[0-9a-f]{64}', p.get('browser_id'))
+        assert join_payloads[0].get('consent_version') is None
+        assert join_payloads[0].get('ctx') is None
 
-        # 3. Create paid lottery with device check: test combined single sheet
+        # 3. Legacy activity with device_check=True: verifies consent flow and disabled edit switch
         viewer['id'] = ADMIN
-        paid_lid = create(env, strict(entry_fee=50, prizes=[{'kind': 'points', 'name': '积分', 'quantity': 2, 'amount': 100}]))
+        legacy_lid = legacy_create(env, strict(entry_fee=50, prizes=[{'kind': 'points', 'name': '积分', 'quantity': 2, 'amount': 100}]))
         env.service.points.add('u2', 200, 'admin.mint', 'test-mint')
 
+        # Check legacy draft/activity editor has disabled checkbox
+        legacy_draft_lid = legacy_create(env, strict(), publish=False)
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_draft_lid}')
+        page.locator('#lot-edit').click()
+        page.locator('#lot-device-check').wait_for()
+        assert page.locator('#lot-device-check').is_checked()
+        assert page.locator('#lot-device-check').is_disabled()
+        page.locator('#lot-title').fill('历史草稿重命名')
+        page.locator('#lot-save').click()
+        page.locator('#lot-preview').wait_for()
+        assert env.service.row(legacy_draft_lid)['config']['device_check'] is True  # preserved
+
+        # 4. Member joins legacy paid lottery: test combined consent + fee bottom sheet
         viewer['id'] = MEMBER
-        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{paid_lid}')
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_lid}')
         page.locator('#lot-join').wait_for()
         assert '支付 50 积分报名' in page.locator('#lot-join').inner_text()
 
@@ -317,7 +307,14 @@ def test_lottery_device_consent_ui_full_flow(request):
         assert '50 积分' in sheet_text
         assert '同意并支付 50 积分报名' in page.locator('#lot-ok').inner_text()
 
-        # Click confirm
+        # Decline
+        page.locator('#lot-cancel').click()
+        page.locator('#lot-sheet').wait_for(state='detached')
+        assert len(join_payloads) == 0
+
+        # Accept
+        page.locator('#lot-join').click()
+        page.locator('#lot-sheet').wait_for()
         page.locator('#lot-ok').click()
         page.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert len(join_payloads) == 1
@@ -326,26 +323,39 @@ def test_lottery_device_consent_ui_full_flow(request):
         assert paid_p.get('expected_entry_fee') == 50
         assert paid_p.get('ctx')
 
-        # 4. Check admin records page display
+        # 5. Check admin records page display: label is 设备环境特征相同
         viewer['id'] = ADMIN
         other_tg = 999111222
         app.state.members.upsert('u_other', 'private-account-other', {'group_id': 'standard'})
         app.state.db.execute('UPDATE members SET tg_user_id=? WHERE emby_user_id=?', (str(other_tg), 'u_other'))
         env.service.points.add('u_other', 200, 'admin.mint', 'test-mint')
-        r_other = env.client.post(BASE + f'/{paid_lid}/join',
+        r_other = env.client.post(BASE + f'/{legacy_lid}/join',
                                   headers={**headers(other_tg), 'CF-Connecting-IP': env.ip_for(other_tg)},
                                   json={'browser_id': browser_id(other_tg), 'consent_version': CONSENT_VERSION,
                                         'ctx': paid_p['ctx'], 'expected_entry_fee': 50})
         assert r_other.status_code == 200, r_other.text
 
-        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{paid_lid}')
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_lid}')
         page.locator('#lot-to-manage').click()
         page.locator('#lot-records').click()
         page.locator('.lot-cluster').wait_for()
         records_text = page.locator('.lottery').inner_text()
-        assert '相同设备' in records_text
+        assert '设备环境特征相同' in records_text
         page.locator('details summary').click()
         notes = page.locator('.rule-note').all_inner_texts()
-        assert any('相同设备' in t for t in notes)
+        assert any('设备环境特征相同' in t for t in notes)
+
+        # 6. Copy legacy activity: verify newly created draft has device_check=False and no switch
+        page.goto(f'https://app.example.test/app?tgWebAppStartParam=lottery_{legacy_lid}')
+        page.locator('#lot-to-manage').click()
+        page.locator('#lot-copy').click()
+        page.locator('#lot-form').wait_for()
+        assert page.locator('#lot-device-check').count() == 0  # no switch
+        page.locator('#lot-title').fill('从历史活动复制的新活动')
+        page.locator('#lot-date').fill(datetime.fromtimestamp(deadline + 3600, BEIJING).strftime('%Y-%m-%dT%H:%M'))
+        page.locator('#lot-save').click()
+        page.locator('#lot-preview').wait_for()
+        copied_lid = app.state.db.one('SELECT id FROM lotteries ORDER BY created_at DESC')['id']
+        assert env.service.row(copied_lid)['config']['device_check'] is False
 
         browser.close()

@@ -17,9 +17,10 @@ import pytest
 from app.core.db import Database
 from app.main import app
 from app.modules import lottery_identity
-from app.modules.lottery import FAIRNESS, RULES, live_status
+from app.modules.lottery import ELIGIBILITY_RULES, FAIRNESS, RULES, live_status
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
+from tests.lottery_legacy_helpers import legacy_create
 from tests.test_lottery import (
     ADMIN,
     BASE,
@@ -27,16 +28,16 @@ from tests.test_lottery import (
     GUEST,
     MEMBER,
     browser_id,
-    config,
-    create,
     draw,
     join,
     req,
 )
+from tests.test_lottery import config as base_config
+from tests.test_lottery import create as base_create
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import headers
 
-FORBIDDEN = ('防小号', 'IP', '浏览器', '设备', '关联')
+FORBIDDEN = ('多账号', '防小号', 'IP', '浏览器', '设备', '关联')
 OTHER_CHAT = '-1009876543210'
 BOT_ID = 123456
 
@@ -73,6 +74,18 @@ def e(request, monkeypatch):
 
     monkeypatch.setattr(TelegramBot, '_call', fake)
     return env
+
+
+def config(**kw):
+    # Universal prize for transport/ops tests; membership-only knobs use member
+    # activities unless the test explicitly exercises a legacy all-audience row.
+    audience = 'member' if any(k in kw for k in ('entry_fee', 'min_level', 'min_points', 'min_watch_hours')) else 'all'
+    return base_config(**{'audience': audience, 'prizes': [{'kind': 'manual', 'name': '人工奖',
+                                                          'quantity': 3, 'instructions': '私密'}], **kw})
+
+
+def create(e, payload=None, publish=True):
+    return base_create(e, payload or config(), publish)
 
 
 def sent(e, method, chat=None):
@@ -138,7 +151,7 @@ def test_public_rules_identical_for_admin_and_member_and_admin_rules_admin_only(
         assert 'admin_rules' not in view
         for key in ('qualification', 'excluded_count', 'candidate_count', 'notices', 'operations', 'awards'):
             assert key not in view
-        for key in ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count'):
+        for key in ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count', 'public_rules_version'):
             assert key not in view['config']
     expected = lottery_identity.RULE if anti_multi else lottery_identity.RULE_OFF
     assert admin['admin_rules'] == expected
@@ -154,20 +167,20 @@ def test_public_rules_identical_for_admin_and_member_and_admin_rules_admin_only(
     assert no_forbidden(notice(e, lid, 'result')['payload_json'])
 
 
-def test_fairness_statement_public_and_only_on_paid_launch(e):
-    assert RULES.endswith(FAIRNESS) and FAIRNESS == '发现多账号等违规参与，将取消中奖资格，报名费不退。'
+def test_new_public_wording_omits_detection_hints_but_keeps_paid_terms(e):
+    assert FAIRNESS not in RULES and no_forbidden(RULES)
     free = create(e)
     fund(e, 'u2', 100)
     paid = create(e, config(entry_fee=40))
     for lid in (free, paid):
         for user in (MEMBER, GUEST, ADMIN):
             rules = req(e, 'GET', '/' + lid, user).json()['rules']
-            assert rules.endswith(FAIRNESS) and rules.count(FAIRNESS) == 1
-        assert req(e, 'POST', f'/{lid}/preview').json()['rules'].endswith(FAIRNESS)
+            assert rules.endswith(ELIGIBILITY_RULES) and FAIRNESS not in rules and no_forbidden(rules)
+        assert FAIRNESS not in req(e, 'POST', f'/{lid}/preview').json()['rules']
     free_text = json.loads(notice(e, free, 'launch')['payload_json'])['text']
     paid_text = json.loads(notice(e, paid, 'launch')['payload_json'])['text']
     assert FAIRNESS not in free_text
-    assert '报名 40 积分 · 成功报名不退，取消活动全额退还' in paid_text and FAIRNESS + '</i>' in paid_text
+    assert '报名 40 积分 · 成功报名不退，取消活动全额退还' in paid_text and FAIRNESS not in paid_text
     for text in (free_text, paid_text):
         assert no_forbidden(text)
 
@@ -200,7 +213,7 @@ def test_winner_dm_short_native_deep_link_without_private_instructions(e):
 
 
 def test_winner_dm_unreachable_unknown_and_rate_limit_semantics(e):
-    lid = create(e, config(prizes=[{'kind': 'points', 'name': '500 积分', 'quantity': 3, 'amount': 500}]))
+    lid = legacy_create(e, config(prizes=[{'kind': 'points', 'name': '500 积分', 'quantity': 3, 'amount': 500}]))
     for user in (MEMBER, GUEST, ADMIN):
         join(e, lid, user)
     e.script[('sendMessage', str(GUEST))] = [{'ok': False, 'error_code': 403, 'description': 'Forbidden: bot was blocked by the user'}]
@@ -322,7 +335,7 @@ def test_copy_creates_draft_with_cleared_deadline_and_audit(e):
     for key in ('title', 'audience', 'entry_fee', 'min_level', 'min_points', 'min_watch_hours', 'reminder', 'pin',
                 'anti_multi', 'draw_mode', 'thread_id', 'chat_id'):
         assert c[key] == old[key], key
-    assert c['prizes'] == old['prizes']
+    assert [{k: v for k, v in p.items() if k != 'audience'} for p in c['prizes']] == old['prizes']
     assert 'winner_dm' not in c and 'live_count' not in c
     assert req(e, 'POST', f'/{draft["id"]}/publish', json={'revision': 1}).json()['detail'] == '定时开奖须填写截止时间'
     assert req(e, 'PUT', '/' + draft['id'], json={**c, 'revision': 1}).status_code == 400
@@ -565,7 +578,7 @@ def test_threshold_defaults_and_exclusions(e):
     assert (c['min_level'], c['min_points'], c['min_watch_hours'], c['reminder'], c['pin']) == (0, 0, 0, True, True)
     assert create(e, config(min_points=None, min_watch_hours=0), publish=False)
     result = req(e, 'POST', '/admin/drafts', json=config(min_points=10, audience='guest'))
-    assert result.status_code == 400 and '仅未注册' in result.json()['detail']
+    assert result.status_code == 200 and result.json()['config']['min_points'] == 0
     registration = [{'kind': 'registration', 'name': '本人资格', 'quantity': 1, 'group_id': 'standard', 'days': 10}]
     result = req(e, 'POST', '/admin/drafts', json=config(min_watch_hours=2, prizes=registration))
     assert result.status_code == 400 and '注册资格' in result.json()['detail']
@@ -575,7 +588,7 @@ def test_threshold_defaults_and_exclusions(e):
 
 def test_points_threshold_checked_not_debited_and_public(e):
     fund(e, 'u2', 40)
-    lid = create(e, config(min_points=50))
+    lid = legacy_create(e, config(min_points=50, audience='all'))  # retain the frozen old all-audience threshold contract
     view = req(e, 'GET', '/' + lid, MEMBER).json()
     assert '参与门槛：积分余额不少于 50（积分只校验不扣）' in view['rules']
     assert '积分余额不少于 50 · 积分只校验不扣 · 须已注册' in json.loads(notice(e, lid, 'launch')['payload_json'])['text']

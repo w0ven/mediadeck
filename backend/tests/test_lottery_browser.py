@@ -13,6 +13,7 @@ import pytest
 
 from app.main import app
 from tests.lottery_device_helpers import device_ctx
+from tests.lottery_legacy_helpers import legacy_create
 from tests.test_lottery import ADMIN, GUEST, MEMBER, config, create, draw, join
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import TELEGRAM_STUB, headers
@@ -83,35 +84,16 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
             page.screenshot(path=str(output / name), full_page=True)
 
         admin = page_for(ADMIN)
-        admin.goto('https://app.example.test/app')
-        admin.locator('[data-go="lottery"]').click()
-        admin.locator('#lot-new').click()
-        admin.locator('#lot-title').fill('周末星光放送')
-        admin.locator('#lot-date').fill('2099-10-25T21:00')  # server rejects out-of-range
-        admin.locator('#lot-add').click()
-        admin.locator('#lot-kind').select_option('points')
-        admin.locator('#lot-quantity').fill('3')
-        admin.locator('#lot-prize-ok').click()
-        admin.locator('#lot-save').click()
-        admin.locator('#lot-form-error').filter(has_text='截止时间').wait_for()
-        admin.locator('#lot-mode').select_option('manual')  # drawn below by the administrator
-        deadline = config()['deadline']
-        from datetime import datetime
-
-        from app.modules.economy_rules import BEIJING
-        admin.locator('#lot-date').fill(datetime.fromtimestamp(deadline, BEIJING).strftime('%Y-%m-%dT%H:%M'))
-        admin.locator('#lot-save').click()
-        admin.locator('#lot-preview').wait_for()
-        lid = app.state.db.one('SELECT id FROM lotteries ORDER BY created_at DESC')['id']
-        admin.locator('#lot-edit').click()
-        admin.locator('#lot-title').fill('星光放送 · 真实活动')
-        admin.locator('#lot-save').click()
+        lid = legacy_create(env, config(title='星光放送 · 真实活动', draw_mode='manual', deadline=None,
+                                        prizes=[{'kind': 'points', 'name': '500 积分', 'quantity': 3, 'amount': 500}]),
+                            publish=False)
+        admin.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         admin.locator('#lot-preview').click()
         fits(admin, '01-admin-publish-preview.png')
         admin.locator('#lot-publish').click()
         admin.locator('#lot-draw').wait_for()
         assert app.state.lottery.row(lid)['state'] == 'published'
-        assert app.state.lottery.row(lid)['config']['device_check'] is True  # strict default
+        assert app.state.lottery.row(lid)['config']['device_check'] is False  # new drafts never enable device check
         fits(admin, '02-admin-published.png')
 
         guest = page_for(GUEST)
@@ -121,9 +103,6 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         assert not guest.locator('#tabbar').is_visible()
         guest.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         guest.locator('#lot-join').click()
-        guest.locator('#lot-sheet').wait_for()
-        assert '设备校验' in guest.locator('#lot-sheet h3').inner_text()
-        guest.locator('#lot-ok').click()
         guest.locator('.ticket strong', has_text='报名已记录').wait_for()
         assert guest.locator('#lot-join').is_disabled()
         assert not guest.locator('#tabbar').is_visible()
@@ -135,10 +114,8 @@ def test_lottery_real_ui_create_publish_join_claim(request, tmp_path):
         assert not member.locator('[data-go="lottery"]').count()
         member.goto('https://app.example.test/app?tgWebAppStartParam=lottery_' + lid)
         member.locator('#lot-join').click()
-        member.locator('#lot-sheet').wait_for()
-        member.locator('#lot-ok').click()
         member.locator('.ticket strong', has_text='报名已记录').wait_for()
-        assert app.state.db.one('SELECT COUNT(*) AS n FROM lottery_device_entries WHERE lottery_id=?', (lid,))['n'] == 2
+        assert app.state.db.one('SELECT COUNT(*) AS n FROM lottery_device_entries WHERE lottery_id=?', (lid,))['n'] == 0
         admin.locator('#lot-refresh').click()
         admin.locator('#lot-draw').click()
         admin.locator('#lot-ok').click()
@@ -210,7 +187,7 @@ def test_lottery_ui_all_prize_types_and_private_registration(request, tmp_path):
 def test_lottery_ui_silent_association_admin_records(request, tmp_path):
     env = request.getfixturevalue('lottery_env')
     sync_playwright = pytest.importorskip('playwright.sync_api').sync_playwright
-    lid = create(env, config(draw_mode='manual', prizes=[{'kind': 'points', 'name': '星光积分', 'quantity': 1, 'amount': 5}]))
+    lid = legacy_create(env, config(draw_mode='manual', prizes=[{'kind': 'points', 'name': '星光积分', 'quantity': 1, 'amount': 5}]))
     viewer = {'id': GUEST}
     with sync_playwright() as driver:
         browser = driver.chromium.launch(executable_path=shutil.which('chromium'), args=['--no-sandbox'])
@@ -315,6 +292,7 @@ def test_lottery_v3_operations_and_interactions(request, tmp_path):
         page.locator('[data-go="lottery"]').click()
         page.locator('#lot-new').click()
         page.locator('#lot-title').fill('门槛与开关测试')
+        page.locator('#lot-audience').select_option('member')
         from datetime import datetime
 
         from app.modules.economy_rules import BEIJING

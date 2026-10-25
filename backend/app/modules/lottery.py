@@ -27,16 +27,24 @@ RULES = ('每个 Telegram 每期仅一次、最多一奖；报名时须属于发
          '同类奖项随机排序，每个名额在剩余合资格报名者中等概率抽取。'
          '账户类奖励未绑定时保留，绑定后可领取；商城道具入背包后使用生效。'
          '注册资格绑定中奖 Telegram，不可转赠，进入原 Bot 注册流程自行设置密码，受原注册通道开关约束。')
-# Generic public fairness statement (product-approved). It names no detection
-# method; the association heuristics stay administrator-only (admin_rules).
+# Preserve the exact old public wording for configurations without a version.
+# Only server-created new/copy drafts get v2; edits/publish keep the stored policy.
 FAIRNESS = '发现多账号等违规参与，将取消中奖资格，报名费不退。'
-RULES += FAIRNESS
+LEGACY_RULES = RULES + FAIRNESS
+PUBLIC_RULES_VERSION = 2
+ELIGIBILITY_VERSION = 2
+ELIGIBILITY_RULES = ('每个 Telegram 每期仅一次、最多一奖；报名时须属于发布群且符合参与对象。'
+                     '定时开奖截止后不能报名；手动开奖不设截止时间，开奖前均可报名。人数不足如实少发。'
+                     '按开奖时的注册状态抽取：本人注册资格仅未注册者，积分、邀请名额及商城奖品仅已注册者，人工奖品通用。'
+                     '先抽注册资格，再抽其他奖；同类奖项随机排序，每个名额在剩余合资格报名者中等概率抽取。'
+                     '已中奖的账户奖励解绑后保留，绑定后可领取；商城道具入背包后使用生效。'
+                     '注册资格绑定中奖 Telegram，不可转赠，进入原 Bot 注册流程自行设置密码，受原注册通道开关约束。')
 AUDIENCES = {'all': '全部群友', 'member': '仅已注册', 'guest': '仅未注册'}
 # How a stored configuration WITHOUT a newer field is read: off / unlimited.
 # New drafts get explicit values from validate(); publication freezes them.
 LEGACY_DEFAULTS = {'min_level': 0, 'min_points': 0, 'min_watch_hours': 0, 'reminder': False, 'pin': False,
                    'winner_dm': False, 'live_count': False}
-INTERNAL = ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count')
+INTERNAL = ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count', 'public_rules_version')
 LEVEL_MAX = 8
 # Reminder: ~1h before the deadline; not when published < 90 min before it;
 # skipped once fewer than 10 min remain (missed maintenance window).
@@ -163,6 +171,35 @@ def winner_mention(winner):
     if not re.fullmatch(r'[1-9][0-9]{0,15}', tg_id) or int(tg_id) > 2**52 - 1:
         return display
     return f'<a href="tg://user?id={tg_id}">{display}</a>'
+
+
+def public_rules_version(config):
+    """Read a server-stored policy; absence (or an unknown value) keeps old text."""
+    value = config.get('public_rules_version')
+    return PUBLIC_RULES_VERSION if type(value) is int and value == PUBLIC_RULES_VERSION else 1
+
+
+def eligibility_version(config):
+    value = config.get('eligibility_version')
+    return ELIGIBILITY_VERSION if type(value) is int and value == ELIGIBILITY_VERSION else 1
+
+
+def prize_audience(prize):
+    return 'guest' if prize['kind'] == 'registration' else 'all' if prize['kind'] == 'manual' else 'member'
+
+
+def eligible_for_prize(config, prize, registered):
+    if eligibility_version(config) == 1:
+        return prize['kind'] != 'registration' or not registered
+    audience = prize_audience(prize)
+    return audience == 'all' or (audience == 'member') == registered
+
+
+def prize_eligibility(config, registered):
+    """Public prize-type eligibility only; never consult an entry or risk signals."""
+    if eligibility_version(config) == 1 or any(eligible_for_prize(config, p, registered) for p in config['prizes']):
+        return True, ''
+    return False, ('本期奖品仅限未注册者，你当前已注册' if registered else '本期奖品仅限已注册者，请先注册并绑定账户')
 
 
 def entry_terms(config):
@@ -301,10 +338,11 @@ class LotteryService:
         levels = getattr(self.members, '_levels', None)
         return bool(levels is not None and levels.config()['config']['enabled'])
 
-    def validate(self, raw, *, now=None, incomplete=False):
+    def validate(self, raw, *, now=None, incomplete=False, legacy=False):
         """Server-side draft validation. ``incomplete`` is only for copy(): the
         deadline (and a no-longer-allowlisted group) must be re-entered before
-        the draft can be saved again or published."""
+        the draft can be saved again or published. ``legacy`` is ONLY selected
+        by publish from server-stored config, never from client fields."""
         now = int(time.time()) if now is None else now
         if not isinstance(raw, dict):
             raise ValueError('活动配置无效')  # noqa: TRY004 - API validation contract
@@ -320,14 +358,15 @@ class LotteryService:
         audience = raw.get('audience')
         if audience not in AUDIENCES:
             raise ValueError('参与对象无效')
-        entry_fee = integer(raw.get('entry_fee', 0), '报名积分', 0, 100000)
+        clear_member_terms = not legacy and audience != 'member'
+        entry_fee = 0 if clear_member_terms else integer(raw.get('entry_fee', 0), '报名积分', 0, 100000)
         if entry_fee and audience == 'guest':
             raise ValueError('收费活动需已注册积分账户，不能选择仅未注册参与')
         limits = {}
         for key, label, high in (('min_level', '最低等级', LEVEL_MAX), ('min_points', '最低积分余额', 1000000),
                                  ('min_watch_hours', '近 30 天观看时长（小时）', 720)):
             value = raw.get(key)
-            limits[key] = integer(0 if value is None else value, label, 0, high)
+            limits[key] = 0 if clear_member_terms else integer(0 if value is None else value, label, 0, high)
         if gated(limits) and audience == 'guest':
             raise ValueError('设置参与门槛的活动需已注册账户，不能选择仅未注册参与')
         if limits['min_level'] and not self.levels_enabled():
@@ -338,8 +377,11 @@ class LotteryService:
         mode = raw.get('draw_mode')
         if mode not in ('manual', 'timed'):
             raise ValueError('开奖方式无效')
-        if raw.get('deadline') is None:
-            # A manual draw may leave entries open until the administrator draws.
+        if not legacy and mode == 'manual':
+            deadline = None
+            switches['reminder'] = False
+        elif raw.get('deadline') is None:
+            # Legacy manual drafts may still retain their original deadline.
             if not incomplete and mode == 'timed':
                 raise ValueError('定时开奖须填写截止时间')
             deadline = None
@@ -356,6 +398,10 @@ class LotteryService:
             if not isinstance(p, dict):
                 raise ValueError('奖项无效')  # noqa: TRY004 - API validation contract
             kind = p.get('kind')
+            if not legacy and audience == 'guest' and kind in ('points', 'invite', 'shop'):
+                raise ValueError('仅未注册活动不能配置积分、邀请名额或商城奖品；请选注册资格或人工奖品')
+            if not legacy and audience == 'member' and kind == 'registration':
+                raise ValueError('仅已注册活动不能配置注册资格')
             item = {'kind': kind, 'name': text(p.get('name'), '奖项名称', 60),
                     'quantity': integer(p.get('quantity'), '获奖人数', 1, 200)}
             if kind in ('points', 'invite'):
@@ -389,13 +435,23 @@ class LotteryService:
             raise ValueError('每期最多 200 个获奖名额')
         return {'title': title, 'audience': audience, 'chat_id': chat, 'thread_id': thread,
                 'deadline': deadline, 'draw_mode': mode, 'prizes': clean, 'anti_multi': anti_multi, 'entry_fee': entry_fee,
-                **limits, **switches, 'device_check': lottery_device.flag(raw, anti_multi)}
+                **limits, **switches, 'device_check': lottery_device.flag(raw),
+                'public_rules_version': PUBLIC_RULES_VERSION, 'eligibility_version': 1 if legacy else ELIGIBILITY_VERSION}
 
     def save(self, raw, actor, lottery_id=None, revision=None):
         config = self.validate(raw)
         now = int(time.time())
         with economy_write(self.db) as conn:
             if lottery_id:
+                stored = conn.execute("SELECT config_json FROM lotteries WHERE id=? AND state='draft' AND revision=?",
+                                      (lottery_id, revision)).fetchone()
+                if not stored:
+                    raise ValueError('草稿已变更或已发布，请刷新；发布后配置冻结')
+                # Preserve server-stored policies under the edit's write lock
+                # and revision, never a client's claimed version/legacy marker.
+                stored = json.loads(stored['config_json'])
+                config['device_check'] = lottery_device.flag(raw, stored=stored)
+                config['public_rules_version'] = public_rules_version(stored)
                 changed = conn.execute('UPDATE lotteries SET config_json=?,revision=revision+1 '
                                        'WHERE id=? AND state=\'draft\' AND revision=?',
                                        (encode(config), lottery_id, revision)).rowcount
@@ -413,6 +469,8 @@ class LotteryService:
 
         Prize pool, audience, fee, thresholds and switches are copied as the
         source's effective values (a legacy source's missing switches = off).
+        Retired environment checks and old public wording are never copied:
+        this is a NEW activity.
         """
         source = self.row(lottery_id)['config']
         raw = {k: source.get(k) for k in ('title', 'audience', 'chat_id', 'thread_id', 'draw_mode', 'anti_multi',
@@ -503,6 +561,7 @@ class LotteryService:
             raise KeyError('活动不存在')
         row['config'] = json.loads(row.pop('config_json'))
         row['config'].setdefault('entry_fee', 0)
+        row['config']['eligibility_version'] = eligibility_version(row['config'])
         for key, value in LEGACY_DEFAULTS.items():
             row['config'].setdefault(key, value)
         return row
@@ -513,6 +572,9 @@ class LotteryService:
             raise KeyError('活动尚未发布')
         config = copy.deepcopy(row['config'])
         config['prizes'] = [public_prize(p) for p in config['prizes']]
+        if eligibility_version(config) == ELIGIBILITY_VERSION:
+            for p in config['prizes']:
+                p['audience'] = prize_audience(p)
         for key in INTERNAL if not admin else ('chat_id', 'thread_id'):
             config.pop(key, None)
         data = {k: row[k] for k in ('id', 'state', 'revision', 'published_at', 'settled_at', 'cancelled_at')}
@@ -520,7 +582,12 @@ class LotteryService:
                            (lottery_id, tg_id))
         # Identical public rules for everybody, administrators included: the
         # association explanation is a separate administrator-only field.
-        rules = entry_terms(config) + requirement_terms(config) + RULES
+        wording = ELIGIBILITY_RULES if eligibility_version(config) == ELIGIBILITY_VERSION else RULES
+        if public_rules_version(row['config']) == 1:
+            wording += FAIRNESS
+        rules = entry_terms(config) + requirement_terms(config) + wording
+        registered = bool(self.db.one('SELECT 1 FROM members WHERE tg_user_id=?', (str(tg_id),)))
+        data['prize_eligible'], data['prize_eligibility_reason'] = prize_eligibility(row['config'], registered)
         if admin:
             data['admin_rules'] = lottery_identity.RULE if config['anti_multi'] else lottery_identity.RULE_OFF
         data.update(config=config, rules=rules, count=self.db.one(
@@ -560,6 +627,8 @@ class LotteryService:
                 admin_config = {k: v for k, v in admin_config.items() if k not in ('winner_dm', 'live_count')}
             data.update(config=admin_config, notices=notices, last_error=row['last_error'],
                         operations=self.operations(row, notices))
+            if eligibility_version(admin_config) == ELIGIBILITY_VERSION:
+                data['config'] = {**admin_config, 'prizes': [{**p, 'audience': prize_audience(p)} for p in admin_config['prizes']]}
             if row['state'] == 'cancelled':
                 data['refunds'] = self.db.one("SELECT COUNT(*) AS count,COALESCE(SUM(delta),0) AS points FROM points_ledger "
                                               "WHERE reason='lottery.refund' AND ref LIKE ?",
@@ -698,12 +767,16 @@ class LotteryService:
             if c.get('entry_fee'):
                 terms.append(f'{emoji("redpack")} 报名 {c["entry_fee"]} 积分 · 成功报名不退，取消活动全额退还')
             notes = []
-            if c.get('entry_fee'):
+            if c.get('entry_fee') and public_rules_version(c) == 1:
                 notes.append(f'<i>{emoji("warn")} {FAIRNESS}</i>')
-            if any(p['kind'] == 'registration' for p in c['prizes']):
+            if eligibility_version(c) == ELIGIBILITY_VERSION:
+                notes.append('<i>奖品资格以开奖时的注册状态为准</i>')
+            elif any(p['kind'] == 'registration' for p in c['prizes']):
                 notes.append('<i>注册资格奖仅限开奖时未注册者本人领取</i>')
             sections = [[f'{emoji("present")} {title}'],
                         [f'{emoji("prize" + str(i % 3))} {escape(p["name"])} × {p["quantity"]}'
+                         + (f' · {AUDIENCES[prize_audience(p)] if p["kind"] != "manual" else "通用"}'
+                            if eligibility_version(c) == ELIGIBILITY_VERSION else '')
                          for i, p in enumerate(c['prizes'])], terms, notes]
         elif kind == 'reminder':
             sections = [[f'{emoji("reaper")} {title} 即将截止'],
@@ -758,7 +831,13 @@ class LotteryService:
             return  # duplicate request must not create a second launch
         if type(revision) is not int or revision != row['revision']:
             raise ValueError('草稿版本已变化，请重新预览')
-        self.validate(row['config'])
+        # Validate, but publish the stored configuration: the new-draft default
+        # must not replace a legacy draft's stored device/public/eligibility policies.
+        legacy = eligibility_version(row['config']) == 1
+        checked = self.validate(row['config'], legacy=legacy)
+        if not legacy and any(row['config'].get(k) != checked[k] for k in
+                              ('deadline', 'reminder', 'entry_fee', 'min_level', 'min_points', 'min_watch_hours')):
+            raise ValueError('草稿参与条件已变化，请保存草稿后重新发布')
         username, chat_id = await self.ready(row['config'])
         with economy_write(self.db) as conn:
             if not accepting(row['config'], int(time.time())):
@@ -838,6 +917,9 @@ class LotteryService:
             registered = bool(account)
             if c['audience'] != 'all' and (c['audience'] == 'member') != registered:
                 raise ValueError('你的注册状态不符合本期参与对象')
+            allowed, reason = prize_eligibility(c, registered)
+            if not allowed:
+                raise ValueError(reason)
             fee = integer(c.get('entry_fee', 0), '报名积分', 0, 100000)
             if ((expected_entry_fee is not ENTRY_FEE_UNSET or fee) and
                     (type(expected_entry_fee) is not int or expected_entry_fee != fee)):
@@ -894,7 +976,7 @@ class LotteryService:
             rng.shuffle(special)
             rng.shuffle(normal)
             for p in special + normal:
-                eligible = [r for r in remaining if p['kind'] != 'registration' or r['tg_id'] not in registered]
+                eligible = [r for r in remaining if eligible_for_prize(c, p, r['tg_id'] in registered)]
                 winners = rng.sample(eligible, min(p['quantity'], len(eligible)))
                 for w in winners:
                     conn.execute('INSERT INTO lottery_awards(lottery_id,tg_id,label,prize_json) VALUES(?,?,?,?)',
