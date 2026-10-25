@@ -2,6 +2,15 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-26 — v0.58.1: bigger 象棋 and 五子棋 boards
+
+- Inside Telegram a phone leaves about 390×700, and v0.58.0 sized the board to the height
+  left by four chrome rows, so it shrank to roughly 70–85% of the width. Board tables now
+  keep one header row (back, title, stake/game number, connection, sound, rules, leave),
+  slimmer player bars that also say whose turn it is and 被将军, and one row of actions. The
+  frame and margins are thinner and pieces and stones slightly larger; the board takes at
+  least 94% of the width at 390×700 and 90% at 360×640, which the browser tests now assert.
+
 ## 2026-10-26 — v0.58.0: 象棋 and 五子棋 in the game center
 
 - Two-player board tables on the shared game-center layer: six tiers each (practice with

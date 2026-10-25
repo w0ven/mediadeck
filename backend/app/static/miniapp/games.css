@@ -1524,10 +1524,50 @@
 .gc-board-card .gc-feature-buttons {
   margin-top: 8px;
 }
+/* Board tables keep everything but the board to one header row, two slim bars and one row of actions. */
+.gc-board-bar {
+  gap: 6px;
+  padding: 6px 8px 4px;
+}
+.gc-board-bar .gc-tool {
+  flex: none;
+  min-height: 30px;
+  padding: 5px 8px;
+}
+.gc-board-bar .gc-tool[data-gc-back] {
+  font-size: 18px;
+  padding: 2px 10px 4px;
+}
+.gc-board-title {
+  min-width: 0;
+}
+.gc-board-title > b {
+  display: block;
+  white-space: nowrap;
+}
+.gc-board-title .tiny {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
 .gc-board-meta {
-  font-size: 11px;
-  color: var(--hint);
-  margin-right: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.gc-board-title .gc-connection {
+  flex: none;
+  padding: 0;
+}
+.gc-board-dock {
+  padding: 8px 10px 10px;
+}
+.gc-board-actions .gc-action {
+  min-height: 42px;
+  font-size: 15px;
+}
+.gc-board-actions .gc-action small {
+  display: none;
 }
 .gc-duel {
   flex: 1;
@@ -1540,9 +1580,9 @@
 .gc-duel-bar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 7px 10px;
-  border-radius: 16px;
+  gap: 8px;
+  padding: 5px 9px;
+  border-radius: 14px;
   background: var(--plate);
   border: 1px solid #ffffff1f;
   backdrop-filter: blur(10px);
@@ -1552,13 +1592,18 @@
   box-shadow: 0 0 18px color-mix(in srgb, var(--trim) 30%, transparent);
 }
 .gc-duel-bar > .gc-avatar-ring {
-  width: 42px;
-  height: 42px;
+  width: 34px;
+  height: 34px;
 }
 .gc-duel-bar .avatar {
-  width: 36px;
-  height: 36px;
-  font-size: 14px;
+  width: 29px;
+  height: 29px;
+  font-size: 12px;
+}
+.gc-duel-status {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .gc-duel-bar.gc-duel-empty .gc-avatar-ring {
   display: grid;
@@ -1603,7 +1648,7 @@
 }
 .gc-clock b {
   display: block;
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 900;
   letter-spacing: 1px;
   color: #e9e3ff;
@@ -1619,27 +1664,33 @@
 .gc-clock.low b {
   color: #ff8a9c;
 }
-/* The duel area takes the height left by header and dock; the board shrinks to fit it, minus two player bars. */
+/* The duel area takes the height left by header and dock. The board fills the width and only
+   shrinks when that height, minus two 46px player bars and their gaps, cannot hold it. */
+.gc-table.gc-board-table {
+  min-height: 560px;
+}
 .gc-board-table .gc-duel {
   container-type: size;
   min-height: 0;
+  gap: 6px;
+  padding: 2px 4px;
 }
 .gc-board-frame {
   position: relative;
   align-self: center;
-  width: min(100%, 520px, calc((100cqh - 160px) * .9 + 14px));
-  padding: 7px;
-  border-radius: 16px;
+  width: min(100%, 560px, calc((100cqh - 116px) * .9 + 8px));
+  padding: 4px;
+  border-radius: 12px;
   background: linear-gradient(145deg, #fff0b3, #c99a3c 30%, #8a5a1a 55%, #e8c56a 80%, #9a6a24);
   box-shadow: 0 18px 36px #14002ecc, 0 0 30px #f2c14e33;
 }
 .gc-gomoku .gc-board-frame {
-  width: min(100%, 520px, calc(100cqh - 146px));
+  width: min(100%, 560px, calc(100cqh - 108px));
 }
 .gc-xq-board, .gc-go-board {
   position: relative;
   container-type: inline-size;
-  border-radius: 10px;
+  border-radius: 8px;
   box-shadow: inset 0 0 0 1px #0004, inset 0 0 30px #0005;
   touch-action: manipulation;
   user-select: none;
@@ -1689,7 +1740,7 @@
 }
 .gc-xq-piece {
   position: absolute;
-  width: 10.2%;
+  width: 10.6%;
   aspect-ratio: 1;
   transform: translate(-50%, -50%);
   padding: 0;
@@ -1698,7 +1749,7 @@
   background: radial-gradient(circle at 38% 30%, #fffaf0, #f2e2c0 55%, #d8bf8e);
   box-shadow: 0 .6cqw 1.2cqw #0009, inset 0 -.5cqw .8cqw #8a5a1a55;
   font-family: "KaiTi", "STKaiti", "Kaiti SC", "Songti SC", "Noto Serif CJK SC", serif;
-  font-size: 5.6cqw;
+  font-size: 6.1cqw;
   font-weight: 900;
   line-height: 1;
   transition: transform .12s;
@@ -1754,7 +1805,7 @@
 }
 .gc-stone {
   position: absolute;
-  width: 6.1%;
+  width: 6.3%;
   aspect-ratio: 1;
   transform: translate(-50%, -50%);
   border-radius: 50%;
@@ -1781,7 +1832,7 @@
 }
 .gc-stone-win {
   position: absolute;
-  width: 6.8%;
+  width: 7%;
   aspect-ratio: 1;
   transform: translate(-50%, -50%);
   border-radius: 50%;
@@ -1877,8 +1928,8 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 9px;
-  padding: 9px 11px;
+  margin-bottom: 8px;
+  padding: 6px 10px;
   border-radius: 14px;
   font-size: 13px;
   font-weight: 800;

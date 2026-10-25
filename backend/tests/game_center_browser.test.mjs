@@ -1006,6 +1006,16 @@ test('connection warning waits for repeated failures; token renewal is quiet and
 
 // Board games: real rules engine, clocks and settlement behind the shipped board UI.
 const boardView = (env, id, user) => tableFor(env, id, user);
+// Phones inside Telegram leave about 390x700; the board must still take nearly the whole width.
+async function boardFill(page, label) {
+  for (const [width, height, least] of [[390, 700, .94], [360, 640, .9]]) {
+    await page.setViewportSize({ width, height });
+    const fill = await page.evaluate(() => document.querySelector('[data-gc-board]').getBoundingClientRect().width / innerWidth);
+    assert(fill >= least, `${label} board fills ${width}x${height}: ${fill.toFixed(3)}`);
+    await capture(page, `${label}-${width}x${height}.png`);
+  }
+  await page.setViewportSize({ width: 400, height: 860 });
+}
 async function boardMove(env, id, user, move) {
   const v = await boardView(env, id, user);
   return (await env.request(user, `/tables/${id}/actions`, 'POST', { hand_no: v.hand_no, turn: v.hand.turn, action: 'move', move })).table;
@@ -1060,15 +1070,17 @@ test('real xiangqi: colours and flipped board, tap-to-move, capture with check, 
     await syncTable(pages[black], await boardView(env, id, black));
     await pages[black].locator('.gc-xq-piece.check[data-gc-sq="e9"]').waitFor();
     await pages[black].locator(`.gc-fx-bubble`, { hasText: '将军' }).waitFor();
-    assert.match(await pages[black].locator('.gc-turn-line').innerText(), /被将军/);
+    assert.match(await pages[black].locator('.gc-duel-bar.bottom').innerText(), /轮到你走 · 被将军/);
     assert.equal(await pieceCount(pages[black]), 31);
     await capture(pages[black], '22-xiangqi-check-flipped.png');
+    await boardFill(pages[black], '22-xiangqi-check');
     // Draw offer: the other side may answer out of turn; rejecting keeps the game going.
     await pages[black].locator('[data-gc-board-act="offer_draw"]').click();
     await pages[black].locator('.gc-wait-reason', { hasText: '已提出和棋' }).waitFor();
     await syncTable(pages[red], await boardView(env, id, red));
     await pages[red].locator('.gc-draw-offer').waitFor();
     await capture(pages[red], '23-xiangqi-draw-offer.png');
+    await boardFill(pages[red], '23-xiangqi-draw-offer');
     await pages[red].locator('[data-gc-board-act="reject_draw"]').click();
     await pages[red].locator('.gc-draw-offer').waitFor({ state: 'detached' });
     await syncTable(pages[black], await boardView(env, id, black));
@@ -1140,6 +1152,7 @@ test('real gomoku: two humans, preview-then-confirm placement, five in a row and
     }
     assert.equal(await stoneCount(page), 8);
     assert.equal(await page.locator('.gc-stone.last').count(), 1, 'the last stone is marked');
+    await boardFill(page, '26-gomoku-playing');
     // Occupied points are ignored; the fifth stone wins and the line is highlighted.
     await tap(5, 7);
     assert.equal(await page.locator('.gc-stone.ghost').count(), 0, 'occupied points cannot be previewed');
