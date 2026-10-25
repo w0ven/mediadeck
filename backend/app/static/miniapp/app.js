@@ -223,6 +223,7 @@
     if (tg) { if (top) tg.BackButton.show(); else tg.BackButton.hide(); }
   }
   async function render() {
+    games.dispose();
     const version = ++S.version;
     syncChrome();
     const top = current();
@@ -1295,7 +1296,8 @@
   }
 
   const lottery = window.createLotteryUI({ api, esc, setScreen, push, back, toast, stamp, tg, icon });
-  const TABS = { me: renderMe, rank: renderRank, req: renderReq, bag: renderBag };
+  const games = window.createGamesUI({ api, esc, setScreen, push, back, toast, sheet, closeLayer, icon, lvTag, lvClass, plaque, myTag, getProfile: () => S.me, tg });
+  const TABS = { me: renderMe, rank: renderRank, req: renderReq, games: games.lobby, bag: renderBag };
 
   if (!tg || !tg.initData) {
     setScreen(stateView(icon('smartphone'), '请在 Telegram 里打开', '会员面板需要从 Bot 首页的「📱 会员面板」按钮进入。'));
@@ -1312,13 +1314,23 @@
     Promise.all([
       api('/api/app/lottery/context'),
       api('/api/app/lottery/ongoing').catch(() => ({ items: [] }))
-    ]).then(([ctx, ongoingRes]) => {
+    ]).then(async ([ctx, ongoingRes]) => {
       if (!ctx.registered) {
         showWelcome(ongoingRes.items || []);
         return;
       }
       const deepLink = { devices: renderDevices, password: renderPassword }[params.get('page')];
-      if (deepLink) S.stack.push({ render: deepLink });
+      const gameLink = /^gc_([A-Za-z0-9_]+)$/.exec(start);
+      if (gameLink || start === 'games' || !deepLink) {
+        // Explicit links only preview a table. Reopening restores an already seated member.
+        const tableId = gameLink ? gameLink[1] : await games.activeTable();
+        if (tableId || start === 'games') {
+          await loadMe();
+          S.tab = 'games';
+          if (tableId) S.stack.push({ render: alive => games.table(tableId, alive) });
+        }
+      }
+      if (deepLink && !gameLink && start !== 'games') S.stack.push({ render: deepLink });
       render();
     }).catch(err => { if (!fatal(err)) setScreen(failView(err)); });
   }

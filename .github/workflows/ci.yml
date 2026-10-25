@@ -17,7 +17,7 @@ jobs:
   backend:
     name: Backend lint, tests and mock startup
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     env:
       TZ: Asia/Shanghai
       MEDIADECK_MOCK: "1"

@@ -36,6 +36,9 @@ def self_deletion_guard(db, user_id):
                 raise ConfigError("你有未结算的骰局庄本，请等待结算后再注销；本次未删除账号。")
             if pending:
                 raise ConfigError("你有未结算的骰局下注，请等待结算完成后再注销；本次未删除账号。")
+        if (conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='gc_seats'").fetchone()
+                and conn.execute('SELECT 1 FROM gc_seats WHERE user_id=?', (str(user_id),)).fetchone()):
+            raise ConfigError('你仍在游戏中心牌桌，请先离桌结算后再注销；本次未删除账号。')
         conn.execute("INSERT INTO meta(key,value) VALUES(?,?)", (key, token))
     # Persist through remote I/O; a process crash deliberately fails closed.
     # Never hold a SQLite transaction while awaiting Emby.

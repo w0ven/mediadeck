@@ -90,3 +90,5 @@ def migrate(db):
     migrate_pk(db)
     from app.modules.bot_play_panels import migrate as migrate_panels
     migrate_panels(db)
+    from app.modules.game_center_schema import migrate as migrate_game_center
+    migrate_game_center(db)

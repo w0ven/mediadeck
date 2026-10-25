@@ -35,6 +35,18 @@ class PlayHubBotMixin:
                 body+='\n授权群 /猜大小 庄本 坐庄，其他群友直接发送 /大 金额 或 /小 金额即确认'
             if self._plugin_on('pk'):
                 body+='\n🎲 骰子 PK · 回复对方消息发 /pk 100 挑战（不写数字是友谊赛），/pkrank 看连胜榜'
+            if self._plugin_on('game_center') and str(self._cfg().get('miniapp_url') or '').strip():
+                from app.modules.game_center_config import deep_link
+                base = self._cfg()['miniapp_url']
+                username = getattr(self, '_bot_username', '')
+                if username:
+                    base = 'https://t.me/' + username
+                url = deep_link(base)
+                if url:
+                    entry = {'text': '🎮 游戏中心', 'url': url}
+                    if private and not username:
+                        entry = {'text': '🎮 游戏中心', 'web_app': {'url': url}}
+                    rows.append([entry])
             if self._plugin_on('points_ranking'):rows.append([button('积分榜','view','leaderboard')])
             if private and (self._plugin_on('niuniu') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /牛牛 创建牌局。'
             if not rows:body+='\n\n暂未开放玩法'

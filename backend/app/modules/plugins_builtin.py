@@ -36,6 +36,7 @@ from app.modules.blackwhite import BlackwhitePlugin
 from app.modules.checkin_cleanup import CheckinCleanupPlugin
 from app.modules.command_cleanup import GroupCommandCleanupPlugin
 from app.modules.dice import DicePlugin
+from app.modules.game_center_config import GameCenterPlugin
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.intake_plugin import IntakePipelinePlugin
 from app.modules.level_lifecycle import LevelLifecyclePlugin
@@ -955,6 +956,7 @@ BUILTIN_PLUGINS = (
     CheckinCleanupPlugin,
     BlackwhitePlugin,
     PokerPlugin,
+    GameCenterPlugin,
     NiuniuPlugin,
     PkPlugin,
     DicePlugin,

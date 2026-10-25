@@ -18,6 +18,7 @@ from app.modules.usage import run_usage_io
 def unsettled(conn, uid):
     queries = [
         ("SELECT 1 FROM play_escrows WHERE user_id=? AND amount>0", (uid,)),
+        ("SELECT 1 FROM gc_seats WHERE user_id=?", (uid,)),
         ("SELECT 1 FROM activity_watch_pending WHERE emby_user_id=?", (uid,)),
         (("SELECT 1 FROM play_players p JOIN play_rounds r ON r.nonce=p.nonce "
           "WHERE p.user_id=? AND r.state IN ('lobby','running')"), (uid,)),
@@ -172,6 +173,10 @@ class LevelLifecyclePlugin(Plugin):
                     f"到期：{datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
                     f"删除候选时间：{datetime.fromtimestamp(expiry+3*DAY, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
                     '到期停止播放，保留期间仍可查看/积分续费。/activity 查看，/renew30 续30天；自动保号需主动开启。')
+            if info['shortfall']:
+                held = levels.db.one("SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND scope IN ('gc_zjh','gc_holdem')", (uid,))['n']
+                if held:
+                    body += f'\n有 {held} 积分正冻结在牌桌。'
             try:
                 acknowledged = await bot.send(chat, body)
             except Exception:  # noqa: BLE001 - retain retry without claiming delivery
