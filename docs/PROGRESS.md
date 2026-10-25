@@ -2,6 +2,34 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-26 — v0.54.0: Mini App game center (炸金花 and Texas hold'em)
+
+- New 「游戏」 tab in the member Mini App: lobby, six tiers per game (practice with
+  labelled robots and daily beans, then 新手/普通/高手/大师/至尊), tables, rules and
+  deck verification (SHA256 commitment revealed after each hand). Specs in
+  `GAME-CENTER.md`, member API and SSE contract in `GAME-CENTER-API.md`.
+- 炸金花: 2–5 players, per-hand cap frozen at the start and refunded at settlement
+  (至尊 freezes all available points), look at any time, private comparisons, all-in
+  showdown, ten-round limit, optional 235 rule.
+- Texas hold'em: pure no-limit engine (`holdem_engine.py`, exhaustive hand-rank and
+  10,000-hand property tests), 6-max tables, buy-in 20–100 BB, top-ups, side pots,
+  continuous dealing and sit-out. Hands settle as same-table escrow transfers; the
+  member ledger only shows buy-in, top-up and cash-out.
+- The host can start once the minimum players are ready; a full, all-ready table
+  starts by itself. Auto-play (manual toggle, or entered on a turn timeout) plays a
+  conservative, documented strategy and sits the member out after the configured
+  number of hands so idle seats cannot keep losing points.
+- Deadlines persist in SQLite and resume after restarts. Opponents' cards never
+  reach other viewers over HTTP or SSE. Opening a table can post one recruitment card
+  to a configured group, edited in place and deleted when play starts.
+- Default-off Deck plugin `game_center` (switches, tiers, timeouts, auto-play limits,
+  broadcast group, statistics, cash queries) and a 「🎮 游戏中心」 entry in `/玩法`.
+  Members still seated cannot self-delete or be expiry-deleted; renewal shortfall
+  reminders mention points frozen at a table.
+- Artwork in `static/miniapp/game-assets/` is AI-generated (see `SOURCES.md`).
+- Full suite: 5612 passed, 79 skipped. `test_audit_web_browser.py::test_member_override_raw_success_and_other_draft`
+  is intermittently flaky on v0.53.3 as well (about 1 in 5 runs) and is unrelated.
+
 ## 2026-10-25 — v0.53.3: /kk profile section in groups too
 
 - `/kk` is mostly read in groups, so the group card now carries the same profile

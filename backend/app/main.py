@@ -42,6 +42,7 @@ from app.modules.entries import entry_target, identify_entry
 from app.modules.entry_proxy import SERVERS as ENTRY_SERVERS
 from app.modules.entry_proxy import friend_config, member_proxy_config
 from app.modules.events import EventStream, safe_stream
+from app.modules.game_center_api import register_admin as register_game_admin
 from app.modules.groups import WHITELIST_GROUP_ID, GroupService
 from app.modules.imagecache import ALLOWED_IMAGE_TYPES, ImageCache
 from app.modules.imports import ImportManager, JobKind, MockExecutor
@@ -607,6 +608,13 @@ async def _startup() -> None:
                                       app.state.shop, app.state.registration, app.state.groups,
                                       app.state.telegram)
     app.state.telegram._lottery = app.state.lottery
+    from app.modules.game_center import GameCenter
+    from app.modules.game_center_delivery import GameDelivery
+    app.state.game_center = GameCenter(app.state.db, app.state.members, app.state.points,
+        lambda: app.state.plugins.config('game_center'),
+        lambda: app.state.plugins.enabled('game_center'), lambda: app.state.telegram)
+    app.state.game_center_task = asyncio.create_task(app.state.game_center.run())
+    app.state.game_delivery_task = asyncio.create_task(GameDelivery(app.state.game_center).run())
     app.state.telegram._inventory = app.state.inventory
     app.state.telegram._titles = app.state.titles
     app.state.member_devices = MemberDevices(lambda: app.state.emby)
@@ -670,7 +678,7 @@ async def _shutdown() -> None:
     """Join background writers before releasing their shared database."""
     tasks = [getattr(app.state, name, None) for name in
              ("usage_task", "probe_task", "intake_prime_task", "restriction_notice_task",
-              "audit_retention_task", "lottery_task")]
+              "audit_retention_task", "lottery_task", "game_center_task", "game_delivery_task")]
     tasks = [task for task in tasks if task is not None]
     for task in tasks:
         task.cancel()
@@ -3736,3 +3744,4 @@ async def cached_image(item_id: str, image_type: str, request: Request) -> Respo
 
 activity_api.register(app, _auth)
 miniapp.register(app)
+register_game_admin(app, _auth)

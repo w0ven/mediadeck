@@ -5,7 +5,7 @@ The inline SVG sprite at the top of `index.html` holds outline icons from Lucide
 Templates reference them as `<svg class="ico"><use href="#i-<name>"/></svg>`;
 stroke width and colour come from `.ico` in `app.css`.
 
-Included: award, box, chevron-down, chevron-right, circle-alert, circle-check, circle-pause, clapperboard, crown, gauge, globe, key-round, lock, monitor-play, monitor-smartphone, monitor, package, receipt, rotate-cw, route, search, shield-check, shield, smartphone, tablet, ticket, triangle-alert, trophy, tv, unlink, user-plus, user, wrench.
+Included: award, box, chevron-down, chevron-right, circle-alert, circle-check, circle-pause, clapperboard, crown, gamepad-2, gauge, globe, key-round, lock, monitor-play, monitor-smartphone, monitor, package, receipt, rotate-cw, route, search, shield-check, shield, smartphone, tablet, ticket, triangle-alert, trophy, tv, unlink, user-plus, user, wrench.
 
 To add an icon, copy its `<path>`/`<circle>`/`<rect>`/`<line>` elements from
 `icons/<name>.svg` in the Lucide repository into a new `<symbol>`.

@@ -44,6 +44,9 @@ REASON_LABELS = {
     "play.reserve": "玩法资金冻结",
     "play.release": "未用资金退回",
     "play.payout": "游戏奖池结算",
+    "game.buy_in": "牌桌带入",
+    "game.top_up": "牌桌补码",
+    "game.cash_out": "牌桌离桌结算",
 }
 
 

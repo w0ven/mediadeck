@@ -183,6 +183,8 @@ def register(app: Any) -> None:
     Ctx = Depends(member_context)
     from app.modules.lottery_api import register as register_lottery
     register_lottery(app, telegram_context)
+    from app.modules.game_center_api import register as register_games
+    register_games(app, member_context)
 
 
     def refreshed(ctx):
