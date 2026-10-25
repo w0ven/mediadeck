@@ -1,7 +1,7 @@
 # 游戏中心 Mini App API
 
 版本：v1，2026-10-25。权威规则见 `GAME-CENTER.md`。根路径 `/api/app/games`。
-炸金花 `zjh` 与德州扑克 `holdem` 均已实现，`available:true`；后台总开关及各游戏开关仍默认关闭，关闭时开桌/入桌返回 `503 disabled`。牛牛 `niuniu`、斗地主 `doudizhu`、五子棋 `gomoku`、象棋 `xiangqi` 为 coming_soon。
+炸金花 `zjh`、德州扑克 `holdem`、五子棋 `gomoku` 和象棋 `xiangqi` 均已接入，完整安装时 `available:true`。后台总开关及各游戏开关仍默认关闭，关闭时开桌/入桌返回 `503 disabled`。牛牛 `niuniu`、斗地主 `doudizhu` 为 coming_soon。棋类完整合同见“棋类（象棋、五子棋）”节。
 
 ## 1. 通用约定
 
@@ -114,7 +114,7 @@
 ### POST `/tables/{table_id}/ready`
 
 `{"ready":true,"request_id":"ready_12345678"}`；取消 `ready:false`。
-仅炸金花等待阶段；余额不足封顶不允许准备。全员准备且至少两人自动 5 秒倒计时，有人入座/取消则取消。每手结束需要重新准备（托管玩家自动准备，但达到连续托管手数上限自动离座）。
+炸金花及棋类等待阶段（棋类细节见专节）；炸金花余额不足封顶不允许准备。全员准备且至少两人自动 5 秒倒计时，有人入座/取消则取消。每手结束需要重新准备（托管玩家自动准备，但达到连续托管手数上限自动离座）。
 
 ### POST `/tables/{table_id}/start`
 
@@ -123,7 +123,7 @@
 
 ### POST `/tables/{table_id}/auto`
 
-`{"enabled":true,"request_id":"auto_12345678"}`。随时切换托管；false 取消。开启后到本人时 1–2 秒自动行动，普通行动超时自动开启。取消后不会重置原始 30 秒截止时间。
+`{"enabled":true,"request_id":"auto_12345678"}`。仅炸金花/德州，随时切换托管；false 取消。开启后到本人时 1–2 秒自动行动，普通行动超时自动开启。取消后不会重置原始 30 秒截止时间。
 
 炸金花托管说明：第一次先看牌；对子或更好就跟注，单张弃牌，不加注不主动比牌；跟不起时对子或更好孤注一掷，否则弃牌。最多连续 3 手自动准备（后台可调），达到上限离座。
 德州托管说明：免费就过牌；成牌一对或更好（翻前口袋对子或两张都是 A/K/Q），且跟注不超过底池一半才跟；跟注即全下需两对或更好；否则弃牌，不主动下注/加注/全下。
@@ -291,6 +291,100 @@ HTTP 与 SSE 的 Snapshot 新增 `start_status`；旧字段保持不变。例如
 - 外层 result 等于 engine.results，结算后结构为 `{"players":{"p_abcd":{"stack":102,"net":2,"won":4,"hand":"一对","best5":[0,13,2,3,4],"shown":true}},"pots":[{"amount":4,"eligible":["p_abcd","p_efgh"],"winners":["p_abcd"]}],"uncalled":{}}`（玩家示例省略其他人）。hand 为中文牌型；best5 最好五张；未亮牌者 hand/best5=null，shown=false。净额之和为 0。
 - 只按 engine/legal_actions 允许项渲染；不可应注的未跟注筹码会自动退回，可能出现无人能再跟进而 all_in=0 的合法局面，此时只能 call/fold（或 check）。
 
+## 棋类（象棋、五子棋）
+
+本节为棋类前后端合同（首版 2026-10-26）。游戏 ID 为 `xiangqi`、`gomoku`；均为两人桌，沿用上述开桌、快速开始、入座、准备、房主开始、离桌、HTTP 快照及 SSE 接口。棋盘公开，积分桌允许会员旁观；练习桌仍仅主人可见。`phase` 为 `waiting/playing/closed`，结束后 `hand=null`，完整结束局面放入 `last_hand`，双方须重新准备，房主可以自动算准备。练习机器人自动准备。离开进行中的对局视为认输并立即结算。
+
+### 场次、开桌和通用字段
+
+六场 `practice/novice/normal/pro/master/supreme`；场次和 `rules` 含 `stake`（每人每局押注）、`min_balance`，不使用 ante、cap、buy_in。默认练习押 100 欢乐豆，五档积分押 10/50/200/500/2000，赢家拿两份，和棋或作废原额退回，无抽水。开局才冻结。场次摘要示例：
+
+```json
+{"id":"novice","name":"新手场","currency":"points","stake":10,"min_balance":10,"seated":0,"waiting_tables":[]}
+```
+
+```json
+{"game":"gomoku","tier":"practice","robot_level":"easy","request_id":"create_board_123"}
+```
+
+`robot_level` 仅练习场可传，`easy/normal/hard` 分别为入门/普通/困难，省略为 `normal`；积分场只有真人。`/quick-start` body 相同。`/seat` body 为 `{"seat":1,"request_id":"seat_board_123"}`（seat 可省略）；`/ready`、`/start`、`/leave` 与通用接口相同。`/auto`、`/away`、`/top-up` 不适用棋类。`max_players=2`，座位为 0、1；`start_status` 与炸金花的查看者相关结构相同，但两人都必须满足条件。`auto_at=null`，机器人思考/排队仍为 `playing` 且 `current_player` 是机器人。两种引擎合计最多同时运行 2 个进程；桌层排队加思考预算 1.5 秒，过期用合法回退，不新增前端状态字段。
+
+`rules` 完整示例（象棋默认 `total_seconds=600, step_seconds=60`；五子棋为 300、30；时长均可配置，开桌时冻结）：
+
+```json
+{"id":"practice","name":"练习场","currency":"beans","stake":100,"min_balance":100,
+ "total_seconds":300,"step_seconds":30,"offline_step_seconds":120,
+ "draw_cooldown_plies":3,"auto_play":false,"robot_level":"normal"}
+```
+
+`seats[]` 保留公共字段，并追加 `color`（未首次开局前为 null；象棋 red/black，五子棋 black/white）。每局 `hand.players` 保存当局颜色，红/黑先行，同桌第一局随机，以后交换。`rules.auto_play=false` 是隐藏托管入口的依据。
+
+### hand / last_hand 的完整棋类结构
+
+以下是五子棋进行中的 `hand` 示例，其余顶层 Snapshot 字段沿用通用结构：
+
+```json
+{
+  "number":1,"turn":2,"current_player":"p_white","finished":false,
+  "players":[{"player":"p_black","seat":0,"color":"black"},{"player":"p_white","seat":1,"color":"white"}],
+  "board":{"size":15,"moves":[[7,7]]},
+  "moves":[{"ply":1,"player":"p_black","color":"black","move":[7,7]}],
+  "last_move":{"ply":1,"player":"p_black","color":"black","move":[7,7]},
+  "clocks":{"remaining":{"p_black":298.5,"p_white":299.2},"running":"p_white","turn_started_at":1792939300,"turn_deadline":1792939330},
+  "in_check":null,"draw_offer":null,
+  "legal_actions":{"move":{},"resign":{},"offer_draw":{}},
+  "result":null
+}
+```
+
+- 五子棋 `board.moves` 是实际落子顺序，黑白交替，坐标 `[x,y]` 均为 0..14，左上角为 `[0,0]`，x 向右、y 向下；15×15 自由规则，任意方向五子或更多胜，下满和棋。`moves` 是带玩家、颜色的同一历史；`last_move` 是其最后一项，无落子时 null。
+- `turn` 是动作版本，不是落子数；认输、求和、拒绝、悔棋等也推进，客户端一律使用最新快照。`ply` 是棋谱内从 1 起的半回合序号。
+- `clocks.remaining` 为截至外层 `server_time` 双方剩余总秒数（非负小数）；`running` 是正在扣时的 player，结束为 null；`turn_started_at` 是本步起点，结束为 null。`clocks.turn_deadline` 与外层 `turn_deadline` 一致，为总时长和本步上限中较早的绝对 Unix 截止时间，结束为 null。客户端自行逐秒显示，不要求每秒 SSE。
+- 当前玩家本桌无有效 SSE 且无近期 HTTP 活动时，本步上限放宽到 120 秒，总时长仍扣除，回来可继续，已获宽限不收回。在线使用共享的本桌 presence 记录（HTTP 在线窗口 30 秒）；放宽后的截止时间持久化，重启不重置。开始时没有走过第一步且先手到期则 `aborted` 退回；以后到期 `timeout` 判负。求和及回应不暂停、不重置棋钟。
+- `draw_offer` 是 `null` 或 `{"player":"p_black","ply":8}`；对方落子视为拒绝。相同玩家再次求和须距离上次至少 3 次落子（悔棋不回退冷却计数）。机器人会拒绝求和。
+- `legal_actions` 是**查看者**能执行的动作对象；旁观者/结束为 `{}`，非当前玩家仍可认输、求和或回应求和。无资格的键直接省略，不以空值代表禁止。练习场只有轮到真人、且自己的上一步及机器人应着都存在时有 `undo`；撤回这两步，不退还已经用掉的总时间。
+- `result` 未结束为 null，结束为 `{"winner":"p_black","reason":"five","net":{"p_black":10,"p_white":-10}}`。winner 是 player 或 null（和棋/作废），net 含双方且总和为 0。和棋或作废双方 net 都是 0。结束后 current_player=null，legal_actions={}，棋盘、棋谱、颜色和停止后的剩余棋钟保留。
+
+象棋 `hand` 的公共字段完全相同，差别如下（示例为红方刚开局、红方查看）：
+
+```json
+{
+  "number":1,"turn":1,"current_player":"p_red","finished":false,
+  "players":[{"player":"p_red","seat":0,"color":"red"},{"player":"p_black","seat":1,"color":"black"}],
+  "board":{"fen":"rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P1P/1C5C1/9/RNBAKABNR w"},
+  "moves":[],"last_move":null,
+  "clocks":{"remaining":{"p_red":600,"p_black":600},"running":"p_red","turn_started_at":1792939300,"turn_deadline":1792939360},
+  "in_check":false,"draw_offer":null,
+  "legal_moves":["h2e2","h2f2"],
+  "legal_actions":{"move":{},"resign":{},"offer_draw":{}},"result":null
+}
+```
+
+示例 `legal_moves` 仅展示两项，实际响应是完整合法着法数组。着法字符串如 `h2e2`，列 a..i、行 0..9，**红方底线是第 0 行**；FEN 自上而下从黑方底线（第 9 行）排列。`moves[].move` 为同格式字符串，`board.fen` 是当前局面，规范输出为**两字段 FEN**（棋子布局、`w/b` 行棋方），前端不要依赖末尾四个计数字段；引擎也能读取六字段 FEN。`in_check` 为当前走棋方是否被将军。**仅进行中且当前走棋方本人拿到 `legal_moves` 字段；对手、观众、结束局面直接省略此字段**，不可由共享快照缓存泄漏。
+
+结束原因：象棋 `checkmate/stalemate/perpetual_check/repetition/move_limit/insufficient/timeout/resign/draw_agreed/aborted`；五子棋 `five/board_full/timeout/resign/draw_agreed/aborted`。
+
+### 动作请求与错误
+
+统一 POST `/tables/{table_id}/actions`，都必须有 `request_id/hand_no/turn`，成功返回 `{"table":<Snapshot>}`：
+
+```json
+{"request_id":"move_board_123","hand_no":1,"turn":2,"action":"move","move":[7,8]}
+```
+
+| action | 额外请求字段 | 条件 |
+|---|---|---|
+| move | 象棋 `"move":"h2e2"`；五子棋 `"move":[7,8]` | 只允许当前玩家的合法着法 |
+| resign | 无 | 双方进行中随时可认输 |
+| offer_draw | 无 | 无待处理求和且本人不在冷却期 |
+| accept_draw | 无 | 仅收到对方求和者，立即议和结算 |
+| reject_draw | 无 | 仅收到对方求和者，继续原有棋钟 |
+| undo | 无 | 仅练习场真人、本人回合且可撤回完整的两步 |
+
+无额外参数的完整请求示例：`{"request_id":"draw_board_123","hand_no":1,"turn":2,"action":"offer_draw"}`，其余动作仅替换 action。
+
+复用通用错误格式和鉴权/幂等错误。棋类新增或明确：`400 invalid`（坐标/着法格式/难度/棋类不支持的桌操作）、`400 illegal_action`（非本人回合、非法落子、不能悔棋或无对方求和）、`409 draw_cooldown`（三次落子内再次求和）、`409 stale_turn`（局号或版本不符，包括已结束）、`409 not_ready`（另一人尚未准备或双方余额不足）、`400 insufficient_funds`（准备余额不足）。期限到达后的请求先结算，再返回 stale_turn，不会用迟到动作延长棋钟。棋类不使用洗牌复核接口，调用返回 `400 invalid`。
+
 ## 6. 复核
 
 会员界面不调用此接口，也不展示复核入口；接口保留，供排查争议时核对牌序。
@@ -362,5 +456,5 @@ data: {"table": <Snapshot>}
 
 ## 9. Deck 管理端（不是会员 API）
 
-插件 `game_center`，默认总开关/单游戏/播报关闭。声明场次 JSON、行动超时、托管阈值、235、欢乐豆、授权播报群等 Field；插件 readonly_status 给真人在桌数、今日局数、积分投入流水（炸金花下注 + 今日已结算德州各手 committed 之和，扣除未跟注退回）、今日德州冻结转移额（只计出账一侧）。群播报发送前用 getMe 确认对应 Bot 已配置 Main Mini App；未配置则保留任务重试，不发普通网页假深链。初次发卡结果不明或租约过期进入 unknown，不再盲发；没有确认的 message_id 不能安全编辑/删除，需管理员核实原群卡，状态计数在插件卡可见。
+插件 `game_center`，默认总开关/单游戏/播报关闭。棋类追加 `xiangqi_enabled/gomoku_enabled`、`xiangqi_tiers/gomoku_tiers` 和各自 `*_total_seconds/*_step_seconds`；声明场次 JSON、行动超时、托管阈值、235、欢乐豆、授权播报群等 Field；插件 readonly_status 给真人在桌数、今日局数、积分投入流水（炸金花下注 + 今日已结算德州各手 committed 之和，扣除未跟注退回）、今日德州冻结转移额（只计出账一侧）。群播报发送前用 getMe 确认对应 Bot 已配置 Main Mini App；未配置则保留任务重试，不发普通网页假深链。初次发卡结果不明或租约过期进入 unknown，不再盲发；没有确认的 message_id 不能安全编辑/删除，需管理员核实原群卡，状态计数在插件卡可见。
 使用现有后台登录鉴权的 `GET /api/game-center/cash?table_id=...&user_id=...&limit=100` 查询（至少一个条件，最多500条），返回 `{"events":[{"id":1,"scope":"gc_zjh","ref":"abc123:1","user_id":"...","operation":"reserve","amount":50,"target":"","created_at":1792939300}]}`；可按桌/用户交叉筛选，仅管理端允许内部会员 ID。

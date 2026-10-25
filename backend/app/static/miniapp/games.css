@@ -1495,6 +1495,404 @@
   left: 21px;
 }
 
+/* Board games: a gold-framed wooden board between the two players' bars. */
+.gc-boards {
+  display: grid;
+  gap: 10px;
+}
+.gc-board-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px;
+  border-radius: 20px;
+  border: 1px solid #ffd67a80;
+  background: radial-gradient(200px 120px at 100% 0, #ffcc5c33, transparent 70%), linear-gradient(150deg, #5a2a9a, #34106a);
+  box-shadow: 0 12px 28px #14002e66, inset 0 1px 0 #ffffff33;
+}
+.gc-board-card b {
+  font-size: 17px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+.gc-board-art {
+  width: 64px;
+  height: 68px;
+  flex: none;
+  filter: drop-shadow(0 6px 14px #ffbe5044);
+}
+.gc-board-card .gc-feature-buttons {
+  margin-top: 8px;
+}
+.gc-board-meta {
+  font-size: 11px;
+  color: var(--hint);
+  margin-right: auto;
+}
+.gc-duel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 4px 10px 8px;
+}
+.gc-duel-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 16px;
+  background: var(--plate);
+  border: 1px solid #ffffff1f;
+  backdrop-filter: blur(10px);
+}
+.gc-duel-bar.on {
+  border-color: color-mix(in srgb, var(--trim) 70%, transparent);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--trim) 30%, transparent);
+}
+.gc-duel-bar > .gc-avatar-ring {
+  width: 42px;
+  height: 42px;
+}
+.gc-duel-bar .avatar {
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
+}
+.gc-duel-bar.gc-duel-empty .gc-avatar-ring {
+  display: grid;
+  place-items: center;
+  background: #ffffff1a;
+  color: #ffe39a;
+}
+.gc-duel-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  font-weight: 800;
+}
+.gc-duel-name .lvtag {
+  font-size: 9px;
+}
+.gc-side {
+  font-size: 10px;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: 99px;
+  font-weight: 800;
+}
+.gc-side.red {
+  color: #fff;
+  background: linear-gradient(135deg, #ff6b6b, #c0202f);
+}
+.gc-side.black {
+  color: #f3f3f3;
+  background: linear-gradient(135deg, #4a4a55, #15151c);
+  box-shadow: inset 0 0 0 1px #ffffff33;
+}
+.gc-side.white {
+  color: #2a2a2a;
+  background: linear-gradient(135deg, #ffffff, #d6d6dc);
+}
+.gc-clock {
+  text-align: right;
+  min-width: 58px;
+}
+.gc-clock b {
+  display: block;
+  font-size: 19px;
+  font-weight: 900;
+  letter-spacing: 1px;
+  color: #e9e3ff;
+}
+.gc-clock small {
+  font-size: 10px;
+  color: var(--hint);
+}
+.gc-clock.on b {
+  color: #ffe08a;
+  text-shadow: 0 0 10px #ffcc5c88;
+}
+.gc-clock.low b {
+  color: #ff8a9c;
+}
+/* The duel area takes the height left by header and dock; the board shrinks to fit it, minus two player bars. */
+.gc-board-table .gc-duel {
+  container-type: size;
+  min-height: 0;
+}
+.gc-board-frame {
+  position: relative;
+  align-self: center;
+  width: min(100%, 520px, calc((100cqh - 160px) * .9 + 14px));
+  padding: 7px;
+  border-radius: 16px;
+  background: linear-gradient(145deg, #fff0b3, #c99a3c 30%, #8a5a1a 55%, #e8c56a 80%, #9a6a24);
+  box-shadow: 0 18px 36px #14002ecc, 0 0 30px #f2c14e33;
+}
+.gc-gomoku .gc-board-frame {
+  width: min(100%, 520px, calc(100cqh - 146px));
+}
+.gc-xq-board, .gc-go-board {
+  position: relative;
+  container-type: inline-size;
+  border-radius: 10px;
+  box-shadow: inset 0 0 0 1px #0004, inset 0 0 30px #0005;
+  touch-action: manipulation;
+  user-select: none;
+}
+.gc-xq-board {
+  aspect-ratio: 9 / 10;
+  background: url(/app/assets/game-assets/board-rosewood.webp) center / cover, #6b1d14;
+}
+.gc-go-board {
+  aspect-ratio: 1;
+  background: url(/app/assets/game-assets/board-kaya.webp) center / cover, #e6b866;
+}
+.gc-board-lines {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  pointer-events: none;
+}
+.gc-xq-board .gc-board-lines path {
+  stroke: #f6d98a;
+  stroke-width: 3;
+  opacity: .82;
+}
+.gc-xq-board .gc-board-lines .edge {
+  stroke: #f6d98a;
+  stroke-width: 7;
+  opacity: .9;
+}
+.gc-xq-board .gc-board-lines text {
+  fill: #f6d98a;
+  opacity: .78;
+  font-size: 58px;
+  font-family: "KaiTi", "STKaiti", "Kaiti SC", "Songti SC", "Noto Serif CJK SC", serif;
+  text-anchor: middle;
+  letter-spacing: 12px;
+}
+.gc-go-board .gc-board-lines path {
+  stroke: #3b2410;
+  stroke-width: 4;
+  opacity: .75;
+}
+.gc-go-board .gc-board-lines circle {
+  fill: #3b2410;
+  opacity: .85;
+}
+.gc-xq-piece {
+  position: absolute;
+  width: 10.2%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  padding: 0;
+  border-radius: 50%;
+  border: .5cqw solid #c9963a;
+  background: radial-gradient(circle at 38% 30%, #fffaf0, #f2e2c0 55%, #d8bf8e);
+  box-shadow: 0 .6cqw 1.2cqw #0009, inset 0 -.5cqw .8cqw #8a5a1a55;
+  font-family: "KaiTi", "STKaiti", "Kaiti SC", "Songti SC", "Noto Serif CJK SC", serif;
+  font-size: 5.6cqw;
+  font-weight: 900;
+  line-height: 1;
+  transition: transform .12s;
+}
+.gc-xq-piece span {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  box-shadow: inset 0 0 0 .55cqw currentColor;
+  opacity: .96;
+}
+.gc-xq-piece.red {
+  color: #c4161c;
+}
+.gc-xq-piece.black {
+  color: #1e2a24;
+}
+.gc-xq-piece.sel {
+  transform: translate(-50%, -62%) scale(1.08);
+  box-shadow: 0 1.6cqw 2.4cqw #000a, 0 0 0 .8cqw #ffe08acc;
+}
+.gc-xq-piece.target {
+  box-shadow: 0 .6cqw 1.2cqw #0009, 0 0 0 .8cqw #ff5c6ccc;
+}
+.gc-xq-piece.check {
+  animation: gc-check .9s ease-in-out infinite alternate;
+}
+@keyframes gc-check {
+  to {
+    box-shadow: 0 .6cqw 1.2cqw #0009, 0 0 0 1cqw #ff3b4fcc, 0 0 4cqw #ff3b4f;
+  }
+}
+.gc-xq-dot {
+  position: absolute;
+  width: 6cqw;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle, #ffe08a 0 30%, #ffe08a55 32%, transparent 62%);
+}
+.gc-xq-last {
+  position: absolute;
+  width: 11cqw;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border: .45cqw dashed #ffe08acc;
+  border-radius: 50%;
+  pointer-events: none;
+}
+.gc-stone {
+  position: absolute;
+  width: 6.1%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+}
+.gc-stone.black {
+  background: radial-gradient(circle at 35% 30%, #6a6a72, #18181c 55%, #050506);
+  box-shadow: 0 .4cqw .9cqw #0009;
+}
+.gc-stone.white {
+  background: radial-gradient(circle at 35% 30%, #ffffff, #ececf0 55%, #bdbdc6);
+  box-shadow: 0 .4cqw .9cqw #0007;
+}
+.gc-stone.ghost {
+  opacity: .55;
+  box-shadow: 0 0 0 .5cqw #ffe08a;
+}
+.gc-stone.last::after {
+  content: "";
+  position: absolute;
+  inset: 36%;
+  border-radius: 50%;
+  background: #ff4d5e;
+}
+.gc-stone-win {
+  position: absolute;
+  width: 6.8%;
+  aspect-ratio: 1;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  box-shadow: 0 0 0 .5cqw #ffe08a, 0 0 2.4cqw #ffcc5c;
+  pointer-events: none;
+  animation: gc-win-glow 1.1s ease-in-out infinite alternate;
+}
+@keyframes gc-win-glow {
+  from {
+    box-shadow: 0 0 0 .4cqw #ffe08acc, 0 0 1.2cqw #ffcc5c88;
+  }
+  to {
+    box-shadow: 0 0 0 .6cqw #fff3c4, 0 0 3.4cqw #ffcc5c;
+  }
+}
+.gc-board-note {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  padding: 12px 18px;
+  border-radius: 18px;
+  text-align: center;
+  color: #fff;
+  background: #1c0838b3;
+  border: 1px solid #f3cf7380;
+  box-shadow: 0 14px 30px #0009;
+  backdrop-filter: blur(6px);
+}
+/* The result sits above the dock so the final position (winning five, mated king) stays visible. */
+.gc-board-result {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin-bottom: 9px;
+  padding: 8px 12px;
+  border-radius: 16px;
+  text-align: left;
+  color: #fff;
+  background: #ffffff14;
+  border: 1px solid #ffffff2e;
+}
+.gc-board-result.win {
+  background: linear-gradient(100deg, #ffcc5c33, #ffcc5c0d 70%);
+  border-color: #ffd67a99;
+  box-shadow: 0 0 22px #ffcc5c33;
+}
+.gc-board-result.loss {
+  border-color: #ff9fb066;
+}
+.gc-board-result img {
+  width: 30px;
+  height: 30px;
+  flex: none;
+}
+.gc-board-result b {
+  flex: none;
+  font-size: 17px;
+  font-weight: 900;
+}
+.gc-board-result.win b {
+  color: #ffe08a;
+}
+.gc-board-result.loss b {
+  color: #ffc2cc;
+}
+.gc-board-result span {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--hint);
+}
+.gc-board-result em {
+  flex: none;
+  font-style: normal;
+  font-size: 12px;
+  color: #ffe08a;
+}
+.gc-board-note b {
+  font-size: 30px;
+  font-weight: 900;
+}
+.gc-board-note small {
+  font-size: 15px;
+  color: var(--hint);
+}
+.gc-draw-offer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 9px;
+  padding: 9px 11px;
+  border-radius: 14px;
+  font-size: 13px;
+  font-weight: 800;
+  color: #ffe7a8;
+  background: #ffcc5c1f;
+  border: 1px solid #ffcc5c66;
+}
+.gc-draw-offer .btn:first-of-type {
+  margin-left: auto;
+}
+.gc-check {
+  color: #ff8a9c;
+}
+
 /* Card faces use the canonical 0..51 values, never baked-in decorative art. */
 .gc-card {
   position: relative;
@@ -2194,7 +2592,10 @@ html[data-theme="light"] .gc-feature {
   .gc-auto i::after, .gc-switch-row i, .gc-switch-row i::after {
     transition: none;
   }
-  .gc-dealing .gc-card, .gc-celebrate, .gc-celebrate-crown, .gc-winner .gc-avatar-ring {
+  .gc-dealing .gc-card, .gc-celebrate, .gc-celebrate-crown, .gc-winner .gc-avatar-ring, .gc-xq-piece.check, .gc-stone-win {
     animation: none !important;
+  }
+  .gc-xq-piece {
+    transition: none;
   }
 }

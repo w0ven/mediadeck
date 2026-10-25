@@ -2,6 +2,28 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-26 — v0.58.0: 象棋 and 五子棋 in the game center
+
+- Two-player board tables on the shared game-center layer: six tiers each (practice with
+  robots and 100 beans; 10/50/200/500/2000-point stakes, winner takes both, draws and
+  aborted openings refund, no rake), colours random then alternating, chess clocks with a
+  per-move limit and loss on time, a 120-second step allowance while offline, resignation,
+  draw offers with a three-move cooldown, and undo on practice tables. Specs in
+  `GAME-CENTER.md` §9, contract in `GAME-CENTER-API.md` "棋类".
+- 象棋 rules are a pure engine (`xiangqi_engine.py`) whose perft counts match Pikafish to
+  depth 4 on ten positions; it decides checkmate, stalemate, perpetual check, repetition,
+  the no-capture limit and insufficient material. 五子棋 is 15×15 freestyle.
+- Practice robots call Pikafish and Rapfi as optional, privilege-dropped subprocesses; both
+  engines share a global cap of two processes, and a 1.5-second table budget falls back to a
+  local legal move. Releases, checksums and the Pikafish weights licence are recorded in
+  `OPERATIONS-ENV.md`; binaries and weights stay out of the repository.
+- Board UI: a rosewood 象棋 board and a kaya 五子棋 board in gold frames, sized to the
+  height left between both player bars and the dock; the board flips for black; tap a piece
+  for its legal targets, or preview a stone and confirm it; last move, check, and the
+  winning five are marked; clocks run per side. The result sits above the dock so the final
+  position stays visible. Board games use two-player start messages.
+- End-to-end browser tests drive real 象棋, 五子棋 and practice tables through the shipped UI.
+
 ## 2026-10-26 — v0.57.1: version the game center's script and stylesheet
 
 - The Mini App page now stamps `games.js` and `games.css` with the release commit like the

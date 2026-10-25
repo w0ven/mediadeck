@@ -20,7 +20,14 @@ HOLDEM_TIERS = [{'id': key, 'name': name, 'small_blind': sb, 'big_blind': bb,
                 for key, name, sb, bb, lo, hi in zip(TIERS, NAMES, (10, 1, 5, 10, 25, 50),
                     (20, 2, 10, 20, 50, 100), (2000, 40, 200, 400, 1000, 2000),
                     (2000, 200, 1000, 2000, 5000, None))]
-DEFAULTS = {'zjh_enabled': False, 'holdem_enabled': False, 'zjh_tiers': encode(ZJH_TIERS),
+BOARD_TIERS = [{'id': key, 'name': name, 'stake': stake, 'min_balance': stake,
+                'currency': 'beans' if key == 'practice' else 'points'}
+               for key, name, stake in zip(TIERS, NAMES, (100, 10, 50, 200, 500, 2000))]
+DEFAULTS = {'xiangqi_enabled': False, 'gomoku_enabled': False,
+            'xiangqi_tiers': encode(BOARD_TIERS), 'gomoku_tiers': encode(BOARD_TIERS),
+            'xiangqi_total_seconds': 600, 'xiangqi_step_seconds': 60,
+            'gomoku_total_seconds': 300, 'gomoku_step_seconds': 30,
+            'zjh_enabled': False, 'holdem_enabled': False, 'zjh_tiers': encode(ZJH_TIERS),
             'holdem_tiers': encode(HOLDEM_TIERS), 'step_seconds': 30, 'zjh_auto_hands': 3,
             'holdem_auto_hands': 10, 'holdem_auto_seconds': 600, 'holdem_away_seconds': 600,
             'allow_235': False, 'daily_beans': 10000, 'broadcast_enabled': False,
@@ -37,7 +44,7 @@ def deep_link(base, param='games'):
 
 
 def tiers(config, game):
-    if game not in ('zjh', 'holdem'):
+    if game not in ('zjh', 'holdem', 'xiangqi', 'gomoku'):
         raise ValueError('游戏不存在')
     try:
         rows = json.loads(config[game + '_tiers'])
@@ -48,6 +55,13 @@ def tiers(config, game):
                 raise ValueError
             if r['currency'] != ('beans' if r['id'] == 'practice' else 'points'):
                 raise ValueError
+            if game in ('xiangqi', 'gomoku'):
+                if type(r.get('stake')) is not int or not 1 <= r['stake'] <= 10**12:
+                    raise ValueError
+                if r['id'] == 'practice' and r['stake'] != 100:
+                    raise ValueError
+                r['min_balance'] = r['stake']
+                continue
             keys = ('ante', 'min_balance') if game == 'zjh' else ('small_blind', 'big_blind', 'buy_min')
             if any(type(r.get(k)) is not int or not 1 <= r[k] <= 10**12 for k in keys):
                 raise ValueError
@@ -75,10 +89,18 @@ def tiers(config, game):
 
 class GameCenterPlugin(Plugin):
     spec = Spec(id='game_center', name='游戏中心', icon='🎮', category='points',
-                description='Mini App 炸金花、德州真人积分桌与机器人欢乐豆练习。默认关闭；不抽水。',
+                description='Mini App 炸金花、德州、象棋、五子棋真人积分桌与机器人欢乐豆练习。默认关闭；不抽水。',
                 fields=[
                     Field('zjh_enabled', '炸金花', 'bool', False),
                     Field('holdem_enabled', '德州扑克', 'bool', False),
+                    Field('xiangqi_enabled', '象棋', 'bool', False),
+                    Field('gomoku_enabled', '五子棋', 'bool', False),
+                    Field('xiangqi_tiers', '象棋六场参数 JSON', 'text', DEFAULTS['xiangqi_tiers']),
+                    Field('gomoku_tiers', '五子棋六场参数 JSON', 'text', DEFAULTS['gomoku_tiers']),
+                    Field('xiangqi_total_seconds', '象棋每方总秒数', 'int', 600, min=10, max=7200),
+                    Field('xiangqi_step_seconds', '象棋每步秒数', 'int', 60, min=5, max=120),
+                    Field('gomoku_total_seconds', '五子棋每方总秒数', 'int', 300, min=10, max=7200),
+                    Field('gomoku_step_seconds', '五子棋每步秒数', 'int', 30, min=5, max=120),
                     Field('zjh_tiers', '炸金花六场参数 JSON', 'text', DEFAULTS['zjh_tiers']),
                     Field('holdem_tiers', '德州六场参数 JSON', 'text', DEFAULTS['holdem_tiers']),
                     Field('step_seconds', '每步操作秒数', 'int', 30, min=5, max=120),
@@ -95,8 +117,13 @@ class GameCenterPlugin(Plugin):
 
     def normalize_config(self, config):
         cfg = {**DEFAULTS, **config}
-        for game in ('zjh', 'holdem'):
+        for game in ('zjh', 'holdem', 'xiangqi', 'gomoku'):
             cfg[game + '_tiers'] = encode(tiers(cfg, game))
+        for game in ('xiangqi', 'gomoku'):
+            for key, low, high in (('total_seconds', 10, 7200), ('step_seconds', 5, 120)):
+                value = cfg[game + '_' + key]
+                if type(value) is not int or not low <= value <= high:
+                    raise ValueError('棋钟参数须为有效范围内的整数')
         groups = str(cfg['broadcast_groups']).split()
         if any(not re.fullmatch(r'-[1-9][0-9]{0,19}', group) for group in groups) or len(groups) > 20:
             raise ValueError('播报群须为负数ID，最多20个')
