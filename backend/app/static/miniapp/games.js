@@ -891,7 +891,8 @@ window.createGamesUI = ({
         <div class="grow"><b>等待对手</b><div class="tiny muted">${t.currency === 'beans' ? '机器人马上就位' : '分享桌链接，邀请朋友来下'}</div></div>
       </div>`;
     const color = colorOf(t, h, seat), moving = t.hand?.current_player === seat.player;
-    const status = t.hand ? moving ? seat.bot ? '思考中…' : '走棋中' : '等待对方'
+    const status = t.hand ? moving ? (seat.bot ? '思考中…' : seat.player === t.me.player ? '轮到你走' : '走棋中')
+      + (t.hand.in_check ? ' · <b class="gc-check">被将军</b>' : '') : '等待对方'
       : seat.bot ? '机器人已准备' : seat.ready ? '已准备' : seat.player === t.host ? '房主' : '未准备';
     return `
       <div class="gc-duel-bar ${pos} ${moving ? 'on' : ''}" data-gc-player="${esc(seat.player)}">
@@ -899,7 +900,7 @@ window.createGamesUI = ({
         <div class="grow">
           <div class="gc-duel-name">${esc(seat.name)}${seat.player === t.host ? '<span class="gc-host">房主</span>' : ''}
             ${color ? `<span class="gc-side ${color}">${sideName(t, color)}</span>` : ''}${label(seat, t)}</div>
-          <div class="tiny muted">${status}</div>
+          <div class="tiny muted gc-duel-status">${status}</div>
         </div>${h?.clocks ? `
         <div class="gc-clock ${moving ? 'on' : ''}"><b class="num" data-gc-clock="${esc(seat.player)}">--:--</b>${moving ? '<small data-gc-step></small>' : ''}</div>` : ''}
       </div>`;
@@ -938,13 +939,12 @@ window.createGamesUI = ({
           <button class="btn sm" data-gc-board-act="accept_draw" ${disabled(!legal.accept_draw)}>接受</button>
           <button class="btn sm ghost" data-gc-board-act="reject_draw" ${disabled(!legal.reject_draw)}>拒绝</button>
         </div>` : offer ? '<div class="gc-wait-reason">已提出和棋，等待对方回应</div>' : ''}
-      <div class="gc-actions">${legal.undo ? `
+      <div class="gc-actions gc-board-actions">${legal.undo ? `
         <button class="gc-action" data-gc-board-act="undo" ${disabled(false)}>悔棋<small>撤回一个回合</small></button>` : ''}
         <button class="gc-action" data-gc-board-act="offer_draw" ${disabled(!legal.offer_draw)}>求和<small>${offer ? '已提出' : '对方可接受或拒绝'}</small></button>
         <button class="gc-action warm" data-gc-board-act="resign" ${disabled(!legal.resign)}>认输<small>本局判负</small></button>${t.game === 'gomoku' && mine ? `
         <button class="gc-action gold" data-gc-board-act="place" ${disabled(!c.preview)}>落子<small>${c.preview ? '确认这一手' : '先点棋盘选位置'}</small></button>` : ''}
-      </div>
-      <div class="gc-turn-line">${mine ? '轮到你走' : '等待对方走棋'} · 本步剩 <b data-gc-seconds>—</b> 秒${mine && h.in_check ? ' · <b class="gc-check">被将军</b>' : ''}</div>`;
+      </div>`;
   }
   function paintBoard(c) {
     const t = c.table, me = t.seats.find(s => s.player === t.me.player), h = t.hand || t.last_hand;
@@ -955,23 +955,18 @@ window.createGamesUI = ({
     setScreen(`
       <section class="gc gc-table gc-board-table gc-${t.game} gc-felt-${Object.hasOwn(tierClasses, t.tier) ? t.tier : 'practice'}"
         data-table-id="${esc(t.id)}" data-revision="${t.revision}" data-phase="${esc(t.phase)}">
-        <header class="gc-table-bar">
-          <button class="gc-tool" data-gc-back>‹ 返回</button>
-          <div class="grow"><b>${esc(names[t.game])} <span class="gc-tier-chip ${tierClasses[t.tier] || ''}">${esc(t.tier_name)}</span></b>
-            <div class="tiny muted">每局押 ${num(t.rules.stake)} ${unit(t)} · ${t.game === 'xiangqi' ? '红先黑后' : '黑先白后'} · 不抽水</div>
+        <header class="gc-table-bar gc-board-bar">
+          <button class="gc-tool" data-gc-back aria-label="返回">‹</button>
+          <div class="grow gc-board-title"><b>${esc(names[t.game])} <span class="gc-tier-chip ${tierClasses[t.tier] || ''}">${esc(t.tier_name)}</span></b>
+            <div class="tiny muted"><span class="gc-board-meta">${t.currency === 'beans'
+              ? `练习 · ${esc(levels.find(([v]) => v === t.rules.robot_level)?.[1] || '普通')}机器人`
+              : `每局押 ${num(t.rules.stake)} 积分 · 第 ${num(t.hand_no || 0)} 局`}</span>
+              <button class="gc-connection" data-gc-connection data-state="${c.status}"></button></div>
           </div>
           <button class="gc-tool gc-sound-btn" data-gc-sound aria-label="声音">${icon(sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x')}</button>
           <button class="gc-tool" data-gc-rules>玩法</button>
+          <button class="gc-tool" data-gc-leave ${disabled(!me)}>离桌</button>
         </header>
-        <div class="gc-tools">
-          <span class="gc-board-meta">${t.currency === 'beans' ? `练习 · ${esc(levels.find(([v]) => v === t.rules.robot_level)?.[1] || '普通')}机器人` : `第 ${num(t.hand_no || 0)} 局`}</span>
-          <button class="link" data-gc-history ${t.last_hand ? '' : 'disabled'}>上局结果</button>
-          <button class="link" data-gc-leave ${disabled(!me)}>离桌</button>
-        </div>
-        <div class="gc-connection-row">
-          <button class="gc-connection" data-gc-connection data-state="${c.status}"></button>
-          ${t.currency === 'beans' ? '<span>练习场 · 可悔棋</span>' : '<button class="link" data-gc-broadcast>群播报说明</button>'}
-        </div>
         <div data-gc-retry-slot>${pendingHtml()}</div>
         <div class="gc-duel">
           ${duelBar(t, top, 'top', h)}
