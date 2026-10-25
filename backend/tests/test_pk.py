@@ -191,10 +191,13 @@ def test_a_throw_lost_in_a_restart_is_refunded_not_rethrown(env):
     asyncio.run(run())
 
 
-def test_without_a_number_it_is_a_friendly_match(env):
+@pytest.mark.parametrize('target_points', [0, 1000])
+def test_without_a_number_it_is_a_friendly_match(env, target_points):
     async def run():
+        if target_points != 1000:
+            env.services.points.add(env.uids[3], target_points - 1000, 'isolated.fixture')
         row = await duel(env, [1, 6], text='/pk', opponent=3)
-        assert row['stake'] == 0 and balance(env, 1) == balance(env, 3) == 1000
+        assert row['stake'] == 0 and balance(env, 1) == 1000 and balance(env, 3) == target_points
         assert env.db.one("SELECT COUNT(*) n FROM play_escrows WHERE scope='pk'")['n'] == 0
         text = shown(env, row)['text']
         assert '友谊赛' in text and '获胜' in text and '积分' not in text.split('获胜')[1]
@@ -270,13 +273,50 @@ def test_unanswered_challenge_expires_with_refund(env):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize('target_points', [0, 99])
+@pytest.mark.parametrize('target_kind', ['reply', 'username', 'text_mention'])
+def test_insufficient_opponent_points_prevent_the_challenge(env, target_points, target_kind):
+    async def run():
+        env.services.points.add(env.uids[2], target_points - 1000, 'isolated.fixture')
+        text, kw = '/pk 100', {'reply': 2}
+        if target_kind == 'username':
+            env.db.execute('UPDATE members SET tg_username=? WHERE emby_user_id=?', ('target_two', env.uids[2]))
+            text, kw = '/pk @target_two 100', {'entities': [{'type': 'mention', 'offset': 4, 'length': 11}]}
+        elif target_kind == 'text_mention':
+            text, kw = '/pk 小2 100', {'entities': [{'type': 'text_mention', 'offset': 4, 'length': 2, 'user': env.actors[2]}]}
+        ledger = env.db.query('SELECT * FROM points_ledger ORDER BY id')
+        row = await challenge(env, text, **kw)
+        assert row is None and not env.db.query('SELECT * FROM pk_rounds')
+        assert sent(env) == ['🍃 对方积分不足，本次 PK 需 100 积分，未发起挑战']
+        assert balance(env, 1) == 1000 and balance(env, 2) == target_points
+        assert env.db.query('SELECT * FROM points_ledger ORDER BY id') == ledger
+        assert not env.db.query("SELECT * FROM play_escrows WHERE scope='pk'")
+        assert not env.db.query("SELECT * FROM play_cash_events WHERE scope='pk'")
+        assert not throws(env)
+    asyncio.run(run())
+
+
+def test_opponent_with_exact_stake_can_be_challenged_without_reserving_their_points(env):
+    async def run():
+        env.services.points.add(env.uids[2], -900, 'isolated.fixture')
+        row = await challenge(env, '/pk 100', reply=2)
+        assert row['state'] == 'pending' and balance(env, 1) == 900 and balance(env, 2) == 100
+        assert not env.db.query("SELECT * FROM play_escrows WHERE scope='pk' AND user_id=?", (env.uids[2],))
+        env.dice = [6, 1]
+        row = await click(env, row, 'accept', 2)
+        assert row['state'] == 'settled' and balance(env, 1) == 1100 and balance(env, 2) == 0
+    asyncio.run(run())
+
+
 def test_balance_checks_on_both_sides(env):
     async def run():
+        env.services.points.add(env.uids[2], 4000, 'isolated.fixture')
         await challenge(env, '/pk 5000', index=1, reply=2)
-        assert '积分不足' in sent(env)[-1] and not env.db.query('SELECT * FROM pk_rounds')
+        assert '你的积分不足' in sent(env)[-1] and not env.db.query('SELECT * FROM pk_rounds')
         assert balance(env, 1) == 1000
         env.services.points.add(env.uids[1], 4000, 'isolated.fixture')
         row = await challenge(env, '/pk 3000', index=1, reply=2, mid=2007)
+        env.services.points.add(env.uids[2], -4000, 'isolated.fixture')
         row = await click(env, row, 'accept', 2)
         assert row['state'] == 'pending' and '应战需要 3000 积分' in answer(env)['text']
         assert balance(env, 2) == 1000 and balance(env, 1) == 2000 and not throws(env)
