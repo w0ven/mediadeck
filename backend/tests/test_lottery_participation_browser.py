@@ -131,7 +131,7 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
         lid = app.state.db.one('SELECT id FROM lotteries ORDER BY created_at DESC')['id']
 
         # Give Member 100 points
-        env.service.points.add('u2', 100, 'admin.mint', 'test-mint')
+        app.state.points.add('u2', 100, 'admin.mint', 'test-mint')
 
         # Switch to Member
         viewer['id'] = MEMBER
@@ -148,13 +148,13 @@ def test_paid_lottery_ui_flow_and_modals(request, tmp_path):
         # Cancel confirmation
         page.locator('#lot-cancel').click()
         page.locator('#lot-join').wait_for()
-        assert env.service.points.balance('u2') == 100
+        assert app.state.points.balance('u2') == 100
 
         # Confirm payment
         page.locator('#lot-join').click()
         page.locator('#lot-ok').click()
         page.locator('.ticket strong', has_text='报名已记录').wait_for()
-        assert env.service.points.balance('u2') == 50
+        assert app.state.points.balance('u2') == 50
         assert page.locator('#lot-join').inner_text() == '已报名 · 等待开奖'
         assert '我的余额：50 积分' in page.locator('.lottery').inner_text()
 

@@ -4,6 +4,7 @@ import copy
 import json
 import re
 import time
+from html.parser import HTMLParser
 
 import pytest
 
@@ -333,27 +334,30 @@ def test_valid_telegram_id_and_single_at(tg_id):
     assert winner_mention({'tg_id': tg_id, 'label': ''}) == f'<a href="tg://user?id={tg_id}">Telegram用户</a>'
 
 
-@pytest.mark.parametrize('count,long_labels', [(0, False), (1, False), (12, False), (13, False), (200, False), (200, True)])
-def test_result_list_limits_count_urls_and_escaping_honestly(e, count, long_labels):
+@pytest.mark.parametrize('count,long_labels', [(0, False), (1, False), (12, False), (13, False), (33, False), (200, False), (200, True)])
+def test_result_list_complete_pages_count_parsed_utf16_not_html(e, count, long_labels):
     lid = create(e, config(title='"' * 60 if long_labels else '午夜抽奖'), publish=False)
     winners = [{'tg_id': str(2**52 - 1 - i), 'label': '"' * 40 if long_labels else 'Guest',
                 'prize_json': json.dumps({'name': '"' * 60 if long_labels else '奖品'})} for i in range(count)]
-    payload = e.service.notice_payload(e.service.row(lid), 'result', winners)
-    body = payload['text']
-    assert len(body.encode('utf-16-le')) // 2 <= 4096
-    shown = body.count('<a href="tg://user?id=')
-    assert shown == body.count('</a>')
+    payloads = e.service.result_payloads(e.service.row(lid), winners)
+    seen = []
+    for payload in payloads:
+        body = payload['text']
+        plain = []
+        parser = HTMLParser(convert_charrefs=True)
+        parser.handle_data = plain.append
+        parser.feed(body)
+        assert len(''.join(plain).encode('utf-16-le')) // 2 <= 4096
+        assert body.count('<a href="tg://user?id=') == body.count('</a>')
+        seen.extend(re.findall(r'tg://user\?id=([0-9]+)', body))
+        assert all(word not in body for word in ('其余', '名额不足', '人工奖品', '🔡'))
+    assert seen == [w['tg_id'] for w in winners]
     if long_labels:
-        assert 0 < shown < 12  # HTML length budget, not just an arbitrary name count
+        assert len(payloads) > 1
     else:
-        assert shown == min(count, 12)
-    if count > shown:
-        assert body.splitlines()[-1] == f'其余 {count - shown} 位见结果页'
-    elif not count:
-        assert body.splitlines()[-1] == '本期暂无中奖者'
-    else:
-        assert '其余' not in body
-    assert '名额不足' not in body and '人工奖品' not in body and '🔡' not in body
+        assert len(payloads) == 1  # even 33/200 short names are not limited by tag length
+    if not count:
+        assert payloads[0]['text'].splitlines()[-1] == '本期暂无中奖者'
 
 
 def test_short_registration_launch_keeps_necessary_eligibility(e):

@@ -18,6 +18,7 @@ from app.modules.lottery import LotteryService
 from app.modules.report_delivery import CALL_DELIVERY, failure
 from app.modules.telegram import _CALL_ERROR, TelegramBot
 from tests.lottery_legacy_helpers import legacy_create
+from tests.lottery_private_helpers import private_start
 from tests.test_miniapp import TOKEN, headers
 
 ADMIN, MEMBER, GUEST = 888000111, 888000222, 888000333
@@ -77,6 +78,10 @@ def env(monkeypatch):
             app.state.members.upsert(uid, 'private-account-' + uid, {'group_id': 'standard', 'roles': roles})
             app.state.db.execute('UPDATE members SET tg_user_id=? WHERE emby_user_id=?', (str(tid), uid))
         app.state.db.execute('UPDATE shop_items SET enabled=1')
+        # These existing fixture identities have explicitly started the test Bot.
+        # Private-admission tests clear this evidence and exercise unknown users.
+        for tg in (ADMIN, MEMBER, GUEST, 888000444, 888000555, 888000666, 888000777, 888000888, 777000444):
+            private_start(app.state.lottery, tg)
         yield SimpleNamespace(client=client, service=app.state.lottery, calls=calls, replies=replies, ctl=ctl,
                               ip_for=ip_for, ips=ips)
 

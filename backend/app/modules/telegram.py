@@ -41,6 +41,7 @@ import httpx
 
 from app.core.cache import TTLCache
 from app.core.errors import ConfigError, ConflictError
+from app.modules import telegram_private
 from app.modules.bot_accounts import AccountBotMixin
 from app.modules.bot_activity import ActivityBotMixin, growth_line
 from app.modules.bot_invites import InviteBotMixin
@@ -3591,6 +3592,15 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             payload = args[0] if args else ""
             if in_group:
                 return await self._group_start(chat_id, payload)
+            if self._lottery is not None and re.fullmatch(r'lottery_[0-9a-f]{24}', payload):
+                try:
+                    lottery = self._lottery.row(payload[8:])
+                except KeyError:
+                    lottery = None
+                if lottery and lottery['state'] != 'draft':
+                    await self._show(chat_id, '已开启抽奖通知，返回活动报名。', [[{
+                        'text': '返回抽奖', 'url': f'https://t.me/{lottery["bot_username"]}?startapp={payload}'}]])
+                    return
             if not in_group and payload == 'account':
                 await self._show(chat_id, self._account_card(member) if member else self._guest_home(display),
                                  self.info_menu() if member else self.guest_menu())
@@ -5231,8 +5241,9 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             self._chat_locks[chat_key] = lock
         return lock
 
-    async def _dispatch_update(self, update: dict[str, Any]) -> None:
+    async def _dispatch_update(self, update: dict[str, Any], source_bot_id: str | None = None) -> None:
         try:
+            telegram_private.observe(self._db, telegram_private.identity(self) if source_bot_id is None else source_bot_id, update)
             # Membership events must invalidate earlier leaves immediately,
             # not wait behind a slow chat callback or a scan's account lock.
             if await self.membership.handle_update(update):
@@ -5262,12 +5273,13 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
             self._last_error = f"处理更新失败: {type(exc).__name__}"
 
-    def _spawn_update(self, update: dict[str, Any]) -> None:
-        task = asyncio.create_task(self._dispatch_update(update))
+    def _spawn_update(self, update: dict[str, Any], source_bot_id: str | None = None) -> None:
+        task = asyncio.create_task(self._dispatch_update(update, source_bot_id))
         self._in_flight.add(task)
         task.add_done_callback(self._in_flight.discard)
 
     async def _poll_once(self) -> None:
+        source_bot_id = telegram_private.identity(self)  # preserve update provenance across a Bot switch
         result = await self._call(
             "getUpdates",
             {"offset": self._offset, "timeout": POLL_TIMEOUT,
@@ -5278,7 +5290,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             raise RuntimeError("Telegram polling unavailable")  # noqa: TRY004 - failed transport, not a caller type error
         for update in result:
             self._offset = max(self._offset, int(update.get("update_id", 0)) + 1)
-            self._spawn_update(update)
+            self._spawn_update(update, source_bot_id)
 
     async def run(self) -> None:
         """Poll while enabled; idle cheaply while not.

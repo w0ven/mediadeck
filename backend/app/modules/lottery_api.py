@@ -53,11 +53,15 @@ def register(app, telegram_context):
 
     @app.get('/api/app/lottery/admin/list')
     async def listing(offset: int = 0, ctx=manager):
-        rows = service().db.query('SELECT * FROM lotteries ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?',
+        rows = service().db.query('SELECT l.*,(SELECT COUNT(*) FROM lottery_entries e WHERE e.lottery_id=l.id) AS count '
+                                  'FROM lotteries l ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?',
                                   (max(0, min(offset, 100000)),))
-        return {'more': len(rows) > 50, 'items': [
-            {'id': r['id'], 'state': r['state'], 'title': json.loads(r['config_json'])['title'],
-             'deadline': json.loads(r['config_json'])['deadline']} for r in rows[:50]]}
+        items = []
+        for r in rows[:50]:
+            c = json.loads(r['config_json'])
+            items.append({'id': r['id'], 'state': r['state'], 'title': c['title'], 'deadline': c['deadline'],
+                          'draw_mode': c['draw_mode'], 'max_entries': c.get('max_entries', 0), 'count': r['count']})
+        return {'more': len(rows) > 50, 'items': items}
 
     @app.post('/api/app/lottery/admin/drafts')
     async def create(raw: dict = payload, ctx=manager):
