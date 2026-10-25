@@ -1,8 +1,9 @@
-"""Consented device check for strict lotteries: one physical device, several TG accounts.
+"""Legacy-only consented environment check; not proof of a device or a person.
 
-Purpose-bound and opt-in per entry. The Mini App reads system/hardware level
-values (ux.js) ONLY after the user tapped 「同意并报名」; without that consent an
-activity with ``device_check`` cannot be entered at all. This module keeps
+New/copy drafts never enable this retired check. Stored legacy configurations
+retain their original policy: the Mini App reads environment values (ux.js)
+ONLY after the user tapped 「同意并报名」; without that consent an activity with
+``device_check`` cannot be entered at all. This module keeps
 nothing but an activity-domain HMAC-SHA256 digest under the existing
 ``lottery_identity_key``. Every activity is judged on its own entries only;
 nothing is carried over or compared across activities. iPhone/iPad entries keep
@@ -38,13 +39,13 @@ CONSENT = {
 NEED_CONSENT = '需同意设备校验后才能参加'
 FAILED = '未能完成设备校验，请重试'
 UNAVAILABLE = '报名暂不可用，请联系管理员检查活动校验服务'
-RULE = ('设备校验已开启：报名前须同意设备校验，服务端只保存不可逆摘要。每期单独判定，本期内设备摘要相同的账号'
-        '判定为同一设备，关联账号全部排除中奖（包括先报名者），以开奖时的判定为准。同型号、同系统版本且设置相同的'
-        '不同手机可能被误判为同一设备，更换设备或主动伪造也可能绕过检测。')
+RULE = ('历史活动保留设备环境校验：报名前须同意，服务端只保存不可逆摘要。每期单独判定，环境摘要相同的账号'
+        '按本期原规则全部排除中奖（包括先报名者），以开奖时的判定为准。设备环境特征相同不代表同一物理设备或同一人；'
+        '同型号、同系统版本且设置相同的不同手机可能得到相同摘要，更换环境或主动伪造也可能绕过检测。')
 
 REASON = 'hardware'
-LABELS = {'ip': '相同可信公网 IP', 'device': '相同浏览器安装标识', REASON: '相同设备'}
-STATUS = {'same': '判定为同一设备，关联账号全部排除'}
+LABELS = {'ip': '相同可信公网 IP', 'device': '相同浏览器安装标识', REASON: '设备环境特征相同'}
+STATUS = {'same': '设备环境特征相同，按本期原规则全部排除'}
 
 _HEX = r'[0-9a-f]{64}'
 _NUMBER = r'[0-9]{1,6}(?:\.[0-9]{1,6})?'
@@ -84,12 +85,16 @@ def migrate(db):
     db._conn.executescript(SCHEMA)
 
 
-def flag(raw, anti_multi):
-    """New configurations default to the strict-mode switch; it only exists inside strict mode."""
-    value = raw.get('device_check', anti_multi)
-    if type(value) is not bool:
+def flag(raw, *, stored=None):
+    """Retired for new drafts; only a server-read stored config can retain it.
+
+    Accept old clients' boolean switch for compatibility, but never use it (or
+    a claimed legacy marker) to enable/disable the stored environment policy.
+    ``required`` still applies the activity's existing strict-mode switch.
+    """
+    if type(raw.get('device_check', False)) is not bool:
         raise ValueError('设备校验开关必须为布尔值')
-    return value and anti_multi
+    return stored is not None and stored.get('device_check') is True
 
 
 def required(config):

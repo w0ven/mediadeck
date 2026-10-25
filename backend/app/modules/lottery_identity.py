@@ -71,7 +71,7 @@ def record(conn, lottery_id, tg_id, source_ip, browser_id, now):
     if not address:
         raise ValueError('报名暂不可用，请稍后重试或联系管理员')
     if not isinstance(browser_id, str) or not re.fullmatch(r'[0-9a-f]{64}', browser_id):
-        raise ValueError('报名暂不可用，请允许本地存储并重新打开活动')
+        raise ValueError('报名暂不可用，请关闭后重新打开活动，或稍后再试')
     key = _key(conn)
     for kind, value in (('ip', address), ('device', browser_id)):
         digest = hmac.new(key, encode(['lottery-identity-v1', lottery_id, kind, value]).encode(), hashlib.sha256).hexdigest()

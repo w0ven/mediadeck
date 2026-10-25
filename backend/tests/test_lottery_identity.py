@@ -17,13 +17,13 @@ from tests.test_lottery import (
     GUEST,
     MEMBER,
     browser_id,
-    config,
-    create,
     draw,
     join,
     req,
     synthetic_public_ip,
 )
+from tests.test_lottery import config as base_config
+from tests.test_lottery import create as base_create
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import headers
 
@@ -33,6 +33,16 @@ OTHER, UNIQUE = 888000444, 888000555
 @pytest.fixture
 def e(request):
     return request.getfixturevalue('lottery_env')
+
+
+def config(**kw):
+    # New activities use a universal prize for identity-independent risk tests.
+    return base_config(**{'prizes': [{'kind': 'manual', 'name': '人工奖', 'quantity': 3,
+                                     'instructions': '私密领奖'}], **kw})
+
+
+def create(e, payload=None, publish=True):
+    return base_create(e, payload or config(), publish)
 
 
 def signup(e, lid, tg, ip=None, device=None, extra=None):
@@ -320,7 +330,7 @@ def test_records_pagination_and_no_normal_user_disclosure(e):
 
 
 def test_public_views_identical_for_linked_and_unlinked_entries(e):
-    lid = create(e, config(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 1, 'amount': 5}]))
+    lid = create(e, config(prizes=[{'kind': 'manual', 'name': '人工奖', 'quantity': 1, 'instructions': '私密领奖'}]))
     join(e, lid, GUEST)
     signup(e, lid, OTHER, e.ip_for(GUEST))
     join(e, lid, UNIQUE)

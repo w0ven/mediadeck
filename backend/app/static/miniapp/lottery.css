@@ -1109,3 +1109,31 @@ html[data-theme="light"] .lottery select optgroup {
     transition: none !important;
   }
 }
+
+.lottery .prize-tag {
+  display: inline-block;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 4px;
+  margin-left: 6px;
+  vertical-align: middle;
+  background: var(--glass2);
+  border: 1px solid var(--line);
+  color: var(--hint);
+}
+.lottery .prize-tag.tag-member {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.lottery .prize-tag.tag-guest {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 30%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+.lottery .prize-tag.tag-all {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, var(--line));
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}

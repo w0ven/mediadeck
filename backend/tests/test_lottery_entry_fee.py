@@ -13,7 +13,9 @@ from app.core.db import Database
 from app.modules import lottery_identity
 from app.modules.lottery import entry_terms
 from app.modules.points import PointsService
-from tests.test_lottery import ADMIN, BASE, GUEST, MEMBER, browser_id, config, create, draw, req
+from tests.lottery_legacy_helpers import legacy_create
+from tests.test_lottery import ADMIN, BASE, GUEST, MEMBER, browser_id, create, draw, req
+from tests.test_lottery import config as base_config
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import headers
 
@@ -21,6 +23,11 @@ from tests.test_miniapp import headers
 @pytest.fixture
 def e(request):
     return request.getfixturevalue('lottery_env')
+
+
+def config(**kw):
+    # Only member activities can have fees under the new public participation rules.
+    return base_config(**{'audience': 'member', **kw})
 
 
 def fund(e, uid='u2', amount=100):
@@ -64,9 +71,10 @@ def test_valid_fee_config_saved_and_frozen(e, fee):
 
 
 @pytest.mark.parametrize('audience', ['all', 'member'])
-def test_paid_all_and_member_supported_without_rewriting_audience(e, audience):
+def test_legacy_paid_all_and_new_member_supported_without_rewriting_audience(e, audience):
     fund(e)
-    lid = create(e, config(entry_fee=40, audience=audience))
+    maker = legacy_create if audience == 'all' else create
+    lid = maker(e, config(entry_fee=40, audience=audience))
     assert enter(e, lid).json()['joined']
     assert e.service.row(lid)['config']['audience'] == audience
     result = enter(e, lid, GUEST)
@@ -79,9 +87,9 @@ def test_fee_guest_and_registration_prize_incompatible_but_free_unchanged(e):
     assert result.status_code == 400 and '仅未注册' in result.json()['detail']
     registration = [{'kind': 'registration', 'name': '本人资格', 'quantity': 2, 'group_id': 'standard', 'days': 10}]
     result = req(e, 'POST', '/admin/drafts', json=config(entry_fee=40, prizes=registration))
-    assert result.status_code == 400 and '本人专属注册资格' in result.json()['detail']
-    lid = create(e, config(entry_fee=0, prizes=registration))
-    assert enter(e, lid, MEMBER, fee=0).status_code == 200
+    assert result.status_code == 400 and '注册资格' in result.json()['detail']
+    lid = create(e, config(entry_fee=0, audience='all', prizes=registration))
+    assert enter(e, lid, MEMBER, fee=0).status_code == 400
     assert enter(e, lid, GUEST, fee=0).status_code == 200
     draw(e, lid)
     assert {r['tg_id'] for r in e.service.db.query('SELECT tg_id FROM lottery_awards')} == {str(GUEST)}
@@ -89,7 +97,7 @@ def test_fee_guest_and_registration_prize_incompatible_but_free_unchanged(e):
 
 
 def test_publish_revalidates_fee_restrictions(e):
-    lid = create(e, config(audience='guest'), publish=False)
+    lid = legacy_create(e, config(audience='guest'), publish=False)
     c = e.service.row(lid)['config']
     c['entry_fee'] = 40
     e.service.db.execute('UPDATE lotteries SET config_json=? WHERE id=?', (json.dumps(c), lid))
@@ -99,7 +107,7 @@ def test_publish_revalidates_fee_restrictions(e):
 
 
 def test_old_free_configuration_join_and_notices_left_intact(e):
-    lid = create(e)
+    lid = legacy_create(e)
     c = e.service.row(lid)['config']
     c.pop('entry_fee')
     saved = json.dumps(c)
@@ -187,7 +195,8 @@ def test_admin_participates_and_pays_without_exemption(e):
 @pytest.mark.parametrize('fault', ['group_unknown', 'not_member', 'expired', 'audience', 'device', 'ip'])
 def test_failed_admission_never_charges(e, fault):
     fund(e)
-    lid = create(e, config(entry_fee=40)) if fault != 'audience' else create(e, config(audience='guest'))
+    lid = create(e, config(entry_fee=40)) if fault != 'audience' else create(e, config(audience='guest', prizes=[
+        {'kind': 'registration', 'name': '本人资格', 'quantity': 1, 'group_id': 'standard', 'days': 10}]))
     if fault == 'group_unknown':
         e.ctl.membership = None
     elif fault == 'not_member':
@@ -355,7 +364,7 @@ def test_api_rules_and_launch_disclose_fee_and_keep_native_icons(e, fee):
     line = '报名 40 积分 · 成功报名不退，取消活动全额退还'
     preview = req(e, 'POST', f'/{lid}/preview').json()
     assert terms in preview['rules'] and (line in preview['text']) == bool(fee)
-    native = 3 + len(config()['prizes']) + (2 if fee else 0)  # title, prizes, timing, eligibility, fee, fairness
+    native = 3 + len(config()['prizes']) + (1 if fee else 0)  # title, prizes, timing, eligibility, fee
     assert preview['text'].count('<tg-emoji') == native and '🔡' not in preview['text']
     req(e, 'POST', f'/{lid}/publish', json={'revision': 1})
     result = req(e, 'GET', '/' + lid, MEMBER).json()
@@ -363,11 +372,13 @@ def test_api_rules_and_launch_disclose_fee_and_keep_native_icons(e, fee):
     launch = [p for m, p in e.calls if m == 'sendMessage'][-1]
     assert launch['text'] == preview['text'] and launch['reply_markup']['inline_keyboard'][0][0]['icon_custom_emoji_id']
     if fee:
-        assert '须已注册' in launch['text'] and '已注册积分账户' in result['rules']
+        assert '仅已注册可参与' in launch['text'] and '已注册积分账户' in result['rules']
         assert '免费' not in launch['text'] and '免费' not in result['rules']
     else:
         assert '报名 0 积分' not in launch['text'] and '不退' not in launch['text']
-    assert '关联' not in result['rules'] and '排除' not in launch['text']
+    for word in ('多账号', '防小号', '关联', 'IP', '浏览器', '设备'):
+        assert word not in result['rules'] and word not in launch['text']
+    assert '排除' not in launch['text']
 
 
 def test_distinct_activities_charge_separately(e):

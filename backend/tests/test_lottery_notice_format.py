@@ -300,7 +300,8 @@ def test_definite_rejection_arriving_at_deadline_does_not_send_fallback(e, monke
     ({'first_name': '<b>J & "S"</b>'}, '@&lt;b&gt;J &amp; &quot;S&quot;&lt;/b&gt;'),
 ])
 def test_result_mentions_use_stored_telegram_name_then_handle(e, identity, display):
-    lid = create(e, config(title='午夜 & <抽奖>'))
+    lid = create(e, config(title='午夜 & <抽奖>', prizes=[{'kind': 'manual', 'name': '人工奖',
+                                                         'quantity': 1, 'instructions': '私密'}]))
     asyncio.run(e.service.join(lid, {'id': GUEST, **identity},
                               source_ip=e.ip_for(GUEST), browser_id=browser_id(GUEST)))
     e.service.draw(lid)
@@ -309,7 +310,7 @@ def test_result_mentions_use_stored_telegram_name_then_handle(e, identity, displ
     assert payload['text'].splitlines() == [
         emoji('party') + ' <b>午夜 &amp; &lt;抽奖&gt;</b> 开奖啦',
         '',
-        emoji('crown') + f' <a href="tg://user?id={GUEST}">{display}</a> · 500 积分',
+        emoji('crown') + f' <a href="tg://user?id={GUEST}">{display}</a> · 人工奖',
     ]
     button = payload['reply_markup']['inline_keyboard'][0][0]
     assert button['text'] == '查看结果' and button['icon_custom_emoji_id'] == EMOJI['check'][0]
@@ -360,7 +361,8 @@ def test_short_registration_launch_keeps_necessary_eligibility(e):
                                     'group_id': 'standard', 'days': 10}]), publish=False)
     before = e.service.db.query('SELECT * FROM lottery_notices')
     preview = req(e, 'POST', f'/{lid}/preview').json()
-    assert '<i>注册资格奖仅限开奖时未注册者本人领取</i>' in preview['text']
+    assert '本人资格 × 2 · 仅未注册' in preview['text']
+    assert '<i>奖品资格以开奖时的注册状态为准</i>' in preview['text']
     assert '全部群友可参与' in preview['text'] and '截止 · 到点自动开奖' in preview['text']
     assert '本人资格 × 2' in preview['text'] and '积分' not in preview['text']
     assert '完整规则和私密领奖信息' not in preview['text'] and '其他奖随后抽取' not in preview['text']

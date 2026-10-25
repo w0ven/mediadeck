@@ -1,4 +1,4 @@
-"""Consented device check: real SQLite/services/APIs, synthetic device values, mock Telegram only."""
+"""Legacy consented environment check: persisted old configs, synthetic values, mock Telegram only."""
 import json
 import secrets
 import time
@@ -9,7 +9,7 @@ from app.core.db import Database
 from app.modules import lottery_device
 from app.modules.lottery_device import CONSENT_VERSION, FAILED, NEED_CONSENT
 from tests.lottery_device_helpers import blob, device_ctx, traits
-from tests.test_lottery import BASE, GUEST, MEMBER, browser_id, config, create, draw, req
+from tests.test_lottery import ADMIN, BASE, GUEST, MEMBER, browser_id, config, create, draw, req
 from tests.test_lottery import env as lottery_env  # noqa: F401
 from tests.test_miniapp import headers
 
@@ -20,7 +20,7 @@ CONSENT = {'version': 1, 'title': '设备校验',
                     '仅用于本期活动的参与资格校验，不作其他用途。不同意将无法参加本活动。'),
            'accept': '同意并报名', 'decline': '不同意'}
 FORBIDDEN = {'risk', 'qualification', 'excluded', 'excluded_count', 'candidate_count', 'clusters', 'signals',
-             'digest', 'anti_multi', 'device_check', 'admin_rules', 'verdict', 'tg_id', 'hardware'}
+             'digest', 'anti_multi', 'device_check', 'admin_rules', 'verdict', 'tg_id', 'hardware', 'public_rules_version'}
 
 
 @pytest.fixture
@@ -29,11 +29,31 @@ def e(request):
 
 
 def strict(**kw):
-    """A new strict activity as the current admin form submits it (device_check only when given)."""
+    """Request shape used by the old strict form (device_check only when given)."""
     raw = config(**kw)
     if 'device_check' not in kw:
         raw.pop('device_check')
     return raw
+
+
+def legacy_create(e, raw=None, publish=True):
+    """Seed a pre-retirement stored draft, not a new API opt-in to device checks.
+
+    Only isolated fixture data is written. This explicitly models v0.52's saved
+    defaults before exercising current edit/publish/join/draw compatibility.
+    """
+    raw = strict() if raw is None else raw
+    saved = e.service.validate(raw, legacy=True)
+    saved.pop('eligibility_version')
+    saved.pop('public_rules_version')  # real pre-upgrade records have no public-text version
+    saved['device_check'] = raw.get('device_check', raw.get('anti_multi', True)) and raw.get('anti_multi', True)
+    lid = secrets.token_hex(12)
+    e.service.db.execute('INSERT INTO lotteries(id,config_json,created_by,created_at) VALUES(?,?,?,?)',
+                         (lid, json.dumps(saved), str(ADMIN), int(time.time()) - 3600))
+    if publish:
+        response = req(e, 'POST', f'/{lid}/publish', json={'revision': 1})
+        assert response.status_code == 200, response.text
+    return lid
 
 
 def enter(e, lid, tg, *, ip=None, seed=None, k=None, s=None, consent=CONSENT_VERSION, ctx=UNSET, extra=None):
@@ -61,8 +81,8 @@ def assert_public(value):
             assert_public(child)
 
 
-def test_strict_default_consent_text_and_off_switches(e):
-    lid = create(e, strict(), publish=False)
+def test_legacy_consent_text_and_new_off_switches(e):
+    lid = legacy_create(e, strict(), publish=False)
     assert e.service.row(lid)['config']['device_check'] is True
     admin = req(e, 'GET', '/' + lid).json()
     assert admin['consent'] == CONSENT and admin['admin_rules'].endswith(lottery_device.RULE)
@@ -82,7 +102,7 @@ def test_strict_default_consent_text_and_off_switches(e):
 
 
 def test_missing_or_stale_consent_rejected_without_charge(e):
-    lid = create(e, strict(entry_fee=40))
+    lid = legacy_create(e, strict(entry_fee=40))
     e.service.points.add('u2', 100, 'admin.mint', 'test-mint')
     for consent in (UNSET, None, 0, 2, '1', True, 1.0):
         r = enter(e, lid, MEMBER, consent=consent, extra={'expected_entry_fee': 40})
@@ -101,7 +121,7 @@ def test_missing_or_stale_consent_rejected_without_charge(e):
     blob({'v': 1, 's': {**{k: 'not-a-digest' for k in 'acen'}, 'f': 'wide', 'g': True}}),
 ])
 def test_failed_collection_rejected_without_charge(e, ctx):
-    lid = create(e, strict(entry_fee=40))
+    lid = legacy_create(e, strict(entry_fee=40))
     e.service.points.add('u2', 100, 'admin.mint', 'test-mint')
     r = enter(e, lid, MEMBER, ctx=ctx, extra={'expected_entry_fee': 40})
     assert r.status_code == 400 and r.json()['detail'] == FAILED
@@ -110,7 +130,7 @@ def test_failed_collection_rejected_without_charge(e, ctx):
 
 
 def test_consented_entry_records_time_version_and_charges_once(e):
-    lid = create(e, strict(entry_fee=40))
+    lid = legacy_create(e, strict(entry_fee=40))
     e.service.points.add('u2', 100, 'admin.mint', 'test-mint')
     before = int(time.time())
     r = enter(e, lid, MEMBER, extra={'expected_entry_fee': 40})
@@ -126,7 +146,7 @@ def test_consented_entry_records_time_version_and_charges_once(e):
 
 
 def test_same_device_links_accounts_across_ips_and_clients(e):
-    lid = create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
+    lid = legacy_create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
     # Same device, different networks, different installation ids (another Telegram client).
     assert enter(e, lid, GUEST, seed='phone').status_code == 200
     assert enter(e, lid, OTHER, seed='phone').status_code == 200
@@ -135,11 +155,11 @@ def test_same_device_links_accounts_across_ips_and_clients(e):
     records = req(e, 'GET', f'/{lid}/records').json()
     assert records['total'] == 3 and records['excluded'] == 2 and records['device_check'] is True
     [cluster] = records['clusters']
-    assert cluster['reasons'] == ['hardware'] and cluster['labels'] == ['相同设备']
+    assert cluster['reasons'] == ['hardware'] and cluster['labels'] == ['设备环境特征相同']
     assert {a['tg_id'] for a in cluster['accounts']} == {str(GUEST), str(OTHER)}
     assert all(a['excluded'] for a in cluster['accounts'])  # the first entrant too
     [link] = cluster['links']
-    assert link['label'] == '相同设备' and link['status'] == 'same'
+    assert link['label'] == '设备环境特征相同' and link['status'] == 'same'
     assert {r['tg_id']: r['outcome'] for r in records['entries']} == {
         str(GUEST): 'excluded', str(OTHER): 'excluded', str(THIRD): 'eligible'}
     admin = req(e, 'GET', '/' + lid).json()
@@ -170,13 +190,13 @@ def test_same_device_links_accounts_across_ips_and_clients(e):
 
 def test_each_activity_judged_alone_from_its_first_entries(e):
     # The very first device-checked activity already excludes: no warm-up period.
-    first = create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
+    first = legacy_create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
     for tg in (THIRD, FOURTH):
         assert enter(e, first, tg, seed='phone').status_code == 200
     assert enter(e, first, FIFTH, seed='laptop').status_code == 200
     assert e.service.records(first)['excluded'] == 2
     # The same device in a later activity is not linked to the earlier one.
-    lid = create(e, strict())
+    lid = legacy_create(e, strict())
     assert enter(e, lid, GUEST, seed='phone').status_code == 200
     assert enter(e, lid, OTHER, seed='tablet').status_code == 200
     records = e.service.records(lid)
@@ -187,7 +207,7 @@ def test_each_activity_judged_alone_from_its_first_entries(e):
 
 def test_iphone_entries_keep_no_device_digest(e):
     iphone = {k: v for k, v in traits('iphone').items() if k != 'h'} | {'b': 'Apple Inc.|Apple GPU', 'i': '5'}
-    lid = create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 4, 'amount': 5}]))
+    lid = legacy_create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 4, 'amount': 5}]))
     for tg in (GUEST, OTHER):
         assert enter(e, lid, tg, s=iphone).status_code == 200
     for tg in (THIRD, FOURTH):
@@ -203,7 +223,7 @@ def test_iphone_entries_keep_no_device_digest(e):
 
 
 def test_draw_transaction_freezes_the_decision(e):
-    lid = create(e, strict())
+    lid = legacy_create(e, strict())
     for tg in (GUEST, OTHER):
         enter(e, lid, tg, seed='phone')
     assert {r['verdict'] for r in device_rows(e, lid)} == {''}
@@ -213,12 +233,13 @@ def test_draw_transaction_freezes_the_decision(e):
     assert {r['tg_id'] for r in e.service.db.query(
         'SELECT tg_id FROM lottery_entries WHERE lottery_id=? AND excluded=1', (lid,))} == {str(GUEST), str(OTHER)}
     records = e.service.records(lid)
-    assert records['excluded'] == 2 and records['clusters'][0]['labels'] == ['相同设备']
+    assert records['excluded'] == 2 and records['clusters'][0]['labels'] == ['设备环境特征相同']
     assert {r['outcome'] for r in records['entries']} == {'excluded'}
 
 
 def test_switched_off_activity_is_unchanged_and_collects_nothing(e):
     for payload in (config(), config(anti_multi=False), strict(device_check=False)):
+        payload['prizes'] = [{'kind': 'manual', 'name': '人工奖', 'quantity': 3, 'instructions': '私密'}]
         lid = create(e, payload)
         assert 'consent' not in req(e, 'GET', '/' + lid, GUEST).json()
         r = e.client.post(BASE + f'/{lid}/join', json={'browser_id': browser_id(GUEST)},
@@ -229,7 +250,7 @@ def test_switched_off_activity_is_unchanged_and_collects_nothing(e):
         records = e.service.records(lid)
         assert 'device_check' not in records and 'device_observations' not in records
     # Legacy published activity without the field: no consent, no collection.
-    legacy = create(e)
+    legacy = legacy_create(e, config(device_check=False))
     raw = e.service.row(legacy)['config']
     raw.pop('device_check')
     e.service.db.execute('UPDATE lotteries SET config_json=? WHERE id=?', (json.dumps(raw), legacy))
@@ -245,7 +266,7 @@ def test_switched_off_activity_is_unchanged_and_collects_nothing(e):
 
 
 def test_coexists_with_ip_and_browser_rules(e):
-    lid = create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
+    lid = legacy_create(e, strict(prizes=[{'kind': 'points', 'name': '积分', 'quantity': 3, 'amount': 5}]))
     shared_ip, shared_k = e.ip_for(GUEST), secrets.token_hex(32)
     assert enter(e, lid, GUEST, seed='g').status_code == 200
     assert enter(e, lid, OTHER, ip=shared_ip, seed='o').status_code == 200           # same IP as GUEST
@@ -257,8 +278,8 @@ def test_coexists_with_ip_and_browser_rules(e):
     assert records['excluded'] == 5
     clusters = {frozenset(a['tg_id'] for a in c['accounts']): c for c in records['clusters']}
     triple = clusters[frozenset({str(GUEST), str(OTHER), str(THIRD)})]
-    assert triple['reasons'] == ['hardware', 'ip'] and triple['labels'] == ['相同设备', '相同可信公网 IP']
-    assert {link['label'] for link in triple['links']} == {'相同设备', '相同可信公网 IP'}
+    assert triple['reasons'] == ['hardware', 'ip'] and triple['labels'] == ['设备环境特征相同', '相同可信公网 IP']
+    assert {link['label'] for link in triple['links']} == {'设备环境特征相同', '相同可信公网 IP'}
     pair = clusters[frozenset({str(FOURTH), str(FIFTH)})]
     assert pair['reasons'] == ['device'] and pair['labels'] == ['相同浏览器安装标识']
     assert all(a['excluded'] for c in records['clusters'] for a in c['accounts'])
@@ -267,7 +288,7 @@ def test_coexists_with_ip_and_browser_rules(e):
 
 
 def test_raw_device_values_never_persisted_or_returned(e):
-    lid = create(e, strict())
+    lid = legacy_create(e, strict())
     k = secrets.token_hex(32)
     values = traits('raw-check')
     contexts = [device_ctx(GUEST, k=k, s=values), device_ctx(OTHER, s=values)]
@@ -288,7 +309,7 @@ def test_raw_device_values_never_persisted_or_returned(e):
 
 
 def test_lost_key_never_rotates_while_device_digests_exist(e):
-    lid = create(e, strict())
+    lid = legacy_create(e, strict())
     without = create(e, strict(device_check=False))  # strict, but no device check
     assert enter(e, lid, GUEST).status_code == 200
     e.service.db.execute('DELETE FROM lottery_identity_key')
