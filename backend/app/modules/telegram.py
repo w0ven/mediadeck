@@ -2790,15 +2790,12 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         action = self._admin_access_action(access)
         second = [{"text": "⛔ 禁用账号" if action == "admin_disable" else "🔓 解除禁用",
                    "callback_data": action}] if action else []
-        last = [{"text": "🔄 刷新", "callback_data": "admin_card"},
-                {"text": "关闭", "callback_data": "panel_close"}]
-        if _GROUP.get():
-            last = [*(row[0] for row in self._private_button('manage_' + user_id, '📋 资料 · 私聊')), *last]
         return [[{"text": "⏳ 续期", "callback_data": "admin_renew"},
                  {"text": "💰 调整积分", "callback_data": "admin_score"},
                  {"text": "👥 用户组", "callback_data": "admin_groups"}],
                 [*second, {"text": "🗑 删除账号", "callback_data": "admin_rm"}],
-                last]
+                [{"text": "🔄 刷新", "callback_data": "admin_card"},
+                 {"text": "关闭", "callback_data": "panel_close"}]]
 
     async def _admin_read_access(self, target):
         if self._restrictions is None:

@@ -2,6 +2,15 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-25 — v0.53.3: /kk profile section in groups too
+
+- `/kk` is mostly read in groups, so the group card now carries the same profile
+  section as private chats (TG, registration channel, inviter/invitees, request quota,
+  last active, raw login IDs). Only the operator note stays private: groups show
+  「📝 有备注，私聊 /kk 查看」 instead of its text.
+- The 「📋 资料 · 私聊」 button is gone; `/start manage_<id>` links on older cards still
+  resolve for current administrators only.
+
 ## 2026-10-25 — v0.53.2: sectioned member cards, one-layer /kk
 
 - Group account card (`/me` in groups) heads with the member's Telegram nickname as a

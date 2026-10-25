@@ -136,9 +136,9 @@ def test_group_sensitive_callbacks_are_private_only_and_do_not_write(env, action
 def test_private_link_keeps_target_and_requires_current_admin(env):
     async def run():
         mid = await command(env, '/kk ViewerA')
-        await click(env, 'admin_more', mid)
-        link = next(b['url'] for b in env.tg.actions(GROUP, mid) if 'url' in b)
-        private = await command(env, '/start ' + link.split('start=')[1], chat=ADMIN)
+        # The group card carries the profile itself; links on older cards still resolve.
+        assert not any('url' in b for b in env.tg.actions(GROUP, mid))
+        private = await command(env, '/start manage_u1', chat=ADMIN)
         assert 'ViewerA' in env.tg.text(ADMIN, private)
         assert '管理目标' in env.tg.text(ADMIN, private)
         denied = await command(env, '/start manage_u1', chat=VIEWER, user=VIEWER)

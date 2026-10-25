@@ -686,7 +686,7 @@ Telegram <code>1001</code>
 - 🗑 删除账号
 - 🔄 刷新 ｜ 关闭
 
-## /kk · 群内不含私人资料，资料走私聊深链
+## /kk · 群内同样一屏看全
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
@@ -704,9 +704,15 @@ Telegram <code>1001</code>
 近24小时 <b>1小时30分</b> · 近30天 <b>12小时</b>
 累计 <b>24小时</b></blockquote>
 <blockquote><b>🪙 积分 120</b></blockquote>
+<blockquote><b>📋 资料</b>
+Telegram <code>1001</code>
+注册渠道 legacy · 邀请人 暂不可用 · 下级 暂不可用
+求片剩余 3 次 · 最近活跃 —
+原始登录标识记录 暂不可用
+📝 有备注，私聊 /kk 查看</blockquote>
 ```
 
 按钮：
 - ⏳ 续期 ｜ 💰 调整积分 ｜ 👥 用户组
 - ⛔ 禁用账号 ｜ 🗑 删除账号
-- 📋 资料 · 私聊 ｜ 🔄 刷新 ｜ 关闭
+- 🔄 刷新 ｜ 关闭
