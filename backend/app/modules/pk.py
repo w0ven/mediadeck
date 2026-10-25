@@ -145,6 +145,8 @@ class PkService(RoundCards):
                 raise PlayError('你还有一场 PK 没结束')
             if self._busy(conn, target_member['emby_user_id']):
                 raise PlayError('对方正在另一场 PK 里，稍后再来')
+            if stake and self.points.balance(target_member['emby_user_id']) < stake:
+                raise PlayError(f'对方积分不足，本次 PK 需 {stake} 积分，未发起挑战')
             nonce = secrets.token_hex(12)
             cfg = {**DEFAULTS, **self.config()}
             row = {'nonce': nonce, 'bot_id': self.bot_id, 'chat_id': chat, 'thread_id': thread,
