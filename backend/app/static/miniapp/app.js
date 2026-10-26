@@ -51,19 +51,30 @@
     constructor(status, code, message) { super(message); this.status = status; this.code = code; }
   }
 
-  async function api(path, { method = 'GET', body } = {}) {
+  async function api(path, { method = 'GET', body, signal } = {}) {
     let res;
     try {
       res = await fetch(path, {
         method,
         headers: { 'X-Telegram-Init-Data': (tg && tg.initData) || '', ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
         body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal,
       });
-    } catch (_) {
+    } catch (err) {
+      if (err && (err.name === 'AbortError' || signal?.aborted)) {
+        throw new ApiError(0, 'abort', '请求已取消');
+      }
       throw new ApiError(0, 'network', '网络连接失败，请检查网络后重试');
     }
     let data = null;
-    try { data = await res.json(); } catch (_) { /* empty body */ }
+    try {
+      data = await res.json();
+    } catch (err) {
+      if (err && (err.name === 'AbortError' || signal?.aborted)) {
+        throw new ApiError(0, 'abort', '请求已取消');
+      }
+      /* empty body */
+    }
     if (!res.ok) {
       const d = data && data.detail;
       const message = (d && typeof d === 'object' && d.message) || (typeof d === 'string' && d) || '服务暂时不可用，请稍后再试';

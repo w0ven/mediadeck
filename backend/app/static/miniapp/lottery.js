@@ -16,7 +16,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
   const kinds = { shop: '商城道具 · 自动入背包', points: '积分 · 直接入余额', invite: '可用邀请名额', registration: '本人专属注册资格', manual: '自定义奖品 · 人工发放' };
   const audience = { all: '全部群友', member: '仅已注册', guest: '仅未注册' };
   const art = { shop: 'gem', points: 'starCute', invite: 'rocket', registration: 'gift', manual: 'giftPurple' };
-  const call = (path, body = {}) => api(root + path, { method: 'POST', body });
+  const call = (path, body = {}, options = {}) => api(root + path, { method: 'POST', body, ...options });
   let detailLoad = 0;
   let activeTimer = null;
   let activeSheetResolve = null;
@@ -28,6 +28,14 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
   function clearActiveCaptcha() {
     if (activeCaptchaState) {
       activeCaptchaState.generation = (activeCaptchaState.generation || 0) + 1;
+      if (activeCaptchaState.challengeAbort) {
+        try { activeCaptchaState.challengeAbort.abort(); } catch (_) {}
+        activeCaptchaState.challengeAbort = null;
+      }
+      if (activeCaptchaState.challengeTimer) {
+        clearTimeout(activeCaptchaState.challengeTimer);
+        activeCaptchaState.challengeTimer = null;
+      }
       if (activeCaptchaState.widgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
         try { window.turnstile.remove(activeCaptchaState.widgetId); } catch (_) {}
       }
@@ -504,7 +512,9 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       challenge: null,
       token: null,
       widgetId: null,
-      expired: false
+      expired: false,
+      challengeAbort: null,
+      challengeTimer: null
     };
     function getJoinText() {
       return d.joined ? '已报名 · 等待开奖'
@@ -610,6 +620,18 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       if (!needsCaptcha || !captchaAvailable) return;
       const gen = ++captchaState.generation;
 
+      const isCurrent = () => alive() && load === detailLoad && activeCaptchaState === captchaState && gen === captchaState.generation;
+
+      // Abort previous in-flight challenge request if any
+      if (captchaState.challengeAbort) {
+        try { captchaState.challengeAbort.abort(); } catch (_) {}
+        captchaState.challengeAbort = null;
+      }
+      if (captchaState.challengeTimer) {
+        clearTimeout(captchaState.challengeTimer);
+        captchaState.challengeTimer = null;
+      }
+
       // Remove existing widget if any before recreating
       if (captchaState.widgetId && window.turnstile && typeof window.turnstile.remove === 'function') {
         try { window.turnstile.remove(captchaState.widgetId); } catch (_) {}
@@ -622,32 +644,84 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       let container = $('#lot-cf-turnstile-container');
       const wrap = $('#lot-captcha-area');
       if (wrap) {
-        wrap.innerHTML = '<div id="lot-cf-turnstile-container" class="cf-turnstile-box"><div class="lot-captcha-loading">人机验证加载中...</div></div><div id="lot-captcha-msg" class="tiny muted" style="margin-top:6px;display:none"></div>';
+        wrap.innerHTML = '<div id="lot-cf-turnstile-container" class="cf-turnstile-box"><div class="lot-captcha-loading" id="lot-captcha-status-text">正在加载验证组件与安全配置...</div></div><div id="lot-captcha-msg" class="tiny muted" style="margin-top:6px;display:none"></div>';
         container = $('#lot-cf-turnstile-container');
       }
       if (!container) return;
 
-      try {
-        const turnstile = await loadTurnstileScript();
-        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+      const updateStatusHint = (hint) => {
+        if (!isCurrent()) return;
+        const el = $('#lot-captcha-status-text');
+        if (el) el.textContent = hint;
+      };
 
-        // Fetch challenge from server
-        let ch = null;
-        try {
-          ch = await call(`/${lid}/captcha`);
-        } catch (err) {
-          if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
-          const retryHint = (err && err.status === 429) ? '请求频繁，请稍后重试' : (err.message || '获取验证失败');
-          if (wrap) {
-            wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(retryHint)}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
-            const rb = $('#lot-captcha-reissue', wrap);
-            if (rb) rb.onclick = () => initCaptchaWidget();
-          }
-          updateJoinBtn();
-          return;
+      const showRetryError = (msg, isExpired = false) => {
+        if (!isCurrent()) return;
+        captchaState.token = null;
+        captchaState.expired = isExpired;
+        if (wrap) {
+          wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(msg)}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
+          const rb = $('#lot-captcha-reissue', wrap);
+          if (rb) rb.onclick = () => initCaptchaWidget();
         }
+        updateJoinBtn();
+      };
 
-        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+      // 1. Parallel start: Load script and fetch challenge simultaneously
+      let scriptReady = false;
+      let challengeReady = false;
+
+      // Bound 10s wait for challenge request using AbortController
+      const abortCtrl = new AbortController();
+      captchaState.challengeAbort = abortCtrl;
+      let challengeTimedOut = false;
+      const localChallengeTimer = setTimeout(() => {
+        challengeTimedOut = true;
+        abortCtrl.abort();
+      }, 10000);
+      captchaState.challengeTimer = localChallengeTimer;
+
+      const clearLocalTimer = () => {
+        clearTimeout(localChallengeTimer);
+        if (captchaState.challengeTimer === localChallengeTimer) {
+          captchaState.challengeTimer = null;
+        }
+        if (captchaState.challengeAbort === abortCtrl) {
+          captchaState.challengeAbort = null;
+        }
+      };
+
+      const scriptPromise = loadTurnstileScript().then(ts => {
+        if (!isCurrent()) return ts;
+        scriptReady = true;
+        if (!challengeReady) {
+          updateStatusHint('正在准备验证');
+        }
+        return ts;
+      });
+
+      const challengePromise = call(`/${lid}/captcha`, {}, { signal: abortCtrl.signal }).then(ch => {
+        clearLocalTimer();
+        if (!isCurrent()) return ch;
+        challengeReady = true;
+        if (!scriptReady) {
+          updateStatusHint('正在加载验证组件');
+        }
+        return ch;
+      }).catch(err => {
+        clearLocalTimer();
+        if (challengeTimedOut || (err && (err.name === 'AbortError' || err.code === 'abort'))) {
+          throw new Error('获取验证超时，请重试');
+        }
+        throw err;
+      });
+
+      try {
+        const [turnstile, ch] = await Promise.all([scriptPromise, challengePromise]);
+        if (!isCurrent()) return;
+
+        updateStatusHint('等待完成验证');
+
         captchaState.challenge = ch;
         captchaState.token = null;
         captchaState.expired = false;
@@ -672,17 +746,6 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         const isDark = tgScheme ? (tgScheme !== 'light') : ((document.documentElement.dataset && document.documentElement.dataset.theme) === 'dark' || document.documentElement.getAttribute('data-theme') === 'dark');
         const theme = isDark ? 'dark' : 'light';
 
-        const showRetryError = (msg) => {
-          captchaState.token = null;
-          captchaState.expired = true;
-          if (wrap) {
-            wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(msg)}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
-            const rb = $('#lot-captcha-reissue', wrap);
-            if (rb) rb.onclick = () => initCaptchaWidget();
-          }
-          updateJoinBtn();
-        };
-
         const widgetId = turnstile.render(container, {
           sitekey: ch.site_key || captchaCfg.site_key,
           action: ch.action || 'lottery_join',
@@ -692,7 +755,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
           retry: 'never',
           'refresh-expired': 'manual',
           callback: (token) => {
-            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            if (!isCurrent()) return;
             captchaState.token = token;
             captchaState.expired = false;
             const m = curMsgEl();
@@ -700,27 +763,23 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
             updateJoinBtn();
           },
           'expired-callback': () => {
-            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
-            showRetryError('验证已过期，请点击重新验证');
+            if (!isCurrent()) return;
+            showRetryError('验证已过期，请点击重新验证', true);
           },
           'error-callback': (code) => {
-            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            if (!isCurrent()) return;
             showRetryError('验证失败，请重新验证');
           },
           'timeout-callback': () => {
-            if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
+            if (!isCurrent()) return;
             showRetryError('验证超时，请重新验证');
           }
         });
         captchaState.widgetId = widgetId;
       } catch (err) {
-        if (!alive() || load !== detailLoad || activeCaptchaState !== captchaState || gen !== captchaState.generation) return;
-        if (wrap) {
-          wrap.innerHTML = `<div class="rule-note banner bad lot-captcha-banner"><span>${esc(err.message || '验证服务加载失败')}</span><button class="btn secondary text-btn" id="lot-captcha-reissue">重新验证</button></div>`;
-          const rb = $('#lot-captcha-reissue', wrap);
-          if (rb) rb.onclick = () => initCaptchaWidget();
-        }
-        updateJoinBtn();
+        if (!isCurrent()) return;
+        const retryHint = (err && err.status === 429) ? '请求频繁，请稍后重试' : (err.message || '获取验证失败');
+        showRetryError(retryHint);
       }
     }
 
