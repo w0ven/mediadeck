@@ -77,11 +77,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
         cleanup();
         if (attempt !== turnstileScriptAttempt) return;
         turnstileScriptState = 'loaded';
-        if (window.turnstile && typeof window.turnstile.ready === 'function') {
-          window.turnstile.ready(() => resolve(window.turnstile));
-        } else {
-          resolve(window.turnstile);
-        }
+        resolve(window.turnstile);
       };
 
       const onError = () => {

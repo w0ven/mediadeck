@@ -69,6 +69,13 @@ MOCK_TURNSTILE_SCRIPT = """
       return false;
     },
     ready: function(cb) {
+      // Like real Cloudflare Turnstile: throws if script has async/defer attribute!
+      var scripts = document.querySelectorAll('script[src*="challenges.cloudflare.com/turnstile"]');
+      for (var i = 0; i < scripts.length; i++) {
+        if (scripts[i].async || scripts[i].defer) {
+          throw new Error('[Cloudflare Turnstile] Remove async/defer from the Turnstile api.js script tag before using turnstile.ready()..');
+        }
+      }
       if (cb) cb();
     }
   };
@@ -653,5 +660,18 @@ def test_lottery_turnstile_async_race_and_body_abort(request, tmp_path):
 
         # Check that no uncaught exceptions occurred in page
         assert len(page_errors) == 0, f'Uncaught page errors: {page_errors}'
+
+        # ---------------------------------------------------------------------
+        # Regression 4:
+        # Script onload with async/defer must NOT call turnstile.ready() to avoid
+        # Turnstile throwing uncaught exception that leaves Promise pending forever.
+        # ---------------------------------------------------------------------
+        # Navigate to a new lottery activity to trigger full real script + widget render
+        lid_d = create(env, config(title='真实Ready回归活动 D', draw_mode='manual',
+                                  prizes=[{'kind': 'manual', 'name': '纪念礼品 D', 'quantity': 1, 'instructions': '联系发放'}]))
+        url_d = f'https://app.example.test/app?tgWebAppStartParam=lottery_{lid_d}'
+        page.goto(url_d)
+        page.locator('.mock-cf-turnstile').wait_for()
+        assert len(page_errors) == 0, f'Uncaught page errors after load: {page_errors}'
 
         browser.close()
