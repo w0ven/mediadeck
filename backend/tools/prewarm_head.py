@@ -450,7 +450,7 @@ class PrewarmWatcher:
         line = line.replace('\u200c', '').replace('\u200d', '')
         m = re.search(
             r'\bhttp/1\.[01]\s+POST\s+https?://[^/\s]+/'
-            r'(?:emby/)?Items/(\d+)/PlaybackInfo(?:[?\s]|$)', line, re.IGNORECASE)
+            r'(?:emby/)?Items/(\d+)/PlaybackInfo(?:[?.\s]|$)', line, re.IGNORECASE)
         if not m:
             return
         self.stats['playback_seen'] += 1
