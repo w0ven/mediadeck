@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-29 — bound play resolves same-device sessions in playback restrictions
+
+- Production 503 "playback client identity unavailable" bursts (hundreds per day, about 88%
+  from one app family) came from Emby keeping two logins for one DeviceId with different
+  client names. PlaybackInfo carries the client profile and binds its PlaySessionId to one
+  session, but media requests carry only DeviceId and PlaySessionId, so the web-play and
+  session-client checks matched both sessions and refused; players then retried endlessly.
+- When no SessionId is supplied, both checks now use Deck's own user-scoped issuance binding
+  (current lease, then the watch-playback record) before falling back to DeviceId matching.
+  Unbound ambiguous sessions still fail closed, and a binding to a web session is still
+  refused and sanctioned as before. Concurrency admission is unchanged.
+- New regressions reproduce the 503 before the change (with and without the client filter);
+  7 new and 664 focused restriction/admission/playback tests pass; lint passes.
+
 ## 2026-10-29 — earlier, bounded playback prewarm with tail metadata
 
 - Trigger on Emby PlaybackInfo HTTP request lines immediately, without same-thread
