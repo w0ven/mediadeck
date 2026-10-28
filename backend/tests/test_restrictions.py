@@ -282,3 +282,52 @@ def test_admin_promoted_during_disable_restores_local_state(service):
     service.emby.apply_member_policy.return_value = {'status': 'skipped_admin'}
     asyncio.run(service.apply('concurrency', 'u', proof()))
     assert service.members.get('u')['status'] == before
+
+
+def _same_device_sessions(second_client="Hills Windows"):
+    # One DeviceId shared by two logins of the same app (seen with Hills).
+    app.state.emby.set_sessions([
+        {"Id": "s1", "UserId": "u1", "DeviceId": "d", "Client": "Hills"},
+        {"Id": "s2", "UserId": "u1", "DeviceId": "d", "Client": second_client}])
+
+
+def _bound_play(client):
+    info = client.post("/api/playback/info/item42", json={}, headers={
+        "X-Emby-Token": "tok:u1", "X-Emby-Device-Id": "d", "X-Emby-Client": "Hills Windows"})
+    assert info.status_code == 200
+    return info.json()["PlaySessionId"]
+
+
+@pytest.mark.parametrize("client_filter", [False, True])
+@pytest.mark.parametrize("uri", ["/Videos/item42/original.mkv?DeviceId=d&PlaySessionId={play}",
+                                 "/Videos/item42/stream.mkv?Static=true&PlaySessionId={play}"])
+def test_bound_play_resolves_same_device_sessions_without_client_profile(client, client_filter, uri):
+    if client_filter:
+        app.state.restrictions.save_client_config(
+            {"enabled": True, "blocked_patterns": ["blocked-player"], "exempt_groups": []})
+    _same_device_sessions()
+    play = _bound_play(client)
+    # Players fetch the media URL with only the token and the issued play ids.
+    response = client.get("/api/playback/admit", headers={
+        "X-Emby-Token": "tok:u1", "X-Original-URI": uri.format(play=play)})
+    assert response.status_code == 204
+    assert not app.state.restrictions.events()
+
+
+def test_bound_play_still_enforces_web_restriction_for_bound_session(client):
+    _same_device_sessions(second_client="Emby Web")
+    app.state.db.execute("INSERT INTO watch_playbacks (user_id,play_id,session_id,device_id,item_id,issued_at) "
+                         "VALUES ('u1','web-play','s2','d','item42',1)")
+    response = client.get("/api/playback/admit", headers={
+        "X-Emby-Token": "tok:u1", "X-Original-URI": "/Videos/item42/original?DeviceId=d&PlaySessionId=web-play"})
+    assert response.status_code == 403
+    assert app.state.restrictions.events()[0]["rule"] == "web_play"
+
+
+@pytest.mark.parametrize("play", ["", "unknown-play"])
+def test_unbound_same_device_sessions_remain_unresolved(client, play):
+    _same_device_sessions()
+    response = client.get("/api/playback/admit", headers={
+        "X-Emby-Token": "tok:u1", "X-Original-URI": f"/Videos/item42/original?DeviceId=d&PlaySessionId={play}"})
+    assert response.status_code == 503
+    assert not app.state.restrictions.events()

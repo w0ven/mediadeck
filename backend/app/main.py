@@ -1475,6 +1475,25 @@ async def _restrict_session_client(uid: str, device: str = "", sid: str = "",
         raise HTTPException(403, "session client restricted", headers={"Cache-Control": "private, no-store"})
 
 
+def _bound_play_session(uid: str, query: dict[str, str]) -> str:
+    """Session Deck bound to this PlaySessionId when it issued PlaybackInfo.
+
+    Players usually fetch media with only DeviceId and PlaySessionId, while
+    Emby can keep several logins for one DeviceId (seen with Hills). The
+    issuance binding was resolved with the full client profile, so it names
+    the exact session; it is user-scoped and never a caller assertion.
+    """
+    play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
+    if not play_id:
+        return ""
+    for table in ("stream_leases", "watch_playbacks"):
+        bound = app.state.db.query(f"SELECT session_id FROM {table} WHERE user_id=? AND play_id=?",
+                                   (uid, play_id))
+        if len(bound) == 1:
+            return str(bound[0]["session_id"])
+    return ""
+
+
 async def _restrict_web_playback(uid: str, request: Request, query: dict[str, str]) -> None:
     service = app.state.restrictions
     if not service.config()["web_play"]["enabled"]:
@@ -1482,12 +1501,13 @@ async def _restrict_web_playback(uid: str, request: Request, query: dict[str, st
     device = caller_device(request.headers, query)
     sid = query.get("SessionId", query.get("sessionId", ""))
     profile = caller_session_profile(request.headers, query)
-    play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
+    bound = _bound_play_session(uid, query)
     if not device:
-        bound = app.state.db.query("SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?", (uid, play_id)) if play_id else []
-        if len(bound) != 1 or (sid and sid != bound[0]["session_id"]):
+        if not bound or (sid and sid != bound):
             raise HTTPException(503, "playback client identity unavailable")
-        sid = bound[0]["session_id"]
+        sid = bound
+    elif not sid:
+        sid = bound
 
     async def confirm():
         rows = await app.state.emby.active_sessions_raw()
@@ -1614,12 +1634,8 @@ async def _admit_playback(request: Request, item_id: str,
         raise HTTPException(403, "playback access denied", headers=headers)
     await _restrict_web_playback(uid, request, query)
     sid = query.get("SessionId", query.get("sessionId", ""))
-    if app.state.restrictions.client_config()["enabled"] and not (sid or device):
-        play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
-        bound = app.state.db.query("SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?",
-                                   (uid, play_id)) if play_id else []
-        if len(bound) == 1:
-            sid = str(bound[0]["session_id"])
+    if app.state.restrictions.client_config()["enabled"] and not sid:
+        sid = _bound_play_session(uid, query)
     await _restrict_session_client(uid, device, sid, caller_session_profile(request.headers, query))
     if not reserve:
         return uid
