@@ -16,6 +16,9 @@
 | `MEDIADECK_EMBY_LIBRARY_DB` | 路径 | `/var/lib/emby/data/library.db` |
 | `MEDIADECK_EMBY_PATH_PREFIXES` | 逗号分隔的 Emby 路径前缀 | `/media/` |
 | `MEDIADECK_PREWARM_MOUNTS` | JSON 对象：挂载点 → 该挂载的 rclone VFS 缓存目录 | 见下 |
+| `MEDIADECK_PREWARM_DISK_LOW_WATER_GB` | 正数，GiB；缓存文件系统的紧急磁盘低水位 | `320` |
+| `MEDIADECK_PREWARM_FILE_BUDGET_MB` | 正数，MiB；每个存活 worker 的扩容预留 | `320` |
+| `MEDIADECK_PREWARM_WINDOW_MB` | 正数，MiB；600 秒滚动窗口的准入预算 | `1920` |
 
 `MEDIADECK_PREWARM_MOUNTS` 的键同时也是预热白名单，候选路径按键的顺序生成：
 
@@ -23,6 +26,19 @@
 {"/mnt/media-a/Media": "/var/cache/rclone/media-a/vfs/Media",
  "/mnt/media-b/Media": "/var/cache/rclone/media-b/vfs"}
 ```
+
+三个容量变量在启动时读取，未设置时用默认值；空值、非正数、非有限值或非数字直接报错。
+并发预留上限始终为 `MAX_CONCURRENT × 单文件预算`（默认 `2 × 320 = 640 MiB`）。
+磁盘检查取所有缓存目录所在文件系统的最小可用空间；目录尚不存在时，检查最近的已存在父目录。
+低水位用于 rclone 清理失效时兜底，应低于 rclone 自己的正常空闲空间目标，否则会一直阻止预热。
+调整 rclone 预读时，需把每文件预算和滚动窗口一起按实际缓存扩容量校准；测得的块增长不代表最终上游流量。
+
+提前触发依赖 Emby 日志的 `http/1.1 POST .../Items/<id>/PlaybackInfo` 请求行
+（可带 `/emby` 前缀，兼容 U+200C/U+200D 零宽字符），不再依赖同线程的 IsPlayback 配对；
+响应行不触发。实测 62% 的起播在此前 120 秒有同条目请求，提前量 p25/p50/p75/p90 为
+1/2/5/13 秒；按条目加 5 分钟去重后，约 62% 请求在 120 秒内转化，仍有推测性预热开销。
+302 签发日志保留兜底，但通常没有足够提前量。worker 读取开头 32 MiB 后最多再读尾部 2 MiB，
+重叠部分不会重复读取；完成日志中的 `tail_read_s` 包含尾部定位和读取耗时。
 
 `--log`、`--dispatch-log`、`--library-db` 的默认值取自上表。`--settings`
 默认是相对脚本的 `backend/data/settings.json`；如果脚本不在 checkout 里运行，就显式传入 `--settings`。

@@ -2,6 +2,25 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-29 — earlier, bounded playback prewarm with tail metadata
+
+- Trigger on Emby PlaybackInfo HTTP request lines immediately, without same-thread
+  IsPlayback pairing; ignore responses and tolerate zero-width characters. Keep local
+  read-only library lookup, API fallback/backoff and the deduplicated 302 safety net.
+  Document measured 62% start coverage, 1/2/5/13-second lead percentiles and 62% POST
+  conversion rather than promising that speculative warming always beats the client.
+- Make disk low water, per-worker expansion reservation and rolling admission budget
+  configurable (defaults unchanged). Check the least-free configured cache filesystem,
+  falling back to existing parents; disk blocking logs now report transitions and at
+  most one summary per minute. Concurrent reservation follows the per-worker budget.
+- Read up to 2 MiB at EOF after the 32 MiB head, without overlapping reads, and report
+  tail timing. All media filesystem probes and reads remain in the killable worker.
+- Add isolated synthetic-log, SQLite, disk-pressure and real child-worker tests:
+  53 new tests pass; with adjacent dispatch/admission/URL regressions, 91 pass.
+  `ruff check app tests` and `ruff check tools/prewarm_head.py` pass.
+- Next: review and deploy with a low-water floor below rclone's normal free-space
+  target and budgets calibrated to its read-ahead, including tail seeks. No open questions.
+
 ## 2026-10-26 — v0.58.1: bigger 象棋 and 五子棋 boards
 
 - Inside Telegram a phone leaves about 390×700, and v0.58.0 sized the board to the height

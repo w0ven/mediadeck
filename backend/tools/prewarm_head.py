@@ -1,5 +1,15 @@
 #!/usr/bin/env python3
-"""Bounded playback-head prewarm for the existing rclone VFS cache (v2.1).
+# ruff: noqa: EXE001 - invoked with Python; executable mode is not required
+"""Bounded playback head/tail prewarm for the existing rclone VFS cache.
+
+PlaybackInfo HTTP requests now trigger immediately (no IsPlayback pairing).
+Observed coverage: 62% of starts have a same-item POST in the preceding 120s;
+lead p25/p50/p75/p90 is 1/2/5/13s versus cold first-byte p50 of about 1.4s.
+After item + 5-minute dedup, about 62% of POSTs convert to playback within 120s,
+with or without IsPlayback=true: speculative work remains, and completion
+before the client's GET is NOT guaranteed. The 302 trigger remains a fallback.
+Disk and admission budgets are configurable; disk blocking logs are bounded.
+Workers also read up to 2MiB at EOF, without rereading overlapping head bytes.
 
 v2.1 fixes (in addition to v2's B1-B5): the pump timeout path now releases the
 reservation exactly once for both immediate-reap branches (WNOHANG returning
@@ -9,14 +19,13 @@ summary per 60s instead of one line per 20ms check.
 
 v2 fixes (independent-review blockers):
 
-B1 coverage: besides the Emby-log PlaybackInfo pair (only ~10% of real starts
-carry a preceding POST line), a UNIVERSAL trigger tails the nginx dispatch log:
-every 302 issuance line (100% of parsable 302 events; ~90% of items map to
-the whitelisted mounts, the rest are other library roots and rejected) resolves
-item->path through the LOCAL read-only Emby library.db INTEGER-PK point query.
-NOTE: dispatch log uses buffer=32k flush=1s, so effective lead over the
-client's first media GET is p50 0.3-1.5s (not the full 302->GET gap); the
-prewarm may NOT complete before the client's GET for most sessions.
+B1 coverage: Emby-log PlaybackInfo HTTP request lines provide the earlier
+trigger described above; the old same-thread IsPlayback pair covered only
+about 10% of starts. Every parsable nginx 302 issuance remains a fallback
+(~90% of items map to whitelisted mounts; other library roots are rejected).
+Both resolve item->path through the LOCAL read-only Emby library.db INTEGER-PK
+point query. The client can GET almost immediately after 302, and dispatch-log
+buffering can delay observation further: this fallback has little useful lead.
 
 B2 rotation: LogFollower detects rename+create (inode change), copytruncate
 (size shrink), deletion and watcher restart; no manual restart ever needed.
@@ -50,7 +59,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
+import re
 import shutil
 import signal
 import sqlite3
@@ -60,15 +71,34 @@ import time
 import urllib.request
 from pathlib import Path
 
+
+def _positive_bytes(name: str, default: int, unit: int) -> int:
+    """Read a positive, finite size at startup; never hide invalid configuration."""
+    try:
+        value = float(os.environ.get(name, str(default)))
+        if not math.isfinite(value) or value <= 0:
+            raise ValueError
+        size = int(value * unit)
+        if size <= 0:
+            raise ValueError
+    except (ValueError, OverflowError) as exc:
+        raise ValueError(f'{name} must be a positive finite number') from exc
+    return size
+
+
 HEAD_BYTES = 32 * 1024 * 1024                      # app-level read per file
-PER_FILE_EXPANSION_BUDGET = 320 * 1024 * 1024      # reservation per live worker
-TOTAL_RESERVATION_LIMIT = 640 * 1024 * 1024        # concurrent reservations
+TAIL_BYTES = 2 * 1024 * 1024                       # metadata near EOF
+MAX_CONCURRENT = 2                                # running + leaked workers
+PER_FILE_EXPANSION_BUDGET = _positive_bytes(
+    'MEDIADECK_PREWARM_FILE_BUDGET_MB', 320, 1024 ** 2)  # reservation per live worker
+TOTAL_RESERVATION_LIMIT = MAX_CONCURRENT * PER_FILE_EXPANSION_BUDGET
 WINDOW_SECONDS = 600.0
-WINDOW_BYTES = 1920 * 1024 * 1024                  # admissions per rolling window
-MAX_CONCURRENT = 2                                 # running + leaked workers
+WINDOW_BYTES = _positive_bytes(
+    'MEDIADECK_PREWARM_WINDOW_MB', 1920, 1024 ** 2)  # admissions per rolling window
 QUEUE_TTL = 120.0
 DEDUP_TTL = 300.0
-DISK_LOW_WATER_BYTES = 320 * 1024 ** 3             # stricter than rclone 300G
+DISK_LOW_WATER_BYTES = _positive_bytes(
+    'MEDIADECK_PREWARM_DISK_LOW_WATER_GB', 320, 1024 ** 3)  # emergency cache-disk floor
 WORKER_TIMEOUT = 60.0
 # Host layout comes from the environment (see docs/OPERATIONS-ENV.md); the
 # defaults are neutral examples, not a real deployment.
@@ -113,8 +143,6 @@ MEDIA_MOUNTS = tuple(CACHE_ROOTS)
 ALLOCATED_SLOP = 8 * 1024 * 1024                   # blocks dirty mid-write
 API_BACKOFF_BASE = 2.0
 API_BACKOFF_MAX = 60.0
-PENDING_THREAD_TTL = 60.0
-PENDING_THREAD_CAP = 512
 RESOLVER_QUEUE_MAX = 64
 BACKFILL_BYTES = 256 * 1024                        # bounded restart backfill
 BLOCKED_LOG_INTERVAL = 60.0                       # max 1 summary log/min while blocked
@@ -144,7 +172,7 @@ def _cache_allocated(worker_path: str) -> int:
 
 
 def worker_main(candidates: list[str], head_bytes: int, out_fd: int) -> None:
-    """The ONLY process that touches mount paths or cache entries."""
+    """Only the killable worker probes media paths and per-file cache entries."""
     result: dict = {'used': None, 'error': None}
     try:
         os.setsid()
@@ -167,7 +195,7 @@ def worker_main(candidates: list[str], head_bytes: int, out_fd: int) -> None:
         before = _cache_allocated(chosen)
         t0 = time.monotonic()
         with open(chosen, 'rb', buffering=0) as f:
-            first = f.read(1)
+            f.read(1)
             t_first = time.monotonic() - t0
             remaining = head_bytes - 1
             while remaining > 0:
@@ -175,8 +203,21 @@ def worker_main(candidates: list[str], head_bytes: int, out_fd: int) -> None:
                 if not chunk:
                     break
                 remaining -= len(chunk)
+            t_tail = time.monotonic()
+            size = os.fstat(f.fileno()).st_size
+            tail_start = max(f.tell(), size - TAIL_BYTES)
+            remaining = size - tail_start
+            if remaining > 0:
+                f.seek(tail_start)
+                while remaining > 0:
+                    chunk = f.read(min(4 * 1024 * 1024, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            tail_read_s = time.monotonic() - t_tail
         after = _cache_allocated(chosen)
         result = {'used': chosen, 'open_to_first_byte_s': round(t_first, 3),
+                  'tail_read_s': round(tail_read_s, 3),
                   'total_s': round(time.monotonic() - t0, 3),
                   'allocated_before': before, 'allocated_after': after}
     except Exception as exc:  # noqa: BLE001 - reported to parent, never fatal
@@ -207,7 +248,8 @@ class LogFollower:
             self.inode = None
             self.pos = 0
             return
-        self.fh = open(self.path, 'r', encoding='utf-8', errors='replace')
+        # Kept open across polls; rotation and deletion explicitly close it.
+        self.fh = open(self.path, 'r', encoding='utf-8', errors='replace')  # noqa: SIM115
         self.inode = (st.st_dev, st.st_ino)
         if self.backfill:
             if st.st_size > self.backfill:
@@ -291,7 +333,9 @@ class PrewarmWatcher:
         self._blocked_reason = None                   # v4: budget-block state
         self._blocked_since = 0.0
         self._last_blocked_log = 0.0
-        self._pending_threads: dict[str, tuple[str, float]] = {}  # thread->(item,seen)
+        self._disk_blocked_path: Path | None = None
+        self._disk_blocked_since = 0.0
+        self._last_disk_blocked_log = 0.0
         self._resolver_in: list[tuple[str, str]] = []           # (item_id, source)
         self._resolver_out: list[tuple[str, str | None]] = []   # (item_id, path)
         self._resolver_thread: threading.Thread | None = None
@@ -352,7 +396,7 @@ class PrewarmWatcher:
             item_id, source = self._resolver_in.pop(0)
             path = self._resolve_local(item_id)
             if path is None and source == 'emby_log':
-                path = self._resolve_api(item_id)   # API only for the rare pair path
+                path = self._resolve_api(item_id)   # request trigger retains API fallback
             self._resolver_out.append((item_id, path))
 
     def _start_resolver(self) -> None:
@@ -396,38 +440,29 @@ class PrewarmWatcher:
         self._enqueue_key(emby_path, candidates)
 
     def on_log_line(self, line: str) -> None:
-        """Secondary trigger: Emby PlaybackInfo pair (~10% of starts, p50 8.7s lead)."""
+        """Early request trigger: 62% of starts, lead p25/p50/p75/p90 = 1/2/5/13s.
+
+        About 62% of item + 5-minute-deduplicated POSTs convert within 120s;
+        IsPlayback has no observed discrimination. Responses must not trigger.
+        """
         if 'PlaybackInfo' not in line:
             return
-        import re
-        if 'Source Ip' in line and '/PlaybackInfo' in line and 'POST http' in line:
-            m = re.search(r'(MediaInfoService-\S+?):\S*:\s*http/1\.1 POST \S+/Items/(\d+)/PlaybackInfo', line)
-            if m:
-                self._pending_threads[m[1]] = (m[2], time.monotonic())
-                if len(self._pending_threads) > PENDING_THREAD_CAP:
-                    oldest = min(self._pending_threads, key=self._pending_threads.get)
-                    self._pending_threads.pop(oldest, None)
+        line = line.replace('\u200c', '').replace('\u200d', '')
+        m = re.search(
+            r'\bhttp/1\.[01]\s+POST\s+https?://[^/\s]+/'
+            r'(?:emby/)?Items/(\d+)/PlaybackInfo(?:[?\s]|$)', line, re.IGNORECASE)
+        if not m:
             return
-        if 'GetPostedPlaybackInfo request' in line and 'IsPlayback: true' in line:
-            m = re.search(r'(MediaInfoService-\S+?):', line)
-            thread = m[1] if m else None
-            entry = self._pending_threads.pop(thread, None) if thread else None
-            if not entry:
-                # B1: orphan decision (~90% of starts) -> wait for the universal
-                # issuance trigger instead of silently dropping.
-                return
-            if time.monotonic() - entry[1] > PENDING_THREAD_TTL:
-                return
-            self.stats['playback_seen'] += 1
-            self._resolver_in.append((entry[0], 'emby_log'))
-            if len(self._resolver_in) > RESOLVER_QUEUE_MAX:
-                self._resolver_in.pop(0)
+        self.stats['playback_seen'] += 1
+        self._resolver_in.append((m[1], 'emby_log'))
+        if len(self._resolver_in) > RESOLVER_QUEUE_MAX:
+            self._resolver_in.pop(0)
 
     def on_dispatch_line(self, line: str) -> None:
-        """Primary universal trigger: Deck's 302 issuance line (100% of plays).
+        """Fallback trigger: every parsable Deck 302 issuance line.
 
-        Coverage note (honest): this fires AT issuance, so the lead is the
-        client's 302->first-GET gap (p50 1.5s), not the 8.7s PlaybackInfo lead.
+        The client can GET almost immediately; log buffering can delay this
+        trigger further. Unlike the earlier POST, it offers little useful lead.
         """
         try:
             row = json.loads(line)
@@ -435,9 +470,8 @@ class PrewarmWatcher:
             return
         if row.get('status') != 302 or row.get('method') != 'GET':
             return
-        import re
         m = re.match(r'^/(?:emby/)?(?:videos|audio)/(\d+)/(?:stream|original)(?:\.[A-Za-z0-9]+)?$',
-                     (row.get('path') or ''), re.I)
+                     (row.get('path') or ''), re.IGNORECASE)
         if not m:
             return
         self.stats['issuance_seen'] += 1
@@ -461,10 +495,32 @@ class PrewarmWatcher:
         return len(self._procs) + len(self._leaked)   # B5: leaked keeps its slot
 
     def _disk_ok(self) -> bool:
-        if shutil.disk_usage('/var/cache/rclone').free < DISK_LOW_WATER_BYTES:
+        """Check local cache filesystems, never media mounts; count blocked checks."""
+        available = []
+        for root in CACHE_ROOTS.values():
+            path = root
+            while not path.exists() and path != path.parent:
+                path = path.parent
+            available.append((shutil.disk_usage(path).free, path))
+        free, path = min(available, key=lambda entry: entry[0])
+        now = time.monotonic()
+        if free < DISK_LOW_WATER_BYTES:
             self.stats['skipped_disk'] += 1
-            log('skip', reason='disk_low_water')
+            if self._disk_blocked_path != path:
+                log('disk_blocked', reason='disk_low_water', cache_dir=str(path),
+                    free_bytes=free, low_water_bytes=DISK_LOW_WATER_BYTES)
+                self._disk_blocked_path = path
+                self._disk_blocked_since = now
+                self._last_disk_blocked_log = now
+            elif now - self._last_disk_blocked_log >= BLOCKED_LOG_INTERVAL:
+                log('disk_blocked_summary', reason='disk_low_water', cache_dir=str(path),
+                    free_bytes=free, blocked_for_s=int(now - self._disk_blocked_since))
+                self._last_disk_blocked_log = now
             return False
+        if self._disk_blocked_path is not None:
+            log('disk_unblocked', cache_dir=str(self._disk_blocked_path), free_bytes=free,
+                blocked_for_s=int(now - self._disk_blocked_since))
+            self._disk_blocked_path = None
         return True
 
     def _budget_ok(self) -> bool:
@@ -604,7 +660,8 @@ class PrewarmWatcher:
                            - result.get('allocated_before', 0))
             self._release_reservation(pid, grew)
             log('worker_done', path_dir=dir_of(result.get('used') or key.split('|')[0]),
-                **{k: result.get(k) for k in ('open_to_first_byte_s', 'total_s', 'error')})
+                **{k: result.get(k) for k in
+                   ('open_to_first_byte_s', 'tail_read_s', 'total_s', 'error')})
             progressed = True
         self._procs = still
         return bool(still) or progressed
