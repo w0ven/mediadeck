@@ -100,6 +100,7 @@ def test_invalid_sizes_fail_at_import(load_prewarm, name, value):
     '/emby/Items/42/PlaybackInfo?AutoOpenLiveStream=false',
     '/Items/42/PlaybackInfo?UserId=test',
     '/Items/42/PlaybackInfo',
+    '/emby/Items/42/PlaybackInfo. Source Ip: \u200cclient.invalid\u200d, UserAgent: test',
 ])
 def test_request_triggers_immediately(watcher, path):
     watcher.on_log_line(request_line(path))

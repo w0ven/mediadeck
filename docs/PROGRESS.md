@@ -20,6 +20,10 @@ Newest entries first. Every working session appends one entry.
   `ruff check app tests` and `ruff check tools/prewarm_head.py` pass.
 - Next: review and deploy with a low-water floor below rclone's normal free-space
   target and budgets calibrated to its read-ahead, including tail seeks. No open questions.
+- Follow-up (v0.58.5): a production replay showed that Emby logs query-less requests as
+  `…/PlaybackInfo. Source Ip: …`, which the request pattern missed (3 of 237 lines, all
+  from clients that send no query string). Accept a trailing period; a regression case
+  fails before the fix and the 54 prewarm tests pass after it.
 
 ## 2026-10-26 — v0.58.1: bigger 象棋 and 五子棋 boards
 
