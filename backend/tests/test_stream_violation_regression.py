@@ -303,3 +303,34 @@ def test_reason_string_alone_never_authorizes_punishment(stack):
     _, _, guard = stack
     assert not Admission(False, "over-limit").punishable
     assert asyncio.run(guard.confirm_violation(Admission(False, "over-limit"))) is None
+
+
+def _admit(client, play, device="shared"):
+    return client.get("/api/playback/admit", headers={
+        "X-Emby-Token": "tok:u1",
+        "X-Original-URI": f"/Videos/item42/original?DeviceId={device}&PlaySessionId={play}"})
+
+
+def test_other_item_playbackinfo_keeps_running_play_resolvable_on_duplicate_device(client):
+    app.state.members.set_overrides("u1", {"max_streams": 1})
+    app.state.emby.set_sessions([{**row("a", "shared"), "Client": "A"},
+                                 {**row("b", "shared"), "Client": "B"}])
+    hdr = {**headers("shared"), "X-Emby-Client": "A"}
+    play = client.post("/api/playback/info/item42", headers=hdr, json={}).json()["PlaySessionId"]
+    assert _admit(client, play).status_code == 204
+    # Opening another item's details rebinds the session lease to a newer play.
+    assert client.post("/api/playback/info/item43", headers=hdr, json={}).status_code == 200
+    assert _admit(client, play).status_code == 204
+    assert app.state.restrictions.events() == []
+
+
+def test_issued_play_binding_requires_the_same_device(client):
+    app.state.emby.set_sessions([{**row("a", "shared"), "Client": "A"},
+                                 {**row("b", "shared"), "Client": "B"},
+                                 {**row("c", "other"), "Client": "A"}, {**row("d", "other"), "Client": "B"}])
+    hdr = {**headers("shared"), "X-Emby-Client": "A"}
+    play = client.post("/api/playback/info/item42", headers=hdr, json={}).json()["PlaySessionId"]
+    client.post("/api/playback/info/item43", headers=hdr, json={})
+    response = _admit(client, play, device="other")
+    assert response.status_code == 503
+    assert response.headers["X-Mediadeck-Decision"] == "session-unresolved"

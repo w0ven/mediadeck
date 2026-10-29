@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-30 — admission keeps a running play resolvable after another item's PlaybackInfo
+
+- After v0.58.6, restriction 503s on duplicate-device sessions fell from 6.1% to 1.3% of
+  issuances. The remainder were concurrency-admission `session-unresolved` bursts: while one
+  item was playing, the same session requested PlaybackInfo for another item (details page
+  or prefetch), which rebinds that session's lease to the newer PlaySessionId. Media requests
+  for the running play then lost their lease binding and fell back to DeviceId, which is
+  ambiguous when Emby keeps two logins for the device; playback stalled until the client
+  re-requested PlaybackInfo. Emby itself kept the play on the bound session.
+- When the lease no longer holds the play, admission now uses the same user's issuance record
+  for that PlaySessionId and DeviceId. Device-less requests and other devices are unchanged.
+- The new regression fails before the change and passes after it; a different-device request
+  stays unresolved. 719 focused admission/restriction/playback/watch tests pass; lint passes.
+
 ## 2026-10-29 — bound play resolves same-device sessions in playback restrictions
 
 - Production 503 "playback client identity unavailable" bursts (hundreds per day, about 88%
