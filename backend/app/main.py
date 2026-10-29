@@ -1455,14 +1455,36 @@ async def enroll_script(token: str) -> PlainTextResponse:
                              media_type="text/x-shellscript")
 
 
+# Switching devices often overlaps the old play by tens of seconds. Refuse at
+# once, but sanction and notify only if the overlap outlives this grace.
+CONCURRENCY_GRACE_SECONDS = 75.0
+_concurrency_checks: dict[tuple[str, str], asyncio.Task[None]] = {}
+
+
 async def _restrict_concurrency(uid: str, admission: Any) -> None:
     if not getattr(admission, "punishable", False):
         return
     async def confirm():
+        # Fresh proof: cancelled if an original occupant left or the refused
+        # session has since been admitted.
         return await app.state.streams.confirm_violation(admission)
-    # A failed sanction must never turn the refused playback into a URL.
-    with contextlib.suppress(Exception):
-        await app.state.restrictions.apply("concurrency", uid, confirm)
+    async def sanction():
+        # A failed sanction must never turn the refused playback into a URL.
+        with contextlib.suppress(Exception):
+            await app.state.restrictions.apply("concurrency", uid, confirm)
+    if CONCURRENCY_GRACE_SECONDS <= 0:
+        await sanction()
+        return
+    key = (uid, str(admission.session_id))
+    if key in _concurrency_checks:
+        return
+    async def later():
+        try:
+            await asyncio.sleep(CONCURRENCY_GRACE_SECONDS)
+            await sanction()
+        finally:
+            _concurrency_checks.pop(key, None)
+    _concurrency_checks[key] = asyncio.create_task(later())
 
 
 async def _restrict_session_client(uid: str, device: str = "", sid: str = "",

@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-30 — gentler concurrency enforcement for device switches
+
+- Review of recent over-limit cases: continuing to the next episode on the same session is
+  admitted as the same play, but switching devices often overlaps the old play by tens of
+  seconds, and a seat reserved by PlaybackInfo (including details pages) blocked other
+  devices for two minutes. Non-punished refusals left no record, so individual complaints
+  could not be traced.
+- Unstarted seats now expire after 45 seconds (PlaybackInfo to first media request is ~13s
+  at p90). Each over-limit refusal logs one structured line with the live sessions and held
+  seats (session, device, client, paused/observed, age), without credentials.
+- Punishable over-limit attempts are still refused at once, but the sanction and notices
+  wait a 75-second grace and use a fresh proof: if an original occupant stops or the
+  refused session gets admitted meanwhile, nothing is recorded. One check per session.
+- Group notices mention the member through their Telegram display name, and concurrency
+  notices explain the cap and how to resume. Private notices are unchanged apart from the
+  explanation.
+- New tests cover a switch within the grace, a sustained overlap sanctioned once, and the
+  mention; the immediate-sanction test runs with a zero grace. 755 focused tests pass; lint
+  passes.
+
 ## 2026-10-30 — admission keeps a running play resolvable after another item's PlaybackInfo
 
 - After v0.58.6, restriction 503s on duplicate-device sessions fell from 6.1% to 1.3% of

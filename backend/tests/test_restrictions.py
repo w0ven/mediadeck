@@ -1,5 +1,6 @@
 """Sanctions require authenticated evidence; receipts survive delete/restart."""
 import asyncio
+import time
 from unittest.mock import AsyncMock
 
 import httpx
@@ -254,7 +255,8 @@ def test_web_bound_hls_without_device_still_checked(client):
     assert app.state.restrictions.events()[0]['rule'] == 'web_play'
 
 
-def test_overlimit_http_real_vs_pending_and_exit(client):
+def test_overlimit_http_real_vs_pending_and_exit(client, monkeypatch):
+    monkeypatch.setattr("app.main.CONCURRENCY_GRACE_SECONDS", 0)
     service = app.state.restrictions
     service.save({'web_play': {'enabled': False, 'action': 'disable'}})
     app.state.members.set_overrides('u1', {'max_streams': 1})
@@ -331,3 +333,54 @@ def test_unbound_same_device_sessions_remain_unresolved(client, play):
         "X-Emby-Token": "tok:u1", "X-Original-URI": f"/Videos/item42/original?DeviceId=d&PlaySessionId={play}"})
     assert response.status_code == 503
     assert not app.state.restrictions.events()
+
+
+def _overlap(client, monkeypatch, grace=0.3):
+    monkeypatch.setattr("app.main.CONCURRENCY_GRACE_SECONDS", grace)
+    app.state.restrictions.save({"web_play": {"enabled": False, "action": "disable"}})
+    app.state.members.set_overrides("u1", {"max_streams": 1})
+    app.state.emby.set_sessions([{"Id": "a", "UserId": "u1", "DeviceId": "a", "NowPlayingItem": {"Id": "i"}},
+                                 {"Id": "b", "UserId": "u1", "DeviceId": "b"}])
+
+    def admit(device):
+        return client.get("/api/playback/admit", headers={"X-Emby-Token": "tok:u1",
+            "X-Emby-Device-Id": device, "X-Original-URI": "/Videos/item42/master.m3u8"})
+    return admit
+
+
+def _settle(seconds):
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
+def test_device_switch_within_grace_is_refused_but_not_sanctioned(client, monkeypatch):
+    admit = _overlap(client, monkeypatch)
+    assert admit("b").status_code == 403
+    assert app.state.restrictions.events() == []
+    # The old device stops shortly after the new one first tried.
+    app.state.emby.set_sessions([{"Id": s, "UserId": "u1", "DeviceId": s} for s in "ab"])
+    _settle(0.8)
+    assert app.state.restrictions.events() == []
+    assert admit("b").status_code == 204
+
+
+def test_overlap_outliving_grace_is_sanctioned_once(client, monkeypatch):
+    admit = _overlap(client, monkeypatch)
+    for _ in range(3):
+        assert admit("b").status_code == 403
+    assert app.state.restrictions.events() == []
+    _settle(0.8)
+    events = app.state.restrictions.events()
+    assert len(events) == 1 and events[0]["rule"] == "concurrency"
+    assert {n["kind"] for n in events[0]["notices"]} >= {"private"}
+
+
+def test_group_notice_mentions_member_and_explains_concurrency(service):
+    service.db.execute("UPDATE members SET tg_display_name=? WHERE emby_user_id='u'", ("<小明>",))
+    asyncio.run(service.apply("concurrency", "u", proof()))
+    asyncio.run(service.deliver())
+    sent = {c.args[0]: c.args[1] for c in service.telegram.send_message.await_args_list}
+    assert '<a href="tg://user?id=123">&lt;小明&gt;</a>' in sent["-1001"]
+    assert "tg://user" not in sent["123"] and "&lt;name&gt;" in sent["123"]
+    assert all("上限 1 路" in text for text in sent.values())

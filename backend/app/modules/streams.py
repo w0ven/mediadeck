@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import time
 from dataclasses import dataclass, replace
 from typing import Any
@@ -17,7 +18,10 @@ from weakref import WeakValueDictionary
 
 from app.modules.usage import is_playing
 
-PENDING_START_SECONDS = 120
+# PlaybackInfo to the first media request is ~13s at p90. Details pages also
+# call PlaybackInfo, so an unstarted seat must not block other devices long.
+PENDING_START_SECONDS = 45
+LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,8 +110,8 @@ class StreamAdmission:
     A pending lease ends on a successful client Stopped report or disappearance
     of the Emby session. An observed play also ends when Emby reports it idle.
     Start/progress acknowledgements observe the bound play, even when no later
-    admission happens during playback. Abandoned idle starts expire after two
-    minutes; an unavailable snapshot never counts as proof of idleness.
+    admission happens during playback. Abandoned idle starts expire after
+    PENDING_START_SECONDS; an unavailable snapshot never counts as proof of idleness.
     """
 
     def __init__(self, members: Any, emby: Any) -> None:
@@ -315,6 +319,18 @@ class StreamAdmission:
                 # snapshots refuse URLs but never constitute punishment proof.
                 punishable = bool(device and actual_device and sid not in live
                                   and len(live) == cap and live <= occupied)
+                seats = conn.execute("SELECT session_id,observed,pending_at FROM stream_leases "
+                                     "WHERE user_id=?", (uid,)).fetchall()
+                LOG.warning("admission over-limit %s", json.dumps({
+                    "user_id": uid, "session_id": sid, "device_id": actual_device, "cap": cap,
+                    "punishable": punishable,
+                    "live": [{"session_id": key, "device_id": by_sid[key].get("DeviceId"),
+                              "client": by_sid[key].get("Client"), "paused": key in paused}
+                             for key in sorted(live)],
+                    "seats": [{"session_id": row[0], "device_id": (by_sid.get(row[0]) or {}).get("DeviceId"),
+                               "observed": bool(row[1]), "age_s": round(now - row[2])}
+                              for row in seats],
+                }, ensure_ascii=False))
                 return Admission(False, "over-limit", punishable=punishable, **facts)
             conn.execute("INSERT INTO stream_leases (user_id,session_id,observed,pending_at) VALUES (?,?,0,?)",
                          (uid, sid, now))
