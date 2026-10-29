@@ -257,6 +257,13 @@ class StreamAdmission:
         if play_id:
             bound = self._db.query("SELECT session_id FROM stream_leases "
                                    "WHERE user_id=? AND play_id=?", (uid, play_id))
+            if len(bound) != 1 and device:
+                # A later PlaybackInfo on the same session (another item's
+                # details or a prefetch) rebinds its lease to a newer play;
+                # the issuance record still names this play's session.
+                bound = self._db.query("SELECT session_id FROM watch_playbacks "
+                                       "WHERE user_id=? AND play_id=? AND device_id=?",
+                                       (uid, play_id, device))
             if len(bound) == 1:
                 bound_sid = str(bound[0]["session_id"])
                 if session_id and session_id != bound_sid:
