@@ -12,7 +12,7 @@ from test_stream_admission import (
 )
 
 from app.main import app
-from app.modules.streams import Admission, StreamAdmission
+from app.modules.streams import PENDING_START_SECONDS, Admission, StreamAdmission
 
 
 def issue(play):
@@ -40,11 +40,11 @@ def test_old_snapshot_cannot_observe_replacement_or_release_its_pending_seat(sta
         assert lease["play_id"] == "new" and lease["observed"] == 0
         assert lease["snapshot_guard"] == 1
         assert await current.report_stopped("u1", "a", "tok:u1", {"PlaySessionId": "old"}) == 204
-        clock[0] = 1119
+        clock[0] = 1000 + PENDING_START_SECONDS - 1
         denied = await current.inspect("u1", "b")
         assert denied.reason == "over-limit" and not denied.punishable
         assert denied.live_count == 0 and denied.pending_count == 1
-        clock[0] = 1120
+        clock[0] = 1000 + PENDING_START_SECONDS
         assert (await current.inspect("u1", "b")).allowed
 
     asyncio.run(check())

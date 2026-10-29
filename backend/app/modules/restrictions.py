@@ -445,14 +445,25 @@ class RestrictionService:
 
     async def deliver(self) -> None:
         async with self._notice_lock:
-            rows = self.db.query("SELECT n.*,e.username,e.rule,e.action,e.status,e.result FROM restriction_notices n JOIN restriction_events e ON e.id=n.event_id WHERE n.state IN ('pending','retry') AND n.next_at<=? AND e.status<>'pending' ORDER BY n.id LIMIT 20", (int(time.time()),))
+            rows = self.db.query("SELECT n.*,e.user_id,e.tg_user_id,e.username,e.rule,e.action,e.status,e.result,e.evidence_json FROM restriction_notices n JOIN restriction_events e ON e.id=n.event_id WHERE n.state IN ('pending','retry') AND n.next_at<=? AND e.status<>'pending' ORDER BY n.id LIMIT 20", (int(time.time()),))
             for row in rows:
                 self.db.execute("UPDATE restriction_notices SET state='sending',attempts=attempts+1 WHERE id=?", (row["id"],))
                 row["attempts"] += 1
+                name = html.escape(row["username"])
+                tg_id = str(row.get("tg_user_id") or "")
+                if row["kind"].startswith("group:") and tg_id.isdigit():
+                    # Mention the member in the group so a failed play has a visible reason.
+                    member = self.members.get(row["user_id"]) or {}
+                    label = member.get("tg_display_name") or member.get("tg_username") or row["username"]
+                    name = f'<a href="tg://user?id={tg_id}">{html.escape(str(label))}</a>'
                 text = (f"<b>账号限制处理 #{row['event_id']}</b>\n"
-                        f"{html.escape(row['username'])} · {html.escape(EVENT_RULES.get(row['rule'], row['rule']))}\n"
+                        f"{name} · {html.escape(EVENT_RULES.get(row['rule'], row['rule']))}\n"
                         f"{'操作' if row['rule'] == 'manual' else '处罚'}：{ACTIONS.get(row['action'], row['action'])}\n"
                         f"结果：{html.escape(row['result'])}")
+                if row["rule"] == "concurrency":
+                    cap = json.loads(row.get("evidence_json") or "{}").get("cap")
+                    limit = f"已达上限 {cap} 路" if isinstance(cap, int) and cap > 0 else "已达上限"
+                    text += f"\n说明：账号同时播放{limit}，其他设备正在播放；先停止其他设备上的播放再试。"
                 marker = CALL_DELIVERY.set(None)
                 try:
                     message = await self.telegram.send_message(row["chat_id"], text)

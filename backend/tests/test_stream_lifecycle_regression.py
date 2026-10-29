@@ -10,7 +10,7 @@ from test_stream_admission import headers, row
 from test_stream_admission import stack as stack  # noqa: PLC0414 - pytest fixture re-export
 
 from app.main import app
-from app.modules.streams import StreamAdmission
+from app.modules.streams import PENDING_START_SECONDS, StreamAdmission
 
 
 def test_pending_deadline_and_restart_do_not_extend_on_retry(stack, monkeypatch):
@@ -20,11 +20,11 @@ def test_pending_deadline_and_restart_do_not_extend_on_retry(stack, monkeypatch)
     monkeypatch.setattr('app.modules.streams.time.time', lambda: clock[0])
     async def check():
         assert (await guard.inspect('u1', 'a')).allowed
-        clock[0] = 1119
+        clock[0] = 1000 + PENDING_START_SECONDS - 1
         assert (await guard.inspect('u1', 'a')).allowed
         restarted = StreamAdmission(members, emby)
         assert (await restarted.inspect('u1', 'b')).reason == 'over-limit'
-        clock[0] = 1120
+        clock[0] = 1000 + PENDING_START_SECONDS
         assert (await restarted.inspect('u1', 'b')).allowed
         assert (await restarted.inspect('u1', 'a')).reason == 'over-limit'
     asyncio.run(check())
@@ -50,7 +50,7 @@ def test_legacy_pending_gets_one_grace_period_not_per_restart(stack, monkeypatch
     monkeypatch.setattr('app.modules.streams.time.time', lambda: 1000)
     StreamAdmission(members, emby)
     assert guard._db.one("SELECT pending_at FROM stream_leases WHERE session_id='a'")['pending_at'] == 1000
-    monkeypatch.setattr('app.modules.streams.time.time', lambda: 1120)
+    monkeypatch.setattr('app.modules.streams.time.time', lambda: 1000 + PENDING_START_SECONDS)
     restarted = StreamAdmission(members, emby)
     assert asyncio.run(restarted.inspect('u1', 'b')).allowed
 
