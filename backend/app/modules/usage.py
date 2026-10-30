@@ -161,31 +161,44 @@ def verified_watch_interval(before: dict | None, current: dict, observed_gap: fl
     return (start, end, '') if end > start else (0, 0, 'before_verification')
 
 
-def continuous_watch_interval(before: dict, current: dict, since: float) -> tuple[float, float, str]:
+def recent_run(before: dict | None, current: dict) -> list[tuple[float, float]]:
+    """Last advancing intervals of one unbroken accepted-report run, current last."""
+    if (not before or before.get('reason') or current['reason']
+            or before.get('play_id') != current['play_id'] or before.get('device_id') != current['device_id']
+            or before.get('rate') != current['rate']):
+        return []
     elapsed = current['activity'] - before['activity']
     progress = current['position'] - before['position']
-    if not 0 < elapsed <= WATCH_HEARTBEAT_MAX_AGE:
-        return 0, 0, 'seek_or_buffering'
-    speed = progress / elapsed
-    if not max(1.1 * current['rate'], current['rate'] + 0.1) < speed <= 4:
-        return 0, 0, 'seek_or_buffering'
-    intervals = [*(before.get('continuous_intervals') or []), (elapsed, progress)][-3:]
-    duration = sum(pair[0] for pair in intervals)
-    distance = sum(pair[1] for pair in intervals)
-    average = distance / duration
-    if any(abs(distance - average * seconds) >
-           max(0.75, average * seconds * 0.05, average * min(2, seconds * 0.25)) + 0.000001
-           for seconds, distance in intervals):
-        intervals = [(elapsed, progress)]
-        duration = elapsed
-    current['continuous_intervals'] = intervals
-    if len(intervals) < 3 or duration < 20:
-        return 0, 0, 'seek_or_buffering'
-    # Repeated advancing reports can establish continuity, not an actual rate.
-    # Credit only this interval; never backfill the candidate windows.
-    current['credit_basis'] = 'continuous_progress'
+    if not (0 < elapsed <= WATCH_HEARTBEAT_MAX_AGE and 0 < progress <= elapsed * 4):
+        return []
+    return [*(before.get('recent') or []), (elapsed, progress)][-3:]
+
+
+def cumulative_watch_interval(before: dict, current: dict, since: float) -> tuple[float, float, str]:
+    """An accepted report interval outside the single-interval tolerance.
+
+    Slower than the reported rate credits only the content actually played.
+    Faster credits elapsed once the run already holds an earlier interval; a
+    jump beyond 4x stays a seek. Credit never exceeds elapsed or backfills.
+    """
+    elapsed = current['activity'] - before['activity']
+    progress = current['position'] - before['position']
+    rate = current['rate']
     end = current['activity']
-    start = max(since, before.get('anchor_floor', before['activity']), end-elapsed)
+    floor = max(since, before.get('anchor_floor', before['activity']))
+    if progress < elapsed * rate:
+        current['credit_basis'] = 'content_progress'
+        start = max(floor, end - progress / rate)
+        return (start, end, '') if end > start else (0, 0, 'before_verification')
+    run = current.get('recent') or []
+    if len(run) < 2:
+        return 0, 0, 'seek_or_buffering'
+    duration = sum(seconds for seconds, _ in run)
+    distance = sum(moved for _, moved in run)
+    expected = duration * rate
+    if distance - expected > max(0.75, expected * 0.05, rate * min(2, duration * 0.2)):
+        current['credit_basis'] = 'continuous_progress'
+    start = max(floor, end - elapsed)
     return (start, end, '') if end > start else (0, 0, 'before_verification')
 
 
@@ -373,12 +386,14 @@ class UsageSampler:
 
     def _proof(self, state: dict, observation: dict, gap: float, source: str) -> tuple[float, float, str]:
         before = state.get('watch_observation') if state.get('watch_source', 'poll') == source else None
+        if source == 'progress':
+            observation['recent'] = recent_run(before, observation)
         start, end, reason = verified_watch_interval(before, observation, gap, self._verified_since)
         if (source == 'progress' and reason == 'seek_or_buffering' and before
                 and not before.get('reason') and not observation.get('reason')
                 and observation.get('rate') is not None
                 and before.get('rate') == observation['rate']):
-            start, end, reason = continuous_watch_interval(before, observation, self._verified_since)
+            start, end, reason = cumulative_watch_interval(before, observation, self._verified_since)
         if end > start:
             start = max(start, float(state.get('last_verified_end') or 0))
             if end <= start:

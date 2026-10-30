@@ -2,6 +2,27 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-31 — accepted progress is judged by its recent run, slow intervals credit played content
+
+- Measured against Emby's own history (PlayDuration minus PauseDuration; PlayDuration includes
+  pauses), the panel credited 92% of 615 hours of comparable plays. About 13.6 hours were
+  buffering and correctly uncredited; 34 hours were watching the proof rejected. Most of it came
+  from judging each report interval alone against the reported rate with a 2-second tolerance:
+  clients that report PlaybackRate=1 while playing 1.1x–2x or switching speeds, whole-second
+  positions, report arrival jitter above 2 seconds, and stalling playback where an interval that
+  advanced 5 of 10 seconds credited nothing.
+- An accepted progress interval outside the single-interval tolerance is now judged with its
+  run (the last up to three advancing intervals of the same play, device and rate):
+  slower than the reported rate credits only the content actually played; faster credits the
+  elapsed time once the run already holds an earlier interval (previously three mutually
+  consistent intervals). A single interval beyond 4x stays a seek. Pause, explicit seek, stall,
+  rewind, gaps over 60 seconds, rate changes and restarts still break the run. Credit never
+  exceeds elapsed time and nothing is backfilled. Poll snapshots keep the strict rate check.
+- New tests replay intervals captured from production (1x/2x switching, ~1.15x with whole-second
+  positions, 1x with 3.5-second arrival jitter): the previous code credited 64%, 60% and 50% of
+  the elapsed time; the new code credits 99.5%, 96% and 91%. Half-speed stalling credits the 50%
+  that played instead of nothing. 891 focused tests pass; lint passes.
+
 ## 2026-10-31 — a same-id restart reopens its viewing binding
 
 - A member watching a short drama in EplayerX was credited about one minute for a 33-minute
