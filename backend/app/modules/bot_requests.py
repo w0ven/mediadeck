@@ -7,7 +7,7 @@ import secrets
 import time
 from html import escape
 
-from app.modules.bot_views import short_label
+from app.modules.bot_views import short_label, watch_rank_mention
 from app.modules.requests import (
     STATUS_LABELS,
     RequestError,
@@ -569,6 +569,60 @@ class RequestBotMixin:
         if compact:
             body += '\n完整信息请从工单列表重新打开。'
         return body
+
+    def _rq_announce_text(self, row, stage):
+        """Public arrival bulletin: Telegram nickname only, never the Emby account name."""
+        member = self._members.get(row["emby_user_id"]) or {}
+        who = watch_rank_mention({
+            "tg_user_id": member.get("tg_user_id") or row.get("tg_user_id"),
+            "tg_display_name": member.get("tg_display_name"),
+            "tg_username": member.get("tg_username"),
+        })
+        demand = row["demand"]
+        scope = demand.get("scope")
+        if row["media_type"] == "tv" and scope in ("series", "season"):
+            want = self._rq_season_label(demand)
+        elif scope == "episodes" and demand.get("seasons") and demand.get("episodes"):
+            want = (f"第{demand['seasons'][0]}季 第"
+                    + number_ranges(demand["episodes"]).replace(",", "、") + "集")
+        elif scope == "version":
+            want = "补版本" + (f"：{short_label(demand['version'], 30)}" if demand.get("version") else "")
+        else:
+            want = ""
+        complete = stage == "complete"
+        lines = [
+            "🎉 <b>求片入库啦</b>" if complete else "🎞 <b>求片开始入库</b>",
+            "",
+            f"🎬 <b>{self._rq_title(row)}</b>",
+            f"🏷 {row['media_label']}" + (f" · {escape(want)}" if want else ""),
+            f"🙋 求片人：{who}",
+            "✅ 已全部入库，现在就能看" if complete else "🟡 已入库一部分，可以先看起来",
+        ]
+        overview = str(row.get("overview") or "").strip()
+        if overview:
+            lines += ["", f"<i>{escape(short_label(overview, 120))}</i>"]
+        return "\n".join(lines)
+
+    async def _rq_announce(self, row, payload):
+        """One group bulletin per arrival stage; a missing poster falls back to text."""
+        chat = str(payload.get("chat") or "").strip()
+        if not chat or row["status"] != "accepted":
+            return True, None
+        body = self._rq_announce_text(row, payload.get("stage"))
+        photo = poster_url(row.get("poster_path") or "")
+        if photo:
+            result = await self._call("sendPhoto", {
+                "chat_id": chat, "photo": photo, "caption": body, "parse_mode": "HTML",
+            })
+            if isinstance(result, dict) and result.get("message_id"):
+                return True, int(result["message_id"])
+        result = await self._call("sendMessage", {
+            "chat_id": chat, "text": body, "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        })
+        if isinstance(result, dict) and result.get("message_id"):
+            return True, int(result["message_id"])
+        return False, None
 
     def _rq_result_notice(self, row, payload):
         # State and rejection reason belong to this queued event, not the
@@ -1151,6 +1205,8 @@ class RequestBotMixin:
                     ok = True
                 elif job["kind"] == "refresh":
                     ok = await self._rq_refresh(row["id"])
+                elif job["kind"] == "announce":
+                    ok, mid = await self._rq_announce(row, json.loads(job["payload"]))
                 else:
                     member = self._members.get(job["user_id"])
                     if not member:

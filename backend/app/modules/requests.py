@@ -714,7 +714,7 @@ class RequestService:
             )
             return cur.rowcount
 
-    def apply_library_stage(self, rid, stage, now=None):
+    def apply_library_stage(self, rid, stage, now=None, announce_chat=""):
         """Enqueue one library notice per recipient; same stage is ignored."""
         if stage not in ("partial", "complete"):
             return None
@@ -759,6 +759,16 @@ class RequestService:
                     "library",
                     {"stage": stage},
                     f"library:{int(rid)}:{stage}:{uid}",
+                )
+            chat = str(announce_chat or "").strip()
+            if chat:
+                self._queue(
+                    conn,
+                    int(rid),
+                    "",
+                    "announce",
+                    {"stage": stage, "chat": chat},
+                    f"announce:{int(rid)}:{stage}",
                 )
             return {"state": state, "notified_stage": stage}
 

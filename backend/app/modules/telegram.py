@@ -254,6 +254,7 @@ ADMIN_TARGET_COMMANDS = {
 }
 PRIVATE_ONLY_COMMANDS = {"register", "claim", "rebind", "resetpw"}
 GROUP_BRIEF_TTL = 60.0
+GROUP_ADMINS_TTL = 10.0
 GROUP_TEMP_COMMANDS = {
     '/usage', '/me', '/myinfo', '/help', '/rules', '/start',
     '/register', '/claim', '/rebind', '/resetpw', '/requests', '/request', '/req', '/uploader', '/manage',
@@ -331,6 +332,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         self._menu_panel: dict[str, int] = {}
         self._chat_commands: dict[str, tuple] = {}
         self._card_actor: dict[str, str] = {}
+        self._group_admins: dict[int, tuple[float, list[dict[str, Any]]]] = {}
         # Target selection outlives a prompt, but belongs to one message and
         # one verified operator; it is never inferred from the last /kk.
         self._admin_panels: dict[tuple[str, int], dict[str, Any]] = {}
@@ -718,6 +720,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             self._gift_claims.clear()
             self._chat_commands.clear()
             self._card_actor.clear()
+            self._group_admins.clear()
             self._admin_panels.clear()
             self._retired_panels.clear()
             self._installed_group_chats.clear()
@@ -841,6 +844,47 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return True
         sender = message.get("from") or {}
         return bool(sender.get("is_bot") and str(sender.get("username") or "").lower() == "groupanonymousbot")
+
+    async def _unmask_anonymous_admin(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Attribute an anonymous admin's own message to the one admin it can be.
+
+        Telegram only reveals the custom title (author_signature). The sender is
+        known only when exactly one anonymous admin of this group currently has
+        that title; otherwise the message stays anonymous. Reply targets are
+        never unmasked: that would let anyone expose an anonymous admin.
+        """
+        chat = message.get("chat") or {}
+        sender = message.get("sender_chat") or {}
+        origin = message.get("from") or {}
+        cid = chat.get("id")
+        if (chat.get("type") not in ("group", "supergroup") or type(cid) is not int
+                or sender.get("id") != cid or message.get("is_automatic_forward")
+                or origin.get("is_bot") is not True
+                or str(origin.get("username") or "").lower() != "groupanonymousbot"
+                or not self._group_chat_allowed(chat)):
+            return message
+        cached = self._group_admins.get(cid)
+        if cached and cached[0] > time.monotonic():
+            admins = cached[1]
+        else:
+            result = await self._call("getChatAdministrators", {"chat_id": cid}, timeout=10)
+            if not isinstance(result, list):
+                return message
+            admins = [row for row in result if isinstance(row, dict)]
+            self._group_admins[cid] = (time.monotonic() + GROUP_ADMINS_TTL, admins)
+        title = str(message.get("author_signature") or "")
+        matches = [
+            row["user"] for row in admins
+            if row.get("is_anonymous") is True and isinstance(row.get("user"), dict)
+            and row["user"].get("is_bot") is False
+            and type(row["user"].get("id")) is int and row["user"]["id"] > 0
+            and str(row.get("custom_title") or "") == title
+        ]
+        if len(matches) != 1:
+            return message
+        unmasked = {key: value for key, value in message.items() if key != "sender_chat"}
+        unmasked["from"] = dict(matches[0])
+        return unmasked
 
     def _remember_card_actor(self, chat_id: Any, message_id: Any) -> None:
         actor = _ACTOR.get()
@@ -4369,6 +4413,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         return text
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
+        message = await self._unmask_anonymous_admin(message)
         with self._group_command_context(message):
             await self._handle_current_message(message)
         with contextlib.suppress(Exception):
@@ -4409,9 +4454,9 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             if (text and text.split()[0].lower().split('@', 1)[0] in ('/kk', '/transfer', '/转账')
                     and not self._addressed_to_other_bot(text)
                     and self._group_chat_allowed(message.get('chat') or {})):
-                await self.send(chat_id, '⛔ 无法核实匿名管理身份，请使用本人账号发送 /kk。'
-                                if text.split()[0].lower().split('@', 1)[0] == '/kk'
-                                else '⛔ 无法核实匿名管理身份，请使用本人账号发送 /transfer。')
+                await self.send(chat_id, '⛔ 无法核实匿名管理身份：请给自己设一个与其他匿名管理员不同的头衔，'
+                                '或使用本人账号发送 ' + ('/kk' if text.split()[0].lower().split('@', 1)[0] == '/kk'
+                                                     else '/transfer') + '。')
             return
         custom_password = (self._private_chat(message) and self._password_custom_waiting(chat_id)
                            and not self._password_navigation(str(message.get("text") or "")))

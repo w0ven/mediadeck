@@ -391,3 +391,31 @@ def test_library_arrival_notifies_requester_and_follower_privately(bot):
         ]
         assert any('已入库' in t for t in texts)
     assert bot.service.get(row['id'])['status'] == 'accepted'
+
+
+def test_library_arrival_group_bulletin_has_poster_and_nickname_only(bot):
+    row = submit(bot)
+    tap(bot, 'accept', '801')
+    bot.db.execute("UPDATE members SET tg_display_name=?, tg_username=? WHERE emby_user_id='u1'",
+                   ('小可乐', 'cola_fan'))
+    bot.service.apply_library_stage(row['id'], 'complete', announce_chat='-10055')
+    run(bot.flush_request_notifications())
+    run(bot.flush_request_notifications())
+    photos = [p for m, p in bot.transport.calls if m == 'sendPhoto' and str(p['chat_id']) == '-10055']
+    assert len(photos) == 1 and photos[0]['photo'].endswith('/poster.jpg')
+    caption = photos[0]['caption']
+    assert '求片入库啦' in caption and '搏击俱乐部' in caption and '已全部入库' in caption
+    assert '<a href="tg://user?id=900">小可乐</a>' in caption and '本地模拟简介' in caption
+    assert '求片人：u1' not in caption and '>u1<' not in caption
+
+
+def test_group_bulletin_falls_back_to_text_without_a_poster(bot):
+    row = submit(bot)
+    tap(bot, 'accept', '801')
+    bot.transport.fail.add('sendPhoto')
+    bot.service.apply_library_stage(row['id'], 'partial', announce_chat='-10055')
+    run(bot.flush_request_notifications())
+    sent = [p for m, p in bot.transport.calls if m == 'sendMessage' and str(p['chat_id']) == '-10055']
+    assert len(sent) == 1 and '求片开始入库' in sent[0]['text'] and '已入库一部分' in sent[0]['text']
+    state = bot.db.one("SELECT state FROM request_outbox WHERE kind='announce'")['state']
+    assert state == 'sent'

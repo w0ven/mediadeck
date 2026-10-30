@@ -883,11 +883,16 @@ class RequestLibraryWatchPlugin(Plugin):
     spec = Spec(
         id="request_library_watch",
         name="求片入库通知",
-        description="已接受的求片在媒体库出现后，私聊通知求片人和关注者。"
+        description="已接受的求片在媒体库出现后，私聊通知求片人和关注者，"
+                    "可同时在群里发带海报的入库播报。"
                     "每 15 分钟用最近新增条目反查，每 6 小时全量精确核对。",
         category="request",
         icon="📥",
         interval=900,
+        fields=[
+            Field("group_chat_id", "群播报目标", kind="str", default="",
+                  help="求片入库后在这个群发带海报的播报：-100xxxxxxxxxx 或 @channel；留空则只私聊通知"),
+        ],
     )
 
     async def run(self, config: dict[str, Any]) -> dict[str, Any]:
@@ -909,6 +914,7 @@ class RequestLibraryWatchPlugin(Plugin):
                 tmdb=self.ctx.tmdb,
                 now=int(now),
                 full=full,
+                announce_chat=str((config or {}).get("group_chat_id") or "").strip(),
             )
         except Exception:  # noqa: BLE001 - a plugin must never take the scheduler down
             return {"ok": True, "结果": "本轮跳过"}

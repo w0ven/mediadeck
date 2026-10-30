@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-30 — anonymous group admins act as themselves; request arrivals announced in the group
+
+- An anonymous admin's message carries only their custom title (`author_signature`). The Bot
+  now reads the group's administrator list (cached 10 seconds) and, when exactly one anonymous
+  admin holds that title (or exactly one untitled anonymous admin when there is no title),
+  handles the message as that admin's own account. Every group command and game therefore
+  works as if sent from the real account. Ambiguous titles keep the existing refusal, which now
+  says to set a distinct title. Replies to an anonymous admin are never unmasked, so nobody can
+  expose an anonymous admin by replying to them; confirmation buttons still require the real
+  account's click.
+- `request_library_watch` gains a `group_chat_id` field. When set, each arrival stage
+  (partial, then complete) also queues one durable `announce` outbox job: a TMDB poster with
+  the title, request scope, the requester's Telegram nickname mention (never the Emby account
+  name), the stage and a short overview. A missing poster falls back to text; the job key
+  `announce:{rid}:{stage}` prevents repeats.
+- New tests cover a unique-title admin, an untitled admin, ambiguous titles, channels and reply
+  targets, an anonymous admin's `/转账` confirmed only by the real account, queueing per stage
+  only when configured, the plugin field, the poster bulletin and the text fallback. 429
+  focused tests pass; lint passes.
+
 ## 2026-10-30 — gentler concurrency enforcement for device switches
 
 - Review of recent over-limit cases: continuing to the next episode on the same session is

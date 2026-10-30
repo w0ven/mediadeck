@@ -133,6 +133,7 @@ async def inspect_watch(
     *,
     tmdb: Any = None,
     now: int | None = None,
+    announce_chat: str = "",
 ) -> str | None:
     """Look up one watch. Upstream errors skip this ticket and do not raise."""
     now = int(now if now is not None else time.time())
@@ -151,7 +152,7 @@ async def inspect_watch(
     except Exception:  # noqa: BLE001 - one bad lookup must not stop the round
         return "error"
     if stage:
-        service.apply_library_stage(rid, stage, now=now)
+        service.apply_library_stage(rid, stage, now=now, announce_chat=announce_chat)
         return stage
     service.touch_watch(rid, now=now)
     return None
@@ -178,6 +179,7 @@ async def poll_library_watches(
     now: int | None = None,
     full: bool = False,
     latest_limit: int = INCREMENTAL_LIMIT,
+    announce_chat: str = "",
 ) -> dict[str, Any]:
     """One reverse-match round (or a full per-watch lookup). Never raises."""
     now = int(now if now is not None else time.time())
@@ -213,7 +215,8 @@ async def poll_library_watches(
     for watch in targets:
         summary["checked"] += 1
         summary["lookups"] += 1
-        result = await inspect_watch(service, library, watch, tmdb=tmdb, now=now)
+        result = await inspect_watch(service, library, watch, tmdb=tmdb, now=now,
+                                     announce_chat=announce_chat)
         if result in ("partial", "complete"):
             summary["notified"] += 1
     return summary
