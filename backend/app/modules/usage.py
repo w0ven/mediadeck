@@ -278,6 +278,16 @@ class UsageSampler:
         if stopped and play and device:
             self._db.execute('UPDATE watch_playbacks SET closed_at=? WHERE user_id=? AND play_id=? '
                              'AND device_id=?', (time.time(), user_id, play, device))
+        elif play and device and payload.get('ItemId'):
+            # A poll between Stop and a same-id restart can replace the cached
+            # session with an idle row, so reopening cannot depend on it.
+            # Stop-only placeholders (issued_at=0) and superseded plays stay closed.
+            self._db.execute('UPDATE watch_playbacks SET closed_at=0 WHERE user_id=? AND play_id=? '
+                             "AND device_id=? AND item_id=? AND issued_at>0 AND (?='' OR session_id=?) "
+                             'AND NOT EXISTS (SELECT 1 FROM watch_playbacks newer WHERE '
+                             'newer.user_id=watch_playbacks.user_id AND newer.session_id=watch_playbacks.session_id '
+                             'AND newer.issued_at>watch_playbacks.issued_at)',
+                             (user_id, play, device, str(payload['ItemId']), sid, sid))
         for current_sid, state in self._live.items():
             if state['user_id'] != user_id or (sid and current_sid != sid):
                 continue

@@ -2,6 +2,22 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-10-31 — a same-id restart reopens its viewing binding
+
+- A member watching a short drama in EplayerX was credited about one minute for a 33-minute
+  play. The client reported Stopped and, five seconds later, Started again with the same
+  PlaySessionId. A poll in between saw the session idle and replaced its cached state, so
+  Started no longer matched it and the binding closed by Stop stayed closed. Every later
+  progress report was rejected as `session_unresolved`; the poll fallback, which keeps its
+  strict rate check, credited nothing at 1.25x because the client still reported rate 1.
+- An accepted Started report now reopens the closed binding for the same user, device, item
+  and PlaySessionId (and SessionId when given) without depending on the cached session.
+  Superseded plays (a newer issuance on the session) and Stop-only placeholders
+  (`issued_at=0`) stay closed. Credit still requires progress proofs; nothing is backfilled.
+- New tests replay the incident (Stop, idle poll, same-id Started, 1.25x progress with rate 1)
+  and cover the superseded and Stop-only cases; the replay fails on the previous code. 562
+  focused tests pass; lint passes.
+
 ## 2026-10-30 — anonymous group admins act as themselves; request arrivals announced in the group
 
 - An anonymous admin's message carries only their custom title (`author_signature`). The Bot
