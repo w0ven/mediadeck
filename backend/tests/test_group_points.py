@@ -693,3 +693,34 @@ def test_mint_integer_storage_boundary_does_not_wrap_or_allow_negative_deduction
         assert len(env.db.query("SELECT * FROM points_ledger WHERE reason='admin.mint'")) == 1
 
     asyncio.run(run())
+
+
+def test_anonymous_admin_transfer_is_attributed_to_the_admin_with_that_title(env):
+    plain = env.bot._call
+
+    async def call(method, payload=None, **kwargs):
+        if method == "getChatAdministrators":
+            return [
+                {"status": "creator", "is_anonymous": True, "custom_title": "群主",
+                 "user": {"id": ADMIN, "is_bot": False, "first_name": "Cola"}},
+                {"status": "administrator", "is_anonymous": False, "custom_title": "群主",
+                 "user": {"id": SECOND, "is_bot": False, "first_name": "Other"}},
+            ]
+        return await plain(method, payload, **kwargs)
+
+    env.bot._call = call
+    message = msg("/转账 100", actor=ADMIN, mid=230)
+    message["from"] = {"id": 1087968824, "is_bot": True, "username": "GroupAnonymousBot"}
+    message["sender_chat"] = {"id": GROUP, "type": "supergroup"}
+    message["author_signature"] = "群主"
+
+    async def run():
+        minted = await dispatch(env, message)
+        assert minted and minted["mode"] == "mint" and minted["actor_tg_id"] == str(ADMIN)
+        await confirm(env, minted, actor=VIEWER)
+        assert env.services.points.balance("u2") == 0
+        await confirm(env, minted)
+        assert env.services.points.balance("u2") == 100
+
+    asyncio.run(run())
+    assert "无法核实匿名管理身份" not in responses(env)

@@ -141,6 +141,81 @@ def test_anonymous_kk_is_refused_and_channel_business_is_ignored(bot):
     assert bot.calls == []
 
 
+ANON = {"id": 1087968824, "is_bot": True, "username": "GroupAnonymousBot", "first_name": "Group"}
+
+
+def _anon(text, title=None, **kw):
+    message = _msg(text, sender_chat={"id": GROUP, "type": "supergroup", "title": "群"}, **kw)
+    message["from"] = dict(ANON)
+    if title is not None:
+        message["author_signature"] = title
+    return message
+
+
+def _with_admins(bot, admins):
+    plain = bot._call
+    asked = []
+
+    async def call(method, payload=None, timeout=20):
+        if method == "getChatAdministrators":
+            asked.append(payload)
+            return admins
+        return await plain(method, payload, timeout)
+
+    bot._call = call
+    return asked
+
+
+def _admin(uid, title=None, anonymous=True, status="administrator"):
+    row = {"status": status, "is_anonymous": anonymous,
+           "user": {"id": int(uid), "is_bot": False, "first_name": "Cola", "username": f"u{uid}"}}
+    if title is not None:
+        row["custom_title"] = title
+    return row
+
+
+def test_anonymous_admin_with_unique_title_acts_as_themself(bot):
+    asked = _with_admins(bot, [_admin(ADMIN, "群主", status="creator"),
+                               _admin(OTHER_ADMIN, "管理", anonymous=False)])
+    run(bot._handle_message(_anon("/kk 901", "群主")))
+    assert asked == [{"chat_id": GROUP}]
+    assert f"g:{GROUP}:0:{ADMIN}" in bot._panel
+    assert '无法核实匿名管理身份' not in "".join(texts(bot))
+    bot.calls.clear()
+    run(bot._handle_message(_anon("/kk 901", "群主")))
+    assert len(asked) == 1  # one short-lived admin list per burst
+
+
+def test_anonymous_admin_without_title_needs_a_single_untitled_anonymous_admin(bot):
+    _with_admins(bot, [_admin(ADMIN, status="creator"), _admin(OTHER_ADMIN, "管理")])
+    run(bot._handle_message(_anon("/kk 901")))
+    assert f"g:{GROUP}:0:{ADMIN}" in bot._panel
+
+
+def test_ambiguous_anonymous_admin_stays_refused(bot):
+    _with_admins(bot, [_admin(ADMIN, "管理"), _admin(OTHER_ADMIN, "管理")])
+    run(bot._handle_message(_anon("/kk 901", "管理")))
+    assert '无法核实匿名管理身份' in last_text(bot)
+    assert not bot._admin_panels
+
+
+def test_unmask_never_touches_channels_or_reply_targets(bot):
+    asked = _with_admins(bot, [_admin(ADMIN, "群主")])
+    channel = _msg("/me", sender_chat={"id": -100, "type": "channel"})
+    channel["from"] = dict(ANON)
+    assert run(bot._unmask_anonymous_admin(channel)) is channel
+    elsewhere = _anon("/me", "群主", chat=OTHER)
+    elsewhere["sender_chat"]["id"] = OTHER
+    assert run(bot._unmask_anonymous_admin(elsewhere)) is elsewhere
+    assert asked == []
+    reply = _anon("老板发话", "群主")
+    message = _msg("/transfer 5", user=ALICE, username="alice_tg", reply=reply)
+    assert run(bot._unmask_anonymous_admin(message)) is message
+    assert message["reply_to_message"]["sender_chat"]["id"] == GROUP
+    own = run(bot._unmask_anonymous_admin(_anon("/me", "群主")))
+    assert own["from"]["id"] == int(ADMIN) and "sender_chat" not in own
+
+
 def test_allowed_group_start_is_private_entry_only(bot):
     run(bot._handle_message(_msg("/start GIFTABC1234567", user=ALICE, username="alice_tg")))
     assert "请私聊" in last_text(bot)

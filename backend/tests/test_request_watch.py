@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import pytest
@@ -386,3 +387,36 @@ def test_plugin_run_skips_when_emby_is_down(stack):
     assert result["ok"] is True
     assert "跳过" in str(result.get("结果") or "")
     assert FULL_SCAN_EVERY == 6 * 3600
+
+
+def test_group_announcement_is_queued_once_per_stage_only_when_configured(stack):
+    db, _, s = stack
+    rid = create(s)["id"]
+    s.finish(rid, "up1", "accepted")
+    s.apply_library_stage(rid, "partial", announce_chat="-1001")
+    s.apply_library_stage(rid, "partial", announce_chat="-1001")
+    s.apply_library_stage(rid, "complete", announce_chat="-1001")
+    rows = db.query("SELECT * FROM request_outbox WHERE kind='announce' ORDER BY id")
+    assert [(r["user_id"], json.loads(r["payload"])) for r in rows] == [
+        ("", {"stage": "partial", "chat": "-1001"}),
+        ("", {"stage": "complete", "chat": "-1001"}),
+    ]
+    quiet = create(s, tmdb=551)["id"]
+    s.finish(quiet, "up1", "accepted")
+    s.apply_library_stage(quiet, "complete")
+    assert not db.query("SELECT 1 FROM request_outbox WHERE kind='announce' AND request_id=?", (quiet,))
+    assert outbox_library(db, quiet)
+
+
+def test_plugin_passes_group_target_to_arrivals(stack):
+    db, _, s = stack
+    rid = create(s)["id"]
+    s.finish(rid, "up1", "accepted")
+    lib = FakeLibrary()
+    lib.by_tmdb[550] = _movie_item()
+    plugin = RequestLibraryWatchPlugin(PluginContext(requests=s, emby=lib))
+    assert [f.key for f in plugin.spec.fields] == ["group_chat_id"]
+    result = asyncio.run(plugin.run({"group_chat_id": " -1002 "}))
+    assert result["通知"] == 1
+    row = db.one("SELECT * FROM request_outbox WHERE kind='announce' AND request_id=?", (rid,))
+    assert json.loads(row["payload"]) == {"stage": "complete", "chat": "-1002"}
