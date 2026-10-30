@@ -263,6 +263,49 @@ def test_cached_explicit_old_play_does_not_replace_fresh_new_report_identity(bou
     assert seconds(db) == 70
 
 
+def idle(at):
+    raw = session(at, 0)
+    raw.pop('NowPlayingItem')
+    raw.pop('PlaySessionId')
+    return raw
+
+
+def test_same_id_restart_after_idle_poll_reopens_binding_and_counts_fast_playback(bound):
+    # EplayerX: Stop, a poll sees the session idle, then Started reuses the
+    # PlaySessionId and plays at 1.25x while still reporting PlaybackRate=1.
+    db, _, sampler, _, clock = bound
+    clock[0] = BASE+20
+    sampler._playback_report('u','device',payload(20),True)
+    sampler._sample([idle(BASE+24)],BASE+24,None)
+    clock[0] = BASE+25
+    sampler._playback_report('u','device',payload(0),False)
+    assert db.one('SELECT closed_at FROM watch_playbacks')['closed_at'] == 0
+    for offset in range(35,636,10):
+        clock[0] = BASE+offset
+        sampler._progress('u','device',payload((offset-25)*1.25),clock[0])
+        if offset % 30 == 5:
+            raw = session(BASE+offset+5,(offset-20)*1.25)
+            raw.pop('PlaySessionId')
+            sampler._sample([raw],BASE+offset+5,None)
+    assert seconds(db) >= 550
+    assert 'session_unresolved' not in diagnosis(db)['counts']
+
+
+def test_same_id_restart_does_not_reopen_superseded_or_stop_only_play(bound):
+    db, _, sampler, _, clock = bound
+    clock[0] = BASE+20
+    sampler._playback_report('u','device',payload(20),True)
+    bind(db,'new-run',BASE+22,'new-film')
+    clock[0] = BASE+25
+    sampler._playback_report('u','device',payload(0),False)
+    assert db.one("SELECT closed_at FROM watch_playbacks WHERE play_id='run'")['closed_at'] == BASE+20
+    clock[0] = BASE+30
+    sampler._playback_report('u','device',payload(5,PlaySessionId='ghost'),True)
+    clock[0] = BASE+31
+    sampler._playback_report('u','device',payload(0,PlaySessionId='ghost'),False)
+    assert db.one("SELECT closed_at FROM watch_playbacks WHERE play_id='ghost'")['closed_at'] == BASE+30
+
+
 def test_nullable_rate_migration_preserves_existing_rows_and_totals(tmp_path):
     path=tmp_path/'legacy.db'
     db=Database(path)
