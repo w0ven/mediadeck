@@ -384,3 +384,41 @@ def test_group_notice_mentions_member_and_explains_concurrency(service):
     assert '<a href="tg://user?id=123">&lt;小明&gt;</a>' in sent["-1001"]
     assert "tg://user" not in sent["123"] and "&lt;name&gt;" in sent["123"]
     assert all("上限 1 路" in text for text in sent.values())
+
+
+def test_web_form_and_query_login_payloads_accepted(client, monkeypatch):
+    app.state.emby.list_users.return_value[0]["Policy"]["IsAdministrator"] = True
+    calls = []
+
+    async def fake_login(emby, headers, query, payload, user_id=""):
+        calls.append(payload)
+        return 200, login_data()
+
+    monkeypatch.setattr("app.main.login_request", fake_login)
+    # Emby Web's apiclient.js submits application/x-www-form-urlencoded.
+    resp = client.post(
+        "/api/access/emby-login",
+        content="Username=admin&Pw=s3cr3t%21",
+        headers={"Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"},
+    )
+    assert resp.status_code == 200
+    assert calls[-1] == {"Username": "admin", "Pw": "s3cr3t!"}
+
+    # Emby Web / AfuseKt with reqformat=json sends JSON with text/plain content-type.
+    resp2 = client.post(
+        "/api/access/emby-login?reqformat=json",
+        content='{"Username":"admin","Pw":"pw2"}',
+        headers={"Content-Type": "text/plain"},
+    )
+    assert resp2.status_code == 200
+    assert calls[-1] == {"Username": "admin", "Pw": "pw2"}
+
+    # Yamby-style query-parameter credentials with empty body.
+    resp3 = client.post("/api/access/emby-login?Username=admin&Pw=pw3&Password=pw3")
+    assert resp3.status_code == 200
+    assert calls[-1] == {"Username": "admin", "Pw": "pw3", "Password": "pw3"}
+
+    # Empty or unparseable body without credentials still returns 400.
+    assert client.post("/api/access/emby-login", content="").status_code == 400
+    assert client.post("/api/access/emby-login", content="not-json-or-form").status_code == 400
+

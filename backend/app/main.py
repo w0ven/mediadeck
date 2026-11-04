@@ -76,7 +76,7 @@ from app.modules.provisioning import (
 )
 from app.modules.registration import RegistrationService
 from app.modules.requests import RequestError, RequestService, parse_status
-from app.modules.restriction_http import login_request
+from app.modules.restriction_http import login_request, parse_login_payload
 from app.modules.restrictions import RestrictionService, is_web_client
 from app.modules.scheduler import PROBE_INTERVAL, Scheduler
 from app.modules.settings import SettingsService
@@ -1560,12 +1560,13 @@ async def _restrict_web_playback(uid: str, request: Request, query: dict[str, st
 @app.post("/api/access/emby-login", include_in_schema=False)
 @app.post("/api/access/emby-login/{user_id}", include_in_schema=False)
 async def restricted_emby_login(request: Request, user_id: str = "") -> Response:
+    query = dict(request.query_params)
     try:
-        payload = await request.json()
+        payload = parse_login_payload(
+            await request.body(), request.headers.get("content-type", ""), query
+        )
     except ValueError:
         raise HTTPException(400, "invalid authentication body") from None
-    if not isinstance(payload, dict):
-        raise HTTPException(400, "invalid authentication body")
     # Repeated FAILED passwords from one address get a short, self-expiring
     # block before Emby is asked again. Successful logins are never counted.
     throttle = app.state.login_throttle
@@ -1577,7 +1578,7 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
                             headers={"Cache-Control": "private, no-store", "Retry-After": str(wait)})
     try:
         code, data = await login_request(app.state.emby, request.headers,
-                                         dict(request.query_params), payload, user_id)
+                                         query, payload, user_id)
     except Exception:  # noqa: BLE001 - do not disclose credential-bearing upstream errors
         raise HTTPException(503, "authentication unavailable") from None
     if code in FAILURE_STATUSES:

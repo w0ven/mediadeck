@@ -2,6 +2,19 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-05 — accept form-urlencoded, text/plain JSON and query login payloads
+
+- Emby Web's `apiclient.js` posts `Username=...&Pw=...` with `Content-Type:
+  application/x-www-form-urlencoded; charset=UTF-8` (or `text/plain` JSON when `reqformat=json` is
+  set), and clients such as Yamby send credentials in query parameters with an empty body.
+  `restricted_emby_login` previously called `request.json()` unconditionally, returning `400 invalid
+  authentication body` before reaching Emby or the administrator exemption check.
+- `parse_login_payload` now decodes JSON, `application/x-www-form-urlencoded`, `text/plain` JSON
+  and query-string credentials into the canonical Emby login fields while still rejecting empty or
+  malformed bodies with `400`.
+- New tests in `test_restrictions.py` cover `application/x-www-form-urlencoded`, `text/plain` JSON,
+  query-parameter login and malformed bodies.
+
 ## 2026-10-31 — accepted progress is judged by its recent run, slow intervals credit played content
 
 - Measured against Emby's own history (PlayDuration minus PauseDuration; PlayDuration includes
