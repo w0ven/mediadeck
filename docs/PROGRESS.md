@@ -2,6 +2,17 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-05 — automatic default user avatar on Emby account creation
+
+- Third-party Emby players display the signed-in user's Primary image (`/emby/Users/{id}/Images/Primary`)
+  as the server icon on the library card when Emby has no server-wide icon endpoint.
+- `LiveEmby.create_user` now uploads an optional default avatar (`MEDIADECK_DEFAULT_USER_AVATAR_PATH`,
+  or `<data_dir>/default-user-avatar.png` when present) as the new user's Primary image immediately
+  after `/emby/Users/New` succeeds. Avatar upload errors are non-fatal so account creation never fails
+  if an image write is rejected.
+- Added unit test in `test_audit_core_adapters.py` verifying base64 Primary image upload on user
+  creation.
+
 ## 2026-11-05 — accept form-urlencoded, text/plain JSON and query login payloads
 
 - Emby Web's `apiclient.js` posts `Username=...&Pw=...` with `Content-Type:

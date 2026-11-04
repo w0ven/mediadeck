@@ -7,6 +7,7 @@ it take effect immediately — no restart, no shell access.
 from __future__ import annotations
 
 import asyncio
+import base64
 import contextlib
 import re
 import sqlite3
@@ -80,10 +81,12 @@ class LiveEmby:
     """Emby adapter bound to a settings provider rather than frozen env vars."""
 
     def __init__(self, config_provider: ConfigProvider, *,
-                 identity_data_dir: str = "", identity_url: str = "") -> None:
+                 identity_data_dir: str = "", identity_url: str = "",
+                 default_avatar_path: str = "") -> None:
         self._config = config_provider
         self._identity_data_dir = identity_data_dir
         self._identity_url = normalize_base_url(identity_url)
+        self._default_avatar_path = (default_avatar_path or "").strip()
 
     # -- connection ----------------------------------------------------------
     def _conn(self) -> tuple[str, dict[str, str], float, bool]:
@@ -134,6 +137,24 @@ class LiveEmby:
             r.raise_for_status()
             return r.json()
 
+    def _default_avatar_payload(self) -> tuple[bytes, str] | None:
+        if not self._default_avatar_path:
+            return None
+        path = Path(self._default_avatar_path)
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        if not raw:
+            return None
+        suffix = path.suffix.lower()
+        media_type = {
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+        }.get(suffix, "image/png")
+        return base64.b64encode(raw), media_type
+
     async def create_user(self, name: str) -> dict[str, Any]:
         base, headers, timeout, verify = self._conn()
         async with self._client(timeout, verify) as client:
@@ -141,7 +162,18 @@ class LiveEmby:
                 await client.post(f"{base}/emby/Users/New", headers=headers, json={"Name": name})
             )
             r.raise_for_status()
-            return r.json()
+            user = r.json()
+            uid = str(user.get("Id") or "") if isinstance(user, dict) else ""
+            avatar = self._default_avatar_payload()
+            if uid and avatar is not None:
+                encoded, media_type = avatar
+                with contextlib.suppress(Exception):
+                    await client.post(
+                        f"{base}/emby/Users/{uid}/Images/Primary",
+                        headers={**headers, "Content-Type": media_type},
+                        content=encoded,
+                    )
+            return user
 
     async def delete_user(self, user_id: str) -> bool:
         base, headers, timeout, verify = self._conn()

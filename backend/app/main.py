@@ -283,10 +283,16 @@ async def _startup() -> None:
         app.state.emby = MockEmby()
         probe = MockProbe()
     else:
+        default_avatar = cfg.mediadeck_default_user_avatar_path.strip()
+        if not default_avatar:
+            candidate = cfg.data_dir / "default-user-avatar.png"
+            if candidate.is_file():
+                default_avatar = str(candidate)
         app.state.emby = LiveEmby(
             app.state.settings_service.emby_config,
             identity_data_dir=cfg.mediadeck_emby_identity_data_dir,
-            identity_url=cfg.mediadeck_emby_identity_url)
+            identity_url=cfg.mediadeck_emby_identity_url,
+            default_avatar_path=default_avatar)
         probe = LiveProbe()
     app.state.pipeline = (
         MockPipeline() if cfg.mediadeck_mock else PipelineReader(cfg.pipeline_snapshot_path)

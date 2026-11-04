@@ -53,3 +53,37 @@ async def test_invalid_auth_payload_fails_closed(monkeypatch, payload):
     _transport(monkeypatch, payload)
     emby = LiveEmby(lambda: {"enabled": True, "url": "https://emby.invalid", "api_key": "test"})
     assert await emby.authenticate_user("test", "password") is None
+
+
+@pytest.mark.asyncio
+async def test_create_user_uploads_default_avatar_when_configured(monkeypatch, tmp_path):
+    import base64
+
+    avatar_file = tmp_path / "default-user-avatar.png"
+    raw_png = b"\x89PNG\r\n\x1a\nfake"
+    avatar_file.write_bytes(raw_png)
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/emby/Users/New":
+            return httpx.Response(200, json={"Id": "u-new", "Name": "alice"})
+        if request.url.path == "/emby/Users/u-new/Images/Primary":
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    factory = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: factory(transport=transport, **kwargs))
+
+    emby = LiveEmby(
+        lambda: {"enabled": True, "url": "https://emby.invalid", "api_key": "test-key"},
+        default_avatar_path=str(avatar_file),
+    )
+    created = await emby.create_user("alice")
+    assert created == {"Id": "u-new", "Name": "alice"}
+    assert [r.url.path for r in seen] == ["/emby/Users/New", "/emby/Users/u-new/Images/Primary"]
+    assert seen[1].headers["content-type"] == "image/png"
+    assert seen[1].content == base64.b64encode(raw_png)
+

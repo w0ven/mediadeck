@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     # be configured, and the URL must match the current Emby integration.
     mediadeck_emby_identity_data_dir: str = ""
     mediadeck_emby_identity_url: str = ""
+    # Optional default avatar file (PNG/JPG/WEBP) uploaded to Emby when a new
+    # user is created so players that use the user's Primary image as the
+    # server icon display it automatically.
+    mediadeck_default_user_avatar_path: str = ""
     # Optional local Reporting database: playback existence only, never seconds.
     mediadeck_playback_history_db: str = ""
     mediadeck_playback_history_timezone: str = "Asia/Shanghai"
