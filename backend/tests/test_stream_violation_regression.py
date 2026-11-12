@@ -29,11 +29,13 @@ def test_old_snapshot_cannot_observe_replacement_or_release_its_pending_seat(sta
 
     async def check():
         await guard.issue_info("u1", "a", "", issue("old"))
+        assert (await guard.inspect("u1", "a", play_id="old")).allowed
         old_row = row("a", playing=True)
         if snapshot_play:
             old_row["PlaySessionId"] = snapshot_play
         emby.set_sessions([old_row, row("b")])
         await guard.issue_info("u1", "a", "", issue("new"))
+        assert (await guard.inspect("u1", "a", play_id="new")).allowed
         current = StreamAdmission(members, emby) if restart else guard
         assert (await current.inspect("u1", "b")).reason == "over-limit"
         lease = current._db.one("SELECT * FROM stream_leases")
@@ -57,8 +59,10 @@ def test_current_replacement_observation_allows_idle_recovery(stack, observation
 
     async def check():
         await guard.issue_info("u1", "a", "", issue("old"))
+        assert (await guard.inspect("u1", "a", play_id="old")).allowed
         emby.set_sessions([row("a", playing=True), row("b")])
         await guard.issue_info("u1", "a", "", issue("new"))
+        assert (await guard.inspect("u1", "a", play_id="new")).allowed
         if observation == "activity":
             await guard.report_activity("u1", {"PlaySessionId": "new"}, AsyncMock(return_value=204))
         else:
@@ -112,7 +116,8 @@ def test_duplicate_device_stop_never_releases_on_mismatch_or_failed_delivery(sta
     emby.report_stopped = AsyncMock(return_value=status)
 
     async def check():
-        await guard.issue_info("u1", "shared", "", issue("current"), session_profile={"Client": "A"})
+        await guard.issue_info("u1", "a", "", issue("current"), session_profile={"Client": "A"})
+        assert (await guard.inspect("u1", "shared", play_id="current", session_profile={"Client": "A"})).allowed
         assert await guard.report_stopped("u1", device, "tok:u1", payload) == status
         assert guard._db.one("SELECT * FROM stream_leases")["play_id"] == "current"
 

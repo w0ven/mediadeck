@@ -30,19 +30,20 @@ def test_normal_playback_info_keeps_original_upstream_source(client, monkeypatch
     assert response.status_code == 200, response.text
     assert response.json() == original
     assert upstream.await_count == 1
-    lease = app.state.db.one("SELECT * FROM stream_leases WHERE user_id='u1'")
-    assert lease["play_id"] == "ordinary-play"
-    assert lease["session_id"] == "a"
+    assert app.state.db.query("SELECT * FROM stream_leases WHERE user_id='u1'") == []
+    bound = app.state.db.one("SELECT * FROM watch_playbacks WHERE user_id='u1'")
+    assert bound["play_id"] == "ordinary-play"
+    assert bound["session_id"] == "a"
 
 
 def test_retired_short_registry_setting_cannot_change_normal_admission(client, monkeypatch):
     monkeypatch.setenv("MEDIADECK_SHORT_REGISTRY", "/nonexistent/retired-registry.json")
     for device in "ab":
         response = client.get("/api/playback/admit", headers={
-            **headers(device), "X-Original-URI": "/Items/item42/PlaybackInfo",
+            **headers(device), "X-Original-URI": "/Videos/item42/stream.mkv?Static=true",
         })
         assert response.status_code == 204
     blocked = client.get("/api/playback/admit", headers={
-        **headers("c"), "X-Original-URI": "/Items/item42/PlaybackInfo",
+        **headers("c"), "X-Original-URI": "/Videos/item42/stream.mkv?Static=true",
     })
     assert blocked.status_code == 403

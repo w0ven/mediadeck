@@ -45,6 +45,9 @@ def _disconnecting_call(path):
 def test_report_body_disconnect_is_not_an_unhandled_error(client, event, monkeypatch, caplog):
     info = client.post("/api/playback/info/item42", headers=headers("a"), json={})
     assert info.status_code == 200
+    play = info.json()["PlaySessionId"]
+    assert client.get("/api/playback/admit", headers={
+        **headers("a"), "X-Original-URI": "/Videos/item42/master.m3u8?PlaySessionId=" + play}).status_code == 204
     before = app.state.db.one("SELECT * FROM stream_leases WHERE session_id='a'")
 
     async def never(*_args, **_kwargs):
@@ -66,6 +69,8 @@ def test_report_body_disconnect_is_not_an_unhandled_error(client, event, monkeyp
 def test_complete_reports_still_work_after_the_fix(client):
     info = client.post("/api/playback/info/item42", headers=headers("a"), json={})
     play = info.json()["PlaySessionId"]
+    assert client.get("/api/playback/admit", headers={
+        **headers("a"), "X-Original-URI": "/Videos/item42/master.m3u8?PlaySessionId=" + play}).status_code == 204
     r = client.post("/api/playback/progress", headers=headers("a"),
                     json={"ItemId": "item42", "PlaySessionId": play, "PositionTicks": 1})
     assert r.status_code == 204

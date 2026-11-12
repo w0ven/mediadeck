@@ -2,6 +2,23 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-13 — metadata-only PlaybackInfo binding and over-limit notice stream
+
+- Players with detail-page preloading (such as Rex and Hills) automatically call
+  `POST /Items/{id}/PlaybackInfo?IsPlayback=true` when opening a title's details without starting
+  video playback, previously occupying a pending concurrency seat or triggering concurrency
+  refusals and notices while another device was watching.
+- `StreamAdmission.issue_info` and `playback_admit` now treat `PlaybackInfo` as metadata-only
+  identity binding (`watch_playbacks`) without creating or mutating `stream_leases` or evaluating
+  concurrency caps, moving seat reservation and concurrency enforcement exclusively to actual
+  video/audio stream entrances (`/Videos/...`, `/Audio/...`).
+- Added optional over-limit notice media fallback (`MEDIADECK_CONCURRENCY_NOTICE_URL` for 302
+  direct streams across MediaDeck and `deploy/gateway/gateway.py`, plus
+  `MEDIADECK_CONCURRENCY_NOTICE_HLS_DIR` and `/api/playback/manifest` for HLS playlists) when
+  concurrency enforcement uses the non-destructive `pause` action, while suppressing lifecycle
+  reports (`Started`/`Progress`/`Stopped`) from notice-only plays so the active viewer's resume
+  position and `NowPlayingItem` state are never overwritten.
+
 ## 2026-11-12 — merge same-(device name, player) active records per member
 
 - Players such as SenPlayer, Infuse, Forward and Rex generate a fresh `ReportedDeviceId` per added

@@ -132,6 +132,22 @@ class StreamAdmission:
         # period, not an immediate wipe; never reset deadlines on a restart.
         self._db.execute("UPDATE stream_leases SET pending_at=? WHERE pending_at=0",
                          (time.time(),))
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS watch_playbacks ("
+            "user_id TEXT NOT NULL, play_id TEXT NOT NULL, session_id TEXT NOT NULL, "
+            "device_id TEXT NOT NULL, item_id TEXT NOT NULL, issued_at REAL NOT NULL, "
+            "closed_at REAL NOT NULL DEFAULT 0, metadata_json TEXT NOT NULL DEFAULT '{}', "
+            "PRIMARY KEY(user_id, play_id))"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watch_playback_session "
+            "ON watch_playbacks(user_id,session_id)"
+        )
+        self._db.execute(
+            "CREATE TABLE IF NOT EXISTS concurrency_notice_plays ("
+            "user_id TEXT NOT NULL, play_id TEXT NOT NULL, session_id TEXT NOT NULL, "
+            "created_at REAL NOT NULL, PRIMARY KEY(user_id, play_id))"
+        )
 
     def _user_lock(self, user_id: str | None) -> asyncio.Lock:
         # All devices/plays for one authenticated user share a lock. Never hold
@@ -261,13 +277,20 @@ class StreamAdmission:
         if play_id:
             bound = self._db.query("SELECT session_id FROM stream_leases "
                                    "WHERE user_id=? AND play_id=?", (uid, play_id))
-            if len(bound) != 1 and device:
-                # A later PlaybackInfo on the same session (another item's
-                # details or a prefetch) rebinds its lease to a newer play;
-                # the issuance record still names this play's session.
-                bound = self._db.query("SELECT session_id FROM watch_playbacks "
-                                       "WHERE user_id=? AND play_id=? AND device_id=?",
-                                       (uid, play_id, device))
+            if len(bound) != 1:
+                # PlaybackInfo binds PlaySessionId in watch_playbacks without
+                # pre-reserving a stream lease; verify DeviceId when supplied,
+                # and never let a closed binding authorize a device-less fetch.
+                if device:
+                    bound = self._db.query(
+                        "SELECT session_id FROM watch_playbacks "
+                        "WHERE user_id=? AND play_id=? AND device_id=?",
+                        (uid, play_id, device))
+                else:
+                    bound = self._db.query(
+                        "SELECT session_id FROM watch_playbacks "
+                        "WHERE user_id=? AND play_id=? AND closed_at=0",
+                        (uid, play_id))
             if len(bound) == 1:
                 bound_sid = str(bound[0]["session_id"])
                 if session_id and session_id != bound_sid:
@@ -312,6 +335,21 @@ class StreamAdmission:
                 "SELECT session_id FROM stream_leases WHERE user_id=?", (uid,)).fetchall()}
             facts["pending_count"] = len(occupied - live)
             if sid in occupied:
+                if play_id:
+                    current = conn.execute(
+                        "SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?",
+                        (uid, sid)).fetchone()
+                    if current and current[0] != play_id:
+                        replacement = bool(current[0] or matches[0].get("NowPlayingItem"))
+                        conn.execute(
+                            "UPDATE stream_leases SET observed=0,snapshot_guard=?,pending_at=?,play_id=? "
+                            "WHERE user_id=? AND session_id=?",
+                            (int(replacement), now, play_id, uid, sid))
+                        facts["pending_count"] = len(
+                            {r[0] for r in conn.execute(
+                                "SELECT session_id FROM stream_leases WHERE user_id=?", (uid,)
+                            ).fetchall()} - live
+                        )
                 return Admission(True, "same-play", **facts)
             if len(occupied | live) >= cap:
                 # Only an idle, unadmitted newcomer against a fully known real
@@ -332,8 +370,10 @@ class StreamAdmission:
                               for row in seats],
                 }, ensure_ascii=False))
                 return Admission(False, "over-limit", punishable=punishable, **facts)
-            conn.execute("INSERT INTO stream_leases (user_id,session_id,observed,pending_at) VALUES (?,?,0,?)",
-                         (uid, sid, now))
+            conn.execute(
+                "INSERT INTO stream_leases (user_id,session_id,observed,play_id,pending_at) "
+                "VALUES (?,?,0,?,?)",
+                (uid, sid, play_id, now))
             facts["pending_count"] += 1
             return Admission(True, "granted", **facts)
 
@@ -402,63 +442,103 @@ class StreamAdmission:
                          session_profile: dict[str, str] | None = None,
                          item_id: str = "",
                          ) -> tuple[Admission, int, dict[str, Any]]:
-        """Keep admission + upstream issuance + PlaySessionId binding atomic per user.
+        """Bind PlaybackInfo's PlaySessionId as metadata without taking a seat.
 
-        The metadata proxy is necessary: nginx auth_request cannot see the
-        PlaySessionId in PlaybackInfo's response. Without binding it a delayed
-        Stopped report from an old play could release the replacement's seat.
+        Details pages and client preloaders call PlaybackInfo without starting
+        playback. Media stream entrances own concurrency admission and leases.
         """
+        uid = str(uid or "").strip()
+        if not uid:
+            return Admission(False, "unresolved"), 403, {}
         async with self._user_lock(uid):
             rows = await self._snapshot()
-            result = self._admit(uid, device, session_id, rows,
-                                 session_profile=session_profile)
-            result = await self._native_admin_exemption(result)
-            if not result.allowed:
-                return result, 403, {}
-            matches = self._matching(rows, uid, device, session_id, session_profile)
-            def release_failed_start():
-                # Only this request's newly acquired seat; never release a
-                # previous play when replacement metadata fails.
-                if result.reason == "granted" and len(matches) == 1:
-                    self._db.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
-                                     (uid, str(matches[0]["Id"])))
-            try:
-                code, data = await issue()
-            except BaseException:
-                release_failed_start()
-                raise
-            if not 200 <= code < 300:
-                release_failed_start()
+            member = self._members.get(uid)
+            cap = int((member or {}).get("max_streams") or 0)
+            own = [s for s in rows if str(s.get("UserId") or "") == uid and s.get("Id")]
+            live = {str(s["Id"]) for s in own if s.get("NowPlayingItem")}
+            paused = {str(s["Id"]) for s in own
+                      if s.get("NowPlayingItem") and (s.get("PlayState") or {}).get("IsPaused")}
+            facts = {"user_id": uid, "cap": cap, "playing_count": len(live - paused),
+                     "paused_count": len(paused), "snapshot_at": time.time(),
+                     "live_session_ids": tuple(sorted(live))}
+            if device and self._members.device_blocked(uid, device):
+                return Admission(False, "device-blocked", **facts), 403, {}
+            matches = self._matching(own, uid, device, session_id, session_profile)
+            if len(matches) == 1:
+                actual_device = str(matches[0].get("DeviceId") or "")
+                facts.update(session_id=str(matches[0]["Id"]), device_id=actual_device)
+                if actual_device and self._members.device_blocked(uid, actual_device):
+                    return Admission(False, "device-blocked", **facts), 403, {}
+            elif member and not self._is_admin(member) and cap > 0:
+                return Admission(False, "session-unresolved", **facts), 503, {}
+            code, data = await issue()
             if 200 <= code < 300 and data.get("PlaySessionId") and len(matches) == 1:
-                # The replacement play has not been observed yet. Do not let
-                # the previous play's observed flag release this pending start
-                # when an old Stopped report makes the session briefly idle.
                 sid = str(matches[0]["Id"])
-                if item_id and matches[0].get('DeviceId'):
-                    item = matches[0].get('NowPlayingItem') or {}
-                    item = item if str(item.get('Id') or '') == item_id else {}
-                    sources = data.get('MediaSources') or []
-                    metadata = {'client': matches[0].get('Client') or '',
-                                'item_name': item.get('Name') or '', 'item_type': item.get('Type') or '',
-                                'series_name': item.get('SeriesName') or '',
-                                'runtime_ticks': item.get('RunTimeTicks') or
-                                    next((source.get('RunTimeTicks') for source in sources
-                                          if isinstance(source, dict) and source.get('RunTimeTicks')), None)}
-                    self._db.execute('INSERT OR IGNORE INTO watch_playbacks '
-                                     '(user_id,play_id,session_id,device_id,item_id,issued_at,metadata_json) '
-                                     'VALUES(?,?,?,?,?,?,?)',
-                                     (uid, str(data['PlaySessionId']), sid, str(matches[0]['DeviceId']),
-                                      item_id, time.time(), json.dumps(metadata)))
-                previous = self._db.one("SELECT play_id FROM stream_leases WHERE user_id=? AND session_id=?", (uid, sid))
-                replacement = bool(previous and (previous["play_id"] or matches[0].get("NowPlayingItem")))
-                self._db.execute("UPDATE stream_leases SET "
-                                 "observed=CASE WHEN play_id=? THEN observed ELSE 0 END, "
-                                 "snapshot_guard=CASE WHEN play_id=? THEN snapshot_guard ELSE ? END, "
-                                 "pending_at=CASE WHEN play_id=? THEN pending_at ELSE ? END, play_id=? "
-                                 "WHERE user_id=? AND session_id=?",
-                                 (str(data["PlaySessionId"]), str(data["PlaySessionId"]), int(replacement),
-                                  str(data["PlaySessionId"]), time.time(), str(data["PlaySessionId"]), uid, sid))
-            return result, code, data
+                actual_dev = str(matches[0].get("DeviceId") or device or "")
+                item = matches[0].get("NowPlayingItem") or {}
+                item = item if item_id and str(item.get("Id") or "") == item_id else {}
+                sources = data.get("MediaSources") or []
+                metadata = {
+                    "client": matches[0].get("Client") or "",
+                    "item_name": item.get("Name") or "",
+                    "item_type": item.get("Type") or "",
+                    "series_name": item.get("SeriesName") or "",
+                    "runtime_ticks": item.get("RunTimeTicks") or next(
+                        (source.get("RunTimeTicks") for source in sources
+                         if isinstance(source, dict) and source.get("RunTimeTicks")), None),
+                }
+                self._db.execute(
+                    "INSERT OR IGNORE INTO watch_playbacks "
+                    "(user_id,play_id,session_id,device_id,item_id,issued_at,metadata_json) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (uid, str(data["PlaySessionId"]), sid, actual_dev,
+                     str(item_id or ""), time.time(), json.dumps(metadata)))
+            reason = ("no-member" if not member else
+                      "admin-exempt" if self._is_admin(member) else
+                      "unlimited" if cap <= 0 else "metadata-bound")
+            return Admission(True, reason, **facts), code, data
+
+    def mark_notice_play(self, uid: str, play_id: str, session_id: str = "") -> None:
+        uid = str(uid or "").strip()
+        play = str(play_id or "").strip()
+        if not uid or not play:
+            return
+        now = time.time()
+        with self._db.write() as conn:
+            conn.execute(
+                "INSERT INTO concurrency_notice_plays (user_id,play_id,session_id,created_at) "
+                "VALUES (?,?,?,?) ON CONFLICT(user_id,play_id) "
+                "DO UPDATE SET session_id=excluded.session_id,created_at=excluded.created_at",
+                (uid, play, str(session_id or ""), now))
+            conn.execute("UPDATE watch_playbacks SET closed_at=? WHERE user_id=? AND play_id=?",
+                         (now, uid, play))
+            conn.execute("DELETE FROM concurrency_notice_plays WHERE created_at<?", (now - 86400,))
+
+    def is_notice_report(self, uid: str, device: str, payload: dict[str, Any]) -> bool:
+        """Suppress lifecycle reports from an over-limit notice clip.
+
+        Forwarding them to Emby would overwrite the legitimate viewer's resume
+        position and mark the refused session as NowPlayingItem.
+        """
+        uid = str(uid or "").strip()
+        if not uid:
+            return False
+        play = str(payload.get("PlaySessionId") or "").strip()
+        if play and self._db.one(
+                "SELECT 1 FROM concurrency_notice_plays WHERE user_id=? AND play_id=?",
+                (uid, play)):
+            return True
+        if not play and device:
+            recent = self._db.one(
+                "SELECT n.play_id FROM concurrency_notice_plays n "
+                "JOIN watch_playbacks w ON w.user_id=n.user_id AND w.play_id=n.play_id "
+                "WHERE n.user_id=? AND w.device_id=? AND n.created_at>=? "
+                "AND NOT EXISTS (SELECT 1 FROM stream_leases l "
+                "WHERE l.user_id=n.user_id AND l.session_id=w.session_id)",
+                (uid, device, time.time() - 300))
+            if recent:
+                return True
+        return False
 
 
 
@@ -484,6 +564,19 @@ class StreamAdmission:
                 self._db.execute("UPDATE stream_leases SET observed=1,snapshot_guard=0 "
                                  "WHERE user_id=? AND session_id=? AND play_id=?",
                                  (uid, sid, play_id))
+            else:
+                bound = self._db.one(
+                    "SELECT session_id FROM watch_playbacks "
+                    "WHERE user_id=? AND play_id=? AND closed_at=0",
+                    (uid, play_id))
+                if bound:
+                    sid = str(bound["session_id"])
+                    if payload.get("SessionId") and str(payload["SessionId"]) != sid:
+                        return code
+                    self._db.execute(
+                        "UPDATE stream_leases SET observed=1,snapshot_guard=0,play_id=? "
+                        "WHERE user_id=? AND session_id=? AND play_id=''",
+                        (play_id, uid, sid))
         return code
 
     async def report_stopped(self, uid: str, device: str, token: str,
@@ -494,6 +587,10 @@ class StreamAdmission:
             play_id = str(payload.get("PlaySessionId") or "")
             if play_id and not sid:
                 bound = self._db.query("SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?", (uid, play_id))
+                if len(bound) != 1 and device:
+                    bound = self._db.query(
+                        "SELECT session_id FROM watch_playbacks WHERE user_id=? AND play_id=? AND device_id=?",
+                        (uid, play_id, device))
                 if len(bound) == 1:
                     sid = str(bound[0]["session_id"])
             matches = self._matching(rows, uid, device, sid)
@@ -505,8 +602,16 @@ class StreamAdmission:
                 sid = str(matches[0]["Id"])
                 lease = self._db.one("SELECT play_id FROM stream_leases "
                                      "WHERE user_id=? AND session_id=?", (uid, sid))
-                # A delayed old Stop must not release a newer PlaybackInfo lease.
-                if lease and str(lease["play_id"]) == str(payload.get("PlaySessionId") or ""):
+                # A delayed old Stop must not release a newer bound lease.
+                if lease and str(lease["play_id"]) == play_id:
                     self._db.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
                                      (uid, sid))
+                elif lease and not lease["play_id"] and play_id:
+                    bound = self._db.one(
+                        "SELECT session_id FROM watch_playbacks "
+                        "WHERE user_id=? AND play_id=? AND device_id=?",
+                        (uid, play_id, device))
+                    if bound and str(bound["session_id"]) == sid:
+                        self._db.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
+                                         (uid, sid))
             return code

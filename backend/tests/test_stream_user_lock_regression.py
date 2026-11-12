@@ -17,7 +17,7 @@ def issue(play):
 
 @pytest.mark.parametrize("operation,stage", [
     ("inspect", "snapshot"), ("inspect", "policy"),
-    ("info", "snapshot"), ("info", "policy"), ("info", "issue"),
+    ("info", "snapshot"), ("info", "issue"),
     ("stop", "snapshot"), ("stop", "stop"),
     ("confirm", "snapshot"), ("confirm", "policy"),
     ("activity", "issue"),
@@ -80,18 +80,24 @@ def test_slow_user_never_blocks_another_users_admission(stack, monkeypatch, oper
 
 
 @pytest.mark.parametrize("entrance", ["inspect", "admit", "info"])
-def test_same_user_mixed_entrances_cannot_take_reserved_last_seat(stack, entrance):
+def test_same_user_mixed_entrances_cannot_take_reserved_last_seat(stack, monkeypatch, entrance):
     members, emby, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
 
     async def check():
         entered, release, attempted = asyncio.Event(), asyncio.Event(), asyncio.Event()
-        rejected_issue = issue("must-not-issue")
+        info_issue = issue("metadata-allowed")
+        snapshot = emby.active_sessions_raw
+        owner_task = None
 
-        async def slow_issue():
-            entered.set()
-            await release.wait()
-            return 200, {"PlaySessionId": "current"}
+        async def slow_snapshot():
+            rows = await snapshot()
+            if asyncio.current_task() is owner_task:
+                entered.set()
+                await release.wait()
+            return rows
+
+        monkeypatch.setattr(emby, "active_sessions_raw", slow_snapshot)
 
         async def contender():
             attempted.set()
@@ -99,9 +105,10 @@ def test_same_user_mixed_entrances_cannot_take_reserved_last_seat(stack, entranc
                 return await guard.inspect(" u1 ", "b")  # same canonical user
             if entrance == "admit":
                 return await guard.admit(user_id="u1", device_id="b", sessions=emby._sessions)
-            return (await guard.issue_info("u1", "b", "", rejected_issue))[0]
+            return (await guard.issue_info("u1", "b", "", info_issue))[0]
 
-        owner = asyncio.create_task(guard.issue_info("u1", "a", "", slow_issue))
+        await guard.issue_info("u1", "a", "", issue("current"))
+        owner_task = asyncio.create_task(guard.inspect("u1", "a", play_id="current"))
         await asyncio.wait_for(entered.wait(), 1)
         waiter = asyncio.create_task(contender())
         try:
@@ -109,10 +116,13 @@ def test_same_user_mixed_entrances_cannot_take_reserved_last_seat(stack, entranc
             assert not waiter.done()
         finally:
             release.set()
-            await owner
-        denied = await waiter
-        assert not denied.allowed and denied.reason == "over-limit" and not denied.punishable
-        rejected_issue.assert_not_awaited()
+            await owner_task
+        result = await waiter
+        if entrance == "info":
+            assert result.allowed and result.reason == "metadata-bound"
+            info_issue.assert_awaited_once()
+        else:
+            assert not result.allowed and result.reason == "over-limit" and not result.punishable
         assert guard._db.one("SELECT play_id FROM stream_leases")["play_id"] == "current"
         assert len(guard._db.query("SELECT * FROM stream_leases")) == 1
 
@@ -127,12 +137,20 @@ def test_replacement_binding_is_atomic_with_old_stop_and_activity(stack, monkeyp
 
     async def check():
         await guard.issue_info("u1", "a", "", issue("old"))
+        assert (await guard.inspect("u1", "a", play_id="old")).allowed
+        await guard.issue_info("u1", "a", "", issue("new"))
         entered, release, activity_sent, stop_attempted = (asyncio.Event() for _ in range(4))
+        snapshot = emby.active_sessions_raw
+        owner_task = None
 
-        async def replacement():
-            entered.set()
-            await release.wait()
-            return 200, {"PlaySessionId": "new"}
+        async def slow_snapshot():
+            rows = await snapshot()
+            if asyncio.current_task() is owner_task:
+                entered.set()
+                await release.wait()
+            return rows
+
+        monkeypatch.setattr(emby, "active_sessions_raw", slow_snapshot)
 
         async def activity():
             activity_sent.set()
@@ -142,7 +160,7 @@ def test_replacement_binding_is_atomic_with_old_stop_and_activity(stack, monkeyp
             stop_attempted.set()
             return await guard.report_stopped("u1", "a", "tok:u1", {"PlaySessionId": "old"})
 
-        owner = asyncio.create_task(guard.issue_info("u1", "a", "", replacement))
+        owner_task = asyncio.create_task(guard.inspect("u1", "a", play_id="new"))
         await asyncio.wait_for(entered.wait(), 1)
         stop = asyncio.create_task(stop_old())
         progress = asyncio.create_task(guard.report_activity("u1", {"PlaySessionId": "old"}, activity))
@@ -154,7 +172,7 @@ def test_replacement_binding_is_atomic_with_old_stop_and_activity(stack, monkeyp
             assert not progress.done() and not stop.done()
         finally:
             release.set()
-            await asyncio.gather(owner, stop, progress)
+            await asyncio.gather(owner_task, stop, progress)
         lease = guard._db.one("SELECT * FROM stream_leases")
         assert lease["play_id"] == "new" and lease["observed"] == 0 and lease["snapshot_guard"] == 1
         denied = await guard.inspect("u1", "b")
@@ -165,7 +183,7 @@ def test_replacement_binding_is_atomic_with_old_stop_and_activity(stack, monkeyp
     asyncio.run(check())
 
 
-def test_violation_confirmation_waits_for_same_user_new_binding(stack):
+def test_violation_confirmation_waits_for_same_user_new_binding(stack, monkeypatch):
     members, emby, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
     emby.set_sessions([row("a", playing=True), row("b")])
@@ -174,18 +192,25 @@ def test_violation_confirmation_waits_for_same_user_new_binding(stack):
         denied = await guard.inspect("u1", "b")
         assert denied.punishable
         emby.set_sessions([row("a"), row("b")])
+        await guard.issue_info("u1", "b", "", issue("legitimate"))
         entered, release, attempted = (asyncio.Event() for _ in range(3))
+        snapshot = emby.active_sessions_raw
+        owner_task = None
 
-        async def slow_issue():
-            entered.set()
-            await release.wait()
-            return 200, {"PlaySessionId": "legitimate"}
+        async def slow_snapshot():
+            rows = await snapshot()
+            if asyncio.current_task() is owner_task:
+                entered.set()
+                await release.wait()
+            return rows
+
+        monkeypatch.setattr(emby, "active_sessions_raw", slow_snapshot)
 
         async def confirm():
             attempted.set()
             return await guard.confirm_violation(denied)
 
-        owner = asyncio.create_task(guard.issue_info("u1", "b", "", slow_issue))
+        owner_task = asyncio.create_task(guard.inspect("u1", "b", play_id="legitimate"))
         await asyncio.wait_for(entered.wait(), 1)
         proof = asyncio.create_task(confirm())
         try:
@@ -193,7 +218,7 @@ def test_violation_confirmation_waits_for_same_user_new_binding(stack):
             assert not proof.done()
         finally:
             release.set()
-            await owner
+            await owner_task
         assert await proof is None  # the rejected session legitimately acquired a seat
         assert guard._db.one("SELECT play_id FROM stream_leases")["play_id"] == "legitimate"
 
@@ -209,6 +234,8 @@ def test_identical_play_ids_and_devices_remain_user_scoped(stack, monkeypatch):
     async def check():
         await asyncio.gather(guard.issue_info("u1", "a", "", issue("same-id")),
                              guard.issue_info("u2", "a", "", issue("same-id")))
+        await asyncio.gather(guard.inspect("u1", "a", play_id="same-id"),
+                             guard.inspect("u2", "a", play_id="same-id"))
         await guard.report_activity("u2", {"PlaySessionId": "same-id"}, AsyncMock(return_value=204))
         assert guard._db.one("SELECT observed FROM stream_leases WHERE user_id='u1'")["observed"] == 0
         assert guard._db.one("SELECT observed FROM stream_leases WHERE user_id='u2'")["observed"] == 1
@@ -223,13 +250,14 @@ def test_identical_play_ids_and_devices_remain_user_scoped(stack, monkeypatch):
 
 @pytest.mark.parametrize("existing", [False, True])
 @pytest.mark.parametrize("failure", ["status", "exception", "cancel"])
-def test_failed_or_cancelled_issuance_only_releases_its_new_seat(stack, existing, failure):
+def test_failed_or_cancelled_issuance_never_creates_or_releases_seat(stack, existing, failure):
     members, _, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
 
     async def check():
         if existing:
             await guard.issue_info("u1", "a", "", issue("previous"))
+            assert (await guard.inspect("u1", "a", play_id="previous")).allowed
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def failing_issue():
@@ -261,19 +289,25 @@ def test_failed_or_cancelled_issuance_only_releases_its_new_seat(stack, existing
     asyncio.run(check())
 
 
-def test_cancelled_waiters_do_not_split_lock_and_idle_locks_are_reclaimed(stack):
-    members, _, guard = stack
+def test_cancelled_waiters_do_not_split_lock_and_idle_locks_are_reclaimed(stack, monkeypatch):
+    members, emby, guard = stack
     members.set_overrides("u1", {"max_streams": 1})
 
     async def check():
         entered, release = asyncio.Event(), asyncio.Event()
+        snapshot = emby.active_sessions_raw
+        owner_task = None
 
-        async def slow_issue():
-            entered.set()
-            await release.wait()
-            return 200, {"PlaySessionId": "current"}
+        async def slow_snapshot():
+            rows = await snapshot()
+            if asyncio.current_task() is owner_task:
+                entered.set()
+                await release.wait()
+            return rows
 
-        owner = asyncio.create_task(guard.issue_info("u1", "a", "", slow_issue))
+        monkeypatch.setattr(emby, "active_sessions_raw", slow_snapshot)
+        await guard.issue_info("u1", "a", "", issue("current"))
+        owner_task = asyncio.create_task(guard.inspect("u1", "a", play_id="current"))
         await asyncio.wait_for(entered.wait(), 1)
         waiters = [asyncio.create_task(guard.inspect("u1", "b")) for _ in range(20)]
         await asyncio.sleep(0)  # enqueue all waiters behind the held user lock
@@ -288,7 +322,7 @@ def test_cancelled_waiters_do_not_split_lock_and_idle_locks_are_reclaimed(stack)
             assert all(not task.done() for task in [*waiters[10:], last])
         finally:
             release.set()
-            await owner
+            await owner_task
         results = await asyncio.gather(*waiters[10:], last)
         assert all(not result.allowed and not result.punishable for result in results)
 
@@ -301,6 +335,7 @@ def test_cancelled_waiters_do_not_split_lock_and_idle_locks_are_reclaimed(stack)
 def test_snapshot_failure_never_issues_or_releases_existing_seat(stack, monkeypatch, operation):
     _, emby, guard = stack
     asyncio.run(guard.issue_info("u1", "a", "", issue("current")))
+    assert asyncio.run(guard.inspect("u1", "a", play_id="current")).allowed
     monkeypatch.setattr(emby, "active_sessions_raw", AsyncMock(side_effect=RuntimeError("offline")))
     stopped = AsyncMock(return_value=204)
     monkeypatch.setattr(emby, "report_stopped", stopped)
@@ -330,6 +365,7 @@ def test_cancelled_stop_keeps_current_seat_and_releases_user_lock(stack, monkeyp
 
     async def check():
         await guard.issue_info("u1", "a", "", issue("current"))
+        assert (await guard.inspect("u1", "a", play_id="current")).allowed
         entered = asyncio.Event()
 
         async def slow_stop(*_):
