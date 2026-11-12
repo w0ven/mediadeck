@@ -319,6 +319,11 @@ class PasswordBotMixin:
                 self._on_password_changed()
             except Exception:  # noqa: BLE001 - never pretend a remote password change rolled back
                 notices.append("密码已更改，旧面板登录失效尚未确认，请联系管理员。")
+        devices = getattr(self, "_member_devices", None)
+        if ok and devices is not None:
+            devices.invalidate()
+            with contextlib.suppress(Exception):
+                await devices.prune_inactive_for_user(user_id)
         if hasattr(self._members, "audit"):
             self._members.audit(
                 actor,

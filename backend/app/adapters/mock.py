@@ -29,6 +29,7 @@ class MockEmby:
         # username -> password; missing means any non-empty password is accepted
         # so existing tests that never set a password still work.
         self._passwords: dict[str, str] = {}
+        self._device_token_state: dict[str, Any] | None = None
 
     async def system_info(self) -> dict[str, Any]:
         return {
@@ -78,6 +79,16 @@ class MockEmby:
         if not user:
             return False
         self._passwords[user.get("Name") or ""] = new_password
+        if self._device_token_state is not None:
+            active = self._device_token_state.setdefault("active_by_device", {})
+            dead = self._device_token_state.setdefault("dead_device_ids", set())
+            for did, entries in list(active.items()):
+                kept = [e for e in entries if e.get("user_id") != str(user_id)]
+                if kept:
+                    active[did] = kept
+                elif entries:
+                    active.pop(did, None)
+                    dead.add(str(did))
         return True
 
     async def authenticate_user(self, username: str, password: str) -> dict[str, Any] | None:
@@ -210,8 +221,23 @@ class MockEmby:
     async def list_devices(self) -> list[dict[str, Any]]:
         return [dict(d) for d in self._devices]
 
+    async def device_token_state(self) -> dict[str, Any] | None:
+        if self._device_token_state is None:
+            return None
+        return {
+            "active_by_device": {
+                str(k): [dict(e) for e in v]
+                for k, v in self._device_token_state.get("active_by_device", {}).items()
+            },
+            "dead_device_ids": set(self._device_token_state.get("dead_device_ids", set())),
+        }
+
     async def delete_device(self, device_id: str) -> None:
-        self._devices = [d for d in self._devices if str(d.get("Id")) != str(device_id)]
+        did = str(device_id)
+        self._devices = [d for d in self._devices if str(d.get("Id")) != did]
+        if self._device_token_state is not None:
+            self._device_token_state.get("active_by_device", {}).pop(did, None)
+            self._device_token_state.get("dead_device_ids", set()).discard(did)
 
     async def stop_session(self, session_id: str, reason: str = "") -> bool:
         before = len(self._sessions)

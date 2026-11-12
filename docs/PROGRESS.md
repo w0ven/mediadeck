@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-12 — filter and prune inactive Emby ghost device records
+
+- Emby's `GET /emby/Devices` keeps returning `Devices2` rows whose `Tokens_2` entries were marked
+  `IsActive=0` on client sign-out or password reset, inflating member device counts and showing
+  duplicate entries when a reinstalled player registers a fresh `ReportedDeviceId`.
+- `LiveEmby.device_token_state` reads `users.db` and `authentication.db` (`Tokens_2`) read-only
+  when `MEDIADECK_EMBY_IDENTITY_DATA_DIR` is configured, mapping active (`IsActive=1`) personal
+  tokens to their exact user GUIDs and identifying fully inactive member device IDs while never
+  marking API-key (`UserId IS NULL`) or shared-active devices as dead.
+- `MemberDevices` now counts and lists only active token bindings when local auth state is
+  configured, sweeps fully inactive member ghost rows within the per-cycle `enforce` budget without
+  recording false `device.auto_logout` audits, and immediately invalidates and prunes inactive rows
+  after member or admin password changes.
+
 ## 2026-11-05 — automatic default user avatar on Emby account creation
 
 - Third-party Emby players display the signed-in user's Primary image (`/emby/Users/{id}/Images/Primary`)
