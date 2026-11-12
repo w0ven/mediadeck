@@ -2081,6 +2081,10 @@ async def emby_set_password(user_id: str, new_password: str = Body(..., embed=Tr
     if not await app.state.emby.set_user_password(user_id, new_password):
         raise HTTPException(404, "unknown user")
     app.state.cache.drop_prefix("panelauth:")
+    if hasattr(app.state, "member_devices"):
+        app.state.member_devices.invalidate()
+        with contextlib.suppress(Exception):
+            await app.state.member_devices.prune_inactive_for_user(user_id)
     return {"ok": True}
 
 
@@ -2965,6 +2969,10 @@ async def _reset_member_password(user_id: str, payload: dict[str, Any],
     if not await app.state.emby.set_user_password(user_id, password):
         raise HTTPException(404, "unknown user")
     app.state.cache.drop_prefix("panelauth:")
+    if hasattr(app.state, "member_devices"):
+        app.state.member_devices.invalidate()
+        with contextlib.suppress(Exception):
+            await app.state.member_devices.prune_inactive_for_user(user_id)
     app.state.members.audit(actor, "member.password", user_id, "password changed")
     return {"ok": True, "password": password}
 

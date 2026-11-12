@@ -38,6 +38,9 @@ class EmbyAdapter(Protocol):
     async def list_devices(self) -> list[dict[str, Any]]:
         """Emby device records (one per signed-in client install); failures raise."""
         ...
+    async def device_token_state(self) -> dict[str, Any] | None:
+        """Optional local auth-DB view of active owners and fully inactive device IDs."""
+        ...
     async def delete_device(self, device_id: str) -> None:
         """Delete one device record, which revokes that client's login; failures raise."""
         ...

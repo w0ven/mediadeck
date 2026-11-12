@@ -85,3 +85,159 @@ def test_saved_config_without_caps_reads_defaults(tmp_path):
     read = service.config()
     assert read['revision'] == 3
     assert [row['max_devices'] for row in read['config']['levels']] == [3, 4, 5, 6, 7, 8, 9, 10]
+
+
+def test_live_device_token_state_filters_ghosts_and_protects_shared_and_system_devices(tmp_path):
+    import sqlite3
+    import uuid
+
+    import pytest
+
+    from app.adapters.live import LiveEmby
+    from app.core.errors import UpstreamError
+
+    u_member = '11111111222233334444555566667777'
+    u_admin = 'aaaaaaaa222233334444555566667777'
+    u_other = 'bbbbbbbb222233334444555566667777'
+    with sqlite3.connect(tmp_path / 'users.db') as users:
+        users.execute('CREATE TABLE LocalUsersv2 (Id INTEGER, guid BLOB)')
+        users.executemany('INSERT INTO LocalUsersv2 VALUES (?, ?)', [
+            (1, uuid.UUID(u_admin).bytes_le),
+            (2, u_other),
+            (7, uuid.UUID(u_member).bytes_le),
+        ])
+    with sqlite3.connect(tmp_path / 'authentication.db') as auth:
+        auth.execute(
+            'CREATE TABLE Tokens_2 (Id INTEGER PRIMARY KEY, AccessToken TEXT, DeviceId INT, '
+            'AppName TEXT, AppVersion TEXT, UserId INT, IsActive INT, '
+            'DateCreatedInt INT, DateLastActivityInt INT)'
+        )
+        auth.executemany('INSERT INTO Tokens_2 VALUES (?,?,?,?,?,?,?,?,?)', [
+            # API key device (Id=3) mixed with old inactive user token: never dead.
+            (1, 'apikey', 3, 'Panel Key', '1.0', None, 1, NOW - 9000, NOW - 10),
+            (2, 'oldbot', 3, 'Bot', '1.0', 7, 0, NOW - 9000, NOW - 8000),
+            # Shared device (Id=90): u_admin active, u_other signed out more recently.
+            (3, 'adm', 90, 'RodelPlayer', '2.0', 1, 1, NOW - 5000, NOW - 3000),
+            (4, 'oth', 90, 'RodelPlayer', '2.1', 2, 0, NOW - 2000, NOW - 100),
+            # Member: one live install (35) and two signed-out ghosts (29, 31).
+            (5, 'live', 35, 'PlayerA', '2.1.0', 7, 1, NOW - 1000, NOW - 30),
+            (6, 'ghost1', 29, 'PlayerA', '2.1.0', 7, 0, NOW - 86400 * 40, NOW - 86400 * 30),
+            (7, 'ghost2', 31, 'PlayerA', '2.1.0', 7, 0, NOW - 86400 * 40, NOW - 86400 * 31),
+        ])
+
+    unconfigured = LiveEmby(lambda: {'enabled': True, 'url': 'http://emby.local', 'api_key': 'k'})
+    assert asyncio.run(unconfigured.device_token_state()) is None
+
+    mismatched = LiveEmby(
+        lambda: {'enabled': True, 'url': 'http://other.local', 'api_key': 'k'},
+        identity_data_dir=str(tmp_path), identity_url='http://emby.local',
+    )
+    with pytest.raises(UpstreamError):
+        asyncio.run(mismatched.device_token_state())
+
+    live = LiveEmby(
+        lambda: {'enabled': True, 'url': 'http://emby.local', 'api_key': 'k'},
+        identity_data_dir=str(tmp_path), identity_url='http://emby.local',
+    )
+    state = asyncio.run(live.device_token_state())
+    assert state['dead_device_ids'] == {'29', '31'}
+    assert '3' not in state['dead_device_ids'] and '90' not in state['dead_device_ids']
+
+    emby = MockEmby()
+    emby._device_token_state = state
+    emby._devices = [
+        {'Id': '3', 'Name': 'API Host', 'AppName': 'Bot', 'LastUserId': u_member,
+         'DateLastActivity': iso(NOW - 8000)},
+        {'Id': '90', 'Name': 'Shared PC', 'AppName': 'RodelPlayer', 'AppVersion': '2.1',
+         'LastUserId': u_other, 'DateLastActivity': iso(NOW - 100)},
+        {'Id': '35', 'Name': 'Phone Model X', 'AppName': 'PlayerA', 'AppVersion': '2.1.0',
+         'LastUserId': u_member, 'DateLastActivity': iso(NOW - 5)},
+        {'Id': '29', 'Name': 'Phone Model Y', 'AppName': 'PlayerA', 'AppVersion': '2.1.0',
+         'LastUserId': u_member, 'DateLastActivity': iso(NOW - 86400 * 30)},
+        {'Id': '31', 'Name': 'Phone Model X', 'AppName': 'PlayerA', 'AppVersion': '2.1.0',
+         'LastUserId': u_member, 'DateLastActivity': iso(NOW - 86400 * 31)},
+    ]
+    service = MemberDevices(lambda: emby)
+    member_devices = asyncio.run(service.for_user(u_member))
+    assert [d['id'] for d in member_devices] == ['35']
+    assert member_devices[0]['last_active'] == NOW - 5
+    assert asyncio.run(service.for_user(u_other)) == []
+    admin_devices = asyncio.run(service.for_user(u_admin))
+    assert [(d['id'], d['version'], d['last_active']) for d in admin_devices] == [('90', '2.0', NOW - 3000)]
+
+
+def test_enforce_ignores_ghosts_for_cap_and_sweeps_dead_rows_within_budget():
+    emby = MockEmby()
+    admin = next(iter(emby._users))
+    emby._users[admin].setdefault('Policy', {})['IsAdministrator'] = True
+    emby._devices = [
+        device('live1', 'm1', 3600),
+        device('live2', 'm1', 7200),
+        device('live3', 'm1', 86400 * 5),
+        # Signed out 10s ago: if counted as active, it would wrongly evict live3!
+        device('ghost_recent', 'm1', 10),
+        device('ghost_old', 'm1', 86400 * 20),
+        device('ghost_admin', admin, 86400 * 20),
+        {'Id': 'ghost_orphan', 'Name': 'Deleted User Phone', 'AppName': 'Player',
+         'DateLastActivity': iso(NOW - 86400 * 20)},
+    ]
+    emby._device_token_state = {
+        'active_by_device': {
+            'live1': [{'user_id': 'm1', 'app': 'Player', 'version': '1', 'last_active': NOW - 3600}],
+            'live2': [{'user_id': 'm1', 'app': 'Player', 'version': '1', 'last_active': NOW - 7200}],
+            'live3': [{'user_id': 'm1', 'app': 'Player', 'version': '1', 'last_active': NOW - 86400 * 5}],
+        },
+        'dead_device_ids': {'ghost_recent', 'ghost_old', 'ghost_admin', 'ghost_orphan'},
+    }
+    service = MemberDevices(lambda: emby)
+    removed = asyncio.run(service.enforce(lambda uid: 3, budget=1, now=NOW))
+    assert removed == []
+    # Only 1 dead member row swept under budget=1; live3 untouched; admin/orphan untouched.
+    remaining = {d['Id'] for d in emby._devices}
+    assert {'live1', 'live2', 'live3', 'ghost_admin', 'ghost_orphan'} <= remaining
+    assert len(remaining & {'ghost_recent', 'ghost_old'}) == 1
+
+    removed_next = asyncio.run(service.enforce(lambda uid: 3, budget=10, now=NOW))
+    assert removed_next == []
+    assert {d['Id'] for d in emby._devices} == {'live1', 'live2', 'live3', 'ghost_admin', 'ghost_orphan'}
+
+
+def test_password_reset_invalidates_cache_and_prunes_user_dead_devices(tmp_path):
+    from app.core.db import Database
+    from app.modules.groups import GroupService
+    from app.modules.members import MemberService
+    from app.modules.telegram import TelegramBot
+
+    db = Database(tmp_path / 'panel.db')
+    groups = GroupService(db)
+    groups.seed_defaults()
+    members = MemberService(db, groups=groups)
+    emby = MockEmby()
+    user = asyncio.run(emby.create_user('demo_member'))
+    uid = user['Id']
+    members.upsert(uid, 'demo_member', {'group_id': 'standard'})
+    emby._devices = [
+        device('d1', uid, 60),
+        device('d2', uid, 3600),
+        device('other_d', 'someone_else', 60),
+    ]
+    emby._device_token_state = {
+        'active_by_device': {
+            'd1': [{'user_id': uid, 'app': 'Player', 'version': '1', 'last_active': NOW - 60}],
+            'd2': [{'user_id': uid, 'app': 'Player', 'version': '1', 'last_active': NOW - 3600}],
+            'other_d': [{'user_id': 'someone_else', 'app': 'Player', 'version': '1', 'last_active': NOW - 60}],
+        },
+        'dead_device_ids': set(),
+    }
+    service = MemberDevices(lambda: emby)
+    # Prime the 20s cache before password change.
+    assert [d['id'] for d in asyncio.run(service.for_user(uid))] == ['d1', 'd2']
+
+    bot = TelegramBot(lambda: {'enabled': True}, members, emby=emby)
+    bot._member_devices = service
+    ok, notices = asyncio.run(bot._apply_password_reset(uid, 'NewPass99', 'miniapp:1001:custom'))
+    assert ok is True and notices == []
+    # Immediate query sees empty list (cache invalidated) and dead rows removed from Emby.
+    assert asyncio.run(service.for_user(uid)) == []
+    assert [d['Id'] for d in emby._devices] == ['other_d']
+

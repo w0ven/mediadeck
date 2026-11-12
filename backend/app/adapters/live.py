@@ -77,6 +77,18 @@ async def probe_emby(
     }
 
 
+def _emby_guid_hex(raw_guid: Any) -> str | None:
+    if isinstance(raw_guid, bytes) and len(raw_guid) == 16:
+        # Emby persists System.Guid.ToByteArray() (.NET endian).
+        identity = uuid.UUID(bytes_le=raw_guid)
+    elif (isinstance(raw_guid, str) and re.fullmatch(
+            r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", raw_guid)):
+        identity = uuid.UUID(raw_guid)
+    else:
+        return None
+    return None if identity.int == 0 else identity.hex
+
+
 class LiveEmby:
     """Emby adapter bound to a settings provider rather than frozen env vars."""
 
@@ -443,17 +455,10 @@ class LiveEmby:
                 if len(rows) != 1:
                     return None
                 raw_guid = rows[0][0]
-                if isinstance(raw_guid, bytes) and len(raw_guid) == 16:
-                    # Emby persists System.Guid.ToByteArray() (.NET endian).
-                    identity = uuid.UUID(bytes_le=raw_guid)
-                elif (isinstance(raw_guid, str) and re.fullmatch(
-                        r"[0-9a-fA-F]{32}|[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", raw_guid)):
-                    identity = uuid.UUID(raw_guid)
-                else:
+                guid = _emby_guid_hex(raw_guid)
+                if not guid:
                     return None
-                guid = identity.hex
-                if identity.int == 0:
-                    return None
+                identity = uuid.UUID(guid)
                 matches = users.execute(
                     "SELECT Id FROM LocalUsersv2 WHERE guid=? OR "
                     "lower(replace(CAST(guid AS TEXT), '-', ''))=? LIMIT 2",
@@ -707,6 +712,89 @@ class LiveEmby:
                                   headers={"X-Emby-Token": token, "X-Emby-Device-Id": device},
                                   json=payload)
             return r.status_code
+
+    def _local_device_token_state(self) -> dict[str, Any]:
+        """Map Emby internal DeviceIds to active personal-token owners and dead IDs.
+
+        Emby's GET /Devices returns every Devices2 row that still has any
+        Tokens_2 entry, including IsActive=0 tokens left behind by sign-out or
+        password resets. Reading Tokens_2 read-only separates live logins from
+        revoked ghosts while never marking API-key or shared-active devices dead.
+        """
+        root = Path(self._identity_data_dir).expanduser().resolve()
+        try:
+            with contextlib.closing(sqlite3.connect(
+                    (root / "users.db").as_uri() + "?mode=ro",
+                    uri=True, timeout=1)) as users:
+                users.execute("PRAGMA query_only=ON")
+                user_rows = users.execute("SELECT Id, guid FROM LocalUsersv2").fetchall()
+            with contextlib.closing(sqlite3.connect(
+                    (root / "authentication.db").as_uri() + "?mode=ro",
+                    uri=True, timeout=1)) as auth:
+                auth.execute("PRAGMA query_only=ON")
+                token_rows = auth.execute(
+                    "SELECT DeviceId, UserId, IsActive, AppName, AppVersion, "
+                    "DateLastActivityInt, Id FROM Tokens_2 "
+                    "ORDER BY DateLastActivityInt DESC, Id DESC"
+                ).fetchall()
+        except (sqlite3.Error, OSError, ValueError):
+            raise UpstreamError("无法核验 Emby 设备登录状态") from None
+
+        guids_by_id: dict[int, str] = {}
+        seen_guids: dict[str, int] = {}
+        ambiguous: set[str] = set()
+        for raw_id, raw_guid in user_rows:
+            if type(raw_id) is not int or raw_id <= 0:
+                continue
+            guid = _emby_guid_hex(raw_guid)
+            if not guid:
+                continue
+            if guid in seen_guids and seen_guids[guid] != raw_id:
+                ambiguous.add(guid)
+            else:
+                seen_guids[guid] = raw_id
+                guids_by_id[raw_id] = guid
+        if ambiguous:
+            guids_by_id = {k: v for k, v in guids_by_id.items() if v not in ambiguous}
+
+        active_by_device: dict[str, list[dict[str, Any]]] = {}
+        seen_active_pairs: set[tuple[int, int]] = set()
+        all_devices: set[int] = set()
+        protected_devices: set[int] = set()
+        for did, uid, is_active, app_name, app_ver, last_act, _tok_id in token_rows:
+            if type(did) is not int or did <= 0:
+                continue
+            all_devices.add(did)
+            if type(uid) is not int or uid <= 0:
+                protected_devices.add(did)
+                continue
+            if is_active != 0:
+                protected_devices.add(did)
+                if is_active == 1 and (did, uid) not in seen_active_pairs:
+                    guid = guids_by_id.get(uid)
+                    if guid:
+                        seen_active_pairs.add((did, uid))
+                        ts = last_act if type(last_act) is int and last_act > 0 else None
+                        active_by_device.setdefault(str(did), []).append({
+                            "user_id": guid,
+                            "app": str(app_name or "").strip(),
+                            "version": str(app_ver or "").strip(),
+                            "last_active": ts,
+                        })
+
+        return {
+            "active_by_device": active_by_device,
+            "dead_device_ids": {str(did) for did in (all_devices - protected_devices)},
+        }
+
+    async def device_token_state(self) -> dict[str, Any] | None:
+        if not self._identity_data_dir and not self._identity_url:
+            return None
+        base, _, _, _ = self._conn()
+        if (not self._identity_data_dir or not self._identity_url
+                or normalize_base_url(base) != self._identity_url):
+            raise UpstreamError("本地 Emby 设备认证目录配置与服务地址不匹配")
+        return await asyncio.to_thread(self._local_device_token_state)
 
     async def list_devices(self) -> list[dict[str, Any]]:
         base, headers, timeout, verify = self._conn()
