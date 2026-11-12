@@ -176,12 +176,19 @@ class Handler(BaseHTTPRequestHandler):
   # Forwarded streams never call here: 8300 checks them at their issuer.
   # No successful-result cache, redirect following or trusted "admitted" flag.
   c=http.client.HTTPConnection('127.0.0.1',8300,timeout=30)
+  notice=''
   try:
    self.deck_request(c,'/api/playback/admit',admission=True)
-   status=c.getresponse().status
+   resp=c.getresponse()
+   status=resp.status
+   if status==403 and resp.getheader('X-Mediadeck-Decision')=='over-limit':
+    notice=(resp.getheader('X-Mediadeck-Notice-Location') or '').strip()
   except Exception:status=503
   finally:c.close()
   if status==204:return True
+  if status==403 and notice and (notice.startswith('/') or notice.startswith('https://') or notice.startswith('http://')):
+   self.send(302,headers={'Location':notice,'Cache-Control':'private, no-store','X-Mediadeck-Decision':'over-limit-notice'})
+   return False
   self.send(status if status in (401,403) else 503,b'Playback admission refused',
             {'Cache-Control':'private, no-store'})
   return False

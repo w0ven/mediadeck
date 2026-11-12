@@ -55,6 +55,9 @@ def test_new_play_id_does_not_inherit_previous_play_observed_flag(stack):  # noq
         issue = AsyncMock(return_value=(200, {"PlaySessionId": "new-play"}))
         result, code, _ = await guard.issue_info("u1", "a", "", issue)
         assert result.allowed and code == 200
+        # Metadata browsing alone leaves the running lease untouched until actual media fetch.
+        assert guard._db.one("SELECT * FROM stream_leases WHERE session_id='a'")["observed"] == 1
+        assert (await guard.inspect("u1", "a", play_id="new-play")).allowed
         lease = guard._db.one("SELECT * FROM stream_leases WHERE session_id='a'")
         assert lease["observed"] == 0
         emby.set_sessions([row("a"), row("b"), row("c")])

@@ -166,10 +166,7 @@ def test_two_complete_direct_episodes_stop_then_next(
             data = info.json()
             value = data["MediaSources"][0]["DirectStreamUrl"]
             play = data["PlaySessionId"]
-            assert len(seats()) == 1 and seats()[0]["play_id"] == play
-            if previous is not None:
-                assert c.post("/api/playback/stopped", headers=h, json=previous).status_code == 204
-                assert len(seats()) == 1 and seats()[0]["play_id"] == play
+            assert seats() == []
             # Simulate the immutable relative URL issued for the first episode
             # before the bad absolute-URL release; the next is current metadata.
             if already_issued_first and i == 0:
@@ -187,12 +184,6 @@ def test_two_complete_direct_episodes_stop_then_next(
             }
             try:
                 assert c.post("/api/playback/started", headers=h, json=event).status_code == 204
-                blocked = c.post(
-                    "/api/playback/info/third",
-                    headers={**h, "X-Emby-Device-Id": "other-client"},
-                    json={},
-                )
-                assert blocked.status_code == 403
                 decoder = subprocess.run(
                     [
                         "ffmpeg",
@@ -216,6 +207,22 @@ def test_two_complete_direct_episodes_stop_then_next(
                     timeout=15,
                     check=False,
                 )
+                assert len(seats()) == 1 and seats()[0]["play_id"] == play
+                if previous is not None:
+                    assert c.post("/api/playback/stopped", headers=h, json=previous).status_code == 204
+                    assert len(seats()) == 1 and seats()[0]["play_id"] == play
+                browsed = c.post(
+                    "/api/playback/info/third",
+                    headers={**h, "X-Emby-Device-Id": "other-client"},
+                    json={},
+                )
+                assert browsed.status_code == 200
+                blocked = c.get(
+                    "/emby/videos/third/original.mkv",
+                    headers={**h, "X-Emby-Device-Id": "other-client"},
+                    follow_redirects=False,
+                )
+                assert blocked.status_code == 403
                 count = max(
                     [int(v) for v in re.findall(r"^frame=(\d+)$", decoder.stdout, re.MULTILINE)], default=0
                 )

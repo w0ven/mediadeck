@@ -14,6 +14,8 @@ def test_text_plain_json_report_with_query_identity(client, event):
     app.state.members.set_overrides('u1', {'max_streams': 1})
     info = client.post('/api/playback/info/item42', headers=headers('a'), json={})
     play = info.json()['PlaySessionId']
+    assert client.get('/api/playback/admit', headers={
+        **headers('a'), 'X-Original-URI': '/Videos/item42/master.m3u8?PlaySessionId=' + play}).status_code == 204
     params = {'UserId': 'not-the-owner', 'X-Emby-Token': 'tok:u1',
               'X-Emby-Device-Id': 'a', 'reqformat': 'json'}
     report = client.post('/api/playback/' + event, params=params,

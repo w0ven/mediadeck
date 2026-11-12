@@ -66,17 +66,14 @@ def test_head_empty_response_preserves_status_and_caller_identity(monkeypatch, s
 
 
 @pytest.mark.parametrize("status", [200, 503])
-def test_http_head_success_has_no_fake_binding_and_failure_releases_new_seat(client, monkeypatch, status):
+def test_http_head_success_has_no_fake_binding_or_pre_reserved_seat(client, monkeypatch, status):
     emby = adapter(monkeypatch, lambda request: httpx.Response(status))
     app.state.emby.playback_info = emby.playback_info
     response = client.head("/api/playback/info/item42", headers=headers("a"))
     assert response.status_code == status
     assert response.content == b""
-    leases = app.state.db.query("SELECT * FROM stream_leases")
-    if status == 200:
-        assert len(leases) == 1 and leases[0]["play_id"] == ""
-    else:
-        assert leases == []
+    assert app.state.db.query("SELECT * FROM stream_leases") == []
+    assert app.state.db.query("SELECT * FROM watch_playbacks") == []
 
 
 def test_get_empty_success_still_fails_closed_instead_of_inventing_metadata(monkeypatch):

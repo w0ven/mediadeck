@@ -60,18 +60,22 @@ def test_event_observes_play_without_another_admission(client, event):
     app.state.members.set_overrides('u1', {'max_streams': 1})
     r = client.post('/api/playback/info/item42', headers=headers('a'), json={})
     play = r.json()['PlaySessionId']
+    assert client.get('/api/playback/admit', headers={
+        **headers('a'), 'X-Original-URI': '/Videos/item42/master.m3u8?PlaySessionId=' + play}).status_code == 204
     assert client.post('/api/playback/' + event, headers=headers('a'),
                        json={'ItemId': 'item42', 'PlaySessionId': play}).status_code == 204
     assert app.state.db.one("SELECT observed FROM stream_leases WHERE session_id='a'")['observed'] == 1
     # No further admission while it plays, and no Stopped from a crashed client.
     app.state.emby.set_sessions([row('a'), row('b')])
-    assert client.post('/api/playback/info/item42', headers=headers('b'), json={}).status_code == 200
+    assert client.get('/api/playback/admit', headers={
+        **headers('b'), 'X-Original-URI': '/Videos/item42/master.m3u8'}).status_code == 204
 
 
 def test_progress_failure_old_play_and_other_user_do_not_observe(stack):
     _, _, guard = stack
     async def check():
         assert (await guard.issue_info('u1', 'a', '', AsyncMock(return_value=(200, {'PlaySessionId': 'new'}))))[0].allowed
+        assert (await guard.inspect('u1', 'a', play_id='new')).allowed
         for uid, payload, status in [('u1', {'PlaySessionId': 'old'}, 204),
                                      ('other', {'PlaySessionId': 'new'}, 204),
                                      ('u1', {'PlaySessionId': 'new'}, 503),
@@ -91,7 +95,7 @@ def test_unsolicited_activity_cannot_create_or_extend_seat(stack):
 
 
 @pytest.mark.parametrize('failure', [503, RuntimeError('upstream'), asyncio.CancelledError()])
-def test_failed_info_releases_only_its_new_reservation(stack, failure):
+def test_failed_info_never_creates_lease_or_disturbs_active_seat(stack, failure):
     _, _, guard = stack
     issue = AsyncMock(side_effect=failure) if isinstance(failure, BaseException) else AsyncMock(return_value=(failure, {}))
     async def check():
@@ -101,6 +105,7 @@ def test_failed_info_releases_only_its_new_reservation(stack, failure):
             assert exc is failure
         assert guard._db.query('SELECT * FROM stream_leases') == []
         await guard.issue_info('u1', 'a', '', AsyncMock(return_value=(200, {'PlaySessionId': 'current'})))
+        assert (await guard.inspect('u1', 'a', play_id='current')).allowed
         try:
             await guard.issue_info('u1', 'a', '', issue)
         except (RuntimeError, asyncio.CancelledError) as exc:
@@ -119,6 +124,8 @@ def test_http_progress_auth_and_delivery_failure(client):
     assert client.post('/api/playback/progress', json={}).status_code == 401
     r = client.post('/api/playback/info/item42', headers=headers('a'), json={})
     play = r.json()['PlaySessionId']
+    assert client.get('/api/playback/admit', headers={
+        **headers('a'), 'X-Original-URI': '/Videos/item42/master.m3u8?PlaySessionId=' + play}).status_code == 204
     app.state.emby.report_playback = AsyncMock(return_value=503)
     assert client.post('/api/playback/progress', headers=headers('a'), json={'PlaySessionId': play}).status_code == 503
     assert app.state.db.one("SELECT observed FROM stream_leases WHERE session_id='a'")['observed'] == 0

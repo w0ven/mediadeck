@@ -5,6 +5,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import secrets
 import threading
@@ -1503,7 +1504,7 @@ async def _restrict_session_client(uid: str, device: str = "", sid: str = "",
         raise HTTPException(403, "session client restricted", headers={"Cache-Control": "private, no-store"})
 
 
-def _bound_play_session(uid: str, query: dict[str, str]) -> str:
+def _bound_play_session(uid: str, query: dict[str, str], device: str = "") -> str:
     """Session Deck bound to this PlaySessionId when it issued PlaybackInfo.
 
     Players usually fetch media with only DeviceId and PlaySessionId, while
@@ -1514,11 +1515,21 @@ def _bound_play_session(uid: str, query: dict[str, str]) -> str:
     play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
     if not play_id:
         return ""
-    for table in ("stream_leases", "watch_playbacks"):
-        bound = app.state.db.query(f"SELECT session_id FROM {table} WHERE user_id=? AND play_id=?",
-                                   (uid, play_id))
-        if len(bound) == 1:
-            return str(bound[0]["session_id"])
+    bound = app.state.db.query(
+        "SELECT session_id FROM stream_leases WHERE user_id=? AND play_id=?",
+        (uid, play_id))
+    if len(bound) == 1:
+        return str(bound[0]["session_id"])
+    if device:
+        bound = app.state.db.query(
+            "SELECT session_id FROM watch_playbacks WHERE user_id=? AND play_id=? AND device_id=?",
+            (uid, play_id, device))
+    else:
+        bound = app.state.db.query(
+            "SELECT session_id FROM watch_playbacks WHERE user_id=? AND play_id=? AND closed_at=0",
+            (uid, play_id))
+    if len(bound) == 1:
+        return str(bound[0]["session_id"])
     return ""
 
 
@@ -1529,7 +1540,7 @@ async def _restrict_web_playback(uid: str, request: Request, query: dict[str, st
     device = caller_device(request.headers, query)
     sid = query.get("SessionId", query.get("sessionId", ""))
     profile = caller_session_profile(request.headers, query)
-    bound = _bound_play_session(uid, query)
+    bound = _bound_play_session(uid, query, device)
     if not device:
         if not bound or (sid and sid != bound):
             raise HTTPException(503, "playback client identity unavailable")
@@ -1630,6 +1641,36 @@ async def restricted_emby_login(request: Request, user_id: str = "") -> Response
     return JSONResponse(data, status_code=code, headers=headers)
 
 
+def _concurrency_notice_url() -> str:
+    return (os.environ.get("MEDIADECK_CONCURRENCY_NOTICE_URL") or "").strip()
+
+
+def _concurrency_notice_hls_dir() -> str:
+    return (os.environ.get("MEDIADECK_CONCURRENCY_NOTICE_HLS_DIR") or "").strip()
+
+
+def _concurrency_notice_eligible() -> bool:
+    cfg = app.state.restrictions.config().get("concurrency") or {}
+    return not cfg.get("enabled") or cfg.get("action") == "pause"
+
+
+def _concurrency_notice_manifest(path: str, method: str) -> Response | None:
+    hls_dir = _concurrency_notice_hls_dir()
+    if not hls_dir or not _concurrency_notice_eligible():
+        return None
+    name = "master.m3u8" if path.lower().endswith("/master.m3u8") else "main.m3u8"
+    target_file = FilePath(hls_dir) / name
+    if not target_file.is_file():
+        return None
+    text = target_file.read_text(encoding="utf-8")
+    return Response(
+        content=b"" if method.upper() == "HEAD" else text,
+        media_type="application/vnd.apple.mpegurl",
+        headers={"Cache-Control": "private, no-store",
+                 "X-Mediadeck-Decision": "over-limit-notice"},
+    )
+
+
 async def _admit_playback(request: Request, item_id: str,
                           query: dict[str, str], *, reserve: bool = True,
                           original_uri: str | None = None) -> str:
@@ -1664,20 +1705,31 @@ async def _admit_playback(request: Request, item_id: str,
     await _restrict_web_playback(uid, request, query)
     sid = query.get("SessionId", query.get("sessionId", ""))
     if app.state.restrictions.client_config()["enabled"] and not sid:
-        sid = _bound_play_session(uid, query)
+        sid = _bound_play_session(uid, query, device)
     await _restrict_session_client(uid, device, sid, caller_session_profile(request.headers, query))
     if not reserve:
         return uid
+    play_id = query.get("PlaySessionId", query.get("playSessionId", ""))
     admission = await app.state.streams.inspect(
         uid, device_id=device, token=token,
         session_id=query.get("SessionId", query.get("sessionId", "")),
-        play_id=query.get("PlaySessionId", query.get("playSessionId", "")),
+        play_id=play_id,
         session_profile=caller_session_profile(request.headers, query))
     if not admission.allowed:
-        await _restrict_concurrency(uid, admission)
+        if admission.reason == "over-limit":
+            notice_url = _concurrency_notice_url()
+            notice_hls = _concurrency_notice_hls_dir()
+            eligible = _concurrency_notice_eligible()
+            if play_id and (notice_url or notice_hls) and eligible:
+                app.state.streams.mark_notice_play(uid, play_id, admission.session_id)
+            await _restrict_concurrency(uid, admission)
+            extra = ({"X-Mediadeck-Notice-Location": notice_url}
+                     if notice_url and eligible else {})
+        else:
+            extra = {}
         code = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(code, "playback admission refused", headers={
-            **headers, "X-Mediadeck-Decision": admission.reason})
+            **headers, "X-Mediadeck-Decision": admission.reason, **extra})
     return uid
 
 
@@ -1712,7 +1764,6 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
     except Exception:  # noqa: BLE001 - never return a partially checked URL
         raise HTTPException(503, "PlaybackInfo unavailable") from None
     if not admission.allowed:
-        await _restrict_concurrency(uid, admission)
         status = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(status, "playback admission refused", headers={
             "Cache-Control": "private, no-store", "X-Mediadeck-Decision": admission.reason})
@@ -1772,7 +1823,14 @@ async def whitelist_route_manifest(request: Request) -> Response:
         official = app.state.settings_service.integration_config()["emby_public_url"].rstrip("/")
         query = {k: v for k, v in query.items() if k.lower() != CAP_ARG}
         return RedirectResponse(official + path + "?" + urlencode(query), status_code=307, headers=NO_STORE)
-    await _admit_playback(request, claims["item"], query)
+    try:
+        await _admit_playback(request, claims["item"], query)
+    except HTTPException as exc:
+        if exc.status_code == 403 and (exc.headers or {}).get("X-Mediadeck-Decision") == "over-limit":
+            notice = _concurrency_notice_manifest(path, request.method)
+            if notice is not None:
+                return notice
+        raise
     try:
         code, text = await app.state.emby.playback_manifest(path, request.headers, query)
         if code != 200:
@@ -1828,6 +1886,13 @@ async def playback_admit(request: Request) -> Response:
     There is deliberately no admin credential or trusted UserId header here.
     """
     original = urlsplit(request.headers.get("x-original-uri", ""))
+    if re.fullmatch(r"/(?:emby/)?Items/([^/]+)/PlaybackInfo", original.path, re.IGNORECASE):
+        match = re.fullmatch(r"/(?:emby/)?Items/([^/]+)/PlaybackInfo", original.path, re.IGNORECASE)
+        assert match is not None
+        await _admit_playback(request, match[1], dict(parse_qsl(original.query)),
+                              reserve=False,
+                              original_uri=request.headers.get("x-original-uri", ""))
+        return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
     match = re.fullmatch(r"/(?:emby/)?(?:Items|Videos|Audio)/([^/]+)/.+",
                          original.path, re.IGNORECASE)
     if not match:
@@ -1835,6 +1900,35 @@ async def playback_admit(request: Request) -> Response:
     await _admit_playback(request, match[1], dict(parse_qsl(original.query)),
                           original_uri=request.headers.get("x-original-uri", ""))
     return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
+
+
+@app.api_route("/api/playback/manifest", methods=["GET", "HEAD"], include_in_schema=False)
+async def playback_manifest(request: Request) -> Response:
+    """HLS manifest admission with optional over-limit notice playlist fallback."""
+    original = request.headers.get("x-original-uri", "")
+    parsed = urlsplit(original)
+    match = re.fullmatch(r"/(?:emby/)?(?:Videos|Audio)/([^/]+)/.+\.m3u8",
+                         parsed.path, re.IGNORECASE)
+    if not match:
+        raise HTTPException(403, "unsupported manifest path")
+    query = dict(parse_qsl(parsed.query))
+    try:
+        await _admit_playback(request, match[1], query, original_uri=original)
+    except HTTPException as exc:
+        if exc.status_code == 403 and (exc.headers or {}).get("X-Mediadeck-Decision") == "over-limit":
+            notice = _concurrency_notice_manifest(parsed.path, request.method)
+            if notice is not None:
+                return notice
+        raise
+    try:
+        code, text = await app.state.emby.playback_manifest(parsed.path, request.headers, query)
+    except Exception:  # noqa: BLE001 - upstream failure must not expose credentials
+        raise HTTPException(503, "manifest unavailable") from None
+    if code != 200:
+        return Response(status_code=code, headers={"Cache-Control": "private, no-store"})
+    return Response(content=b"" if request.method == "HEAD" else text,
+                    media_type="application/vnd.apple.mpegurl",
+                    headers={"Cache-Control": "private, no-store"})
 
 
 
@@ -1881,6 +1975,8 @@ async def playback_activity(request: Request) -> Response:
         raise HTTPException(401, "playback authentication required")
     try:
         uid = await _playback_report_user(request, token, device)
+        if app.state.streams.is_notice_report(uid, device, payload):
+            return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
         event = "progress" if request.url.path.endswith("/progress") else "started"
         async def issue():
             return await app.state.emby.report_playback(event, dict(request.headers), query, payload)
@@ -1903,6 +1999,8 @@ async def playback_stopped(request: Request) -> Response:
     token = caller_token(request.headers, dict(request.query_params))
     device = caller_device(request.headers, dict(request.query_params))
     uid = await _playback_report_user(request, token, device)
+    if app.state.streams.is_notice_report(uid, device, payload):
+        return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
     try:
         code = await app.state.streams.report_stopped(uid, device, token, payload)
         if 200 <= code < 300:
@@ -1950,7 +2048,16 @@ async def emby_video_stream(item_id: str, rest: str, request: Request) -> Redire
 
     token = caller_token(request.headers, query)
     device = caller_device(request.headers, query)
-    await _admit_playback(request, item_id, query)
+    try:
+        await _admit_playback(request, item_id, query)
+    except HTTPException as exc:
+        notice_url = _concurrency_notice_url()
+        if (exc.status_code == 403
+                and (exc.headers or {}).get("X-Mediadeck-Decision") == "over-limit"
+                and notice_url and _concurrency_notice_eligible()):
+            return RedirectResponse(notice_url, status_code=302, headers={
+                **response_headers, "X-Mediadeck-Decision": "over-limit-notice"})
+        raise
 
     # Preserve the exact incoming path: the fallback URL must point back at the
     # same Emby endpoint the client actually asked for, not a normalised guess.

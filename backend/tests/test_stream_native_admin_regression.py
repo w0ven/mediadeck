@@ -21,8 +21,7 @@ def real_limit(stack):
     return members, emby, guard
 
 
-@pytest.mark.parametrize("entrance", ["inspect", "info"])
-def test_native_admin_exempts_only_over_limit_without_deck_role(stack, entrance):
+def test_native_admin_exempts_only_over_limit_without_deck_role(stack):
     members, emby, guard = real_limit(stack)
     assert "admin" not in members.get("u1")["roles"]
     emby._users["u1"]["Policy"]["IsAdministrator"] = True
@@ -30,12 +29,11 @@ def test_native_admin_exempts_only_over_limit_without_deck_role(stack, entrance)
     issue = AsyncMock(return_value=(200, {"PlaySessionId": "native-admin-play"}))
 
     async def check():
-        if entrance == "inspect":
-            result = await guard.inspect("u1", "b")
-        else:
-            result, code, data = await guard.issue_info("u1", "b", "", issue)
-            assert code == 200 and data["PlaySessionId"] == "native-admin-play"
-            issue.assert_awaited_once()
+        info_result, code, data = await guard.issue_info("u1", "b", "", issue)
+        assert code == 200 and data["PlaySessionId"] == "native-admin-play"
+        assert info_result.allowed and info_result.reason == "metadata-bound"
+        emby.list_users.assert_not_awaited()
+        result = await guard.inspect("u1", "b")
         assert result.allowed and result.reason == "admin-exempt" and not result.punishable
         assert result.session_id == "b" and result.live_count == 1
         emby.list_users.assert_awaited_once()
@@ -43,25 +41,18 @@ def test_native_admin_exempts_only_over_limit_without_deck_role(stack, entrance)
     asyncio.run(check())
 
 
-@pytest.mark.parametrize("entrance", ["inspect", "info"])
 @pytest.mark.parametrize("response", [RuntimeError("offline"), [], {},
                                        [{"Id": "u1"}],
                                        [{"Id": "u1", "Policy": {"IsAdministrator": "true"}}],
                                        [{"Id": "u1", "Policy": {"IsAdministrator": False}},
                                         {"Id": "u1", "Policy": {"IsAdministrator": True}}]])
-def test_unknown_native_admin_policy_preserves_denial_but_never_punishes(stack, entrance, response):
+def test_unknown_native_admin_policy_preserves_denial_but_never_punishes(stack, response):
     _, emby, guard = real_limit(stack)
     emby.list_users = AsyncMock(side_effect=response) if isinstance(response, Exception) else AsyncMock(return_value=response)
-    issue = AsyncMock(return_value=(200, {"PlaySessionId": "must-not-issue"}))
 
     async def check():
-        if entrance == "inspect":
-            result = await guard.inspect("u1", "b")
-        else:
-            result, code, data = await guard.issue_info("u1", "b", "", issue)
-            assert code == 403 and data == {}
+        result = await guard.inspect("u1", "b")
         assert not result.allowed and result.reason == "over-limit" and not result.punishable
-        issue.assert_not_awaited()
         emby.list_users.assert_awaited_once()
 
     asyncio.run(check())

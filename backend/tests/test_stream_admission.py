@@ -202,7 +202,6 @@ def client():
 
 
 @pytest.mark.parametrize("path", [
-    "/emby/Items/item42/PlaybackInfo", "/Items/item42/PlaybackInfo",
     "/emby/Videos/item42/stream.mkv?Static=true", "/videos/item42/original",
     "/Videos/item42/master.m3u8?MediaSourceId=edition", "/Videos/item42/hls1/main/0.ts",
 ])
@@ -211,6 +210,14 @@ def test_shared_admission_refuses_before_all_link_entrances(client, path):
         r = client.get("/api/playback/admit", headers={**headers(device), "X-Original-URI": path})
         assert r.status_code == (204 if device != "c" else 403)
         assert "location" not in r.headers
+
+
+@pytest.mark.parametrize("path", ["/emby/Items/item42/PlaybackInfo", "/Items/item42/PlaybackInfo"])
+def test_playbackinfo_admission_allows_browsing_without_taking_seats(client, path):
+    for device in "abc":
+        r = client.get("/api/playback/admit", headers={**headers(device), "X-Original-URI": path})
+        assert r.status_code == 204
+    assert app.state.db.query("SELECT * FROM stream_leases") == []
 
 
 def test_shared_and_direct_do_not_double_reserve(client):
@@ -236,12 +243,12 @@ def test_auth_permissions_and_failure_never_return_link(client):
 def test_stopped_report_releases_pending_only_on_success(client):
     for device in "ab":
         assert client.get("/api/playback/admit", headers={**headers(device),
-            "X-Original-URI": "/Items/item42/PlaybackInfo"}).status_code == 204
+            "X-Original-URI": "/Videos/item42/stream.mkv?Static=true"}).status_code == 204
     original = app.state.emby.report_stopped
     app.state.emby.report_stopped = AsyncMock(return_value=503)
     assert client.post("/api/playback/stopped", headers=headers(), json={}).status_code == 503
     url = "/api/playback/admit"
-    third = {**headers("c"), "X-Original-URI": "/Items/item42/PlaybackInfo"}
+    third = {**headers("c"), "X-Original-URI": "/Videos/item42/stream.mkv?Static=true"}
     assert client.get(url, headers=third).status_code == 403
     app.state.emby.report_stopped = original
     assert client.post("/api/playback/stopped", headers=headers(), json={}).status_code == 204
@@ -276,9 +283,10 @@ def test_hills_playbackinfo_without_session_id_resolves_duplicate_device(client)
         "X-Emby-Device-Id": "shared", "X-Emby-Device-Name": "PC-202309131322",
     }, json={})
     assert response.status_code == 200
-    lease = app.state.db.one("SELECT session_id,play_id FROM stream_leases")
-    assert lease["session_id"] == "hills-windows"
-    assert lease["play_id"] == response.json()["PlaySessionId"]
+    assert app.state.db.query("SELECT * FROM stream_leases") == []
+    bound = app.state.db.one("SELECT session_id,play_id FROM watch_playbacks")
+    assert bound["session_id"] == "hills-windows"
+    assert bound["play_id"] == response.json()["PlaySessionId"]
 
 
 def test_hills_direct_admission_uses_profile_from_original_query(client):
@@ -328,16 +336,19 @@ def test_live_metadata_keeps_caller_profile_and_stop_does_not_hide_session(monke
 
 
 def test_delayed_old_stopped_cannot_release_new_play_and_hls_without_device(client):
-    def info(device):
+    def start(device):
         r = client.post("/api/playback/info/item42", headers=headers(device), json={})
         assert r.status_code == 200
-        return r.json()["PlaySessionId"]
-    old = info("a")
-    current = info("a")
-    info("b")
+        play = r.json()["PlaySessionId"]
+        assert client.get("/api/playback/admit", headers={**headers(device),
+            "X-Original-URI": "/Videos/item42/master.m3u8?PlaySessionId=" + play}).status_code == 204
+        return play
+    old = start("a")
+    current = start("a")
+    start("b")
     assert client.post("/api/playback/stopped", headers=headers("a"),
                        json={"PlaySessionId": old}).status_code == 204
-    third = {**headers("c"), "X-Original-URI": "/Items/item42/PlaybackInfo"}
+    third = {**headers("c"), "X-Original-URI": "/Videos/item42/stream.mkv?Static=true"}
     assert client.get("/api/playback/admit", headers=third).status_code == 403
     assert client.get("/api/playback/admit", headers={"X-Emby-Token": "tok:u1",
         "X-Original-URI": "/Videos/item42/master.m3u8?PlaySessionId=" + current}).status_code == 204
@@ -434,21 +445,22 @@ http {{
                                  json={"IsPlayback": True})
                 assert info.status_code == 200
                 play_ids[device] = info.json()["PlaySessionId"]
+                for path in ("/Videos/item42/stream.mkv?Static=true&MediaSourceId=mobile",
+                             "/emby/videos/item42/original.mkv?MediaSourceId=mobile"):
+                    assert edge.get(path, headers=headers(device)).status_code == 302
+                assert edge.get("/Videos/item42/master.m3u8", headers=headers(device)).status_code == 200
                 for path in ("/emby/sessions/playing", "/Sessions/Playing/Progress"):
                     assert edge.post(path, headers=headers(device), json={
                         "ItemId": "item42", "PlaySessionId": play_ids[device]}).status_code == 204
                 assert app.state.db.one("SELECT observed FROM stream_leases WHERE session_id=?",
                                         (device,))["observed"] == 1
-                for path in ("/Videos/item42/stream.mkv?Static=true&MediaSourceId=mobile",
-                             "/emby/videos/item42/original.mkv?MediaSourceId=mobile"):
-                    assert edge.get(path, headers=headers(device)).status_code == 302
-                assert edge.get("/Videos/item42/master.m3u8", headers=headers(device)).status_code == 200
+            # Third device browsing detail page / preload PlaybackInfo is allowed without a seat.
+            assert edge.post("/Items/item42/PlaybackInfo", headers=headers("c"), json={}).status_code == 200
             before = len(calls)
-            for method, path in (("POST", "/Items/item42/PlaybackInfo"),
-                                 ("GET", "/Videos/item42/stream.mkv?Static=true&MediaSourceId=mobile"),
+            for method, path in (("GET", "/Videos/item42/stream.mkv?Static=true&MediaSourceId=mobile"),
                                  ("GET", "/Videos/item42/master.m3u8"),
                                  ("GET", "/Videos/item42/hls1/main/0.ts")):
-                result = edge.request(method, path, headers=headers("c"), json={})
+                result = edge.request(method, path, headers=headers("c"))
                 assert result.status_code == 403
                 assert "location" not in result.headers
             assert len(calls) == before  # no URL issuer was contacted for the third play
@@ -456,7 +468,7 @@ http {{
             assert edge.get("/cmcc-source/demo?cap=source-capability").status_code == 302
             assert edge.post("/Sessions/Playing/Stopped", headers=headers("a"),
                              json={"PlaySessionId": play_ids["a"]}).status_code == 204
-            assert edge.post("/Items/item42/PlaybackInfo", headers=headers("c"), json={}).status_code == 200
+            assert edge.get("/Videos/item42/master.m3u8", headers=headers("c")).status_code == 200
             app.state.emby.active_sessions_raw = AsyncMock(side_effect=RuntimeError("offline"))
             before = len(calls)
             assert edge.get("/Videos/item42/master.m3u8", headers=headers("b")).status_code == 500
