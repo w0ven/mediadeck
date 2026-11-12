@@ -1,10 +1,13 @@
-"""Signed-in devices as Emby sees them: one row per client install with a live login.
+"""Signed-in devices as Emby sees them: one entry per active (device name, player) pair.
 
 Emby keeps a device record while any token row exists—even IsActive=0 rows left
-behind by sign-out or password resets—and drops it when the device is deleted,
-which also signs that client out. When the local Emby auth database is configured,
-only IsActive=1 personal tokens count as signed in and fully inactive ghosts are
-pruned. The observational ``devices`` table (device groups) is unaffected.
+behind by sign-out or password resets—and players register a fresh ReportedDeviceId
+whenever a user adds a backup server line or reinstalls the app without signing out.
+When the local Emby auth database is configured, only IsActive=1 personal tokens count
+as signed in and fully inactive ghosts are pruned. Within one account, active records
+sharing the same non-generic device name and player app merge into a single logical
+device for display, cap counting, removal, and auto-logout. The observational
+``devices`` table (device groups) is unaffected.
 """
 from __future__ import annotations
 
@@ -14,6 +17,8 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from typing import Any
+
+from app.modules.device_groups import _NAME_WHITESPACE, _UNKNOWN_NAMES
 
 CACHE_SECONDS = 20.0
 WHITELIST_MAX_DEVICES = 10
@@ -68,23 +73,52 @@ def ago_text(ts: int | None, now: float | None = None) -> str:
 
 
 def shape(row: dict[str, Any], token_entry: dict[str, Any] | None = None) -> dict[str, Any]:
-    name = str(row.get('Name') or '').strip() or '未知设备'
+    raw_name = str(row.get('Name') or '').strip(_NAME_WHITESPACE)
+    name = raw_name or '未知设备'
     if token_entry is None:
-        app = str(row.get('AppName') or '').strip()
+        app = str(row.get('AppName') or '').strip(_NAME_WHITESPACE)
         version = str(row.get('AppVersion') or '').strip()
         last_active = _epoch(row.get('DateLastActivity'))
     elif str(row.get('LastUserId') or '') == str(token_entry.get('user_id') or ''):
-        app = str(row.get('AppName') or token_entry.get('app') or '').strip()
+        app = str(row.get('AppName') or token_entry.get('app') or '').strip(_NAME_WHITESPACE)
         version = str(row.get('AppVersion') or token_entry.get('version') or '').strip()
         stamps = [ts for ts in (_epoch(row.get('DateLastActivity')), token_entry.get('last_active'))
                   if ts is not None]
         last_active = max(stamps) if stamps else None
     else:
-        app = str(token_entry.get('app') or row.get('AppName') or '').strip()
+        app = str(token_entry.get('app') or row.get('AppName') or '').strip(_NAME_WHITESPACE)
         version = str(token_entry.get('version') or '').strip()
         last_active = token_entry.get('last_active')
     return {'id': str(row.get('Id') or ''), 'name': name, 'app': app,
             'version': version, 'last_active': last_active, 'kind': device_kind(name, app)}
+
+
+def _merge_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Collapse same-(name, app) installs for one user while keeping all underlying IDs."""
+    ordered = sorted((r for r in rows if r.get('id')),
+                     key=lambda r: (-(r['last_active'] or 0), r['id']))
+    groups: dict[tuple[str, ...], dict[str, Any]] = {}
+    for row in ordered:
+        did = str(row['id'])
+        clean_name = str(row.get('name') or '').strip(_NAME_WHITESPACE)
+        clean_app = str(row.get('app') or '').strip(_NAME_WHITESPACE)
+        if clean_name.lower() not in _UNKNOWN_NAMES and clean_app:
+            key: tuple[str, ...] = ('name_app', clean_name, clean_app)
+        else:
+            key = ('id', did)
+        group = groups.get(key)
+        if group is None:
+            groups[key] = dict(row, ids=[did])
+        else:
+            if did not in group['ids']:
+                group['ids'].append(did)
+            if not group.get('version') and row.get('version'):
+                group['version'] = row['version']
+    return list(groups.values())
+
+
+def _public_row(group: dict[str, Any]) -> dict[str, Any]:
+    return {k: v for k, v in group.items() if k != 'ids'}
 
 
 def device_cap(member: dict[str, Any] | None) -> int | None:
@@ -121,7 +155,7 @@ class MemberDevices:
                 self._at = time.monotonic()
             return self._snapshot_data
 
-    async def for_user(self, user_id: str, *, fresh: bool = False) -> list[dict[str, Any]]:
+    async def _grouped_for_user(self, user_id: str, *, fresh: bool = False) -> list[dict[str, Any]]:
         uid = str(user_id)
         rows, token_state = await self._snapshot(fresh)
         if token_state is None:
@@ -137,11 +171,14 @@ class MemberDevices:
                               if str(e.get('user_id') or '') == uid), None)
                 if entry is not None:
                     matched.append(shape(row, entry))
-        return sorted((r for r in matched if r['id']), key=lambda r: -(r['last_active'] or 0))
+        return _merge_rows(matched)
+
+    async def for_user(self, user_id: str, *, fresh: bool = False) -> list[dict[str, Any]]:
+        return [_public_row(g) for g in await self._grouped_for_user(user_id, fresh=fresh)]
 
     async def enforce(self, cap_for: Callable[[str], int | None], *, budget: int = 40,
                       now: float | None = None) -> list[dict[str, Any]]:
-        """Sign out each capped member's least recently used devices beyond the cap,
+        """Sign out each capped member's least recently used logical devices beyond the cap,
         and sweep fully inactive ghost device rows within the remaining budget.
 
         Emby administrators and system/API-key devices are never touched. At most
@@ -184,20 +221,29 @@ class MemberDevices:
         ops = 0
         for uid, user_rows in by_user.items():
             cap = cap_for(uid)
-            if cap is None or len(user_rows) <= cap:
+            if cap is None:
                 continue
-            user_rows.sort(key=lambda r: -(r['last_active'] or 0))
-            for row in user_rows[cap:]:
+            groups = _merge_rows(user_rows)
+            if len(groups) <= cap:
+                continue
+            for group in groups[cap:]:
                 if ops >= budget:
                     break
-                if row['id'] in deleted_ids or row['id'] in admin_devices:
+                target_ids = [did for did in group['ids']
+                              if did not in deleted_ids and did not in admin_devices]
+                if not target_ids:
                     continue
-                if row['last_active'] and moment - row['last_active'] < RECENT_GRACE_SECONDS:
+                if group['last_active'] and moment - group['last_active'] < RECENT_GRACE_SECONDS:
                     continue
-                await emby.delete_device(row['id'])
-                deleted_ids.add(row['id'])
-                ops += 1
-                removed.append(dict(row, user_id=uid, cap=cap))
+                if ops > 0 and ops + len(target_ids) > budget:
+                    break
+                if len(target_ids) > budget:
+                    target_ids = target_ids[:budget]
+                for did in target_ids:
+                    await emby.delete_device(did)
+                    deleted_ids.add(did)
+                    ops += 1
+                removed.append(dict(_public_row(group), user_id=uid, cap=cap))
 
         if token_state is not None and ops < budget:
             dead_ids = token_state.get('dead_device_ids') or set()
@@ -254,11 +300,15 @@ class MemberDevices:
         return pruned
 
     async def remove(self, user_id: str, device_id: str) -> dict[str, Any]:
-        """Sign one of this member's devices out; never touches another account's device."""
-        match = next((r for r in await self.for_user(user_id, fresh=True) if r['id'] == str(device_id)), None)
+        """Sign one of this member's logical devices out (all matching underlying IDs)."""
+        target = str(device_id)
+        groups = await self._grouped_for_user(user_id, fresh=True)
+        match = next((g for g in groups if target in g['ids']), None)
         if match is None:
             raise LookupError('设备不存在或已经移除')
-        await self._emby().delete_device(match['id'])
+        emby = self._emby()
+        for did in match['ids']:
+            await emby.delete_device(did)
         async with self._lock:
             self._snapshot_data = None
-        return match
+        return _public_row(match)

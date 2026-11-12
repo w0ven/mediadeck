@@ -241,3 +241,60 @@ def test_password_reset_invalidates_cache_and_prunes_user_dead_devices(tmp_path)
     assert asyncio.run(service.for_user(uid)) == []
     assert [d['Id'] for d in emby._devices] == ['other_d']
 
+
+def test_same_device_name_and_player_merges_for_display_cap_remove_and_auto_logout():
+    emby = MockEmby()
+    emby._devices = [
+        # Two active server lines on the same Mac + SenPlayer: should merge into 1 entry.
+        {'Id': 'mac_new', 'Name': 'Mac', 'AppName': 'SenPlayer', 'AppVersion': '6.2.3',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 3000)},
+        {'Id': 'mac_old', 'Name': ' Mac ', 'AppName': 'SenPlayer', 'AppVersion': '6.2.2',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 86400 * 6)},
+        # Different apps on iPhone stay separate.
+        {'Id': 'ip_libra', 'Name': 'iPhone', 'AppName': 'Libra', 'AppVersion': '1.0',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 7200)},
+        {'Id': 'ip_rex', 'Name': 'iPhone17', 'AppName': 'Rex', 'AppVersion': '1.1',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 86400)},
+        # Generic unknown names must never merge across distinct DeviceIds.
+        {'Id': 'unk1', 'Name': 'Unknown', 'AppName': 'SenPlayer', 'AppVersion': '6.2.3',
+         'LastUserId': 'm2', 'DateLastActivity': iso(NOW - 3600)},
+        {'Id': 'unk2', 'Name': '未知设备', 'AppName': 'SenPlayer', 'AppVersion': '6.2.3',
+         'LastUserId': 'm2', 'DateLastActivity': iso(NOW - 7200)},
+    ]
+    service = MemberDevices(lambda: emby)
+    m1_list = asyncio.run(service.for_user('m1'))
+    assert [(d['id'], d['name'], d['app'], d['version']) for d in m1_list] == [
+        ('mac_new', 'Mac', 'SenPlayer', '6.2.3'),
+        ('ip_libra', 'iPhone', 'Libra', '1.0'),
+        ('ip_rex', 'iPhone17', 'Rex', '1.1'),
+    ]
+    assert [d['id'] for d in asyncio.run(service.for_user('m2'))] == ['unk1', 'unk2']
+
+    # Cap of 3 logical devices is NOT exceeded for m1 despite 4 raw Emby IDs.
+    assert asyncio.run(service.enforce(lambda uid: 3 if uid == 'm1' else None, now=NOW)) == []
+    assert {'mac_new', 'mac_old', 'ip_libra', 'ip_rex'} <= {d['Id'] for d in emby._devices}
+
+    # Removing the merged Mac entry revokes BOTH underlying Emby device IDs at once.
+    removed_one = asyncio.run(service.remove('m1', 'mac_new'))
+    assert removed_one['name'] == 'Mac' and removed_one['app'] == 'SenPlayer'
+    assert {'mac_new', 'mac_old'}.isdisjoint({d['Id'] for d in emby._devices})
+    assert [d['id'] for d in asyncio.run(service.for_user('m1'))] == ['ip_libra', 'ip_rex']
+
+
+def test_enforce_signs_out_all_underlying_ids_of_evicted_merged_group():
+    emby = MockEmby()
+    emby._devices = [
+        {'Id': 'keep1', 'Name': 'iPhone', 'AppName': 'Libra', 'AppVersion': '1.0',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 3600)},
+        {'Id': 'old_line_a', 'Name': 'TV', 'AppName': 'Yamby', 'AppVersion': '2.1',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 86400 * 5)},
+        {'Id': 'old_line_b', 'Name': 'TV', 'AppName': 'Yamby', 'AppVersion': '2.1',
+         'LastUserId': 'm1', 'DateLastActivity': iso(NOW - 86400 * 10)},
+    ]
+    service = MemberDevices(lambda: emby)
+    evicted = asyncio.run(service.enforce(lambda uid: 1, now=NOW))
+    # One logical audit entry, both underlying IDs removed from Emby.
+    assert len(evicted) == 1 and evicted[0]['name'] == 'TV' and evicted[0]['app'] == 'Yamby'
+    assert [d['Id'] for d in emby._devices] == ['keep1']
+
+

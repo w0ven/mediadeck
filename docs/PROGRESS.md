@@ -2,6 +2,18 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-12 — merge same-(device name, player) active records per member
+
+- Players such as SenPlayer, Infuse, Forward and Rex generate a fresh `ReportedDeviceId` per added
+  server card (e.g. primary + backup line) or app reinstall without revoking the previous Emby
+  token, producing duplicate active rows for the same physical device and player.
+- `MemberDevices` now merges active entries sharing the same trimmed `(name, app)` within one
+  account (excluding empty or generic unknown device names) into a single logical device for display
+  and device-cap counting, while revoking all underlying `DeviceId` rows together on manual removal
+  or over-cap auto-logout.
+- Added unit tests in `test_device_caps.py` verifying merged listing, cap preservation for dual
+  lines, grouped manual removal, grouped over-cap eviction and non-merging of unknown labels.
+
 ## 2026-11-12 — filter and prune inactive Emby ghost device records
 
 - Emby's `GET /emby/Devices` keeps returning `Devices2` rows whose `Tokens_2` entries were marked
