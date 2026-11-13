@@ -2,6 +2,20 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-14 — preserve redeem-card and explicit expiry terms under activity levels
+
+- Legacy databases whose `standard` group retained `billing_mode="traffic"` had explicit
+  registration/edit `expires_at` values cleared to `None` inside `MemberService.upsert`, after
+  which `LevelService.enroll_new` overwrote the empty term with `now + 30d` (turning 999-day cards
+  into 30-day accounts and expanding <30-day trial/lottery credentials to 30 days).
+- Added `LevelService.effective_group` / `MemberService.effective_group` so non-whitelist groups
+  are treated consistently as timed (`billing_mode="time"`) across `MemberService.upsert`,
+  `member_ops.group_preview`, and Telegram group-change confirmation when activity levels are
+  enabled.
+- Updated `LevelService.enroll_new` to insert `activity_members` before projecting effective member
+  expiry and to preserve any positive future `expires_at_effective` (`> now`), falling back to
+  `now + 30d` only when no future term was set.
+
 ## 2026-11-13 — metadata-only PlaybackInfo binding and over-limit notice stream
 
 - Players with detail-page preloading (such as Rex and Hills) automatically call

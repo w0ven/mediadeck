@@ -176,17 +176,24 @@ class LevelService:
                           lifecycle=member.get('activity_lifecycle', 'ready'))
             return result
 
+    def effective_group(self, group):
+        if not group or not self.config()['config']['enabled'] or group.get('id') == WHITELIST_GROUP_ID:
+            return group
+        return dict(group, billing_mode='time', duration_days=int(group.get('duration_days') or 0) or 30)
+
     def enroll_new(self, uid, now, conn=None):
         if not self.config()['config']['enabled']:
             return
         with (nullcontext(conn) if conn is not None else economy_write(self.db)) as tx:
-            member = self.members.get(uid)
-            if (not member or member['status'] != 'active' or member['group_id'] == WHITELIST_GROUP_ID
+            row = tx.execute('SELECT status, group_id FROM members WHERE emby_user_id=?', (uid,)).fetchone()
+            if (not row or row['status'] != 'active' or row['group_id'] == WHITELIST_GROUP_ID
                     or tx.execute('SELECT 1 FROM activity_members WHERE emby_user_id=?', (uid,)).fetchone()):
                 return
             tx.execute('INSERT INTO activity_members(emby_user_id,enrolled_at) VALUES(?,?)', (uid, now))
-            expiry = max(now+30*DAY, int(member.get('expires_at_effective') or 0))
-            self.write_expiry(tx, uid, member, expiry, now)
+            member = self.members.get(uid)
+            current = int((member or {}).get('expires_at_effective') or 0)
+            expiry = current if current > now else now+30*DAY
+            self.write_expiry(tx, uid, member or {}, expiry, now)
 
     def grant_special(self, uid, actor):
         with economy_write(self.db) as conn:
