@@ -3813,7 +3813,9 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                  *[escape(w) for w in preview['warnings']],
                  "历史用量、积分及其他个人权限保留。"]
         buttons = [{'text':'确认 · 保留期限/取消计时','callback_data':f'admin_group_apply:keep:{nonce}'}]
-        if group['billing_mode'] in ('time','both'):
+        effective = (self._members.effective_group(group_id)
+                     if hasattr(self._members, 'effective_group') else group)
+        if (effective or group)['billing_mode'] in ('time','both'):
             buttons.append({'text':'确认 · 按组重算期限','callback_data':f'admin_group_apply:apply_group:{nonce}'})
         await self._show(chat_id, '\n'.join(lines), [[b] for b in buttons]+[[{'text':'取消','callback_data':'admin_card'}]])
         self._hold_admin_user(chat_id, target, actor)

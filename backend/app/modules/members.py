@@ -269,6 +269,14 @@ class MemberService:
     def bind_levels(self, levels: Any) -> None:
         self._levels = levels
 
+    def effective_group(self, group_id: str | None) -> dict[str, Any] | None:
+        if not group_id:
+            return None
+        group = self._groups.get(str(group_id))
+        if group and self._levels is not None:
+            group = self._levels.effective_group(group)
+        return group
+
     def bind_metering(self, metering: Any,
                       cutover: Any = None) -> None:
         """Optional measured ledger. cutover() -> bool; off by default."""
@@ -485,7 +493,7 @@ class MemberService:
             group_id = str(group_id) or None
         group = None
         if group_id:
-            group = self._groups.get(group_id)
+            group = self.effective_group(group_id)
             if not group:
                 raise ConfigError(f"用户组不存在: {group_id}")
 
@@ -541,7 +549,7 @@ class MemberService:
                 expires_at = None
                 overrides_after.pop('expires_at_override', None)
         elif group_changed and expiry_policy == 'keep' and not explicit_term:
-            old_group = self._groups.get(existing.get('group_id')) if existing.get('group_id') else None
+            old_group = self.effective_group(existing.get('group_id')) if existing.get('group_id') else None
             if old_group and not needs_duration(old_group['billing_mode']) and not card_owned:
                 # Preserve the actual unlimited term, not an inactive stale date.
                 expires_at = None

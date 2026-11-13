@@ -271,7 +271,9 @@ def group_preview(members: Any, user_id: str, group_id: str) -> dict[str, Any]:
     member = members.get(user_id)
     if not member:
         raise KeyError(user_id)
-    to_group = members._groups.get(group_id)
+    to_group = (members.effective_group(group_id)
+                if hasattr(members, "effective_group")
+                else members._groups.get(group_id))
     if not to_group:
         raise ConfigError(f"用户组不存在: {group_id}")
     from_group = member.get("group") or {}

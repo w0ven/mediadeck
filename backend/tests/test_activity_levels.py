@@ -373,3 +373,50 @@ async def test_live_deletion_adapter_absence_requires_explicit_option_and_local_
     assert not await adapter.delete_selfservice_user('missing', authorize=lambda:False, allow_absent=True)
     assert await adapter.delete_selfservice_user('missing', authorize=lambda:True, allow_absent=True)
     assert requests == ['GET']*3
+
+
+@pytest.mark.asyncio
+async def test_legacy_traffic_group_under_levels_preserves_redeem_and_explicit_terms(env):
+    from app.modules.member_ops import group_preview
+    from app.modules.registration import RegistrationService
+    from app.modules.telegram import TelegramBot
+
+    # Production databases migrated from older releases may still store
+    # billing_mode='traffic' on standard while activity levels govern timing.
+    env.db.execute("UPDATE groups SET billing_mode='traffic',duration_days=30 WHERE id='standard'")
+    cfg = {'enabled': True, 'bot_token': '123456:local-test', 'admin_chat_ids': ['900'],
+           'allow_redeem': True, 'default_group_id': 'standard', 'register_days': 30}
+    emby = MockEmby()
+    reg = RegistrationService(env.db, env.groups, lambda: cfg)
+    bot = TelegramBot(lambda: cfg, env.members, emby, registration=reg, db=env.db, groups=env.groups)
+    bot._call = AsyncMock(return_value={'message_id': 1})
+
+    long_card = reg.generate_redeem('standard', 999, 1)[0]
+    await bot._finish_registration(501, '501', 'long_tg', 'longuser', reg.resolve('501', long_card['code']))
+    long_member = env.members.find_by_telegram('501')
+    assert long_member['activity_managed'] is True
+    assert long_member['expires_at'] == NOW+999*DAY
+    assert long_member['expires_at_effective'] == NOW+999*DAY
+
+    short_card = reg.generate_redeem('standard', 15, 1)[0]
+    await bot._finish_registration(502, '502', 'short_tg', 'shortuser', reg.resolve('502', short_card['code']))
+    short_member = env.members.find_by_telegram('502')
+    assert short_member['activity_managed'] is True
+    assert short_member['expires_at_effective'] == NOW+15*DAY
+
+    default_member = env.members.upsert('default_new', 'DefaultNew', {'group_id': 'standard'})
+    assert default_member['expires_at_effective'] == NOW+30*DAY
+
+    edited = env.members.upsert(long_member['emby_user_id'], 'longuser', {'expires_at': NOW+180*DAY})
+    assert edited['expires_at_effective'] == NOW+180*DAY
+
+    white = env.members.upsert('white_u', 'WhiteUser', {'group_id': 'whitelist'})
+    assert white['expires_at_effective'] is None
+    preview = group_preview(env.members, 'white_u', 'standard')
+    assert preview['decision_required'] is True
+    assert preview['policies']['apply_group']['expires_at'] == NOW+30*DAY
+    await bot._preview_group_change(900, white, 'tg:admin', 'standard')
+    markup = bot._call.call_args.args[1]['reply_markup']['inline_keyboard']
+    callbacks = [btn['callback_data'] for row in markup for btn in row if 'callback_data' in btn]
+    assert any(c.startswith('admin_group_apply:apply_group:') for c in callbacks)
+
