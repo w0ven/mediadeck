@@ -343,13 +343,17 @@ class LiveEmby:
                     params={"Ids": item_id, "Limit": "1"},
                 )
         except httpx.HTTPError:
+            raise UpstreamError("Emby item access verification unavailable") from None
+        if r.status_code in (401, 403, 404):
             return False
+        if r.status_code >= 500:
+            raise UpstreamError(f"Emby item access verification HTTP {r.status_code}")
         if r.status_code != 200:
             return False
         try:
             data = r.json()
         except ValueError:
-            return False
+            raise UpstreamError("Emby item access verification returned invalid JSON") from None
         items = data.get("Items") if isinstance(data, dict) else None
         return isinstance(items, list) and any(
             isinstance(item, dict) and str(item.get("Id") or "") == str(item_id)
@@ -395,14 +399,18 @@ class LiveEmby:
             async with self._client(timeout, verify) as client:
                 s = await client.get(f"{base}/emby/Sessions",
                                      params={"api_key": token})
+                if s.status_code in (401, 403):
+                    return None
+                if s.status_code >= 500:
+                    raise UpstreamError(f"Emby session lookup HTTP {s.status_code}")
                 if s.status_code != 200:
                     return None
                 try:
                     sessions = s.json() or []
                 except ValueError:
-                    return None
+                    raise UpstreamError("Emby session lookup returned invalid JSON") from None
         except httpx.HTTPError:
-            return None
+            raise UpstreamError("Emby session lookup unavailable") from None
         if not isinstance(sessions, list):
             return None
 

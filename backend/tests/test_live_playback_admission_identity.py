@@ -132,3 +132,82 @@ def test_playback_admission_still_refuses_when_item_check_fails(client, monkeypa
         asyncio.run(main._admit_playback(request, "item42", {}, reserve=False))
     assert exc.value.status_code == 503
     assert app.state.db.query("SELECT * FROM stream_leases") == []
+
+
+@pytest.mark.parametrize("failure_mode", ["timeout", "connect_error", "http_502", "invalid_json"])
+def test_live_adapter_upstream_failures_raise_so_admission_returns_503_not_403(
+    client, monkeypatch, failure_mode,
+):
+    secret_token = "caller-secret-token-xyz"
+
+    def broken_upstream(request: httpx.Request) -> httpx.Response:
+        if failure_mode == "timeout":
+            raise httpx.ReadTimeout(f"timed out url={request.url}", request=request)
+        if failure_mode == "connect_error":
+            raise httpx.ConnectError("connection refused", request=request)
+        if failure_mode == "http_502":
+            return httpx.Response(502, text="Bad Gateway")
+        return httpx.Response(200, content=b"{truncated-json")
+
+    emby = adapter(monkeypatch, broken_upstream)
+    with pytest.raises(Exception) as item_exc:
+        asyncio.run(emby.verify_item_access("item42", secret_token))
+    assert secret_token not in str(item_exc.value)
+
+    with pytest.raises(Exception) as user_exc:
+        asyncio.run(emby.user_for_token(secret_token, "dev-a"))
+    assert secret_token not in str(user_exc.value)
+
+    monkeypatch.setattr(app.state.emby, "verify_item_access", emby.verify_item_access)
+    monkeypatch.setattr(app.state.emby, "user_for_token", emby.user_for_token)
+
+    r_info = client.post(
+        "/api/playback/info/item42",
+        headers={"X-Emby-Token": secret_token, "X-Emby-Device-Id": "dev-a"},
+    )
+    assert r_info.status_code == 503
+    assert secret_token not in r_info.text
+
+    r_admit = client.get(
+        "/api/playback/admit",
+        headers={
+            "X-Emby-Token": secret_token,
+            "X-Emby-Device-Id": "dev-a",
+            "X-Original-URI": "/Videos/item42/original.mp4",
+        },
+    )
+    assert r_admit.status_code == 503
+    assert secret_token not in r_admit.text
+
+    r_stop = client.post(
+        "/api/playback/stopped",
+        headers={"X-Emby-Token": secret_token, "X-Emby-Device-Id": "dev-a"},
+        json={"PlaySessionId": "ps1"},
+    )
+    assert r_stop.status_code == 503
+    assert secret_token not in r_stop.text
+
+
+@pytest.mark.parametrize("auth_status", [401, 403])
+def test_live_adapter_auth_denial_still_returns_403_in_admission_and_401_in_reports(
+    client, monkeypatch, auth_status,
+):
+    emby = adapter(monkeypatch, lambda request: httpx.Response(auth_status, text="Access denied"))
+    assert asyncio.run(emby.verify_item_access("item42", "bad-tok")) is False
+    assert asyncio.run(emby.user_for_token("bad-tok", "dev-a")) is None
+
+    monkeypatch.setattr(app.state.emby, "verify_item_access", emby.verify_item_access)
+    monkeypatch.setattr(app.state.emby, "user_for_token", emby.user_for_token)
+
+    r_info = client.post(
+        "/api/playback/info/item42",
+        headers={"X-Emby-Token": "bad-tok", "X-Emby-Device-Id": "dev-a"},
+    )
+    assert r_info.status_code == 403
+
+    r_stop = client.post(
+        "/api/playback/stopped",
+        headers={"X-Emby-Token": "bad-tok", "X-Emby-Device-Id": "dev-a"},
+        json={"PlaySessionId": "ps1"},
+    )
+    assert r_stop.status_code == 401

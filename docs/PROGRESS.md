@@ -2,6 +2,21 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-14 — return 503 on upstream Emby timeouts and 5xx during playback admission
+
+- `LiveEmby.verify_token`, `LiveEmby.verify_session_token`, and `LiveEmby.verify_item_access`
+  previously caught `httpx.TimeoutException` and `httpx.RequestError` (or treated `>= 500`
+  responses as non-200) and returned `None`/`False`, causing `/api/playback/admit`,
+  `/api/playback/info`, and `/api/playback/manifest` to emit `401`/`403` during Emby SQLite queue
+  stalls instead of signaling transient upstream unavailability.
+- Updated `LiveEmby` verification helpers to raise `UpstreamError` with scrubbed static messages on
+  transport timeouts, request errors, invalid JSON, and `>= 500` responses so FastAPI's global
+  `UpstreamError` handler returns `503`, while preserving fail-closed `401`/`403` for invalid
+  credentials, missing item access, and `4xx` responses.
+- Wrapped `emby.verify_token` inside `_resolve_playback_auth` so fallback token verification errors
+  surface as `503` rather than uncaught `500`, and aligned `deploy/gateway/gateway.py` `PlaybackInfo`
+  verification to map `401 -> 401`, `403/404 -> 403`, and upstream timeouts/`5xx` to `503`.
+
 ## 2026-11-14 — preserve redeem-card and explicit expiry terms under activity levels
 
 - Legacy databases whose `standard` group retained `billing_mode="traffic"` had explicit
