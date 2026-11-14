@@ -155,8 +155,12 @@ class Handler(BaseHTTPRequestHandler):
   # edition association with the caller's credential before resolving a URL.
   url='http://127.0.0.1:8096/emby/Items/'+urllib.parse.quote(item,safe='')+'/PlaybackInfo'
   try:
-   with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=90) as r:data=json.load(r)
-  except urllib.error.HTTPError as e:return self.send(403 if e.code==403 else 401,b'Access denied')
+   with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=15) as r:data=json.load(r)
+  except urllib.error.HTTPError as e:
+   if e.code==401:return self.send(401,b'Access denied')
+   if e.code in (403,404):return self.send(403,b'Access denied')
+   return self.send(503,b'Playback verification unavailable')
+  except Exception:return self.send(503,b'Playback verification unavailable')
   if not any(str(x.get('Id'))==sid for x in data.get('MediaSources',[])):return self.send(403,b'Edition unavailable')
   return self.resolve(source)
  def deck_request(self,c,path,admission=False):
@@ -216,8 +220,11 @@ class Handler(BaseHTTPRequestHandler):
   # never substitute admin credentials or rely on an outer nginx subrequest.
   url='http://127.0.0.1:8096/emby/Items/'+m[1]+'/PlaybackInfo'
   try:
-   with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=12) as r:data=json.load(r)
-  except urllib.error.HTTPError as e:self.send(403 if e.code==403 else 401,b'Access denied');return True
+   with urllib.request.urlopen(urllib.request.Request(url,headers={'X-Emby-Token':token}),timeout=15) as r:data=json.load(r)
+  except urllib.error.HTTPError as e:
+   if e.code==401:self.send(401,b'Access denied');return True
+   if e.code in (403,404):self.send(403,b'Access denied');return True
+   self.send(503,b'Project playback verification unavailable');return True
   except Exception:self.send(503,b'Project playback verification unavailable');return True
   if not duanju_static_source(row,sid,data):self.send(403,b'Project File edition unavailable');return True
   c=http.client.HTTPConnection('127.0.0.1',8096,timeout=30)

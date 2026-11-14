@@ -67,7 +67,7 @@ def chain(client, tmp_path, monkeypatch):
     gateway.DUANJU_LOCAL_REGISTRY = local_reg
     gateway.DUANJU_EMBY_ROOT = "/virtual"
     gateway.DUANJU_STORAGE_ROOT = storage
-    state = SimpleNamespace(deck=[], emby=[], cloud=[], override=None, gateway=gateway,
+    state = SimpleNamespace(deck=[], emby=[], cloud=[], override=None, emby_status=200, gateway=gateway,
                             sources=[{"Id": "mobile"}, {"Id": "local", "Protocol": "File", "Path": local_path}],
                             cap=hashlib.sha256(source_url.encode()).hexdigest())
     servers, processes = [], []
@@ -116,8 +116,11 @@ def chain(client, tmp_path, monkeypatch):
         def do_GET(self):
             state.emby.append((self.command, self.path, dict(self.headers)))
             if self.path.endswith("/PlaybackInfo"):
-                self.send_response(200)
-                body = json.dumps({"MediaSources": state.sources}).encode()
+                if state.emby_status == "timeout":
+                    raise TimeoutError("emby playbackinfo timed out")
+                self.send_response(int(state.emby_status))
+                body = (json.dumps({"MediaSources": state.sources}).encode()
+                        if state.emby_status == 200 else b"error")
             else:
                 self.send_response(206 if self.headers.get("Range") else 200)
                 body = b"synthetic bytes"
@@ -319,6 +322,34 @@ def test_exact_source_check_still_runs_after_admission(chain, branch):
     assert result.status_code == 403 and not chain.cloud
     assert len(chain.emby) == 1 and chain.emby[0][1].endswith("/PlaybackInfo")
     assert app.state.streams.inspect.await_count == 1
+
+
+@pytest.mark.parametrize("branch", ["cmcc", "local"])
+@pytest.mark.parametrize("emby_status,expected", [
+    (500, 503),
+    (503, 503),
+    (404, 403),
+    (403, 403),
+    (401, 401),
+])
+def test_gateway_playbackinfo_upstream_5xx_returns_503_not_401(chain, branch, emby_status, expected):
+    chain.emby_status = emby_status
+    result = chain.net.get(chain.gateway_url + PATHS[branch], headers=headers())
+    assert result.status_code == expected and not chain.cloud
+
+
+@pytest.mark.parametrize("branch", ["cmcc", "local"])
+def test_gateway_playbackinfo_timeout_returns_503(chain, monkeypatch, branch):
+    monkeypatch.setattr(chain.gateway, "urllib", SimpleNamespace(
+        parse=chain.gateway.urllib.parse,
+        error=chain.gateway.urllib.error,
+        request=SimpleNamespace(
+            Request=chain.gateway.urllib.request.Request,
+            urlopen=lambda req, timeout=15: (_ for _ in ()).throw(TimeoutError("timed out")),
+        ),
+    ))
+    result = chain.net.get(chain.gateway_url + PATHS[branch], headers=headers())
+    assert result.status_code == 503 and not chain.cloud
 
 
 def test_nonstatic_and_unknown_routes_forward_without_gateway_admission(chain):

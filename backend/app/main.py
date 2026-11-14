@@ -1998,13 +1998,17 @@ async def playback_stopped(request: Request) -> Response:
     payload = await _playback_report_payload(request)
     token = caller_token(request.headers, dict(request.query_params))
     device = caller_device(request.headers, dict(request.query_params))
-    uid = await _playback_report_user(request, token, device)
-    if app.state.streams.is_notice_report(uid, device, payload):
-        return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
+    if not token:
+        raise HTTPException(401, "playback authentication required")
     try:
+        uid = await _playback_report_user(request, token, device)
+        if app.state.streams.is_notice_report(uid, device, payload):
+            return Response(status_code=204, headers={"Cache-Control": "private, no-store"})
         code = await app.state.streams.report_stopped(uid, device, token, payload)
         if 200 <= code < 300:
             await app.state.usage.playback_report(uid, device, payload, stopped=True)
+    except HTTPException:
+        raise
     except Exception:  # noqa: BLE001 - do not release a lease on uncertain delivery
         raise HTTPException(503, "playback report unavailable") from None
     return Response(status_code=code, headers={"Cache-Control": "private, no-store"})
