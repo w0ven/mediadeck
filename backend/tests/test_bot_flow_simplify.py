@@ -44,11 +44,11 @@ def callbacks(rows):
 def test_six_home_entries_role_boundary_and_compact_secondary_menus(bot, roles):
     bot.members.set_roles('u1', roles)
     _, rows = bot._home('900', 'Demo')
-    assert callbacks(rows[:3]) == {'me', 'me_nodes', 'request_center', 'bag', 'rank', 'help'}
+    assert callbacks(rows[:3]) == {'me', 'me_nodes', 'library_stats', 'rank', 'request_center', 'bag'}
     assert all(len(r) == 2 for r in rows[:3])
     assert len(rows) == (4 if 'admin' in roles else 3)
     assert 'request_uploader' not in callbacks(rows)
-    assert callbacks(bot.info_menu()) == {'devices', 'resetpw', 'delete_account', 'rebind', 'me', 'home'}
+    assert callbacks(bot.info_menu()) == {'devices', 'resetpw', 'delete_account', 'rebind', 'help', 'me', 'home'}
     assert len(bot.info_menu()) == 4
     assert len(bot.bag_menu()) <= 3
     assert callbacks(bot.help_menu()) == {'rules', 'home'}

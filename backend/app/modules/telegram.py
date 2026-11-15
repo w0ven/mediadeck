@@ -35,6 +35,7 @@ import unicodedata
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from html import escape
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -1092,6 +1093,47 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return await self._edit(chat_id, mid, text, keyboard)
         return await self.send(chat_id, text, keyboard)
 
+    async def _send_logo_photo(self, chat_id: Any, logo: str, body: str,
+                               keyboard: list[list[dict[str, str]]] | None) -> dict[str, Any] | None:
+        payload = {
+            "chat_id": chat_id,
+            "photo": logo,
+            "caption": body,
+            "parse_mode": "HTML",
+            "reply_markup": {"inline_keyboard": keyboard or []},
+        }
+        result = await self._call("sendPhoto", payload)
+        if isinstance(result, dict) and result.get("message_id"):
+            return result
+        # Telegram sendPhoto URL fetch rejects .webp URLs; try .png sibling or local brand file.
+        if logo.lower().endswith(".webp"):
+            png_url = logo[:-5] + ".png"
+            result = await self._call("sendPhoto", {**payload, "photo": png_url})
+            if isinstance(result, dict) and result.get("message_id"):
+                return result
+        local_name = logo.rsplit("/", 1)[-1]
+        if local_name.lower().endswith(".webp"):
+            local_name = local_name[:-5] + ".png"
+        local_path = (
+            Path(__file__).resolve().parent.parent / "static" / "miniapp" / "brand" / local_name
+        )
+        if local_path.is_file():
+            with contextlib.suppress(Exception):
+                raw = local_path.read_bytes()
+                result = await self._call_multipart(
+                    "sendPhoto",
+                    {
+                        "chat_id": str(chat_id),
+                        "caption": body,
+                        "parse_mode": "HTML",
+                        "reply_markup": {"inline_keyboard": keyboard or []},
+                    },
+                    {"photo": (local_name, raw, "image/png")},
+                )
+                if isinstance(result, dict) and result.get("message_id"):
+                    return result
+        return None
+
     async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str) -> None:
         body, keyboard = self._home(tg_id, tg_name)
         if self._gift_receipts and not _GROUP.get():
@@ -1102,9 +1144,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return
         if logo and not _GROUP.get() and len(body) <= 900:
             old = self._panel.get(self._pkey(chat_id))
-            result = await self._call('sendPhoto', {'chat_id': chat_id, 'photo': logo,
-                'caption': body, 'parse_mode': 'HTML',
-                'reply_markup': {'inline_keyboard': keyboard}})
+            result = await self._send_logo_photo(chat_id, logo, body, keyboard)
             if isinstance(result, dict) and result.get('message_id'):
                 mid = int(result['message_id'])
                 self._photo_panels.add((str(chat_id), mid))
@@ -1183,24 +1223,19 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return False
 
     def member_menu(self) -> list[list[dict[str, str]]]:
-        extra = [{"text": "🏆 排行榜", "callback_data": "rank"}]
-        if self._plugin_on('points_ranking'):
-            extra.append({'text': '💰 积分榜', 'callback_data': 'points_board'})
-        if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice') or self._plugin_on('pk'):
-            extra.append({'text': '🎲 游戏玩法', 'callback_data': 'play_hub'})
-        extra.append({"text": "💡 帮助", "callback_data": "help"})
         return [
-            [{"text": "👤 我的账号", "callback_data": "me"},
-             {"text": "🌐 播放线路", "callback_data": "me_nodes"}],
+            [{"text": "👤 个人信息", "callback_data": "me"},
+             {"text": "📡 服务器线路", "callback_data": "me_nodes"}],
+            [{"text": "📊 媒体库统计", "callback_data": "library_stats"},
+             {"text": "🏆 观影/积分榜", "callback_data": "rank"}],
             [{"text": "🎬 求片中心", "callback_data": "request_center"},
-             {"text": "🎒 背包", "callback_data": "bag"}],
-            *(extra[i:i + 2] for i in range(0, len(extra), 2)),
+             {"text": "🎒 背包与商城", "callback_data": "bag"}],
         ]
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
                         member: dict[str, Any] | None) -> list[list[dict[str, str]]]:
         if self.is_admin(member):
-            rows.append([{"text": "🛠 管理", "callback_data": "admin"}])
+            rows.append([{"text": "🛠 管理员控制台", "callback_data": "admin"}])
         return rows
 
     def info_menu(self) -> list[list[dict[str, str]]]:
@@ -1219,7 +1254,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             [{"text": "📺 我的设备", "callback_data": "devices"},
              {"text": "🔑 修改密码", "callback_data": "resetpw"},
              {"text": "🔗 换绑 TG", "callback_data": "rebind"}],
-            [{"text": "🗑 删除账号", "callback_data": "delete_account"}],
+            [{"text": "💡 使用帮助", "callback_data": "help"},
+             {"text": "🗑 删除账号", "callback_data": "delete_account"}],
             [{"text": "◀ 返回首页", "callback_data": "home"}],
         ]
 
@@ -1311,12 +1347,15 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 {"text": "📜 积分流水", "callback_data": "me_points"}]
         if self._plugin_on("points_transfer"):
             more.append({"text": "💸 积分转账", "callback_data": "transfer"})
+        bottom = [{"text": "◀ 返回首页", "callback_data": "home"}]
+        if self._plugin_on('blackwhite') or self._plugin_on('niuniu') or self._plugin_on('dice') or self._plugin_on('pk'):
+            bottom.insert(0, {"text": "🎲 游戏玩法", "callback_data": "play_hub"})
         return [
             [{"text": "🛍️ 积分商城", "callback_data": "shop"},
              {"text": "📦 我的道具", "callback_data": "inventory"},
              {"text": "🏷️ 我的称号", "callback_data": "titles"}],
             more,
-            [{"text": "◀ 返回首页", "callback_data": "home"}],
+            bottom,
         ]
 
     @staticmethod
@@ -1415,7 +1454,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         miniapp = str(self._cfg().get("miniapp_url") or "").strip()
         if miniapp and not _GROUP.get():
             # Telegram rejects web_app buttons outside private chats.
-            menu.insert(0, [{"text": "📱 会员面板", "web_app": {"url": miniapp}}])
+            menu.insert(0, [{"text": "📱 打开会员面板（Mini App）", "web_app": {"url": miniapp}}])
         return "\n".join(lines), self._with_admin_row(menu, member)
 
     def _guest_home(self, tg_name: str) -> str:
@@ -3713,7 +3752,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         hours = self._rank_hours(hours)
         rows = []
         if not _GROUP.get():
-            rows.append([{"text": "💰 积分榜", "callback_data": "points_rank"}])
+            top = [{"text": "💰 积分榜", "callback_data": "points_board" if self._plugin_on("points_ranking") else "points_rank"}]
+            rows.append(top)
             rows += BACK_HOME
         return rows
 

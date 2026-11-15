@@ -270,11 +270,11 @@ def test_guest_and_member_see_different_menus() -> None:
     assert "register" not in member_actions
     # The member menu is two levels: the top offers identity and backpack, and
     # the per-account views hang off 「我的信息」 rather than crowding the root.
-    assert {"me", "bag", "rank", "request_center", "me_nodes", "help"} == member_actions
+    assert {"me", "bag", "rank", "request_center", "me_nodes", "library_stats"} == member_actions
     assert "admin" not in member_actions
     assert "home" not in member_actions
     info_actions = {b["callback_data"] for row in bot.info_menu() for b in row}
-    assert {"devices", "rebind", "resetpw", "delete_account", "me", "home"} == info_actions
+    assert {"devices", "rebind", "resetpw", "delete_account", "help", "me", "home"} == info_actions
     assert "me_nodes" not in info_actions
 
     assert "没有账号" in guest_body
@@ -978,11 +978,11 @@ def test_the_main_menu_is_two_levels_not_one_long_list() -> None:
     rows = bot.member_menu()
 
     assert _actions(rows) == {"me", "me_nodes", "bag", "request_center", "rank",
-                              "help"}
+                              "library_stats"}
     # Two buttons per row keeps the keyboard readable on a phone.
     assert all(len(row) <= 2 for row in rows)
     assert _actions(bot.info_menu()) == {
-        "devices", "resetpw", "delete_account", "home", "rebind", "me"}
+        "devices", "resetpw", "delete_account", "home", "rebind", "help", "me"}
     assert _actions(bot.bag_menu()) == {"invites", "shop", "me_points", "home", "transfer", "inventory", "titles"}
 
 

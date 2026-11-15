@@ -278,7 +278,7 @@ def test_bot_home_offers_mini_app_only_in_private():
         app.state.members.upsert('u9', 'emby-nine', {'group_id': 'standard'})
         app.state.db.execute("UPDATE members SET tg_user_id='555' WHERE emby_user_id='u9'")
         _, keyboard = app.state.telegram._home('555', 'Nine')
-        assert keyboard[0] == [{'text': '📱 会员面板', 'web_app': {'url': 'https://app.example.test/app'}}]
+        assert keyboard[0] == [{'text': '📱 打开会员面板（Mini App）', 'web_app': {'url': 'https://app.example.test/app'}}]
         token = _GROUP.set(True)
         try:
             _, keyboard = app.state.telegram._home('555', 'Nine')
