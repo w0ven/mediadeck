@@ -40,6 +40,15 @@ class MockEmby:
             "id": "mock-server",
         }
 
+    async def item_counts(self) -> dict[str, int]:
+        return {
+            "movies": 120,
+            "series": 340,
+            "episodes": 4200,
+            "albums": 0,
+            "songs": 0,
+        }
+
     async def list_users(self) -> list[dict[str, Any]]:
         return list(self._users.values())
 

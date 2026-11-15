@@ -141,6 +141,20 @@ class LiveEmby:
             "id": info.get("Id"),
         }
 
+    async def item_counts(self) -> dict[str, int]:
+        base, headers, timeout, verify = self._conn()
+        async with self._client(timeout, verify) as client:
+            r = self._check(await client.get(f"{base}/emby/Items/Counts", headers=headers))
+            r.raise_for_status()
+            data = r.json() if isinstance(r.json(), dict) else {}
+        return {
+            "movies": int(data.get("MovieCount") or 0),
+            "series": int(data.get("SeriesCount") or 0),
+            "episodes": int(data.get("EpisodeCount") or 0),
+            "albums": int(data.get("AlbumCount") or 0),
+            "songs": int(data.get("SongCount") or 0),
+        }
+
     # -- users ---------------------------------------------------------------
     async def list_users(self) -> list[dict[str, Any]]:
         base, headers, timeout, verify = self._conn()

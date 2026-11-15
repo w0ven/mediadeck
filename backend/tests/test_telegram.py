@@ -1257,7 +1257,7 @@ def test_the_line_view_reports_each_node_and_its_load() -> None:
 def test_line_page_does_not_keep_account_card_buttons() -> None:
     bot = _bot()
     actions = _actions(bot.nodes_menu())
-    assert actions == {"me_nodes", "me_proxy", "home"}
+    assert actions == {"me_nodes", "me_proxy", "library_stats", "home"}
     assert "resetpw" not in actions and "me_status" not in actions
     assert "devices" not in actions
 
@@ -1363,7 +1363,7 @@ def test_pasting_a_code_is_enough_without_tapping_register() -> None:
 def test_an_ordinary_hello_still_opens_the_guest_home() -> None:
     bot = _bot()
     asyncio.run(bot._handle_message(_tg_message("你好")))
-    assert any("MediaDeck" in m for m in bot.sent)  # type: ignore[attr-defined]
+    assert any("开放注册" in m and "mediadeck" not in m.lower() for m in bot.sent)  # type: ignore[attr-defined]
     assert "1" not in bot._pending
 
 
