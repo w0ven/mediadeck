@@ -420,3 +420,46 @@ async def test_legacy_traffic_group_under_levels_preserves_redeem_and_explicit_t
     callbacks = [btn['callback_data'] for row in markup for btn in row if 'callback_data' in btn]
     assert any(c.startswith('admin_group_apply:apply_group:') for c in callbacks)
 
+
+@pytest.mark.asyncio
+async def test_timed_whitelist_card_keeps_level_renewal_and_admin_effect_sync_settles(env):
+    from app.modules.economy_rules import DEFAULT_WHITELIST_CARD
+    env.points.add('u', 20000, 'admin.adjust')
+    env.members.upsert('u', '', {'expires_at': NOW + 2 * DAY})
+    trial_item = env.shop.create(dict(DEFAULT_WHITELIST_CARD, duration_days=3, cost=100, enabled=True))
+    trial_cid = env.shop.redeem('u', trial_item['id'])['card_id']
+    env.bag.use('u', trial_cid, now=NOW)
+
+    member = env.members.get('u')
+    assert member['group_id'] == 'whitelist'
+    assert member['activity_exempt'] is False
+    assert member['expires_at_effective'] == NOW + 2 * DAY
+    info = env.levels.status('u', NOW)
+    assert info['exempt'] is False and info['window_open'] is True
+
+    renewed = env.levels.renew('u', 'trial-renew-1', now=NOW)
+    assert renewed['expires_at'] == NOW + 32 * DAY
+
+    perm_item = env.shop.create(dict(DEFAULT_WHITELIST_CARD, duration_days=0, cost=200, enabled=True))
+    perm_cid = env.shop.redeem('u', perm_item['id'])['card_id']
+    env.bag.use('u', perm_cid, now=NOW)
+    perm_member = env.members.get('u')
+    assert perm_member['activity_exempt'] is True and perm_member['expires_at_effective'] is None
+
+    env.members.upsert('emby_adm', 'EmbyAdm', {'group_id': 'whitelist'})
+    calls = []
+
+    async def fake_cb(uid, prev_bw):
+        calls.append((uid, prev_bw))
+        if uid == 'emby_adm':
+            return {'ok': True, 'skipped': 'administrator', 'remote_ok': None}
+        return {'ok': True, 'remote_ok': True}
+
+    await env.levels.sync_effects(fake_cb)
+    row = env.db.one("SELECT * FROM activity_effect_sync WHERE user_id='emby_adm'")
+    assert row['fingerprint'] and row['retry_at'] == 0 and row['error'] == ''
+    calls.clear()
+    await env.levels.sync_effects(fake_cb)
+    assert not any(uid == 'emby_adm' for uid, _ in calls)
+
+

@@ -83,15 +83,34 @@ class InventoryService:
         await reconcile(self.db, sync_effects)
         now = int(time.time())
         due = self.db.query(
-            "SELECT * FROM inventory WHERE used_at IS NOT NULL AND expires_at<=? "
+            "SELECT * FROM inventory WHERE used_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=? "
             "AND expiry_synced_at IS NULL AND expiry_retry_at<=? ORDER BY id LIMIT 100",
             (now, now),
         )
         by_user = {}
+        settled_whitelist = []
         for row in due:
             spec = json.loads(row["spec_json"])
             if spec["kind"] in ("bandwidth_card", "streams_card"):
                 by_user.setdefault(row["emby_user_id"], []).append(row)
+            elif spec["kind"] == "whitelist_card":
+                grant = self.db.one(
+                    "SELECT status,expires_at,synced_at,card_id FROM whitelist_card_grants WHERE emby_user_id=?",
+                    (row["emby_user_id"],),
+                )
+                if (not grant or grant["status"] == "protected"
+                        or (grant["status"] == "restored" and grant["synced_at"] is not None)
+                        or (grant["status"] == "active" and grant["card_id"] != row["id"]
+                            and (grant["expires_at"] is None or grant["expires_at"] > now))):
+                    settled_whitelist.append(row["id"])
+        if settled_whitelist:
+            with economy_write(self.db) as conn:
+                for cid in settled_whitelist:
+                    conn.execute(
+                        "UPDATE inventory SET expiry_synced_at=?,expiry_retry_at=0,expiry_error='' "
+                        "WHERE id=? AND expiry_synced_at IS NULL",
+                        (now, cid),
+                    )
         for user, cards in by_user.items():
             try:
                 result = await sync_effects(
@@ -192,7 +211,7 @@ class InventoryService:
                 result["granted"] = "+1 个邀请名额"
             elif kind == 'whitelist_card':
                 expires = activate(conn, self.db, self.members, user, int(card_id), spec['duration_days'], now)
-                result.update(expires_at=expires, granted='白名单资格已生效' + ('（永久组资格，基础账号有效期不变）' if expires is None else '（到期恢复原组，基础有效期不变）'))
+                result.update(expires_at=expires, granted='白名单资格已生效' + ('（永久有效）' if expires is None else '（到期恢复原组，基础有效期不变）'))
             elif kind == "title_card":
                 tag = validate_title(title)
                 cur = conn.execute(
@@ -208,7 +227,7 @@ class InventoryService:
                     now,
                     expires,
                     encode(result),
-                    now if kind not in ("bandwidth_card", "streams_card", "whitelist_card") else None,
+                    now if expires is None or kind not in ("bandwidth_card", "streams_card", "whitelist_card") else None,
                     int(card_id),
                 ),
             )

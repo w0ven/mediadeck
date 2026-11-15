@@ -110,7 +110,7 @@
         ? up.map((n) => `<span>${statusTag(n.status)} ${esc(n.label)} <span class="muted">${esc(n.username || '')}</span></span>`).join('<span class="muted"> → </span>') + '<span class="muted"> → </span><b>本账号</b>'
         : '<span class="muted">没有邀请人（管理员开通、卡密或旧账号）</span>'}</div>
       <h4 class="hg-section-title">邀请资格</h4>
-      <div>${pause
+      <div data-invite-eligibility>${pause
         ? `<span class="tag warn">暂停至 ${esc(stamp(pause.until))}</span> <button class="btn sm" type="button" id="invite-lift">解除暂停</button>`
         : '<span class="tag ok">正常</span>'}</div>
       <h4 class="hg-section-title">TA 邀请的人 · 名下共 ${esc(data.descendants || 0)} 人</h4>

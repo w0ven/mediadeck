@@ -120,4 +120,4 @@ def test_case_card_suspends_inviter_and_drawer_tab_shows_tree(page):
     assert "demo-user-2" in text and "已删除" in text and "暂停至" in text
     tree.get_by_role("button", name="解除暂停").click()
     dialog(page).get_by_role("button", name="解除暂停").click()
-    tree.locator(".tag.ok", has_text="正常").wait_for()
+    tree.locator("[data-invite-eligibility] .tag.ok", has_text="正常").wait_for()

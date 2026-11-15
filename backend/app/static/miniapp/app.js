@@ -436,7 +436,7 @@
       : '今日暂无奖励';
     const renew = me.renewal;
     let renewCard = '';
-    if (!me.whitelist && renew.available) {
+    if (renew.available) {
       const when = renew.window_open ? '现在可以续期' : (renew.opens_at ? `${stamp(renew.opens_at)} 起可续` : '');
       renewCard = `<div class="card">
         <div class="row"><div class="grow"><b>续期</b><div class="tiny muted"><div>到期 ${stamp(me.expires_at)}</div>${when ? `<div>${when}</div>` : ''}</div></div>
@@ -460,7 +460,7 @@
             <div style="font-weight:800;font-size:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
             <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin-top:4px">
               ${lvTag(tag, true, true)}
-              <span class="tiny nowrap" style="opacity:.85"><span class="status-dot ${statusCls}"></span>${esc(status)} · ${me.whitelist ? '永久有效' : esc(left(me.expires_at))}</span>
+              <span class="tiny nowrap" style="opacity:.85"><span class="status-dot ${statusCls}"></span>${esc(status)} · ${me.whitelist && !me.expires_at ? '永久有效' : esc(left(me.expires_at))}</span>
             </div>
           </div>
         </div>

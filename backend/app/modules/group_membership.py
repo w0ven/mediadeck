@@ -15,6 +15,7 @@ import re
 import secrets
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from functools import partial
 from html import escape
 from typing import Any, ClassVar
@@ -368,7 +369,92 @@ class GroupMembership:
                 json.dumps({'source': source, 'action': row['action'], 'state': row['state'],
                             'chats': [t['chat_id'] for t in row['targets']]}, ensure_ascii=False),
                 ok=row['action'] != 'failed_retained')
+            if row['action'] == 'deleted':
+                await self._notify_deleted(member, row, source=source)
             return row
+
+    def _group_notice_target(self) -> tuple[str, Any] | None:
+        cfg = self.bot._cfg()
+        allowlist = self.bot._group_allowlist() if hasattr(self.bot, '_group_allowlist') else []
+        notify_chat = str(cfg.get('registration_notify_chat_id') or '').strip()
+        if notify_chat and (not allowlist or notify_chat in allowlist):
+            return notify_chat, cfg.get('registration_notify_thread_id')
+        if allowlist:
+            return str(allowlist[0]), None
+        return None
+
+    async def _quiet_send(self, payload: dict[str, Any]) -> None:
+        from app.modules.report_delivery import CALL_DELIVERY
+        from app.modules.telegram import _CALL_ERROR, _QUIET_CALL
+        q_tok = _QUIET_CALL.set(True)
+        e_tok = _CALL_ERROR.set(None)
+        d_tok = CALL_DELIVERY.set(None)
+        try:
+            with contextlib.suppress(Exception):
+                await self.bot._call('sendMessage', payload, timeout=15)
+        finally:
+            CALL_DELIVERY.reset(d_tok)
+            _CALL_ERROR.reset(e_tok)
+            _QUIET_CALL.reset(q_tok)
+
+    async def _notify_deleted(self, member: dict[str, Any], row: dict[str, Any], *, source: str) -> None:
+        if not self.bot.enabled:
+            return
+        bj = timezone(timedelta(hours=8))
+        stamp = datetime.fromtimestamp(time.time(), bj).strftime('%Y-%m-%d %H:%M')
+        absent = [t for t in (row.get('targets') or []) if t.get('state') == 'absent']
+        missing = '、'.join(escape(str(t.get('title') or t.get('chat_id') or '关联目标'))
+                            for t in absent) or '关联群组/频道'
+        tg_id = str(member.get('tg_user_id') or '').strip()
+        if tg_id.isdecimal() and int(tg_id) > 0:
+            username = escape(str(member.get('username') or '—'))
+            dm_lines = [
+                '⚠️ <b>账号已自动注销</b>',
+                f'账号：<code>{username}</code>',
+                f'原因：未加入/未关注 <b>{missing}</b>',
+                f'时间：{stamp}（北京时间）',
+                '',
+                '绑定 Telegram 须保持加入关联群组并关注通知频道，退群或取消关注将自动删除账号。如需重新注册，请先重新加入/关注。',
+            ]
+            buttons = [
+                [{'text': (('关注频道' if t.get('type') == 'channel' else '加入群组')
+                           + ' · ' + str(t.get('title') or t['chat_id']))[:60],
+                  'url': t['join_url']}]
+                for t in absent if t.get('join_url')
+            ]
+            dm_payload: dict[str, Any] = {
+                'chat_id': tg_id,
+                'text': '\n'.join(dm_lines),
+                'parse_mode': 'HTML',
+                'disable_web_page_preview': True,
+            }
+            if buttons:
+                dm_payload['reply_markup'] = {'inline_keyboard': buttons}
+            await self._quiet_send(dm_payload)
+        if source == 'event':
+            target = self._group_notice_target()
+            if target is not None:
+                chat_id, thread_id = target
+                label = str(member.get('tg_display_name') or '').strip()
+                if not label and tg_id:
+                    profile = (getattr(self.bot, '_tg_profiles', None) or {}).get(tg_id) or {}
+                    label = str(profile.get('display_name') or '').strip()
+                handle = str(member.get('tg_username') or '').strip().lstrip('@')
+                if tg_id.isdecimal() and int(tg_id) > 0:
+                    display = escape((label or ('@' + handle if handle else f'TG {tg_id}'))[:80])
+                    who = f'<a href="tg://user?id={int(tg_id)}">{display}</a>'
+                else:
+                    who = '未绑定 Telegram 的成员'
+                group_payload: dict[str, Any] = {
+                    'chat_id': chat_id,
+                    'text': (f'🗑 {who} 因退出/取消关注 <b>{missing}</b>，账号已自动注销。\n'
+                             f'时间：{stamp}（北京时间）'),
+                    'parse_mode': 'HTML',
+                    'disable_web_page_preview': True,
+                }
+                if thread_id:
+                    group_payload['message_thread_id'] = thread_id
+                await self._quiet_send(group_payload)
 
     def status(self) -> dict[str, Any]:
         latest = copy.deepcopy(self._latest)

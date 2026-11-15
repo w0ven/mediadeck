@@ -67,3 +67,28 @@ def test_new_play_id_does_not_inherit_previous_play_observed_flag(stack):  # noq
         assert await guard.report_stopped("u1", "a", "tok:u1", {"PlaySessionId": "new-play"}) == 204
         assert (await guard.inspect("u1", "c")).allowed
     asyncio.run(check())
+
+
+def test_prune_stale_and_member_delete_clean_leases_safely(stack):  # noqa: F811
+    import time
+    members, emby, guard = stack
+    now = time.time()
+    guard._db.execute(
+        "INSERT INTO stream_leases(user_id,session_id,observed,play_id,pending_at) VALUES (?,?,?,?,?)",
+        ("u1", "stale-sid", 1, "old", now - 120),
+    )
+    guard._db.execute(
+        "INSERT INTO stream_leases(user_id,session_id,observed,play_id,pending_at) VALUES (?,?,?,?,?)",
+        ("u1", "fresh-sid", 0, "new", now),
+    )
+    guard._db.execute(
+        "INSERT INTO stream_leases(user_id,session_id,observed,play_id,pending_at) VALUES (?,?,?,?,?)",
+        ("u1", "live-sid", 1, "live", now - 300),
+    )
+    emby.set_sessions([row("live-sid", playing=True)])
+    assert asyncio.run(guard.prune_stale()) == 1
+    remaining = {r["session_id"] for r in guard._db.query("SELECT session_id FROM stream_leases")}
+    assert remaining == {"fresh-sid", "live-sid"}
+    members.delete("u1", actor="admin")
+    assert guard._db.query("SELECT * FROM stream_leases WHERE user_id='u1'") == []
+

@@ -236,7 +236,7 @@ def register(app: Any) -> None:
             'name': _display_name(ctx['tg'], profile) or str(member.get('username') or ''),
             'username': str(member.get('username') or ''),
             'state': str(member.get('state') or member.get('status') or ''),
-            'whitelist': bool(info['exempt']),
+            'whitelist': member.get('group_id') == WHITELIST_GROUP_ID,
             'managed': bool(info['managed']),
             'level': {k: level.get(k) for k in ('level', 'name', 'title', 'icon', 'growth', 'next_threshold',
                                                  'threshold')},

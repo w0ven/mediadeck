@@ -615,3 +615,31 @@ class StreamAdmission:
                         self._db.execute("DELETE FROM stream_leases WHERE user_id=? AND session_id=?",
                                          (uid, sid))
             return code
+
+    async def prune_stale(self) -> int:
+        """Sweep settled or orphaned leases once they predate a fresh session snapshot."""
+        snapshot_started = time.time()
+        try:
+            sessions = await self._snapshot()
+        except Exception:  # noqa: BLE001 - unavailable snapshot never releases seats
+            return 0
+        by_sid = {str(s["Id"]): s for s in sessions if s.get("Id")}
+        live = {sid for sid, row in by_sid.items() if row.get("NowPlayingItem")}
+        cutoff = snapshot_started - max(60, PENDING_START_SECONDS)
+        uids = [str(r["user_id"]) for r in self._db.query("SELECT DISTINCT user_id FROM stream_leases")]
+        removed = 0
+        for uid in uids:
+            async with self._user_lock(uid):
+                with self._db.write() as conn:
+                    rows = conn.execute(
+                        "SELECT session_id,pending_at FROM stream_leases WHERE user_id=?",
+                        (uid,),
+                    ).fetchall()
+                    for sid, pending_at in rows:
+                        if (pending_at or 0) <= cutoff and sid not in live:
+                            cur = conn.execute(
+                                "DELETE FROM stream_leases WHERE user_id=? AND session_id=? AND pending_at<=?",
+                                (uid, sid, cutoff),
+                            )
+                            removed += cur.rowcount
+        return removed
