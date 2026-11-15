@@ -934,6 +934,11 @@ class MemberService:
     def _remove_rows(self, user_id: str) -> None:
         self._db.execute("DELETE FROM members WHERE emby_user_id=?", (user_id,))
         self._db.execute("DELETE FROM devices WHERE emby_user_id=?", (user_id,))
+        for table, column in (("activity_members", "emby_user_id"),
+                              ("activity_effect_sync", "user_id"),
+                              ("stream_leases", "user_id")):
+            if self._db.one("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)):
+                self._db.execute(f"DELETE FROM {table} WHERE {column}=?", (user_id,))
 
     def delete(self, user_id: str, actor: str = "system",
                cascade: bool = False, *,

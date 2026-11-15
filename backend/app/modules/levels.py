@@ -101,7 +101,7 @@ class LevelService:
                 continue
             try:
                 result = await callback(uid, old['bandwidth'] if old else None)
-                confirmed = result.get('remote_ok') is True
+                confirmed = result.get('remote_ok') is True or result.get('skipped') == 'administrator'
             except Exception:  # noqa: BLE001 - do not mark unknown remote sync as delivered
                 confirmed = False
             self.db.execute('INSERT INTO activity_effect_sync VALUES(?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE '
@@ -149,8 +149,9 @@ class LevelService:
         member['activity_managed'] = True
         member['auto_renew'] = bool(enrollment['auto_renew'])
         member['activity_lifecycle'] = enrollment['lifecycle']
-        member['activity_exempt'] = member.get('group_id') == WHITELIST_GROUP_ID
-        if member['activity_exempt']:
+        is_whitelist = member.get('group_id') == WHITELIST_GROUP_ID
+        member['activity_exempt'] = is_whitelist and not member.get('preserve_account_expiry')
+        if is_whitelist:
             return group  # every whitelist/card right remains authoritative
         return dict(group or {}, name=level['name'], billing_mode='time', duration_days=30,
                     **{key: level[key] for key in ('bandwidth_limit_kbps', 'max_streams', 'request_quota')})

@@ -5,7 +5,7 @@ import re
 from html.parser import HTMLParser
 
 import pytest
-from test_group_membership import CHANNEL, GROUP, VIEWER, scan
+from test_group_membership import CHANNEL, GROUP, VIEWER, leave, scan
 from test_group_membership import env as membership_env  # noqa: F401
 from test_tg_interaction_context import env as context_env  # noqa: F401
 
@@ -34,10 +34,32 @@ def test_completed_scan_edits_original_card_with_deleted_identity_and_evidence(e
     assert env.deleted == ['u1']
     assert out['counts']['deleted'] == 1
     assert next(row for row in out['rows'] if row['user_id'] == 'u1')['reason'].endswith(CHANNEL)
-    # No second notification stream, private TG identifier or unrelated member names.
-    assert len([1 for method, _ in env.tg.calls if method == 'sendMessage']) == 1
+    # Group receives only the single progress/summary card; departed member gets a private DM.
+    group_sends = [p for m, p in env.tg.calls if m == 'sendMessage' and str(p['chat_id']) == str(GROUP)]
+    dm_sends = [p for m, p in env.tg.calls if m == 'sendMessage' and str(p['chat_id']) == str(VIEWER)]
+    assert len(group_sends) == 1 and len(dm_sends) == 1
+    assert '账号已自动注销' in dm_sends[0]['text'] and 'Actual ' + CHANNEL in dm_sends[0]['text']
+    assert 'mediadeck' not in dm_sends[0]['text'].lower()
     assert str(VIEWER) not in text and 'ViewerB' not in text
     assert any(method == 'editMessageText' for method, _ in env.tg.calls)
+
+
+def test_event_deletion_sends_private_dm_and_safe_group_announcement(env):
+    env.cfg['membership_rules']['delete_enabled'] = True
+    env.db.execute("UPDATE members SET tg_display_name='群友甲', tg_username='viewer_a' WHERE emby_user_id='u1'")
+    env.states[(CHANNEL, str(VIEWER))] = 'left'
+    asyncio.run(env.bot._dispatch_update(leave(chat=int(CHANNEL))))
+    assert env.deleted == ['u1']
+    sends = [p for m, p in env.tg.calls if m == 'sendMessage']
+    dm = next(p for p in sends if str(p['chat_id']) == str(VIEWER))
+    group_post = next(p for p in sends if str(p['chat_id']) == str(GROUP))
+    assert '账号已自动注销' in dm['text'] and '<code>ViewerA</code>' in dm['text']
+    assert 'Actual ' + CHANNEL in dm['text']
+    assert dm['reply_markup']['inline_keyboard'][0][0]['url'] == 'https://t.me/local_channel'
+    assert f'<a href="tg://user?id={VIEWER}">群友甲</a>' in group_post['text']
+    assert 'Actual ' + CHANNEL in group_post['text'] and '账号已自动注销' in group_post['text']
+    assert 'ViewerA' not in group_post['text']
+    assert 'mediadeck' not in (dm['text'] + group_post['text']).lower()
 
 
 def test_failed_delete_is_named_counted_separately_and_never_reported_as_success(env):

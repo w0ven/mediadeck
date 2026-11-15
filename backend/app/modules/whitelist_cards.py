@@ -47,6 +47,12 @@ def _restore_local(conn, grant, now):
             or current["group_revision"] != grant["group_revision"]):
         conn.execute("UPDATE whitelist_card_grants SET status='protected',synced_at=?,error='' WHERE emby_user_id=?",
                      (now, grant["emby_user_id"]))
+        conn.execute(
+            "UPDATE inventory SET expiry_synced_at=?,expiry_retry_at=0,expiry_error='' "
+            "WHERE emby_user_id=? AND used_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=? "
+            "AND expiry_synced_at IS NULL AND json_extract(spec_json,'$.kind')='whitelist_card'",
+            (now, grant["emby_user_id"], now),
+        )
         return False
     if grant['previous_group_id'] and not conn.execute('SELECT 1 FROM groups WHERE id=?', (grant['previous_group_id'],)).fetchone():
         raise ValueError('白名单卡原组不存在，恢复待重试/管理员处理')
@@ -76,12 +82,12 @@ def activate(conn, db, members, user, card_id, days, now):
         if not grant or grant["expires_at"] is None:
             raise ValueError("你已有永久白名单资格，未消耗道具")
         previous = grant["previous_group_id"]
-        enforce_expiry = grant["enforce_account_expiry"]
         expires = max(now, grant["expires_at"]) + days * 86400 if days else None
+        enforce_expiry = int(bool(grant["enforce_account_expiry"])) if expires is not None else 0
     else:
         previous = member["group_id"]
-        enforce_expiry = int(member.get("expires_at_effective") is not None)
         expires = now + days * 86400 if days else None
+        enforce_expiry = int(member.get("expires_at_effective") is not None) if expires is not None else 0
     if not members._groups.get(WHITELIST_GROUP_ID):
         raise ValueError("现有白名单用户组不可用，未消耗道具")
     conn.execute("UPDATE members SET group_id=?,group_revision=group_revision+1,updated_at=? WHERE emby_user_id=?",
@@ -127,9 +133,16 @@ async def reconcile(db, sync_effects):
             continue
         with economy_write(db) as conn:
             # A concurrent renewal/replacement is never marked by this old attempt.
-            conn.execute(
+            cur = conn.execute(
                 "UPDATE whitelist_card_grants SET synced_at=?,retry_at=?,error=? "
                 "WHERE emby_user_id=? AND group_revision=? AND status IN ('active','restored')",
                 (now if ok else None, 0 if ok else now + 60,
                  "" if ok else "白名单卡到期恢复/同步未确认，稍后重试", user, grant["group_revision"]),
             )
+            if ok and cur.rowcount:
+                conn.execute(
+                    "UPDATE inventory SET expiry_synced_at=?,expiry_retry_at=0,expiry_error='' "
+                    "WHERE emby_user_id=? AND used_at IS NOT NULL AND expires_at IS NOT NULL AND expires_at<=? "
+                    "AND expiry_synced_at IS NULL AND json_extract(spec_json,'$.kind')='whitelist_card'",
+                    (now, user, now),
+                )

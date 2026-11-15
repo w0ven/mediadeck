@@ -511,6 +511,8 @@ async def _startup() -> None:
                         await app.state.enforcement.reconcile(apply=True)
                 with contextlib.suppress(Exception):
                     await run_usage_io(app.state.images.sweep)
+                with contextlib.suppress(Exception):
+                    await app.state.streams.prune_stale()
 
             if now >= prune_due:
                 prune_due = now + 86400

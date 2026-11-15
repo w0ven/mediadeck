@@ -42,7 +42,8 @@ def test_whitelist_purchase_use_changes_real_group_route_and_keeps_original_acco
     assert {k: v for k, v in before.items() if k not in ('group_id', 'group_revision', 'updated_at')} == {
         k: v for k, v in after.items() if k not in ('group_id', 'group_revision', 'updated_at')
     }
-    assert env.members.get('u')['expires_at_effective'] == before['expires_at']
+    assert env.members.get('u')['expires_at_effective'] is None
+    assert env.bag.items('u')[0]['expiry_synced_at'] is not None
     assert len(env.db.query("SELECT * FROM whitelist_card_grants")) == 1
     assert env.points.balance('u') == 45000
     second = buy_white(env, 3)
@@ -81,14 +82,26 @@ def test_disabled_whitelist_use_refused_without_consumption_and_post_use_disable
         WhitelistRoute(SimpleNamespace(members=env.members)).member('u')
 
 
-def test_permanent_group_card_does_not_make_expired_base_account_permanent(env):
-    card = buy_white(env)
-    env.bag.use('u', card)
-    expiry = env.members.get('u')['expires_at_effective']
-    env.clock[0] = expiry
+def test_permanent_card_grants_permanent_term_while_timed_card_preserves_base_expiry(env):
+    before_expiry = env.members.get('u')['expires_at_effective']
+    timed = buy_white(env, 40)
+    env.bag.use('u', timed)
+    assert env.members.get('u')['expires_at_effective'] == before_expiry
+    env.clock[0] = before_expiry
     assert env.members.get('u')['state'] == 'expired'
     with pytest.raises(HTTPException):
         WhitelistRoute(SimpleNamespace(members=env.members)).member('u')
+    env.clock[0] = NOW + 60
+    permanent = buy_white(env, 0)
+    env.bag.use('u', permanent)
+    assert env.members.get('u')['expires_at_effective'] is None
+    env.clock[0] = before_expiry + 86400
+    assert env.members.get('u')['state'] == 'active'
+    assert WhitelistRoute(SimpleNamespace(members=env.members)).member('u')['group_id'] == 'whitelist'
+    sync = AsyncMock(return_value={'ok': True})
+    env.clock[0] = NOW + 41 * 86400
+    asyncio.run(env.bag.reconcile_expired(sync))
+    assert all(r['expiry_synced_at'] is not None for r in env.bag.items('u'))
 
 
 def test_limited_expiry_authority_denies_before_worker_then_restart_restores_and_retries_remote(env):
@@ -115,6 +128,7 @@ def test_limited_expiry_authority_denies_before_worker_then_restart_restores_and
         sync.return_value = {'ok': True}
         asyncio.run(restarted.bag.reconcile_expired(sync))
         assert sync.call_count == 2 and not restarted.bag.items('u')[0]['expiry_error']
+        assert restarted.bag.items('u')[0]['expiry_synced_at'] is not None
         asyncio.run(restarted.bag.reconcile_expired(sync))
         assert sync.call_count == 2
     finally:
