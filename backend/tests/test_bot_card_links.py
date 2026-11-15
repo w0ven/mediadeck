@@ -173,3 +173,67 @@ def test_menu_validation_keeps_format_selection_for_a_corrected_submission(env):
         assert len(cards(env)) == 1
         assert env.bot._start_link(cards(env)[0]['code']) in generated(env)[0]
     asyncio.run(run())
+
+
+def test_interactive_code_picker_and_admin_preset_buttons_and_library_stats(env):
+    async def run():
+        # 1. Interactive code picker mints without typing
+        mid = await open_generator(env)
+        actions = env.tg.actions(ADMIN, mid)
+        nonce = next(b['callback_data'].split(':')[1] for b in actions if b.get('callback_data', '').startswith('admin_code_set:'))
+        await click(env, f'admin_code_set:{nonce}:g:whitelist', mid, chat=ADMIN, user=ADMIN)
+        await click(env, f'admin_code_set:{nonce}:d:90', mid, chat=ADMIN, user=ADMIN)
+        await click(env, f'admin_code_set:{nonce}:c:5', mid, chat=ADMIN, user=ADMIN)
+        await click(env, f'admin_code_mode:{nonce}:links', mid, chat=ADMIN, user=ADMIN)
+        await click(env, f'admin_code_mint:{nonce}', mid, chat=ADMIN, user=ADMIN)
+        rows = cards(env)
+        assert len(rows) == 5
+        assert all(r['group_id'] == 'whitelist' and r['days'] == 90 for r in rows)
+        # Double-clicking mint after completion is rejected
+        await click(env, f'admin_code_mint:{nonce}', mid, chat=ADMIN, user=ADMIN)
+        assert len(cards(env)) == 5
+
+        # 2. Admin preset renew & score buttons on /kk card
+        before_exp = env.members.get('u1')['expires_at_effective']
+        before_pts = env.bot._points.balance('u1')
+        kmid = await command(env, '/kk ViewerA', chat=ADMIN, user=ADMIN)
+        await click(env, 'admin_renew', kmid, chat=ADMIN, user=ADMIN)
+        r_btn = next(b['callback_data'] for b in env.tg.actions(ADMIN, kmid)
+                     if b.get('callback_data', '').startswith('admin_renew_pick:') and b['callback_data'].endswith(':15'))
+        await click(env, r_btn, kmid, chat=ADMIN, user=ADMIN)
+        assert env.members.get('u1')['expires_at_effective'] == before_exp + 15 * 86400
+        # Replay of consumed preset renew button does nothing
+        await click(env, r_btn, kmid, chat=ADMIN, user=ADMIN)
+        assert env.members.get('u1')['expires_at_effective'] == before_exp + 15 * 86400
+
+        await click(env, 'admin_score', kmid, chat=ADMIN, user=ADMIN)
+        s_btn = next(b['callback_data'] for b in env.tg.actions(ADMIN, kmid)
+                     if b.get('callback_data', '').startswith('admin_score_pick:') and b['callback_data'].endswith(':300'))
+        await click(env, s_btn, kmid, chat=ADMIN, user=ADMIN)
+        assert env.bot._points.balance('u1') == before_pts + 300
+        await click(env, s_btn, kmid, chat=ADMIN, user=ADMIN)
+        assert env.bot._points.balance('u1') == before_pts + 300
+
+        # 3. Private prompt input message is auto-deleted to keep chat clean
+        await click(env, 'admin_find', kmid, chat=ADMIN, user=ADMIN)
+        env.tg.calls.clear()
+        await env.bot._dispatch_update({
+            'message': {
+                'message_id': 7788,
+                'chat': {'id': ADMIN, 'type': 'private'},
+                'from': {'id': ADMIN, 'is_bot': False},
+                'text': 'ViewerA',
+            }
+        })
+        assert any(m == 'deleteMessage' and p == {'chat_id': ADMIN, 'message_id': 7788} for m, p in env.tg.calls)
+
+        # 4. Library stats view from nodes page
+        umid = await command(env, '/start', chat=VIEWER, user=VIEWER)
+        await click(env, 'me_nodes', umid, chat=VIEWER, user=VIEWER)
+        nodes_text = env.tg.text(VIEWER, umid)
+        assert '🟢 状态：<b>在线</b>' in nodes_text
+        await click(env, 'library_stats', umid, chat=VIEWER, user=VIEWER)
+        stats_text = env.tg.text(VIEWER, umid)
+        assert '📊 <b>媒体库统计</b>' in stats_text and '影视总计' in stats_text and 'Emby' in stats_text
+    asyncio.run(run())
+

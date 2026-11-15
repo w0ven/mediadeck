@@ -290,6 +290,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         self._emby = emby
         self._restrictions: Any = None  # shared manual/sanction service wired at startup
         self._online_plays_cache = TTLCache(ttl=PLAYBACK_COUNT_TTL, max_entries=1)
+        self._emby_overview_cache = TTLCache(ttl=30.0, max_entries=4)
         self._stats = stats
         self._db = db
         self._rebinding = RebindingService(db) if db is not None else None
@@ -1233,7 +1234,20 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if str(self._cfg().get("playback_routing_rules") or "").strip():
             actions.append({"text": "📋 分流规则", "callback_data": "me_routing"})
         actions.append({"text": "⚙️ 反代配置", "callback_data": "me_proxy"})
-        return [actions, [{"text": "◀ 返回首页", "callback_data": "home"}]]
+        return [
+            actions,
+            [{"text": "📊 媒体库统计", "callback_data": "library_stats"},
+             {"text": "◀ 返回首页", "callback_data": "home"}],
+        ]
+
+    @staticmethod
+    def library_stats_menu() -> list[list[dict[str, str]]]:
+        return [
+            [{"text": "🔄 刷新统计", "callback_data": "library_stats"},
+             {"text": "🏆 排行榜", "callback_data": "rank"}],
+            [{"text": "🌐 播放线路", "callback_data": "me_nodes"},
+             {"text": "◀ 返回首页", "callback_data": "home"}],
+        ]
 
     @staticmethod
     def routing_menu() -> list[list[dict[str, str]]]:
@@ -1388,7 +1402,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         bits = [self._status_label(member), _member_expiry_label(member)]
         group = self._group_label(member)
         lines = [
-            self._whitelist_decoration(member) + "🎬 <b>MediaDeck · 我的影库</b>\n",
+            self._whitelist_decoration(member) + "🎬 <b>我的影库</b>\n",
             f"👋 {escape(str(member.get('username') or '成员'))}，欢迎回来",
             group,
             " · ".join(bits),
@@ -1414,7 +1428,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             channels.append("卡密")
         lines = [f"👋 你好，{escape(str(tg_name))}\n"]
         if open_:
-            lines.append("🟢 <b>MediaDeck · 开放注册</b>\n")
+            lines.append("🟢 <b>开放注册</b>\n")
             if channels:
                 how = "或".join(channels)
                 lines.append(f"✨ 没有账号：凭{how}开通")
@@ -1422,7 +1436,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 lines.append("✨ 已获管理员授权可直接注册")
             lines.append("🔄 已有账号：请用原 TG；换号请申请换绑")
         else:
-            lines.append("🔴 <b>MediaDeck · 暂停注册</b>\n")
+            lines.append("🔴 <b>暂停注册</b>\n")
             lines.append("🔄 已有账号：请用已绑定的 TG；换号请申请换绑")
         rules = self.membership.rules() if self.membership else {}
         if rules.get("gate_enabled") and any(
@@ -2016,6 +2030,65 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             rows.append(line)
         return rows
 
+    async def _server_overview(self) -> dict[str, Any]:
+        async def load() -> dict[str, Any]:
+            version = None
+            online = None
+            if self._emby is not None:
+                info_fn = getattr(self._emby, "system_info", None)
+                if callable(info_fn):
+                    with contextlib.suppress(Exception):
+                        info = await asyncio.wait_for(info_fn(), timeout=PLAYBACK_COUNT_TIMEOUT)
+                        if isinstance(info, dict) and info.get("version"):
+                            version = str(info["version"])
+                raw_fn = getattr(self._emby, "active_sessions_raw", None)
+                if callable(raw_fn):
+                    with contextlib.suppress(Exception):
+                        rows = await asyncio.wait_for(raw_fn(), timeout=PLAYBACK_COUNT_TIMEOUT)
+                        if isinstance(rows, list):
+                            online = len({str(s.get("UserId") or s.get("Id")) for s in rows if isinstance(s, dict) and (s.get("UserId") or s.get("Id"))})
+            return {"version": version, "online": online}
+
+        cache = getattr(self, "_emby_overview_cache", None)
+        if cache is not None:
+            return await cache.resolve("emby:overview", load)
+        return await load()
+
+    async def _library_stats_text(self) -> str:
+        counts = None
+        version = None
+        if self._emby is not None:
+            if callable(getattr(self._emby, "item_counts", None)):
+                with contextlib.suppress(Exception):
+                    counts = await asyncio.wait_for(self._emby.item_counts(), timeout=10)
+            if callable(getattr(self._emby, "system_info", None)):
+                with contextlib.suppress(Exception):
+                    info = await asyncio.wait_for(self._emby.system_info(), timeout=5)
+                    if isinstance(info, dict) and info.get("version"):
+                        version = str(info["version"])
+        if not isinstance(counts, dict):
+            return "📊 <b>媒体库统计</b>\n\n暂时无法读取媒体库统计，请稍后刷新。"
+        movies = int(counts.get("movies") or 0)
+        series = int(counts.get("series") or 0)
+        episodes = int(counts.get("episodes") or 0)
+        albums = int(counts.get("albums") or 0)
+        total = movies + series + episodes + albums
+        head = "📊 <b>媒体库统计</b>" + (f" · Emby <code>{escape(version)}</code>" if version else "")
+        lines = [
+            head,
+            "────────────────────",
+            f"🎬 <b>电影</b>　　<b>{movies:,}</b> 部",
+            f"📺 <b>剧集</b>　　<b>{series:,}</b> 部",
+            f"💿 <b>单集</b>　　<b>{episodes:,}</b> 集",
+        ]
+        if albums:
+            lines.append(f"🎵 <b>专辑</b>　　<b>{albums:,}</b> 张")
+        lines += [
+            "────────────────────",
+            f"📁 <b>影视总计</b>　<b>{total:,}</b> 项",
+        ]
+        return "\n".join(lines)
+
     async def _nodes_text(self, member: dict[str, Any] | None = None) -> str:
         """Member-facing playback addresses, then optional node load.
 
@@ -2050,6 +2123,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             parts.append("")
         online = await self._online_plays()
         if online is not None:
+            parts.append(f"🟢 状态：<b>在线</b> · 当前播放：<b>{online}</b> 路")
             parts.append(f"当前在线：<b>{online}</b> 路播放")
         else:
             parts.append("当前在线：暂不可用，请稍后刷新。")
@@ -2083,11 +2157,13 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 '按设备名称归并（同账号跨播放器）\n'
                 '非硬件唯一识别；空/未知按ID单计')
 
-    async def _devices_view(self, member: dict[str, Any]) -> tuple[str, list[list[dict[str, Any]]]]:
-        """Signed-in devices as Emby sees them; removal happens in the Mini App."""
+    async def _devices_view(self, member: dict[str, Any], *, notice: str = "") -> tuple[str, list[list[dict[str, Any]]]]:
+        """Signed-in devices as Emby sees them, with one-tap Bot sign-out."""
         from app.modules.member_devices import ago_text, device_cap
         cap = device_cap(member)
         lines = ["📺 <b>我的设备</b>", ""]
+        if notice:
+            lines += [notice, ""]
         service = getattr(self, "_member_devices", None)
         try:
             devices = await service.for_user(str(member.get("emby_user_id"))) if service else None
@@ -2108,15 +2184,44 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             if len(devices) > 10:
                 lines.append(f"……还有 {len(devices) - 10} 台")
         keyboard: list[list[dict[str, Any]]] = []
+        if devices and not _GROUP.get():
+            kick_btns = []
+            for device in devices[:6]:
+                did = str(device.get("id") or "")
+                if did and len(f"dev_kick:{did}".encode()) <= 64:
+                    short_name = str(device.get("name") or "设备")[:14]
+                    kick_btns.append({"text": f"❌ 登出 {short_name}", "callback_data": f"dev_kick:{did}"})
+            for i in range(0, len(kick_btns), 2):
+                keyboard.append(kick_btns[i:i + 2])
         miniapp = str(self._cfg().get("miniapp_url") or "").strip()
         if devices is not None and cap:
             lines += ["", f"<i>最多同时登录 {cap} 台，超出会自动登出最久没用的。</i>"]
         if miniapp and not _GROUP.get():
-            lines += ["", "<i>不认识或不再使用的设备，可以在会员面板里移除，它会立刻退出登录。</i>"]
+            lines += ["", "<i>点击上方「❌ 登出」或在会员面板移除设备，它会立刻退出登录。</i>"]
             keyboard.append([{"text": "📱 在会员面板管理设备", "web_app": {"url": miniapp + "?page=devices"}}])
         keyboard.append([{"text": "🔄 刷新", "callback_data": "devices"},
                          {"text": "◀ 我的账号", "callback_data": "me"}])
         return "\n".join(lines), keyboard
+
+    async def _device_kick(self, chat_id: Any, message_id: int, member: dict[str, Any], device_id: str) -> None:
+        if _GROUP.get() or not member:
+            return
+        service = getattr(self, "_member_devices", None)
+        uid = str(member.get("emby_user_id") or "")
+        notice = ""
+        if service is None or not device_id:
+            notice = "⚠️ 设备服务暂不可用。"
+        else:
+            try:
+                removed = await service.remove(uid, device_id)
+                self._members.audit(f"tg:{member.get('tg_user_id') or chat_id}", "device.member_logout", uid,
+                                    json.dumps({"name": removed.get("name"), "app": removed.get("app")}, ensure_ascii=False))
+                notice = f"✅ 已登出设备：<b>{escape(str(removed.get('name') or '设备'))}</b>"
+            except LookupError:
+                notice = "ℹ️ 该设备已不在登录列表中。"
+            except Exception:  # noqa: BLE001
+                notice = "❌ 登出设备未确认成功，请稍后重试。"
+        await self._edit(chat_id, message_id, *(await self._devices_view(member, notice=notice)))
 
     def _usage_text(self, member: dict[str, Any]) -> str:
         lines = [self._whitelist_decoration(member) + "📊 <b>权益与观看</b>", '',
@@ -2881,9 +2986,20 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._edit(chat_id, message_id, "⛔ 无权限。")
             return
         self._pending.pop(self._pkey(chat_id), None)
+        summary = "🛠 <b>管理</b>\n请先查找用户。"
+        if self._db is not None and not _GROUP.get():
+            with contextlib.suppress(Exception):
+                total = (self._db.one("SELECT COUNT(*) AS n FROM members") or {}).get("n", 0)
+                wl = (self._db.one("SELECT COUNT(*) AS n FROM members WHERE group_id=?", (WHITELIST_GROUP_ID,)) or {}).get("n", 0)
+                open_reqs = (self._db.one("SELECT COUNT(*) AS n FROM media_requests WHERE status='open'") or {}).get("n", 0)
+                summary = (
+                    "🛠 <b>管理</b>\n"
+                    f"<blockquote>👥 会员 <b>{total}</b>（💠白名单 <b>{wl}</b>） · 📋 待审求片 <b>{open_reqs}</b></blockquote>"
+                    "请先查找用户，或使用下方快捷管理功能。"
+                )
         await self._edit(
             chat_id, message_id,
-            "🛠 <b>管理</b>\n请先查找用户。",
+            summary,
             self.admin_menu() + (self._target_back() if self._admin_panel(chat_id, message_id) else []))
 
     async def _admin_prompt_find(self, chat_id: Any, message_id: int,
@@ -3146,14 +3262,42 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._admin_show_user(chat_id, target, actor)
             return
         if data == "admin_renew":
+            nonce = secrets.token_hex(6)
             self._pending[self._pkey(chat_id)] = (
                 "admin_renew_days", time.time() + PENDING_TTL,
-                {"user_id": user_id, "actor": actor, "message_id": message_id})
+                {"user_id": user_id, "actor": actor, "message_id": message_id, "nonce": nonce})
+            preset_rows = [
+                [{"text": f"+{d}天", "callback_data": f"admin_renew_pick:{nonce}:{d}"} for d in (7, 15, 30)],
+                [{"text": f"+{d}天", "callback_data": f"admin_renew_pick:{nonce}:{d}"} for d in (90, 180, 365)],
+            ]
             await self._edit(
                 chat_id, message_id,
                 f"⏳ 给 <b>{escape(str(target.get('username')))}</b> 续期多少天？\n"
-                + ("请回复本条消息发送数字；/cancel 可取消。" if _GROUP.get() else "请发送数字。"),
-                self._target_back())
+                "可点击下方快捷天数，或"
+                + ("回复本条消息发送数字；/cancel 可取消。" if _GROUP.get() else "直接发送数字。"),
+                preset_rows + self._target_back())
+            return
+        if data.startswith("admin_renew_pick:"):
+            parts = data.split(":")
+            waiting = self._pending.get(self._pkey(chat_id))
+            if (len(parts) != 3 or not parts[2].isdigit() or not waiting
+                    or waiting[0] != "admin_renew_days" or waiting[1] <= time.time()
+                    or waiting[2].get("nonce") != parts[1]
+                    or waiting[2].get("message_id") != message_id
+                    or waiting[2].get("user_id") != user_id):
+                await self._edit(chat_id, message_id, "这个续期选择已过期，请重新点击续期。", self._target_back())
+                return
+            self._pending.pop(self._pkey(chat_id), None)
+            panel = self._admin_panel(chat_id, message_id)
+            if panel:
+                panel["pending"] = None
+            try:
+                updated = self._members.renew(user_id, int(parts[2]), actor=actor)
+            except (ValueError, KeyError, ConfigError) as exc:
+                await self._show(chat_id, "❌ " + _public_error(exc), self._target_back())
+                return
+            notice = await self._after_member_change(target)
+            await self._admin_show_user(chat_id, updated or target, actor, notice)
             return
         if data == "admin_pro":
             if self._groups is not None:
@@ -3170,15 +3314,47 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._preview_group_change(chat_id, target, actor, default_id)
             return
         if data == "admin_score":
+            nonce = secrets.token_hex(6)
             self._pending[self._pkey(chat_id)] = (
                 "admin_score_delta", time.time() + PENDING_TTL,
-                {"user_id": user_id, "actor": actor, "message_id": message_id})
+                {"user_id": user_id, "actor": actor, "message_id": message_id, "nonce": nonce})
+            preset_rows = [
+                [{"text": f"+{v}", "callback_data": f"admin_score_pick:{nonce}:{v}"} for v in (100, 300, 500, 1000)],
+                [{"text": f"+{v}" if v > 0 else str(v), "callback_data": f"admin_score_pick:{nonce}:{v}"} for v in (2000, 5000, -100, -500)],
+            ]
             await self._edit(
                 chat_id, message_id,
                 f"💰 给 <b>{escape(str(target.get('username')))}</b> 加减多少积分？\n"
-                "例如 <code>+50</code> 或 <code>-10</code>。"
+                "可点击下方常用档位，或发送整数（例如 <code>+50</code> 或 <code>-10</code>）。"
                 + ("\n请回复本条消息输入；/cancel 可取消。" if _GROUP.get() else ""),
-                self._target_back())
+                preset_rows + self._target_back())
+            return
+        if data.startswith("admin_score_pick:"):
+            parts = data.split(":")
+            waiting = self._pending.get(self._pkey(chat_id))
+            if (len(parts) != 3 or not parts[2].lstrip("+-").isdigit() or not waiting
+                    or waiting[0] != "admin_score_delta" or waiting[1] <= time.time()
+                    or waiting[2].get("nonce") != parts[1]
+                    or waiting[2].get("message_id") != message_id
+                    or waiting[2].get("user_id") != user_id):
+                await self._edit(chat_id, message_id, "这个积分选择已过期，请重新点击调整积分。", self._target_back())
+                return
+            self._pending.pop(self._pkey(chat_id), None)
+            panel = self._admin_panel(chat_id, message_id)
+            if panel:
+                panel["pending"] = None
+            if self._points is None:
+                await self._show(chat_id, "无法调整积分。", self.admin_menu())
+                return
+            delta = int(parts[2])
+            try:
+                self._points.add(user_id, delta, "admin.adjust", ref="tg", actor=actor)
+                self._members.audit(actor, "points.adjust", user_id, f"delta={delta}")
+            except ValueError as exc:
+                await self._show(chat_id, f"❌ {_public_error(exc)}", self._target_back())
+                return
+            fresh = self._members.get(user_id) or target
+            await self._admin_show_user(chat_id, fresh, actor)
             return
         if data == "admin_rm":
             await self._cmd_rm(chat_id, actor, [str(target.get("username") or "")])
@@ -4123,22 +4299,52 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         await self.send(chat_id, f"🎁 已发放给 <b>{escape(str(target.get('username')))}</b>：{note}{notice}")
 
     async def _code_prompt(self, chat_id: Any, message_id: int, *,
-                           include_links: bool = False, nonce: str = "") -> None:
+                           include_links: bool = False, nonce: str = "",
+                           group_id: str = "standard", days: int = 30, count: int = 1) -> None:
         nonce = nonce or secrets.token_hex(6)
         self._pending[self._pkey(chat_id)] = (
             "admin_code", time.time() + PENDING_TTL,
-            {"include_links": include_links, "nonce": nonce, "message_id": message_id})
-        keyboard = [[
-            {"text": ("✓ " if not include_links else "") + "仅卡密",
-             "callback_data": f"admin_code_mode:{nonce}:plain"},
-            {"text": ("✓ " if include_links else "") + "卡密＋领取链接",
-             "callback_data": f"admin_code_mode:{nonce}:links"},
-        ], [{"text": "◀ 返回管理", "callback_data": "admin"}]]
+            {"include_links": include_links, "nonce": nonce, "message_id": message_id,
+             "group_id": group_id, "days": days, "count": count})
+        groups = [g["id"] for g in (self._groups.list() if self._groups else [])][:3] or ["standard", WHITELIST_GROUP_ID]
+        if WHITELIST_GROUP_ID not in groups:
+            groups.append(WHITELIST_GROUP_ID)
+        group_row = [
+            {"text": ("✓ " if group_id == gid else "") + ("💠 白名单" if gid == WHITELIST_GROUP_ID else f"👤 {gid}"),
+             "callback_data": f"admin_code_set:{nonce}:g:{gid}"}
+            for gid in groups[:3]
+        ]
+        days_row = [
+            {"text": ("✓ " if days == d else "") + ("永久" if d == 0 else f"{d}天"),
+             "callback_data": f"admin_code_set:{nonce}:d:{d}"}
+            for d in (7, 30, 90, 365, 0)
+        ]
+        count_row = [
+            {"text": ("✓ " if count == c else "") + f"{c}张",
+             "callback_data": f"admin_code_set:{nonce}:c:{c}"}
+            for c in (1, 5, 10, 20)
+        ]
+        keyboard = [
+            group_row,
+            days_row[:3],
+            days_row[3:] + count_row[:2],
+            count_row[2:] + [{"text": f"🚀 立即生成 ({count}张)", "callback_data": f"admin_code_mint:{nonce}"}],
+            [
+                {"text": ("✓ " if not include_links else "") + "仅卡密",
+                 "callback_data": f"admin_code_mode:{nonce}:plain"},
+                {"text": ("✓ " if include_links else "") + "卡密＋领取链接",
+                 "callback_data": f"admin_code_mode:{nonce}:links"},
+            ],
+            [{"text": "◀ 返回管理", "callback_data": "admin"}],
+        ]
         mode = "卡密＋领取链接" if include_links else "仅卡密"
+        days_label = "永久" if days == 0 else f"{days} 天"
         await self._edit(
             chat_id, message_id,
-            f"🎟 <b>生成卡密</b>\n\n输出格式：<b>{mode}</b>\n"
-            "可点下方按钮切换，再发送：<code>套餐id 天数 数量</code>\n"
+            f"🎟 <b>生成卡密</b>\n\n"
+            f"当前选择：<b>{escape(group_id)} · {days_label} · {count} 张</b>\n"
+            f"输出格式：<b>{mode}</b>\n\n"
+            "可直接点选下方参数并点击「🚀 立即生成」，或发送：<code>套餐id 天数 数量</code>\n"
             "例如 <code>standard 30 5</code>", keyboard)
 
     async def _cmd_code(self, chat_id: Any, actor: str,
@@ -4603,6 +4809,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                     return
                 if waiting[0] not in ("admin_renew_days", "admin_score_delta", "admin_find"):
                     return
+            else:
+                await self._delete_trigger_command(chat_id, message.get("message_id"))
             kind, _, extra = waiting
             if kind == "credential":
                 await self._submit_credential(chat_id, tg_user_id, text)
@@ -4835,7 +5043,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                                         mode='luck' if data == 'luckcheckin' else 'normal')
             return
         panel = self._admin_panel(chat_id, message_id)
-        targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
+        targeted = data.startswith(('admin_access_ok:', 'admin_gift', 'admin_renew', 'admin_score_pick:', 'admin_group_', 'rm_self:', 'rm_cascade:')) or (in_group and data.startswith('admin_ok:')) or data in (
             'admin_card', 'admin_more', 'admin_groups', 'admin_score', 'admin_rm', 'admin_usage',
             'admin_binding', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_disable', 'admin_enable')
         if panel:
@@ -4863,7 +5071,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                               'panel_close', 'play_hub', 'points_board', 'admin', 'admin_root', 'admin_find', 'admin_card',
                               'admin_groups', 'admin_more', 'admin_renew', 'admin_score', 'admin_usage',
                               'admin_rm', 'admin_cancel', 'admin_pro', 'admin_rev', 'admin_prouser', 'admin_gift', 'admin_disable', 'admin_enable')
-            public = public or data.startswith(('admin_access_ok:', 'admin_ok:', 'admin_gift_ok:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
+            public = public or data.startswith(('admin_access_ok:', 'admin_ok:', 'admin_gift_ok:', 'admin_renew_pick:', 'admin_score_pick:', 'rank:', 'top:', 'heat:', 'admin_group_', 'rm_self:', 'rm_cascade:'))
             if not public:
                 await self._answer_callback(callback_id, '请使用卡片上的私聊入口继续此操作。')
                 return
@@ -4942,7 +5150,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes", "me_routing",
                                  "req_new", "request_center", "watch_recent", "transfer", "shop", "invites"):
             return
-        if in_group and (data.startswith(("resetpw", "delself:")) or data == "delete_account"):
+        if in_group and (data.startswith(("resetpw", "delself:", "dev_kick:")) or data in ("delete_account", "library_stats")):
             return
         self._touch_panel(chat_id, message_id)
         if message.get('photo'):
@@ -4959,7 +5167,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if data in ('home', 'me', 'bag', 'bag_records', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'orders', 'my_requests', 'usage', 'watch_recent',
                     'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry',
-                    'play_hub', 'points_board', 'me_proxy') or data.startswith('me_proxy:'):
+                    'play_hub', 'points_board', 'me_proxy', 'library_stats') or data.startswith(('me_proxy:', 'dev_kick:')):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
@@ -5054,7 +5262,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             actor = self._admin_actor(member, "")
             await self._cmd_req(chat_id, actor, ["active"])
             return
-        if data == "admin_code" or data.startswith("admin_code_mode:"):
+        if data == "admin_code" or data.startswith(("admin_code_mode:", "admin_code_set:", "admin_code_mint:")):
             if not self.is_admin(member):
                 await self._edit(chat_id, message_id, "⛔ 无权限。")
                 return
@@ -5063,16 +5271,41 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 return
             parts = data.split(":")
             waiting = self._pending.get(self._pkey(chat_id))
-            if (len(parts) != 3 or parts[2] not in ("plain", "links")
-                    or not waiting or waiting[0] != "admin_code" or waiting[1] <= time.time()
-                    or waiting[2].get("nonce") != parts[1]
+            if (not waiting or waiting[0] != "admin_code" or waiting[1] <= time.time()
+                    or len(parts) < 2 or waiting[2].get("nonce") != parts[1]
                     or waiting[2].get("message_id") != message_id):
                 await self._edit(chat_id, message_id, "这次生成操作已结束，请重新打开生成卡密。",
                                  [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
                 return
-            await self._code_prompt(chat_id, message_id,
-                                    include_links=parts[2] == "links", nonce=parts[1])
-            return
+            saved = waiting[2]
+            group_id = str(saved.get("group_id") or "standard")
+            days = int(saved.get("days") if saved.get("days") is not None else 30)
+            count = int(saved.get("count") or 1)
+            include_links = bool(saved.get("include_links"))
+            if data.startswith("admin_code_mode:"):
+                if len(parts) != 3 or parts[2] not in ("plain", "links"):
+                    return
+                await self._code_prompt(chat_id, message_id, include_links=parts[2] == "links",
+                                        nonce=parts[1], group_id=group_id, days=days, count=count)
+                return
+            if data.startswith("admin_code_set:"):
+                if len(parts) != 4:
+                    return
+                field, val = parts[2], parts[3]
+                if field == "g":
+                    group_id = val
+                elif field == "d" and val.isdigit():
+                    days = int(val)
+                elif field == "c" and val.isdigit() and 1 <= int(val) <= 500:
+                    count = int(val)
+                await self._code_prompt(chat_id, message_id, include_links=include_links,
+                                        nonce=parts[1], group_id=group_id, days=days, count=count)
+                return
+            if data.startswith("admin_code_mint:"):
+                actor = self._admin_actor(member, "")
+                await self._cmd_code(chat_id, actor, [group_id, str(days), str(count)],
+                                     include_links=include_links)
+                return
         if data == "admin_auth":
             if not self.is_admin(member):
                 await self._edit(chat_id, message_id, "⛔ 无权限。")
@@ -5084,7 +5317,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 "✅ <b>预授权注册</b>\n\n请发送对方的 Telegram 数字 ID。",
                 [[{"text": "◀ 返回管理", "callback_data": "admin"}]])
             return
-        if data.startswith(("admin_access_ok:", "admin_renew", "admin_group_pick:", "admin_group_apply:")) or data in (
+        if data.startswith(("admin_access_ok:", "admin_renew", "admin_score_pick:", "admin_group_pick:", "admin_group_apply:")) or data in (
                 "admin_pro", "admin_rev", "admin_prouser", "admin_score", "admin_rm",
                 "admin_usage", "admin_binding", "admin_groups", "admin_card", "admin_more", "admin_disable", "admin_enable"):
             await self._admin_user_action(chat_id, message_id, member, data)
@@ -5152,6 +5385,10 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if data == "me_nodes":
             await self._edit(chat_id, message_id, await self._nodes_text(member),
                              self.nodes_menu())
+            return
+        if data == "library_stats":
+            await self._edit(chat_id, message_id, await self._library_stats_text(),
+                             self.library_stats_menu())
             return
         if data == "me_routing":
             await self._edit(chat_id, message_id, self._routing_text(), self.routing_menu())
@@ -5247,6 +5484,9 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return
         if data == "devices":
             await self._edit(chat_id, message_id, *(await self._devices_view(member)))
+            return
+        if data.startswith("dev_kick:"):
+            await self._device_kick(chat_id, message_id, member, data.split(":", 1)[1])
             return
         if data == "usage":
             await self._edit(chat_id, message_id, self._usage_text(member), [
