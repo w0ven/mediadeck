@@ -227,13 +227,37 @@ def test_interactive_code_picker_and_admin_preset_buttons_and_library_stats(env)
         })
         assert any(m == 'deleteMessage' and p == {'chat_id': ADMIN, 'message_id': 7788} for m, p in env.tg.calls)
 
-        # 4. Library stats view from nodes page
+        # 4. Library stats view from nodes page and 3x2 home grid
         umid = await command(env, '/start', chat=VIEWER, user=VIEWER)
+        home_rows = [[b['text'] for b in row] for row in env.tg.message(VIEWER, umid)['reply_markup']['inline_keyboard']]
+        assert home_rows == [
+            ['👤 个人信息', '📡 服务器线路'],
+            ['📊 媒体库统计', '🏆 观影/积分榜'],
+            ['🎬 求片中心', '🎒 背包与商城'],
+        ]
         await click(env, 'me_nodes', umid, chat=VIEWER, user=VIEWER)
         nodes_text = env.tg.text(VIEWER, umid)
         assert '🟢 状态：<b>在线</b>' in nodes_text
         await click(env, 'library_stats', umid, chat=VIEWER, user=VIEWER)
         stats_text = env.tg.text(VIEWER, umid)
         assert '📊 <b>媒体库统计</b>' in stats_text and '影视总计' in stats_text and 'Emby' in stats_text
+
+        # 5. WebP logo URL automatically falls back to .png sibling when Telegram refuses WebP sendPhoto
+        env.cfg['menu_logo_url'] = 'https://images.example/peekpeek-M1-tg-banner-wide-plus.webp'
+        orig_call = env.bot._call
+        seen_photos = []
+        async def webp_rejecting_call(method, payload=None, timeout=20):
+            if method == 'sendPhoto':
+                seen_photos.append(payload.get('photo'))
+                if str(payload.get('photo', '')).endswith('.webp'):
+                    return None
+            return await orig_call(method, payload, timeout)
+        env.bot._call = webp_rejecting_call
+        pmid = await command(env, '/start', chat=VIEWER, user=VIEWER)
+        assert seen_photos == [
+            'https://images.example/peekpeek-M1-tg-banner-wide-plus.webp',
+            'https://images.example/peekpeek-M1-tg-banner-wide-plus.png',
+        ]
+        assert (str(VIEWER), pmid) in env.bot._photo_panels
     asyncio.run(run())
 

@@ -589,7 +589,7 @@ def test_dice_only_menu_and_full_help_are_reachable(env):
     async def run():
         env.services.registry.save('blackwhite',enabled=False)
         env.services.registry.save('niuniu',enabled=False)
-        assert any(b['callback_data']=='play_hub' for line in env.bot.member_menu() for b in line)
+        assert any(b['callback_data']=='play_hub' for line in (env.bot.member_menu()+env.bot.bag_menu()) for b in line)
         await env.bot._dispatch_update({'message':message(env,'/游戏',private=True)})
         assert any('骰局玩法' in p.get('text','') or any(b.get('text')=='骰局玩法' for line in p.get('reply_markup',{}).get('inline_keyboard',[]) for b in line) for method,p in env.tg.calls if method=='sendMessage')
         await env.bot._dispatch_update({'message':message(env,'/猜大小帮助',private=True,mid=8998)})

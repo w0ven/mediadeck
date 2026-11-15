@@ -139,10 +139,10 @@ def test_menu_new_buttons_real_callback_and_plugin_switches(env):
             await menu_click(env,action,mid,chat=VIEWER,user=VIEWER)
             last=env.db.one('SELECT * FROM play_panels ORDER BY created_at DESC LIMIT 1')
             assert json.loads(last['payload_json'])['view']==view and last['message_id']
-        keys=[b['callback_data'] for line in env.bot.member_menu() for b in line]
+        keys=[b['callback_data'] for line in (env.bot.member_menu()+env.bot.bag_menu()+env.bot._watch_rankings_keyboard(24)) for b in line]
         assert 'points_board' in keys and 'play_hub' in keys
         for pid in ('blackwhite','niuniu','points_ranking'):env.services.registry.save(pid,enabled=False)
-        keys=[b['callback_data'] for line in env.bot.member_menu() for b in line]
+        keys=[b['callback_data'] for line in (env.bot.member_menu()+env.bot.bag_menu()+env.bot._watch_rankings_keyboard(24)) for b in line]
         assert 'points_board' not in keys and 'play_hub' not in keys
         for group in (False,True):
             commands={r['command'] for r in env.bot._command_list(group=group)}
