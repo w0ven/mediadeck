@@ -259,5 +259,121 @@ def test_interactive_code_picker_and_admin_preset_buttons_and_library_stats(env)
             'https://images.example/peekpeek-M1-tg-banner-wide-plus.png',
         ]
         assert (str(VIEWER), pmid) in env.bot._photo_panels
+
+        # Subsequent /start reuses cached fallback without probing .webp again
+        seen_photos.clear()
+        pmid2 = await command(env, '/start', chat=VIEWER, user=VIEWER)
+        assert seen_photos == ['https://images.example/peekpeek-M1-tg-banner-wide-plus.png']
+        assert pmid2 != pmid
     asyncio.run(run())
+
+
+def test_private_expired_admin_panel_and_buried_menus_always_reply_at_bottom(env):
+    import time
+
+    async def run():
+        # 1. Expired private /kk card no longer traps subsequent plain-text messages
+        kmid = await command(env, '/kk ViewerA', chat=ADMIN, user=ADMIN)
+        env.bot._admin_panels[(str(ADMIN), kmid)]['expires'] = time.time() - 5
+        await env.bot.send(ADMIN, '🔔 系统通知 1')
+        env.tg.calls.clear()
+        new_home = await command(env, '菜单', chat=ADMIN, user=ADMIN)
+        assert new_home != kmid
+        assert (str(ADMIN), kmid) not in env.bot._admin_panels
+        assert any(m == 'sendMessage' for m, _ in env.tg.calls)
+
+        # 2. Explicit reply to an expired admin card sends a fresh bottom card with admin buttons
+        kmid2 = await command(env, '/kk ViewerA', chat=ADMIN, user=ADMIN)
+        env.bot._admin_panels[(str(ADMIN), kmid2)]['expires'] = time.time() - 5
+        env.tg.calls.clear()
+        exp_mid = await command(env, '30', chat=ADMIN, user=ADMIN, reply=kmid2)
+        assert exp_mid != kmid2
+        assert '管理会话已过期' in env.tg.text(ADMIN, exp_mid)
+        assert any(b.get('callback_data') == 'admin_find' for b in env.tg.actions(ADMIN, exp_mid))
+
+        # 3. Buried admin_find prompt surfaces result at the bottom after intervening notices
+        await click(env, 'admin_find', exp_mid, chat=ADMIN, user=ADMIN)
+        notice_mid = await env.bot.send_message(ADMIN, '📋 新求片待审')
+        assert notice_mid > exp_mid
+        env.tg.calls.clear()
+        await env.bot._dispatch_update({
+            'message': {
+                'message_id': 9901,
+                'chat': {'id': ADMIN, 'type': 'private'},
+                'from': {'id': ADMIN, 'is_bot': False},
+                'text': 'ViewerA',
+            }
+        })
+        cur_mid = env.bot._panel[str(ADMIN)]
+        assert cur_mid > notice_mid
+        assert 'ViewerA' in env.tg.text(ADMIN, cur_mid)
+        assert any(m == 'deleteMessage' and p == {'chat_id': ADMIN, 'message_id': 9901} for m, p in env.tg.calls)
+    asyncio.run(run())
+
+
+def test_transport_retries_transient_reset_and_command_sync_does_not_hold_chat_lock(env):
+    import httpx
+
+    from app.modules.telegram import TelegramBot
+
+    async def run():
+        # 1. Transient connection reset on _call closes pooled client and retries once
+        bot = TelegramBot(lambda: {'enabled': True, 'bot_token': '123456:synthetic-token'}, env.members)
+        attempts = 0
+
+        class FakeResp:
+            def json(self):
+                return {'ok': True, 'result': {'id': 123456, 'username': 'demo_bot'}}
+
+        class FakeClient:
+            def __init__(self, fail_first: bool):
+                self.fail_first = fail_first
+                self.closed = False
+
+            async def post(self, url, json=None, timeout=20):
+                nonlocal attempts
+                attempts += 1
+                if self.fail_first:
+                    raise httpx.RemoteProtocolError('Server disconnected without sending a response.')
+                return FakeResp()
+
+            async def aclose(self):
+                self.closed = True
+
+        clients = [FakeClient(True), FakeClient(False)]
+        idx = 0
+
+        async def fake_get_client():
+            nonlocal idx
+            if bot._http is None:
+                bot._http = clients[idx]
+                idx += 1
+            return bot._http
+
+        bot._client = fake_get_client
+        res = await bot._call('sendMessage', {'chat_id': 1, 'text': 'hi'})
+        assert res == {'id': 123456, 'username': 'demo_bot'}
+        assert attempts == 2 and clients[0].closed is True
+
+        # 2. _sync_chat_commands runs outside _chat_locks[chat_key]
+        lock_held_during_sync = None
+        orig_sync = env.bot._sync_chat_commands
+
+        async def probe_sync(*args, **kwargs):
+            nonlocal lock_held_during_sync
+            lock_held_during_sync = env.bot._lock_for(str(VIEWER)).locked()
+            return await orig_sync(*args, **kwargs)
+
+        env.bot._sync_chat_commands = probe_sync
+        await env.bot._dispatch_update({
+            'message': {
+                'message_id': 9902,
+                'chat': {'id': VIEWER, 'type': 'private'},
+                'from': {'id': VIEWER, 'is_bot': False, 'first_name': 'V'},
+                'text': '/start',
+            }
+        })
+        assert lock_held_during_sync is False
+    asyncio.run(run())
+
 
