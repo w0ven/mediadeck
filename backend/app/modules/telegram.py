@@ -99,6 +99,39 @@ BACK_HOME: list[list[dict[str, str]]] = [
     [{"text": "◀ 首页 / 取消", "callback_data": "home"}],
 ]
 
+_READ_ONLY_TG_METHODS = frozenset({
+    "getUpdates", "getMe", "getChat", "getChatMember",
+    "getChatAdministrators", "getUserProfilePhotos", "getFile", "getWebhookInfo",
+})
+_RETRYABLE_TRANSPORT_ERRORS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.RemoteProtocolError,
+    httpx.WriteError,
+    httpx.PoolTimeout,
+)
+
+
+def _has_global_ipv6_route() -> bool:
+    route_file = Path("/proc/net/ipv6_route")
+    if not route_file.is_file():
+        return True
+    with contextlib.suppress(OSError):
+        for line in route_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            cols = line.split()
+            if len(cols) >= 10 and cols[0] == "0" * 32 and cols[1] == "00" and cols[9] != "lo":
+                return True
+    return False
+
+
+def _extract_photo_file_id(result: dict[str, Any]) -> str:
+    photos = result.get("photo")
+    if isinstance(photos, list) and photos:
+        last = photos[-1]
+        if isinstance(last, dict) and last.get("file_id"):
+            return str(last["file_id"])
+    return ""
+
 
 def device_display_row(device: dict[str, Any]) -> str:
     """Render one technical device identity without exposing its raw id."""
@@ -349,12 +382,15 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         # used to pay that twice, every time.
         self._http: httpx.AsyncClient | None = None
         self._http_token = ""
+        self._logo_photo_cache: dict[str, str] = {}
+        self._last_chat_mid: dict[str, int] = {}
         self._tg_profiles: dict[str, dict[str, str]] = {}
         self._tg_profile_until: dict[str, float] = {}
         self._job_progress: dict[str, tuple[str, int]] = {}
         self._http_loop: asyncio.AbstractEventLoop | None = None
         self._in_flight: set[asyncio.Task] = set()
         self._chat_locks: dict[str, asyncio.Lock] = {}
+        self._command_sync_locks: dict[str, asyncio.Lock] = {}
         self._registration_lock = asyncio.Lock()
         self._gift_receipts = GiftReceipts(self) if db is not None and registration is not None else None
         self.membership = GroupMembership(self)
@@ -427,7 +463,10 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if (self._http is None or self._http_token != token
                 or self._http_loop is not loop):
             await self._close_http()
+            local_addr = None if _has_global_ipv6_route() else "0.0.0.0"
+            transport = httpx.AsyncHTTPTransport(local_address=local_addr, retries=1)
             self._http = httpx.AsyncClient(
+                transport=transport,
                 timeout=httpx.Timeout(HTTP_TIMEOUT, connect=10.0),
                 limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
             )
@@ -482,18 +521,29 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         auth_part = self._token()
         if not auth_part:
             return None
-        client = await self._client()
-        if client is None:
-            return None
         url = f"{API_ROOT}/bot{auth_part}/{method}"
-        try:
-            r = await client.post(url, json=payload or {}, timeout=timeout)
-            body = r.json()
-        except Exception as exc:  # noqa: BLE001 - surfaced through status
-            # The token is in the URL, so raw exception text is not safe to keep.
-            CALL_DELIVERY.set(delivery_failure(exc=exc))
-            self._record_call_error(f"{type(exc).__name__}: 请求失败")
-            return None
+        retryable = (
+            _RETRYABLE_TRANSPORT_ERRORS + (httpx.ReadError, httpx.ReadTimeout)
+            if method in _READ_ONLY_TG_METHODS
+            else _RETRYABLE_TRANSPORT_ERRORS
+        )
+        body: Any = None
+        for attempt in range(2):
+            client = await self._client()
+            if client is None:
+                return None
+            try:
+                r = await client.post(url, json=payload or {}, timeout=timeout)
+                body = r.json()
+                break
+            except Exception as exc:  # noqa: BLE001 - surfaced through status
+                if attempt == 0 and isinstance(exc, retryable):
+                    await self._close_http()
+                    continue
+                # The token is in the URL, so raw exception text is not safe to keep.
+                CALL_DELIVERY.set(delivery_failure(exc=exc))
+                self._record_call_error(f"{type(exc).__name__}: 请求失败")
+                return None
         if not isinstance(body, dict):
             CALL_DELIVERY.set(delivery_failure())
             self._record_call_error('Telegram 返回格式无效')
@@ -515,9 +565,6 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         auth_part = self._token()
         if not auth_part:
             return None
-        client = await self._client()
-        if client is None:
-            return None
         url = f"{API_ROOT}/bot{auth_part}/{method}"
         payload = dict(fields)
         if isinstance(payload.get("reply_markup"), (dict, list)):
@@ -526,13 +573,22 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         thread = _THREAD.get() if chat_id is not None and self._in_bound_chat(chat_id) else None
         if thread:
             payload["message_thread_id"] = thread
-        try:
-            r = await client.post(url, data=payload, files=files, timeout=timeout)
-            body = r.json()
-        except Exception as exc:  # noqa: BLE001 - token lives in the URL
-            CALL_DELIVERY.set(delivery_failure(exc=exc))
-            self._record_call_error(f"{type(exc).__name__}: 请求失败")
-            return None
+        body: Any = None
+        for attempt in range(2):
+            client = await self._client()
+            if client is None:
+                return None
+            try:
+                r = await client.post(url, data=payload, files=files, timeout=timeout)
+                body = r.json()
+                break
+            except Exception as exc:  # noqa: BLE001 - token lives in the URL
+                if attempt == 0 and isinstance(exc, _RETRYABLE_TRANSPORT_ERRORS):
+                    await self._close_http()
+                    continue
+                CALL_DELIVERY.set(delivery_failure(exc=exc))
+                self._record_call_error(f"{type(exc).__name__}: 请求失败")
+                return None
         if not isinstance(body, dict) or not body.get("ok"):
             CALL_DELIVERY.set(delivery_failure(body))
             from app.modules.member_ops import redact
@@ -726,6 +782,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             self._admin_panels.clear()
             self._retired_panels.clear()
             self._installed_group_chats.clear()
+            self._logo_photo_cache.clear()
+            self._last_chat_mid.clear()
             self._commands_installed = False
             self._bot_username = ""
 
@@ -967,6 +1025,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         result = await self._call("sendMessage", payload)
         self._capture_checkin_feedback(payload, result)
         if isinstance(result, dict) and result.get("message_id"):
+            mid_int = int(result["message_id"])
+            self._last_chat_mid[str(chat_id)] = max(self._last_chat_mid.get(str(chat_id), 0), mid_int)
             if _GROUP.get() and self._in_bound_chat(chat_id):
                 key = self._pkey(chat_id)
                 self._menu_panel[key] = int(result["message_id"])
@@ -1009,6 +1069,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         result = await self._call("sendMessage", payload)
         self._capture_checkin_feedback(payload, result)
         if isinstance(result, dict) and result.get("message_id"):
+            mid_int = int(result["message_id"])
+            self._last_chat_mid[str(chat_id)] = max(self._last_chat_mid.get(str(chat_id), 0), mid_int)
             self._remember_menu(chat_id, result["message_id"], keyboard)
             return result.get("message_id")
         return None
@@ -1025,7 +1087,11 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         }
         if keyboard:
             payload["reply_markup"] = {"inline_keyboard": keyboard}
-        if await self._call("sendPhoto", payload) is not None:
+        photo_res = await self._call("sendPhoto", payload)
+        if photo_res is not None:
+            if isinstance(photo_res, dict) and photo_res.get("message_id"):
+                mid_int = int(photo_res["message_id"])
+                self._last_chat_mid[str(chat_id)] = max(self._last_chat_mid.get(str(chat_id), 0), mid_int)
             return True
         return await self.send(chat_id, caption, keyboard)
 
@@ -1102,14 +1168,27 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             "parse_mode": "HTML",
             "reply_markup": {"inline_keyboard": keyboard or []},
         }
+        cached = self._logo_photo_cache.get(logo)
+        if cached:
+            result = await self._call("sendPhoto", {**payload, "photo": cached})
+            if isinstance(result, dict) and result.get("message_id"):
+                fid = _extract_photo_file_id(result)
+                if fid:
+                    self._logo_photo_cache[logo] = fid
+                return result
+            self._logo_photo_cache.pop(logo, None)
         result = await self._call("sendPhoto", payload)
         if isinstance(result, dict) and result.get("message_id"):
+            fid = _extract_photo_file_id(result)
+            if fid:
+                self._logo_photo_cache[logo] = fid
             return result
         # Telegram sendPhoto URL fetch rejects .webp URLs; try .png sibling or local brand file.
         if logo.lower().endswith(".webp"):
             png_url = logo[:-5] + ".png"
             result = await self._call("sendPhoto", {**payload, "photo": png_url})
             if isinstance(result, dict) and result.get("message_id"):
+                self._logo_photo_cache[logo] = _extract_photo_file_id(result) or png_url
                 return result
         local_name = logo.rsplit("/", 1)[-1]
         if local_name.lower().endswith(".webp"):
@@ -1131,10 +1210,27 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                     {"photo": (local_name, raw, "image/png")},
                 )
                 if isinstance(result, dict) and result.get("message_id"):
+                    fid = _extract_photo_file_id(result)
+                    if fid:
+                        self._logo_photo_cache[logo] = fid
                     return result
         return None
 
-    async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str) -> None:
+    async def _show_home(self, chat_id: Any, tg_id: str, tg_name: str, *,
+                         fresh_panel: bool = False) -> None:
+        if fresh_panel and not _GROUP.get():
+            key = self._pkey(chat_id)
+            old = self._saved_menu(chat_id) or self._panel.get(key)
+            old_panel = self._panel.pop(key, None)
+            try:
+                await self._show_home(chat_id, tg_id, tg_name, fresh_panel=False)
+            finally:
+                new = self._menu_panel.get(key)
+                if old and new and new != old and not self._admin_panel(chat_id, old):
+                    await self._retire_menu(chat_id, old)
+                elif key not in self._panel and old_panel:
+                    self._panel[key] = old_panel
+            return
         body, keyboard = self._home(tg_id, tg_name)
         if self._gift_receipts and not _GROUP.get():
             keyboard += await self._gift_receipts.retry_menu(tg_id)
@@ -1147,6 +1243,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             result = await self._send_logo_photo(chat_id, logo, body, keyboard)
             if isinstance(result, dict) and result.get('message_id'):
                 mid = int(result['message_id'])
+                self._last_chat_mid[str(chat_id)] = max(self._last_chat_mid.get(str(chat_id), 0), mid)
                 self._photo_panels.add((str(chat_id), mid))
                 self._remember_menu(chat_id, mid, keyboard)
                 if old and old != mid:
@@ -4798,9 +4895,29 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             if not self._admin_panel_authorized(panel, tg_user_id):
                 return
             if panel['expires'] <= time.time():
-                if not in_group:
-                    await self._edit(chat_id, int(mid), '管理会话已过期，未执行修改；请重新 /kk 查询。')
-                return
+                self._admin_panels.pop((str(chat_id), int(mid)), None)
+                self._pending.pop(self._pkey(chat_id), None)
+                if in_group:
+                    return
+                if reply == mid or text.split('@', 1)[0] == '/cancel':
+                    key = self._pkey(chat_id)
+                    old = self._saved_menu(chat_id) or int(mid)
+                    old_panel = self._panel.pop(key, None)
+                    try:
+                        await self._show(
+                            chat_id,
+                            '管理会话已过期，未执行修改；请重新 /kk 查询或使用下方管理入口。',
+                            self.admin_menu(),
+                        )
+                    finally:
+                        new = self._menu_panel.get(key)
+                        if old and new and new != old:
+                            await self._retire_menu(chat_id, old)
+                        elif key not in self._panel and old_panel:
+                            self._panel[key] = old_panel
+                    return
+                panel = None
+        if panel and is_input:
             pending = panel.get('pending')
             if in_group and reply != mid and text.split('@', 1)[0] != '/cancel':
                 return  # group input must answer the card; /cancel may cancel the current one
@@ -4811,7 +4928,19 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                 self._pending.pop(self._pkey(chat_id), None)
             if (not pending or pending[0] == 'admin_user') and not text.startswith('/'):
                 if not in_group:
-                    await self._return_admin_target(chat_id, int(mid), '\n请选择卡片上的操作。')
+                    key = self._pkey(chat_id)
+                    old_mid = int(mid)
+                    self._panel.pop(key, None)
+                    await self._return_admin_target(
+                        chat_id, old_mid,
+                        '\n💡 请点击卡片上的操作按钮；查找其他用户请点「◀ 返回管理」或发送 /kk 用户名。',
+                    )
+                    new_mid = self._panel.get(key)
+                    if new_mid and new_mid != old_mid:
+                        self._admin_panels.pop((str(chat_id), old_mid), None)
+                        await self._retire_menu(chat_id, old_mid)
+                    elif not new_mid:
+                        self._panel[key] = old_mid
                 return
         try:
             await self._dispatch_bound_message(message, chat_id, tg_user_id, tg_username,
@@ -4849,57 +4978,73 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                     return
                 if waiting[0] not in ("admin_renew_days", "admin_score_delta", "admin_find"):
                     return
-            else:
-                await self._delete_trigger_command(chat_id, message.get("message_id"))
             kind, _, extra = waiting
-            if kind == "credential":
-                await self._submit_credential(chat_id, tg_user_id, text)
-                return
-            if kind == "username":
-                await self._registration_password_start(
-                    chat_id, tg_user_id, tg_username, text,
-                    admission=extra.get("admission"))
-                return
-            if kind == "title_create":
-                member = self._member_for_chat(tg_user_id)
-                if not member or member['emby_user_id'] != extra['user_id']:
+            try:
+                if kind == "credential":
+                    await self._submit_credential(chat_id, tg_user_id, text)
+                    return
+                if kind == "username":
+                    await self._registration_password_start(
+                        chat_id, tg_user_id, tg_username, text,
+                        admission=extra.get("admission"))
+                    return
+                if kind == "title_create":
+                    member = self._member_for_chat(tg_user_id)
+                    if not member or member['emby_user_id'] != extra['user_id']:
+                        self._pending.pop(self._pkey(chat_id),None)
+                        return
+                    try:
+                        self._inventory.use(member['emby_user_id'],extra['card_id'],title=text)
+                    except ValueError as exc:
+                        await self._show(chat_id,escape(str(exc)),self.bag_menu())
+                        return
                     self._pending.pop(self._pkey(chat_id),None)
+                    await self._show(chat_id,'称号已创建，可免费佩戴。',[[{'text':'选择称号','callback_data':'titles'}]])
                     return
-                try:
-                    self._inventory.use(member['emby_user_id'],extra['card_id'],title=text)
-                except ValueError as exc:
-                    await self._show(chat_id,escape(str(exc)),self.bag_menu())
+                if kind in ("transfer_to", "transfer_amount"):
+                    member = self._member_for_chat(tg_user_id)
+                    if not member:
+                        self._pending.pop(self._pkey(chat_id), None)
+                        await self.send(chat_id, "这个 Telegram 还没有账号。",
+                                        self.guest_menu())
+                        return
+                    if kind == "transfer_to":
+                        await self._transfer_pick_target(chat_id, member, text)
+                    else:
+                        await self._transfer_pick_amount(chat_id, member, extra, text)
                     return
-                self._pending.pop(self._pkey(chat_id),None)
-                await self._show(chat_id,'称号已创建，可免费佩戴。',[[{'text':'选择称号','callback_data':'titles'}]])
-                return
-            if kind in ("transfer_to", "transfer_amount"):
-                member = self._member_for_chat(tg_user_id)
-                if not member:
+                if kind in ("admin_find", "admin_renew_days", "admin_score_delta",
+                            "admin_code", "admin_auth"):
+                    member = self._member_for_chat(tg_user_id)
+                    buried_mid: int | None = None
+                    if not in_group and kind == "admin_find":
+                        key = self._pkey(chat_id)
+                        cur_mid = self._panel.get(key)
+                        if cur_mid and self._last_chat_mid.get(str(chat_id), 0) > int(cur_mid):
+                            buried_mid = int(cur_mid)
+                            self._panel.pop(key, None)
+                    await self._admin_handle_text(chat_id, member, kind, extra, text)
+                    if buried_mid is not None:
+                        new_mid = self._panel.get(self._pkey(chat_id))
+                        if new_mid and new_mid != buried_mid:
+                            self._admin_panels.pop((str(chat_id), buried_mid), None)
+                            await self._retire_menu(chat_id, buried_mid)
+                        elif not new_mid:
+                            self._panel[self._pkey(chat_id)] = buried_mid
+                    return
+                if kind == "rebind_target":
+                    await self._pick_rebind_target(chat_id, tg_user_id, text)
+                    return
+                if kind == "rebind_verify":
+                    await self._submit_rebind(message, chat_id, tg_user_id, tg_username, text)
+                    return
+                if kind == "claim":
                     self._pending.pop(self._pkey(chat_id), None)
-                    await self.send(chat_id, "这个 Telegram 还没有账号。",
-                                    self.guest_menu())
+                    await self._show(chat_id, "认领已停用。已绑定用户直接使用；更换 TG 请申请换绑。", self.guest_menu())
                     return
-                if kind == "transfer_to":
-                    await self._transfer_pick_target(chat_id, member, text)
-                else:
-                    await self._transfer_pick_amount(chat_id, member, extra, text)
-                return
-            if kind in ("admin_find", "admin_renew_days", "admin_score_delta",
-                        "admin_code", "admin_auth"):
-                member = self._member_for_chat(tg_user_id)
-                await self._admin_handle_text(chat_id, member, kind, extra, text)
-                return
-            if kind == "rebind_target":
-                await self._pick_rebind_target(chat_id, tg_user_id, text)
-                return
-            if kind == "rebind_verify":
-                await self._submit_rebind(message, chat_id, tg_user_id, tg_username, text)
-                return
-            if kind == "claim":
-                self._pending.pop(self._pkey(chat_id), None)
-                await self._show(chat_id, "认领已停用。已绑定用户直接使用；更换 TG 请申请换绑。", self.guest_menu())
-                return
+            finally:
+                if not in_group:
+                    await self._delete_trigger_command(chat_id, message.get("message_id"))
 
         # Commands are dispatched after the pending-conversation check above,
         # which deliberately ignores anything starting with '/': a member who
@@ -4920,7 +5065,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._start_registration(chat_id, tg_user_id, credential=text)
             return
 
-        await self._show_home(chat_id, tg_user_id, tg_name)
+        await self._show_home(chat_id, tg_user_id, tg_name, fresh_panel=True)
 
     async def _handle_callback(self, callback: dict[str, Any]) -> None:
         data = str(callback.get("data") or "")
@@ -5568,6 +5713,13 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             self._chat_locks[chat_key] = lock
         return lock
 
+    def _command_sync_lock_for(self, chat_key: str) -> asyncio.Lock:
+        lock = self._command_sync_locks.get(chat_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._command_sync_locks[chat_key] = lock
+        return lock
+
     async def _dispatch_update(self, update: dict[str, Any], source_bot_id: str | None = None) -> None:
         try:
             telegram_private.observe(self._db, telegram_private.identity(self) if source_bot_id is None else source_bot_id, update)
@@ -5575,6 +5727,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             # not wait behind a slow chat callback or a scan's account lock.
             if await self.membership.handle_update(update):
                 return
+            sync_args: tuple[Any, str, str, bool] | None = None
+            defer_game_sync = False
             async with self._lock_for(self._chat_key(update)):
                 if "message" in update:
                     await self._handle_message(update["message"])
@@ -5587,14 +5741,18 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                     group = not self._private_chat(message)
                     if group and not self._group_chat_allowed(chat):
                         return
-                    args = (chat['id'], str(sender.get('id') or ''), str(sender.get('language_code') or ''), group)
+                    sync_args = (chat['id'], str(sender.get('id') or ''), str(sender.get('language_code') or ''), group)
                     callback_data = str((update.get('callback_query') or {}).get('data') or '')
                     words = str(message.get('text') or '').strip().split()
                     verb = words[0].lower().split('@', 1)[0] if words else ''
-                    if callback_data.startswith(('nn:', 'nnh:', 'pk:', *PACKET_CALLBACKS)) or verb in ('/牛牛', '/niuniu', '/牛牛帮助', '/pk', '/pkrank', '/pk榜', '/pkme', '/pk战绩', '/红包', '/redpacket', '/packet'):
-                        defer_ui(self, ('commands', str(chat['id'])+':'+args[1]), lambda: sync_game_commands(self, *args))
-                    else:
-                        await self._sync_chat_commands(*args[:3], group=group)
+                    defer_game_sync = callback_data.startswith(('nn:', 'nnh:', 'pk:', *PACKET_CALLBACKS)) or verb in (
+                        '/牛牛', '/niuniu', '/牛牛帮助', '/pk', '/pkrank', '/pk榜', '/pkme', '/pk战绩', '/红包', '/redpacket', '/packet'
+                    )
+                    if defer_game_sync:
+                        defer_ui(self, ('commands', str(chat['id'])+':'+sync_args[1]), lambda: sync_game_commands(self, *sync_args))
+            if sync_args is not None and not defer_game_sync:
+                async with self._command_sync_lock_for(str(sync_args[0])):
+                    await self._sync_chat_commands(*sync_args[:3], group=sync_args[3])
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - one bad update must not stop the bot
@@ -5677,6 +5835,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await asyncio.gather(*pending, return_exceptions=True)
         self._in_flight.clear()
         self._chat_locks.clear()
+        self._command_sync_locks.clear()
         if getattr(self, '_game_ui', None):
             self._game_ui['pending'].clear()
             self._game_ui['menu_locks'].clear()
