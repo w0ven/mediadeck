@@ -16,14 +16,24 @@ def beijing_stamp(value):
     return datetime.fromtimestamp(value, BEIJING).strftime('%Y-%m-%d %H:%M') if value else '永久'
 
 
+def remain_label(left):
+    if left >= 3 * DAY:
+        return f'剩 {int(left // DAY)} 天'
+    if left >= DAY:
+        days = int(left // DAY)
+        hours = int((left % DAY) // 3600)
+        return f'剩 {days} 天 {hours} 小时' if hours else f'剩 {days} 天'
+    hours = int(left // 3600)
+    return f'剩 {hours} 小时' if hours >= 1 else '剩不到 1 小时'
+
+
 def expiry_line(expires_at, now=None):
     if not expires_at:
         return '♾ 永久有效'
     left = expires_at - (time.time() if now is None else now)
     if left <= 0:
         return f'⌛ 已于 {beijing_stamp(expires_at)} 到期'
-    remain = f'剩 {int(left // DAY)} 天' if left >= DAY else f'剩不到 {max(1, int(left // 3600) + 1)} 小时'
-    return f'⏳ {beijing_stamp(expires_at)} 到期 · {remain}'
+    return f'⏳ {beijing_stamp(expires_at)} 到期 · {remain_label(left)}'
 
 
 def growth_line(level):
@@ -36,13 +46,15 @@ def growth_line(level):
 
 def renewal_blockers(info):
     reasons = []
-    if not info['managed']:
-        reasons.append('账号尚未开通等级续期')
     if info['exempt']:
         reasons.append('白名单账号永久有效，无需续期')
+    elif not info.get('expires_at'):
+        reasons.append('当前账号永久有效，无需续期')
+    elif not info['managed']:
+        reasons.append('账号尚未开通等级续期')
     if info['lifecycle'] != 'ready':
         reasons.append('账号删除流程待确认，请联系管理员')
-    if not info['window_open']:
+    if info.get('expires_at') and not info['window_open']:
         reasons.append('到期前 72 小时内才能续期')
     if info['shortfall']:
         reasons.append(f"积分不足，还差 {info['shortfall']} 积分")
@@ -173,7 +185,7 @@ class ActivityBotMixin:
             if action in ('auto:on', 'auto:off'):
                 enabling = action == 'auto:on'
                 text = ('🤖 <b>开启自动保号</b>\n<i>默认关闭，确认后才会开启。</i>\n\n'
-                        '到期前 24 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。\n'
+                        '到期前 72 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。\n'
                         '积分不足时不扣分，也不会续期。\n\n'
                         '⚠️ 账号到期后无法播放，超过 72 小时可能被删除。' if enabling else
                         '🛑 <b>关闭自动保号</b>\n\n'
@@ -195,7 +207,7 @@ class ActivityBotMixin:
                 enabled = pending[2]['enabled']
                 levels.set_auto(uid, enabled, tg_uid=str(actor), binding_revision=pending[2]['binding'])
                 self._pending.pop(self._pkey(chat_id), None)
-                await show('✅ 自动保号已开启\n到期前 24 小时内，积分足够时会自动续期。' if enabled
+                await show('✅ 自动保号已开启\n到期前 72 小时内，积分足够时会自动续期。' if enabled
                            else '✅ 自动保号已关闭\n到期前请记得手动续期。', back)
                 return
             self._pending.pop(self._pkey(chat_id), None)

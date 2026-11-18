@@ -41,14 +41,14 @@ def test_zero_viewing_uses_unchanged_level_price_and_thirty_days(env, automatic,
 
 @pytest.mark.parametrize('automatic', [False, True])
 @pytest.mark.parametrize('offset', [0, 1, -DAY-1])
-def test_manual_72h_and_auto_24h_windows_still_apply_without_viewing(env, automatic, offset):  # noqa: F811 - pytest fixture injection
-    window = DAY if automatic else 3*DAY
+def test_72h_renewal_window_applies_to_manual_and_auto_without_viewing(env, automatic, offset):  # noqa: F811 - pytest fixture injection
+    window = 3*DAY
     expiry = NOW+window+offset if offset >= 0 else NOW+offset
     env.members.upsert('u', '', {'expires_at':expiry})
     env.levels.set_auto('u', True)
     env.points.add('u', 80, 'admin.adjust')
     if offset == 1:
-        with pytest.raises(ValueError, match='72小时.*24小时'):
+        with pytest.raises(ValueError, match='72小时'):
             env.levels.renew('u', 'outside', automatic=automatic)
         assert env.points.balance('u') == 80
         assert env.members.get('u')['expires_at_effective'] == expiry
@@ -88,7 +88,7 @@ async def test_actual_scheduler_has_no_viewing_gate_but_keeps_other_protections(
     balance = 79 if condition == 'poor' else 100
     env.points.add('u', balance, 'admin.adjust')
     if condition == 'early':
-        env.members.upsert('u', '', {'expires_at':NOW+DAY+1})
+        env.members.upsert('u', '', {'expires_at':NOW+3*DAY+1})
     if condition in ('suspended', 'pending'):
         env.members.upsert('u', '', {'status':condition})
     if condition == 'whitelist':

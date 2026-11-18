@@ -299,8 +299,12 @@ async def test_scheduled_auto_renew_notices_and_old_cleanup_exemption(env):
 
     from app.modules.economy_rules import BEIJING
     text = ctx.telegram.send.call_args.args[1]
-    assert '续费30天需80积分，余额缺口80' in text and text.count('北京时间') == 2
-    assert not any(word in text for word in ('80分钟', '合格日', '达标续费'))
+    kb = ctx.telegram.send.call_args.kwargs['keyboard']
+    assert '⏳ <b>账号即将到期提醒</b>' in text
+    assert '续期 30 天需 80 积分（当前余额 0 积分，还差 80 积分）' in text
+    assert '自动保号当前为「未开启」' in text
+    assert [b['callback_data'] for b in kb[0]] == ['activity:renew', 'activity:auto:on']
+    assert not any(word in text for word in ('80分钟', '合格日', '达标续费', '联系管理员'))
     expiry = env.members.get('u')['expires_at_effective']
     assert datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M') in text
     assert (await plugin.run({}))['已提醒'] == 0
@@ -309,10 +313,73 @@ async def test_scheduled_auto_renew_notices_and_old_cleanup_exemption(env):
     assert not env.db.query('SELECT * FROM watch_verified_samples')
     env.points.add('u', 100, 'admin.adjust')
     env.levels.set_auto('u', True)
+    ctx.telegram.send.reset_mock()
     assert (await plugin.run({}))['已续期'] == 1
     assert env.points.balance('u') == 20
+    receipt_text = ctx.telegram.send.call_args.args[1]
+    assert '✅ <b>自动保号续期成功</b>' in receipt_text
+    assert '本次扣除：80 积分（剩余 20 积分）' in receipt_text
+    assert '顺延 30 天' in receipt_text
+    ctx.telegram.send.reset_mock()
     assert (await plugin.run({}))['已续期'] == 0
+    assert not ctx.telegram.send.called
     assert isinstance(plugin, LevelLifecyclePlugin)
+
+
+@pytest.mark.asyncio
+async def test_auto_renew_72h_window_and_shortfall_or_expired_notices(env, monkeypatch):
+    ctx = env.checkin.ctx
+    ctx.levels = env.levels
+    ctx.telegram = type('Bot', (), {'enabled': True, 'send': AsyncMock(return_value=True)})()
+    env.registry.save('activity_lifecycle', enabled=True)
+    plugin = env.registry.get('activity_lifecycle')
+
+    # Case 1: 60h left (inside 72h window, >24h) with auto_renew=True & sufficient points -> renews immediately, no nag notice.
+    env.members.upsert('u_auto', 'AutoUser', {'group_id': 'standard', 'expires_at': NOW + 60 * 3600})
+    env.db.execute("UPDATE members SET tg_user_id='201' WHERE emby_user_id='u_auto'")
+    env.points.add('u_auto', 200, 'admin.adjust')
+    env.levels.set_auto('u_auto', True)
+
+    # Case 2: 60h left with auto_renew=True & shortfall -> sends auto_renew shortfall notice (2A) with hours detail.
+    env.members.upsert('u_short', 'ShortUser', {'group_id': 'standard', 'expires_at': NOW + 60 * 3600})
+    env.db.execute("UPDATE members SET tg_user_id='202' WHERE emby_user_id='u_short'")
+    env.points.add('u_short', 30, 'admin.adjust')
+    env.levels.set_auto('u_short', True)
+
+    # Case 3: already expired (-2h) -> sends expired retention notice (文案 3).
+    env.members.upsert('u_exp', 'ExpUser', {'group_id': 'standard', 'expires_at': NOW + DAY})
+    env.members.upsert('u_exp', '', {'expires_at': NOW - 7200})
+    env.db.execute("UPDATE members SET tg_user_id='203' WHERE emby_user_id='u_exp'")
+
+    # First delivery attempt fails transiently for receipt -> retries cleanly after retry_at.
+    calls_by_chat = {}
+    fail_once = {'201': True}
+    async def send_side_effect(chat, body, keyboard=None):
+        if fail_once.pop(str(chat), False):
+            return False
+        calls_by_chat.setdefault(str(chat), []).append((body, keyboard))
+        return True
+    ctx.telegram.send.side_effect = send_side_effect
+
+    res = await plugin.run({})
+    assert res['已续期'] == 1
+    assert res['已提醒'] == 2
+    assert env.members.get('u_auto')['expires_at_effective'] == NOW + 60 * 3600 + 30 * DAY
+    assert '201' not in calls_by_chat  # receipt failed once, and u_auto was NOT sent a nag notice!
+    short_body, short_kb = calls_by_chat['202'][0]
+    assert '⚠️ <b>自动保号积分不足提醒</b>' in short_body
+    assert '剩 2 天 12 小时' in short_body
+    assert '当前余额 30 积分（还差 50 积分）' in short_body
+    assert [b['callback_data'] for b in short_kb[0]] == ['activity:renew', 'activity:status']
+    exp_body, exp_kb = calls_by_chat['203'][0]
+    assert '🛑 <b>账号已到期 · 保号期提醒</b>' in exp_body
+    assert [b['callback_data'] for b in exp_kb[0]] == ['activity:renew', 'activity:status']
+
+    # Advance 5 minutes -> transient auto-renew receipt retries and succeeds once.
+    monkeypatch.setattr('time.time', lambda: NOW + 301)
+    await plugin.run({})
+    assert len(calls_by_chat.get('201', [])) == 1
+    assert '✅ <b>自动保号续期成功</b>' in calls_by_chat['201'][0][0]
 
 
 def test_pending_activation_and_startup_term_rollback_together(env, monkeypatch):

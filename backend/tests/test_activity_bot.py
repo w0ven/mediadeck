@@ -206,7 +206,7 @@ def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
             await tap(e, 'activity:auto:on', mid)
         body = e.tg.text(VIEWER, mid)
         assert not any(text in body for text in ('80分钟', '有效日', '每天核验', '达标'))
-        for text in ('默认关闭', '确认后才会开启', '到期前 24 小时',
+        for text in ('默认关闭', '确认后才会开启', '到期前 72 小时',
                      '积分足够', '按当时的等级价格自动扣积分续期 30 天',
                      '积分不足时不扣分', '到期后无法播放', '72 小时'):
             assert text in body
@@ -477,4 +477,31 @@ def test_lost_confirmation_result_has_safe_same_intent_retry(env, monkeypatch):
         await tap(e, confirm, mid)
         assert '续期成功' in e.tg.text(VIEWER, mid)
         assert e.services.points.balance('u1') == balance
+    asyncio.run(run())
+
+
+def test_expiry_display_hours_and_legacy_expiry_callback_or_notify_guarded(env, monkeypatch):
+    from app.modules.bot_activity import expiry_line
+    from app.modules.telegram import _fmt_expiry
+    now = 1795000000
+    monkeypatch.setattr('time.time', lambda: now)
+    assert '剩 5 天' in expiry_line(now + 5 * DAY + 7200, now)
+    assert '剩 1 天 15 小时' in expiry_line(now + 39 * 3600, now)
+    assert '剩 5 小时' in expiry_line(now + 5 * 3600 + 600, now)
+    assert '剩不到 1 小时' in expiry_line(now + 1200, now)
+    assert _fmt_expiry(now + 39 * 3600) == '1 天 15 小时后到期'
+    assert _fmt_expiry(now + 5 * 3600) == '5 小时后到期'
+    assert _fmt_expiry(now + 1200) == '不到 1 小时到期'
+
+    e = env
+    async def run():
+        # Legacy notify_expiring skips activity-managed members so "需要续期请联系管理员" is never sent.
+        sent = await e.bot.notify_expiring([e.members.get('u1')])
+        assert sent == 0
+        # Legacy 'expiry' callback routes activity-managed members directly to self-service level status.
+        mid = await private_command(e, '/start')
+        await tap(e, 'expiry', mid)
+        body = e.tg.text(VIEWER, mid)
+        assert '🌱 <b>等级与权益</b>' in body
+        assert '联系管理员' not in body
     asyncio.run(run())
