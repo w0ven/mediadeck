@@ -18,6 +18,12 @@ from app.modules.watch_rewards import (
 )
 
 DAY = 86400
+SPECIAL_LEVELS = (8, 9)
+
+
+def _lv9_from_lv8(lv8):
+    row = dict(lv8, level=9, name="踏天", title="顺为凡，逆则仙，只在心中一念间", icon="🐉", threshold=None)
+    return row
 
 
 def defaults():
@@ -28,8 +34,10 @@ def defaults():
                      "bandwidth_limit_kbps": (120, 120, 140, 160, 180, 220, 280)[i]*1000,
                      "max_streams": (2, 2, 2, 2, 3, 3, 4)[i], "request_quota": (3, 3, 4, 5, 6, 8, 10)[i],
                      "max_devices": (3, 4, 5, 6, 7, 8, 9)[i]})
-    rows.append(dict(rows[-1], level=8, name="道祖", title="一炁化三清", icon="🪷", threshold=None, price=1,
-                     max_devices=10))
+    lv8 = dict(rows[-1], level=8, name="道祖", title="一炁化三清", icon="🪷", threshold=None, price=1,
+               max_devices=10)
+    rows.append(lv8)
+    rows.append(_lv9_from_lv8(lv8))
     return {"enabled": False, "delete_enabled": False, "levels": rows}
 
 
@@ -39,8 +47,8 @@ def validate(config):
     if type(config["enabled"]) is not bool or type(config["delete_enabled"]) is not bool:
         raise ValueError("等级与删除开关须为布尔值")
     levels = config["levels"]
-    if not isinstance(levels, list) or len(levels) != 8:
-        raise ValueError("需配置7个成长等级和1个专属等级")
+    if not isinstance(levels, list) or len(levels) not in (8, 9):
+        raise ValueError("需配置7个成长等级和1～2个专属等级")
     previous = -1
     keys = set(defaults()["levels"][0])
     for i, row in enumerate(levels):
@@ -55,7 +63,7 @@ def validate(config):
                 raise ValueError("成长门槛须从0开始严格递增")
             previous = value
         elif row["threshold"] is not None:
-            raise ValueError("Lv8为专属授予，不设置成长门槛")
+            raise ValueError(f"Lv{i+1}为专属授予，不设置成长门槛")
         for key, high in (("price", 10**9), ("bandwidth_limit_kbps", 10000000), ("max_streams", 100),
                           ("request_quota", 10000), ("max_devices", 100)):
             if type(row[key]) is not int or not 1 <= row[key] <= high:
@@ -114,20 +122,26 @@ class LevelService:
     def config(self):
         row = self.db.one("SELECT * FROM activity_config WHERE id=1")
         config = json.loads(row["config_json"]) if row else defaults()
-        # Configurations saved before per-level device caps carry the defaults.
+        # Configurations saved before per-level device caps or Lv9 carry the defaults.
         for level, default in zip(config.get("levels", []), defaults()["levels"], strict=False):
             level.setdefault("max_devices", default["max_devices"])
+        levels = config.get("levels", [])
+        if len(levels) == 8:
+            levels.append(_lv9_from_lv8(levels[7]))
         return {"revision": row["revision"] if row else 0, "config": config}
 
     def save_config(self, config, revision):
         validate(config)
+        saved = dict(config, levels=list(config["levels"]))
+        if len(saved["levels"]) == 8:
+            saved["levels"].append(_lv9_from_lv8(saved["levels"][7]))
         with economy_write(self.db) as conn:
             current = self.config()
             if revision != current["revision"]:
                 raise ValueError("等级配置已变化，请刷新后重试")
             conn.execute("INSERT INTO activity_config VALUES(1,?,?) ON CONFLICT(id) DO UPDATE "
                          "SET revision=excluded.revision,config_json=excluded.config_json",
-                         (revision+1, encode(config)))
+                         (revision+1, encode(saved)))
         return self.config()
 
     def project(self, member, group):
@@ -143,7 +157,10 @@ class LevelService:
         uid = member['emby_user_id']
         growth = self.db.one("SELECT COALESCE(SUM(delta),0) AS n FROM growth_ledger WHERE emby_user_id=?", (uid,))["n"]
         rows = config['config']['levels']
-        index = 7 if enrollment['special_level'] == 8 else max(i for i in range(7) if growth >= rows[i]['threshold'])
+        sp = enrollment['special_level']
+        index = (8 if sp == 9 and len(rows) >= 9 else
+                 7 if sp in SPECIAL_LEVELS else
+                 max(i for i in range(7) if growth >= rows[i]['threshold']))
         level = dict(rows[index], growth=growth, next_threshold=rows[index+1]['threshold'] if index < 6 else None)
         member['activity_level'] = level
         member['activity_managed'] = True
@@ -196,14 +213,19 @@ class LevelService:
             expiry = current if current > now else now+30*DAY
             self.write_expiry(tx, uid, member or {}, expiry, now)
 
-    def grant_special(self, uid, actor):
+    def grant_special(self, uid, actor, level=8):
+        if type(level) is not int or level not in (0, *SPECIAL_LEVELS):
+            raise ValueError('专属等级须为8、9或0（恢复常规成长等级）')
         with economy_write(self.db) as conn:
             member = self.members.get(uid)
             if not member or member.get('activity_lifecycle') == 'deleting':
                 raise ValueError('账号不存在或删除结果待确认')
-            conn.execute('INSERT INTO activity_members(emby_user_id,special_level,enrolled_at) VALUES(?,8,?) '
-                         'ON CONFLICT(emby_user_id) DO UPDATE SET special_level=8', (uid, int(time.time())))
-            self.members.audit(actor, 'activity.grant_lv8', uid, '管理员明确授予专属Lv8，期限与余额不变', conn=conn)
+            conn.execute('INSERT INTO activity_members(emby_user_id,special_level,enrolled_at) VALUES(?,?,?) '
+                         'ON CONFLICT(emby_user_id) DO UPDATE SET special_level=excluded.special_level',
+                         (uid, level, int(time.time())))
+            action = f'activity.grant_lv{level}' if level else 'activity.revoke_special'
+            note = f'管理员明确授予专属Lv{level}，期限与余额不变' if level else '管理员恢复账号为常规成长等级，期限与余额不变'
+            self.members.audit(actor, action, uid, note, conn=conn)
         return self.members.get(uid)
 
     def set_auto(self, uid, enabled, *, tg_uid=None, binding_revision=None):

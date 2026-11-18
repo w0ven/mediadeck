@@ -51,5 +51,12 @@ def register(app, auth):
     @app.post('/api/activity/members/{uid}/grant-lv8', dependencies=[Depends(auth)])
     async def grant(uid: str, payload: dict = Body(...), actor: str = Depends(auth)):  # noqa: B008
         if payload.get('confirm') is not True:
-            raise HTTPException(409, '须明确确认授予Lv8')
-        return await call(app.state.levels.grant_special, uid, actor)
+            raise HTTPException(409, '须明确确认授予专属等级')
+        target_level = payload.get('level', 8)
+        return await call(app.state.levels.grant_special, uid, actor, target_level)
+
+    @app.post('/api/activity/members/{uid}/grant-special', dependencies=[Depends(auth)])
+    async def grant_special(uid: str, payload: dict = Body(...), actor: str = Depends(auth)):  # noqa: B008
+        if payload.get('confirm') is not True:
+            raise HTTPException(409, '须明确确认授予专属等级')
+        return await call(app.state.levels.grant_special, uid, actor, payload.get('level', 9))

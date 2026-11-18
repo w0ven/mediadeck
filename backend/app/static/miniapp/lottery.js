@@ -1093,7 +1093,7 @@ window.createLotteryUI = ({ api, esc, setScreen, push, back, toast, stamp, tg, i
       const isMemberOnly = draft.audience === 'member';
       const date = draft.deadline ? new Date((draft.deadline + 8 * 3600) * 1000).toISOString().slice(0, 16) : '';
       const options = (rows, value) => rows.map(([id, name]) => `<option value="${esc(id)}" ${String(id) === String(value) ? 'selected' : ''}>${esc(name)}</option>`).join('');
-      const levelOpts = [['0', '不限'], ['1', 'Lv1'], ['2', 'Lv2'], ['3', 'Lv3'], ['4', 'Lv4'], ['5', 'Lv5'], ['6', 'Lv6'], ['7', 'Lv7'], ['8', 'Lv8']];
+      const levelOpts = [['0', '不限'], ['1', 'Lv1'], ['2', 'Lv2'], ['3', 'Lv3'], ['4', 'Lv4'], ['5', 'Lv5'], ['6', 'Lv6'], ['7', 'Lv7'], ['8', 'Lv8'], ['9', 'Lv9']];
       const copiedNotice = isCopied && !draft.deadline && isTimed
         ? '<div class="banner bad" id="lot-copied-banner"><span>⚠️ 请重新设置截止时间（复制出的草稿截止时间已清空）</span></div>'
         : '';

@@ -50,14 +50,14 @@ class MemberCardMixin:
 
     def _member_head(self, member: dict[str, Any], info: Any) -> list[str]:
         title = (info['worn_title'] or info['level']['title']) if info else None
-        identity = self._group_label(member, title=title) + ' · ' + self._status_label(member)
         if member.get('activity_exempt') or (info and info['exempt']):
             term = '♾ 永久有效'
         elif 'expires_at_effective' in member or 'expires_at' in member:
             term = expiry_line(member.get('expires_at_effective', member.get('expires_at')))
         else:
             term = '⏳ 有效期暂不可用'
-        return [identity, term]
+        jade = [*self._identity_plaque_lines(member, title=title), f"{self._status_label(member)} · {term}"]
+        return ['<blockquote>' + '\n'.join(jade) + '</blockquote>']
 
     @staticmethod
     def _member_rights(member: dict[str, Any]) -> list[str]:

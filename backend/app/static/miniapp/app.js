@@ -9,7 +9,8 @@
     rank: { kind: 'watch', period: 'today' }, bag: 'shop',
     req: { q: '', type: '', results: null, page: 1, total: 1 },
   };
-  const ORN = { 1: '⋆', 2: '✦', 3: '❀', 4: '❄', 5: '✧', 6: '◈', 7: '♛', 8: '✺' };
+  const ORN = { 1: '⋆', 2: '✦', 3: '🔥', 4: '⚔', 5: '✧', 6: '◈', 7: '♛', 8: '🪷', 9: '❖' };
+  const LV9_ART = '/app/assets/game-assets/lv9-tatian.webp';
   const STATUS = {
     active: ['ok', '正常'], suspended: ['bad', '已停用'], expired: ['warn', '已过期'],
     exhausted: ['warn', '已超额'], pending: ['', '待开通'], deleted: ['bad', '已删除'],
@@ -154,14 +155,20 @@
   }
   const mbps = (kbps) => (kbps ? Math.round(kbps / 1000) : null);
 
+  function lvIconHtml(lv, iconStr) {
+    if (Number(lv) === 9) return `<img class="lv9-art" src="${LV9_ART}" alt="踏天">`;
+    return iconStr ? esc(emo(iconStr)) : '';
+  }
   function lvClass(tag) {
     if (!tag) return '';
     return tag.whitelist ? 'wl' : `lv${tag.level}`;
   }
   function lvTag(tag, xs = false, bare = false) {
     if (!tag) return '';
+    const art = bare ? (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : '')
+      : (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : (tag.icon ? esc(emo(tag.icon)) + ' ' : ''));
     const label = tag.whitelist ? '💠 白名单'
-      : `${bare || !tag.icon ? '' : esc(emo(tag.icon)) + ' '}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
+      : `${art}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
     return `<span class="lvtag ${xs ? 'xs ' : ''}${lvClass(tag)}">${label}</span>`;
   }
   function growthMeter(lv, nextLevel, today) {
@@ -171,29 +178,32 @@
     const td = today && today.growth > 0 ? `<em class="gm-today num"> · 今日 +${num(today.growth)}</em>` : '';
     const next = lv.next_threshold;
     if (!next) {
-      const isEx = lv.level === 8;
+      const isEx = lv.level >= 8;
+      const exLabel = lv.level === 9 ? '逆仙圣谕 · 专属尊位' : isEx ? '道祖敕封 · 专属尊位' : '已登常规绝巅';
       return `<div class="gm">
-        <div class="gm-top"><span class="gm-label"><b>${lv.icon ? esc(emo(lv.icon)) + ' ' : ''}Lv${esc(lv.level)} ${esc(lv.name || '')}</b> · ${isEx ? '专属授予等级' : '已达最高常规等级'}</span><b class="gm-pct num">${isEx ? '专属' : '已满级'}</b></div>
+        <div class="gm-top"><span class="gm-label"><b>${lvIconHtml(lv.level, lv.icon)} Lv${esc(lv.level)} ${esc(lv.name || '')}</b> · ${exLabel}</span><b class="gm-pct num">${isEx ? '专属' : '已满级'}</b></div>
         <div class="gm-bar" role="progressbar" aria-valuenow="100" aria-valuemin="0" aria-valuemax="100"><span style="width:100%"></span></div>
-        <div class="gm-foot"><span>累计成长 <b class="num">${g}</b>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} MAX</span></div>
+        <div class="gm-foot"><span>累计修为 <b class="num">${g}</b>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} MAX</span></div>
       </div>`;
     }
     const gap = Math.max(0, next - (lv.growth || 0));
     const nextLv = lv.level + 1;
     const nextName = nextLevel && nextLevel.name ? ` ${esc(nextLevel.name)}` : '';
-    const nextIcon = nextLevel && nextLevel.icon ? `${esc(emo(nextLevel.icon))} ` : '';
+    const nextIcon = nextLevel ? `${lvIconHtml(nextLv, nextLevel.icon)} ` : '';
     return `<div class="gm">
-      <div class="gm-top"><span class="gm-label">距 <b>${nextIcon}Lv${esc(nextLv)}${nextName}</b> 还差 <b class="num">${num(gap)}</b> 成长</span><b class="gm-pct num">${p}%</b></div>
+      <div class="gm-top"><span class="gm-label">距破境 <b>${nextIcon}Lv${esc(nextLv)}${nextName}</b> 还差 <b class="num">${num(gap)}</b> 成长</span><b class="gm-pct num">${p}%</b></div>
       <div class="gm-bar" role="progressbar" aria-valuenow="${p}" aria-valuemin="0" aria-valuemax="100"><span style="width:${p}%${p > 0 ? ';min-width:4px' : ''}"></span></div>
-      <div class="gm-foot"><span>成长 <b class="num">${g}</b> / <span class="num">${num(next)}</span>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} → Lv${esc(nextLv)}</span></div>
+      <div class="gm-foot"><span>灵力成长 <b class="num">${g}</b> / <span class="num">${num(next)}</span>${td}</span><span class="gm-stage num">Lv${esc(lv.level)} → Lv${esc(nextLv)}</span></div>
     </div>`;
   }
   function plaque(text, tag, big = false, ident = null) {
-    const tier = tag && tag.whitelist ? 7 : Math.min(8, Math.max(1, Number(tag && tag.level) || 1));
+    const tier = tag && tag.whitelist ? 7 : Math.min(9, Math.max(1, Number(tag && tag.level) || 1));
     const orn = `<span class="orn">${tag && tag.whitelist ? '◆' : ORN[tier]}</span>`;
+    const embInner = ident ? (Number(ident.level) === 9 ? lvIconHtml(9) : (ident.icon ? esc(emo(ident.icon)) : '')) : '';
     const head = ident && ident.name
-      ? `<span class="txt nm">${esc(ident.name)}</span>${ident.icon ? `<span class="emb">${esc(emo(ident.icon))}</span>` : ''}` : '';
-    return `<span class="plaque t${tier}${big ? ' big' : ''}">${orn}${head}<span class="txt">${esc(text)}</span>${orn}</span>`;
+      ? `<span class="txt nm">${esc(ident.name)}</span>${embInner ? `<span class="emb">${embInner}</span>` : ''}` : '';
+    const isLong = Array.from(String(text || '')).length >= 10;
+    return `<span class="plaque t${tier}${big ? ' big' : ''}${isLong ? ' long' : ''}">${orn}${head}<span class="txt">${esc(text)}</span>${orn}</span>`;
   }
   function myTag() {
     const me = S.me;
@@ -569,27 +579,50 @@
     if (!alive()) return;
     const lv = me.level;
     const tag = myTag();
-    const next = lv.next_threshold;
     const r = me.rights;
-    const rows = me.levels.filter((row) => row.level <= 7 || lv.level === 8).map((row) => {
-      const reached = me.whitelist ? false : row.level < lv.level;
+    const realmSub = me.whitelist ? '白名单尊享'
+      : lv.level === 9 ? '九重天外 · 逆仙踏天境'
+        : lv.level === 8 ? '八重圣境 · 太清道祖位'
+          : `第 ${lv.level} 重境界 · 修真仙途`;
+    const crest = me.whitelist ? '<div class="realm-crest">💠</div>'
+      : lv.level === 9 ? `<div class="realm-crest is-lv9"><img src="${LV9_ART}" alt="踏天"></div>`
+        : `<div class="realm-crest">${esc(emo(lv.icon))}</div>`;
+    const rows = me.levels.map((row) => {
+      const isSpecial = row.threshold == null;
+      const reached = !me.whitelist && !isSpecial && row.level < lv.level;
       const isCurrent = !me.whitelist && row.level === lv.level;
-      const detail = isCurrent ? `续期 ${num(row.price)} 积分 / 30 天`
-        : reached ? '已达成'
-          : `${row.threshold != null ? num(row.threshold) + ' 成长 · ' : '专属授予 · '}${mbps(row.bandwidth_limit_kbps)} Mbps · 求片 ${row.request_quota}${row.max_devices ? ' · 设备 ' + row.max_devices : ''}`;
-      return `<div class="it lv${row.level}${isCurrent ? ' cur' : (!reached ? ' dim-lv' : '')}">
-        <span class="lvtag">${esc(emo(row.icon))} Lv${row.level}</span>
-        <span class="t small">${isCurrent ? `<b>${esc(row.name)}</b>` : esc(row.name)} <span class="muted tiny">${esc(detail)}</span></span>
-        ${isCurrent ? '<span class="chip cur">当前</span>' : reached ? '<span class="chip ok">✓</span>' : ''}</div>`;
+      const badge = isCurrent ? '<span class="chip cur">🔥 当前境界</span>'
+        : reached ? '<span class="chip ok">✦ 已破境</span>'
+          : isSpecial ? '<span class="chip acc">❖ 圣谕敕封</span>'
+            : `<span class="chip">${num(row.threshold)} 成长</span>`;
+      const orb = row.level === 9 ? `<img class="lv9-art" src="${LV9_ART}" alt="">` : esc(emo(row.icon));
+      return `<div class="realm-step lv${row.level}${isCurrent ? ' cur' : (!reached && !isSpecial ? ' dim-lv' : '')}">
+        <div class="realm-orb">${orb}</div>
+        <div class="realm-body">
+          <div class="realm-head">
+            <div class="realm-title"><span class="realm-lv">Lv${row.level}</span><span>${esc(row.name)}</span></div>
+            ${badge}
+          </div>
+          <div class="realm-plaque-wrap">${plaque(row.title, { level: row.level }, false, row)}</div>
+          <div class="realm-perks">
+            <span>🚀 ${mbps(row.bandwidth_limit_kbps)} Mbps</span>
+            <span>📺 同播 ${row.max_streams} 路</span>
+            <span>🎬 求片 ${row.request_quota}/月</span>
+            ${row.max_devices ? `<span>📱 ${row.max_devices} 台设备</span>` : ''}
+            <span>🔁 ${num(row.price)} 积分/30天</span>
+          </div>
+        </div>
+      </div>`;
     }).join('');
     setScreen(`
       <div class="hero ${lvClass(tag)}" style="text-align:center"><div class="sheen"></div>
-        <div style="font-size:38px;filter:drop-shadow(0 4px 12px rgba(0,0,0,.4))">${me.whitelist ? '💠' : esc(emo(lv.icon))}</div>
-        <div style="font-weight:800;font-size:19px;letter-spacing:2px">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
-        <div style="margin:6px 0 2px">${plaque(lv.title, tag, false, lv)}</div>
-        ${growthMeter(lv, me.levels.find((row) => row.level === lv.level + 1), me.today)}
+        <div class="realm-sub">${esc(realmSub)}</div>
+        ${crest}
+        <div style="font-weight:900;font-size:21px;letter-spacing:3px;text-shadow:0 2px 12px rgba(0,0,0,.45)">${me.whitelist ? '白名单' : `Lv${esc(lv.level)} · ${esc(lv.name)}`}</div>
+        <div style="margin:8px 0 4px">${plaque(me.worn_title || lv.title, tag, false, lv)}</div>
+        ${growthMeter(lv, me.levels.find((row) => row.level === lv.level + 1 && row.threshold != null), me.today)}
       </div>
-      <div class="h"><span>当前权益</span></div>
+      <div class="h"><span>当前生效权益</span><span>实时同步</span></div>
       <div class="stats">
         <div><b class="num${r.bandwidth_kbps ? '' : ' txt-val'}">${r.bandwidth_kbps ? mbps(r.bandwidth_kbps) : '不限'}</b><span>带宽 Mbps</span></div>
         <div><b class="num${r.max_streams ? '' : ' txt-val'}">${r.max_streams || '不限'}</b><span>同时播放</span></div>
@@ -600,8 +633,8 @@
       <div class="stats">
         ${[me.watch.seconds_24h, me.watch.seconds_30d, me.watch.total].map((s, i) => `<div><b class="num" style="font-size:16px">${dur(s).replace(/(\D+)/g, '<small>$1</small>')}</b><span>${['近 24 小时', '近 30 天', '累计'][i]}</span></div>`).join('')}
       </div>
-      ${me.whitelist ? '' : `<div class="h"><span>升级之路</span></div><div class="list">${rows}</div>`}
-      <div class="card small"><b>积分和成长怎么来？</b><div class="muted tiny" style="margin-top:4px">看片会自动获得积分和成长；签到等其他玩法见 Bot 的<span class="nowrap">「💡 帮助」</span>。</div></div>`);
+      ${me.whitelist ? '' : `<div class="h"><span>九重登仙天梯</span><span>Lv1 凡尘 → Lv9 踏天</span></div><div class="realm-ladder">${rows}</div>`}
+      <div class="card small"><b>灵力成长与破境说明</b><div class="muted tiny" style="margin-top:4px">日常观影自动结算积分与灵力成长（Lv1～Lv7 自动破境晋升）；Lv8 道祖与 Lv9 踏天为圣谕单独敕封境界。</div></div>`);
   }
 
   // -- 称号 ---------------------------------------------------------------------
@@ -657,11 +690,11 @@
   async function renderGallery(alive) {
     const me = S.me || await loadMe();
     if (!alive()) return;
-    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${esc(emo(row.icon))} Lv${row.level}</span>${plaque(row.title, { level: row.level }, false, row)}</div>`).join('');
+    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${lvIconHtml(row.level, row.icon)} Lv${row.level}</span>${plaque(row.title, { level: row.level }, false, row)}</div>`).join('');
     const sample = me.worn_title || me.level.title;
-    setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的称号和样式；自定义称号会按佩戴者的等级套用对应样式。</div>
+    setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的道号铭牌与流光样式；自定义称号会按佩戴者的境界套用对应样式。</div>
       <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">💠 白名单</span>${plaque(sample, { whitelist: true }, false, me.level)}</div></div>
-      <div class="card small" style="margin-top:12px"><div class="tiny muted">铭牌显示「等级名 + 标志 + 称号」，文字带本级配色的流光。Lv3 起铭牌外有光晕；Lv5 起光晕更强、边框发光；Lv7、Lv8 再加扫光和呼吸光晕，Lv8 最大最亮；白名单固定用水晶色。</div></div>`);
+      <div class="card small" style="margin-top:12px"><div class="tiny muted">铭牌显示「境界名 + 标志 + 道号」，文字带本级配色的仙气流光。Lv3 起铭牌外有光晕；Lv5 起光晕更强、边框发光；Lv7～Lv9 再加扫光和呼吸神环，Lv9 踏天配专属冰龙神印与双极冰紫流光；白名单固定用水晶色。</div></div>`);
   }
 
   // -- 播放线路 / 积分流水 ---------------------------------------------------------

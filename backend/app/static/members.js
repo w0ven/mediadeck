@@ -617,7 +617,7 @@
     return `<h4 class="hg-section-title" id="md-common-label">常用操作 · 确认后生效</h4>
         <div class="toolbar" id="md-actions">
           ${m.activity_managed||m.activity_lifecycle==='deleting'?`<div class="md-action-row">
-            ${m.activity_managed?'<button class="btn sm" id="md-grant-lv8">明确授予专属Lv8</button>':''}
+            ${m.activity_managed?'<button class="btn sm" id="md-grant-lv8">明确授予专属Lv8</button> <button class="btn sm primary" id="md-grant-lv9">🐉 授予专属Lv9</button>':''}
             ${m.activity_lifecycle==='deleting'?'<button class="btn sm" id="md-recover-deletion">核实远端并恢复删除互斥</button>':''}</div>`:''}
           <label class="md-action-row"><span class="md-action-label">续期</span><input id="md-days" type="number" min="1" value="30" style="width:72px" aria-label="续期天数"> 天
             <button class="btn sm primary" type="button" id="md-renew">续期</button></label>
@@ -771,8 +771,14 @@
       bindMemberActions(host, id, m, tab);
       const grantLevel = $('#md-grant-lv8');
       if(grantLevel) grantLevel.onclick=()=>runMemberAction(grantLevel,async current=>{
-        if(!(await deckConfirm(`确定授予 ${m.username || id} 专属 Lv8？后续按 1 积分续期，账号到期时间和当前积分余额保持不变。`,{title:'授予专属 Lv8',confirmText:'授予'})))return;
-        await api(`/api/activity/members/${encodeURIComponent(id)}/grant-lv8`,{method:'POST',body:JSON.stringify({confirm:true})});
+        if(!(await deckConfirm(`确定授予 ${m.username || id} 专属 Lv8（道祖）？后续按专属等级积分续期，账号到期时间和当前积分余额保持不变。`,{title:'授予专属 Lv8',confirmText:'授予'})))return;
+        await api(`/api/activity/members/${encodeURIComponent(id)}/grant-lv8`,{method:'POST',body:JSON.stringify({confirm:true,level:8})});
+        await refreshActionDetail(id,'overview',current);
+      });
+      const grantLv9 = $('#md-grant-lv9');
+      if(grantLv9) grantLv9.onclick=()=>runMemberAction(grantLv9,async current=>{
+        if(!(await deckConfirm(`确定授予 ${m.username || id} 专属 Lv9（踏天）？权益与 Lv8 一致，账号到期时间和当前积分余额保持不变。`,{title:'授予专属 Lv9（踏天）',confirmText:'授予'})))return;
+        await api(`/api/activity/members/${encodeURIComponent(id)}/grant-special`,{method:'POST',body:JSON.stringify({confirm:true,level:9})});
         await refreshActionDetail(id,'overview',current);
       });
       const recoverDeletion = $('#md-recover-deletion');
@@ -944,8 +950,9 @@
       if (!(await deckConfirm(`保存 ${member.username || id} 的个人权限覆盖？限速变化可能结束当前播放以重新生效。`,
         {title: '保存权限覆盖', confirmText: '保存'}))) return;
       const result = await api(endpoint + '/overrides', {method:'PUT',body:JSON.stringify(overrides)});
-      assertRemoteResult(result); toast('权限覆盖已保存');
+      assertRemoteResult(result);
       await refreshNow(); await refreshActionDetail(id, 'entitlements', current, submitted);
+      toast('权限覆盖已保存');
     });
     const clear = $('#ov-clear');
     if (clear) clear.onclick = () => runMemberAction(clear, async current => {

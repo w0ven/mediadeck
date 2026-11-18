@@ -6,12 +6,9 @@
 ## 普通首页
 
 ```html
-🎬 <b>我的影库</b>
-
-👋 u1，欢迎回来
-普通用户
-✅ 正常 · 30 天后到期
-🪙 积分 <b>暂不可用</b>
+🎬 <b>我的影库</b> · 欢迎回来，<b>u1</b>
+<blockquote><code>普通用户</code>
+✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
 按钮：
@@ -22,12 +19,9 @@
 ## 上片员首页
 
 ```html
-🎬 <b>我的影库</b>
-
-👋 up1，欢迎回来
-普通用户
-✅ 正常 · 30 天后到期
-🪙 积分 <b>暂不可用</b>
+🎬 <b>我的影库</b> · 欢迎回来，<b>up1</b>
+<blockquote><code>普通用户</code>
+✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
 按钮：
@@ -38,12 +32,9 @@
 ## 管理员首页
 
 ```html
-🎬 <b>我的影库</b>
-
-👋 admin1，欢迎回来
-普通用户
-✅ 正常 · 30 天后到期
-🪙 积分 <b>暂不可用</b>
+🎬 <b>我的影库</b> · 欢迎回来，<b>admin1</b>
+<blockquote><code>普通用户</code>
+✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
 按钮：
@@ -534,8 +525,8 @@
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ✅ 正常
-♾ 永久有效
+<blockquote><code>演示组</code>
+✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未禁用
 其他限制：无</blockquote>
@@ -565,8 +556,8 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ⛔ 已停用
-♾ 永久有效
+<blockquote><code>演示组</code>
+⛔ 已停用 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：已封禁 · Emby：已禁用
 其他限制：无</blockquote>
@@ -596,8 +587,8 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ✅ 正常
-♾ 永久有效
+<blockquote><code>演示组</code>
+✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：已禁用
 其他限制：无</blockquote>
@@ -627,8 +618,8 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ⛔ 已停用
-♾ 永久有效
+<blockquote><code>演示组</code>
+⛔ 已停用 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：已封禁 · Emby：未禁用
 其他限制：无</blockquote>
@@ -658,8 +649,8 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ✅ 正常
-♾ 永久有效
+<blockquote><code>演示组</code>
+✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未知，请刷新核实
 其他限制：无
@@ -690,8 +681,8 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-演示组 · ✅ 正常
-♾ 永久有效
+<blockquote><code>演示组</code>
+✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未禁用
 其他限制：无</blockquote>

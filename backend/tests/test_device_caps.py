@@ -62,7 +62,7 @@ def test_enforce_respects_budget():
 
 def test_level_config_gains_device_caps_and_validates():
     config = defaults()
-    assert [row['max_devices'] for row in config['levels']] == [3, 4, 5, 6, 7, 8, 9, 10]
+    assert [row['max_devices'] for row in config['levels']] == [3, 4, 5, 6, 7, 8, 9, 10, 10]
     validate(config)
     config['levels'][0]['max_devices'] = 0
     try:
@@ -84,7 +84,7 @@ def test_saved_config_without_caps_reads_defaults(tmp_path):
     service = LevelService(db, None, None, None)
     read = service.config()
     assert read['revision'] == 3
-    assert [row['max_devices'] for row in read['config']['levels']] == [3, 4, 5, 6, 7, 8, 9, 10]
+    assert [row['max_devices'] for row in read['config']['levels']] == [3, 4, 5, 6, 7, 8, 9, 10, 10]
 
 
 def test_live_device_token_state_filters_ghosts_and_protects_shared_and_system_devices(tmp_path):

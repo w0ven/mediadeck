@@ -111,7 +111,7 @@ class HoldemGame:
         if len(self.eligible(table)) < 2:
             table.update(phase='waiting', countdown_at=None, idle_deadline=table['idle_deadline'] or clock + 600)
         elif table['hand_no']:
-            table.update(phase='between', countdown_at=table['countdown_at'] or clock + 4, idle_deadline=None)
+            table.update(phase='between', countdown_at=table['countdown_at'] or clock + 5, idle_deadline=None)
         elif len(table['seats']) == self.max_players:
             self.start(service, conn, table, clock)
 
@@ -295,6 +295,8 @@ class HoldemGame:
                 if service.cash.held(conn, 'gc_holdem', table['id'], hand['users'][pid]['uid']) != value['stack']:
                     raise RuntimeError('holdem settlement escrow mismatch')
         self._sync_stacks(table)
+        is_showdown = any(v['shown'] for v in result['players'].values())
+        hand['revealed'] = sorted({w for pot in result['pots'] for w in pot['winners']}) if is_showdown else []
         hand['settled_at'] = clock
         table.update(phase='waiting', last_hand=hand, hand=None, turn_deadline=None, auto_at=None,
                      countdown_at=None, idle_deadline=clock + 600, last_activity=clock, host_active=clock)
@@ -316,8 +318,68 @@ class HoldemGame:
         self.schedule(service, conn, table, clock)
 
     @staticmethod
-    def view(hand, player):
-        public = engine.view(hand['engine'], player)
+    def _hole_hint(hole, board):
+        hint = engine.hand_hint(hole, board)
+        if not board and hole[0] // 13 == hole[1] // 13 and hole[0] % 13 != hole[1] % 13:
+            hint += ' · 同花'
+        best5 = engine.best_hand(hole + board)[2] if len(board) >= 3 else None
+        return hint, best5
+
+    @classmethod
+    def hand_label_for(cls, hand, player):
+        raw = hand['engine']
+        seat = next((s for s in raw['seats'] if s['player'] == player), None)
+        if not seat:
+            return ''
+        return cls._hole_hint(seat['hole'], raw['board'])[0]
+
+    @classmethod
+    def view(cls, hand, player):
+        raw = hand['engine']
+        public = engine.view(raw, player)
+        board = public['board']
+        orig_holes = {s['player']: list(s['hole']) for s in raw['seats']}
+        if public['finished']:
+            default_rev = [pid for pid, r in public['results']['players'].items() if r['shown']]
+            revealed = set(hand['revealed']) if 'revealed' in hand else set(default_rev)
+            for seat in public['seats']:
+                pid = seat['player']
+                r = public['results']['players'][pid]
+                is_pub = pid in revealed
+                is_self = pid == player
+                seat['shown'] = is_pub
+                r['shown'] = is_pub
+                if is_pub or is_self:
+                    hole = orig_holes[pid]
+                    seat['hole'] = list(hole)
+                    hint, best5 = cls._hole_hint(hole, board)
+                    seat['hand_name'] = hint
+                    seat['best5'] = best5
+                    if is_pub:
+                        r['hand'] = r['hand'] or hint
+                        if best5 is not None and r['best5'] is None:
+                            r['best5'] = list(best5)
+                else:
+                    seat.pop('hole', None)
+                    seat['hand_name'] = None
+                    seat['best5'] = None
+                    r['hand'] = None
+                    r['best5'] = None
+            can_reveal = bool(player and player in hand['users'] and player not in revealed)
+            rev_list = sorted(revealed)
+        else:
+            for seat in public['seats']:
+                pid = seat['player']
+                if pid == player and 'hole' in seat:
+                    hint, best5 = cls._hole_hint(seat['hole'], board)
+                    seat['hand_name'] = hint
+                    seat['best5'] = best5
+                else:
+                    seat['hand_name'] = None
+                    seat['best5'] = None
+            can_reveal = False
+            rev_list = []
         return {'number': hand['number'], 'turn': hand['turn'], 'commitment': hand['commitment'],
                 'current_player': public['current_player'], 'finished': public['finished'], 'engine': public,
-                'legal_actions': public['legal_actions'], 'result': public['results']}
+                'legal_actions': public['legal_actions'], 'result': public['results'],
+                'revealed': rev_list, 'can_reveal': can_reveal}

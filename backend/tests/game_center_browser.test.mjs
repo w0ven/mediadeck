@@ -565,10 +565,10 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
     t = await finishHoldem(env, pages, id);
     const firstNet = t.last_hand.result.players[t.me.player].net;
     assert.equal(t.phase, 'between');
-    assert.equal(t.countdown_at - t.server_time, 4);
+    assert.equal(t.countdown_at - t.server_time, 5);
     await syncTable(host, t);
     const countdown = Number(await host.locator('[data-gc-countdown]').first().innerText());
-    assert(countdown > 0 && countdown <= 4, 'countdown uses server_time, not the skewed device clock');
+    assert(countdown > 0 && countdown <= 5, 'countdown uses server_time, not the skewed device clock');
     assert.equal(await host.locator('[data-gc-start]').count(), 0);
     await matrix(host, null);
     await host.locator('[data-gc-history]').first().click();
@@ -578,7 +578,7 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
     await syncTable(host, await tableFor(env, id));
     await host.waitForFunction(() => {
       const remaining = Number(document.querySelector('[data-gc-countdown]')?.textContent);
-      return remaining > 0 && remaining <= 2;
+      return remaining > 0 && remaining <= 3;
     }); // The refresh can have the same revision; wait for its corrected server_time too.
 
     await env.call({ kind: 'advance', table: id, deadline: 'countdown' });

@@ -94,7 +94,7 @@ def test_full_flow_freeze_start_continuous_topup_away_cashout(hc):
     t = e.op('u0', 'start', t['id'])
     assert t['button'] == 0 and t['hand']['engine']['small_blind_seat'] == 0
     t = finish(e, t, 'fold')
-    assert t['phase'] == 'between' and t['countdown_at'] == e.clock + 4
+    assert t['phase'] == 'between' and t['countdown_at'] == e.clock + 5
     assert held(e, t) == {'u0': 99, 'u1': 101}
     assert e.points.balance('u0') == 4900  # no per-hand spendable changes
     t = e.op('u0', 'top-up', t['id'], amount=50)
@@ -231,7 +231,7 @@ def test_waiting_status_distinguishes_first_start_pause_and_practice(hc):
     tier = next(tier for tier in hc.s.list_tiers('holdem')['tiers'] if tier['id'] == 'novice')
     assert tier['waiting_tables'][0]['start_status'] == t['start_status']
     t = hc.op('u2', 'seat', t['id'], buy_in=100)
-    assert t['start_status']['reason'] == 'next_hand' and t['countdown_at'] == hc.clock + 4
+    assert t['start_status']['reason'] == 'next_hand' and t['countdown_at'] == hc.clock + 5
     for uid in ('u0', 'u1', 'u2'):
         t = hc.op(uid, 'leave', t['id'])
     assert t['start_status']['reason'] == 'closed' and not t['start_status']['can_start']
@@ -581,6 +581,11 @@ def test_deck_commitment_deal_order_and_all_private_views(hc):
         wire = json.dumps(v)
         assert all(field not in wire for field in ('"deck"', '"salt"', '"burned"', '"cursor"', '"users"', 'private-login'))
     t = finish(hc, t)
+    winners = {w for pot in t['last_hand']['result']['pots'] for w in pot['winners']}
+    spectator = snap(hc, t, 'u7')['last_hand']['engine']['seats']
+    assert {p['player'] for p in spectator if 'hole' in p} == winners
+    for uid in ('u0', 'u1', 'u2'):
+        t = hc.op(uid, 'reveal', t['id'], hand_no=1)
     verify = hc.s.proof(t['id'], 1)
     assert verify['settled'] and len(verify['deck']) == 52
     n = len(verify['deal_order'])

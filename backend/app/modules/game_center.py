@@ -26,6 +26,25 @@ class GameError(PlayError):
         self.code, self.status = code, status
 
 
+INTERACT_PROPS = {
+    'flower': {'name': '鲜花', 'emoji': '🌹', 'points': 2, 'beans': 20, 'sfx': 'flower'},
+    'poop': {'name': '便便', 'emoji': '💩', 'points': 3, 'beans': 30, 'sfx': 'poop'},
+    'champagne': {'name': '香槟', 'emoji': '🥂', 'points': 5, 'beans': 50, 'sfx': 'champagne'},
+    'bomb': {'name': '炸弹', 'emoji': '💣', 'points': 5, 'beans': 50, 'sfx': 'bomb'},
+}
+
+QUICK_PHRASES = {
+    'hurry': '快点吧，我等到花儿都谢了！',
+    'mercy': '底裤都输光啦，大佬手下留情！',
+    'allin': '搏一搏，单车变摩托！',
+    'strong': '这把牌稳了，跟不跟？',
+    'lucky': '承让承让，运气好而已～',
+    'bluff': '别装了，我知道你在偷鸡！',
+    'battle': '不要走，决战到天亮！',
+    'tatian': '顺为凡，逆则仙，梭哈就在一念间！',
+}
+
+
 class GameCenter:
     # Long enough to leave the Mini App and post an invitation in a group chat.
     OFFLINE_SECONDS = 180
@@ -458,8 +477,87 @@ class GameCenter:
             if table['game'] != 'holdem':
                 raise GameError('invalid', '此操作仅支持德州扑克')
             self.games['holdem'].operation(self, conn, table, p, op, body, clock)
+        elif op == 'reveal':
+            if table['game'] in BOARD_GAMES:
+                raise GameError('invalid', '棋类对局无需亮牌')
+            last = table.get('last_hand')
+            if not last or not last.get('settled_at'):
+                raise GameError('wrong_phase', '当前没有可亮牌的已结算手牌', 409)
+            req_hand = body.get('hand_no')
+            if req_hand is not None and req_hand != last['number']:
+                raise GameError('stale_turn', '新一手已开始，无法亮出旧手牌', 409)
+            pid = next((k for k, who in last['users'].items() if who['uid'] == uid), None)
+            if not pid:
+                raise GameError('forbidden', '未参与本手牌局，无法亮牌', 403)
+            revealed = list(last.get('revealed', []))
+            if pid not in revealed:
+                revealed.append(pid)
+                last['revealed'] = revealed
+                conn.execute('UPDATE gc_hands SET state_json=? WHERE table_id=? AND hand_no=?',
+                             (encode(last), table['id'], last['number']))
+                game_impl = self.games[table['game']]
+                hand_label = game_impl.hand_label_for(last, pid) if hasattr(game_impl, 'hand_label_for') else ''
+                self._push_interaction(table, {
+                    'kind': 'reveal', 'actor': pid, 'actor_name': p['name'],
+                    'hand_no': last['number'], 'hand_name': hand_label, 'at': clock,
+                })
+        elif op == 'interact':
+            if table['phase'] == 'closed':
+                raise GameError('wrong_phase', '牌桌已结束', 409)
+            kind = body.get('kind')
+            cooldown = 1.2 if kind == 'prop' else 2.0
+            if clock - float(p.get('last_interact_at') or 0) < cooldown:
+                raise GameError('rate_limited', '互动太快啦，请稍等一下再发', 429)
+            if kind == 'prop':
+                item = body.get('item')
+                prop = INTERACT_PROPS.get(item)
+                if not prop:
+                    raise GameError('invalid', '不支持的互动道具')
+                target_id = body.get('target')
+                target = next((s for s in table['seats'] if s['player'] == target_id), None)
+                if not target or target['player'] == p['player']:
+                    raise GameError('invalid', '请选择牌桌上的其他玩家')
+                seq = int(table.get('interact_seq') or 0) + 1
+                if table['currency'] == 'points':
+                    cost = prop['points']
+                    if self.points.balance(uid) < cost:
+                        raise GameError('insufficient_funds', f'可用积分不足 {cost} 积分')
+                    self.points._apply(conn, uid, -cost, 'game.interact', f"{table['id']}:ix:{seq}", 'member', int(clock))
+                else:
+                    cost = prop['beans']
+                    beans = self._beans(conn, uid, clock)['balance']
+                    if beans < cost:
+                        raise GameError('insufficient_funds', f'欢乐豆不足 {cost}')
+                    conn.execute('UPDATE gc_beans SET balance=balance-? WHERE user_id=?', (cost, uid))
+                p['last_interact_at'] = clock
+                self._push_interaction(table, {
+                    'kind': 'prop', 'item': item, 'emoji': prop['emoji'], 'label': prop['name'],
+                    'sfx': prop['sfx'], 'cost': cost, 'currency': table['currency'],
+                    'actor': p['player'], 'actor_name': p['name'],
+                    'target': target['player'], 'target_name': target['name'], 'at': clock,
+                })
+            elif kind == 'phrase':
+                phrase_id = body.get('phrase_id')
+                text = QUICK_PHRASES.get(phrase_id)
+                if not text:
+                    raise GameError('invalid', '不支持的快捷语句')
+                p['last_interact_at'] = clock
+                self._push_interaction(table, {
+                    'kind': 'phrase', 'phrase_id': phrase_id, 'text': text,
+                    'actor': p['player'], 'actor_name': p['name'], 'at': clock,
+                })
+            else:
+                raise GameError('invalid', '不支持的互动类型')
         else:
             raise GameError('not_found', '操作不存在', 404)
+
+    @staticmethod
+    def _push_interaction(table, entry):
+        seq = int(table.get('interact_seq') or 0) + 1
+        table['interact_seq'] = seq
+        items = list(table.get('interactions') or [])
+        items.append({'seq': seq, **entry})
+        table['interactions'] = items[-16:]
 
     def _seen(self, table, uid):
         if self.seat(table, uid):
@@ -631,6 +729,7 @@ class GameCenter:
                'hand_no', 'host', 'max_players', 'created_at', 'last_activity', 'countdown_at',
                'turn_deadline', 'auto_at', 'idle_deadline', 'rules')}
         out.update(server_time=clock, deep_link=self.link(table['id']),
+                   interactions=list(table.get('interactions') or []),
                    seats=[{**{k: seat[k] for k in ('seat', 'player', 'name', 'bot', 'ready', 'auto', 'auto_hands',
                                                  'away', 'leave_after')},
                            'avatar': avatars.get(seat['uid'], '')} for seat in table['seats']],

@@ -22,14 +22,31 @@ window.createGamesUI = ({
   let catalog = null, wallet = null, current = null, busy = false, pending = null;
   let sheetGeneration = 0;
   const tierCache = new Map();
+  const PROPS = [
+    ['flower', '🌹', '送鲜花', 2, 20, '花瓣漫天'],
+    ['poop', '💩', '丢便便', 3, 30, '糊脸暴击'],
+    ['champagne', '🥂', '敬香槟', 5, 50, '举杯致敬'],
+    ['bomb', '💣', '丢炸弹', 5, 50, '轰炸震屏'],
+  ];
+  const PHRASES = [
+    ['hurry', '快点吧，我等到花儿都谢了！'],
+    ['mercy', '底裤都输光啦，大佬手下留情！'],
+    ['allin', '搏一搏，单车变摩托！'],
+    ['strong', '这把牌稳了，跟不跟？'],
+    ['lucky', '承让承让，运气好而已～'],
+    ['bluff', '别装了，我知道你在偷鸡！'],
+    ['battle', '不要走，决战到天亮！'],
+    ['tatian', '顺为凡，逆则仙，梭哈就在一念间！'],
+  ];
   // Sound is decoration: browsers allow it only after a tap, and a missing file never blocks play.
   const sound = (() => {
-    const base = '/app/assets/game-assets/audio/', buffers = new Map();
+    const base = '/app/assets/game-assets/audio/', buffers = new Map(), rawBytes = new Map();
+    const ALL_SFX = ['deal', 'flip', 'chip', 'raise', 'fold', 'check', 'allin', 'turn', 'win', 'lose', 'tap', 'tick', 'flower', 'poop', 'champagne', 'bomb', 'chat'];
     let ctx = null, track = null, wanted = false;
     const pref = kind => { try { return localStorage.getItem('gc-sound-' + kind) !== 'off'; } catch { return true; } };
     function sync() {
       const on = wanted && pref('music') && document.visibilityState === 'visible';
-      if (on && !track) { track = new Audio(base + 'music.mp3'); track.loop = true; track.volume = .5; }
+      if (on && !track) { track = new Audio(base + 'music.mp3'); track.loop = true; track.volume = .45; }
       if (on) track.play().catch(() => {});
       else track?.pause();
     }
@@ -39,20 +56,53 @@ window.createGamesUI = ({
       if (ctx?.state === 'suspended') ctx.resume().catch(() => {});
       sync();
     }
+    function fetchBytes(name) {
+      if (!rawBytes.has(name)) {
+        rawBytes.set(name, fetch(base + name + '.mp3').then(r => r.ok ? r.arrayBuffer() : null).catch(() => null));
+      }
+      return rawBytes.get(name);
+    }
     function load(name) {
-      if (!buffers.has(name)) buffers.set(name, fetch(base + name + '.mp3')
-        .then(r => r.ok ? r.arrayBuffer() : Promise.reject(new Error(String(r.status))))
-        .then(data => new Promise((ok, fail) => ctx.decodeAudioData(data, ok, fail))).catch(() => null));
+      if (!ctx) return Promise.resolve(null);
+      if (!buffers.has(name)) {
+        buffers.set(name, fetchBytes(name).then(data => data
+          ? new Promise(ok => ctx.decodeAudioData(data.slice(0), ok, () => ok(null)))
+          : null).catch(() => null));
+      }
       return buffers.get(name);
     }
+    function preload() {
+      for (const name of ALL_SFX) fetchBytes(name);
+      if (ctx) for (const name of ALL_SFX) load(name);
+    }
+    function fallbackPlay(name, volume = 1) {
+      try {
+        const a = new Audio(base + name + '.mp3');
+        a.volume = Math.max(0, Math.min(1, volume));
+        a.play().catch(() => {});
+      } catch { /* ignore */ }
+    }
     async function play(name, volume = 1) {
-      if (!ctx || ctx.state !== 'running' || !pref('sfx')) return;
-      const buffer = await load(name);
-      if (!buffer || ctx.state !== 'running') return;
-      const source = ctx.createBufferSource(), gain = ctx.createGain();
-      source.buffer = buffer; gain.gain.value = volume;
-      source.connect(gain).connect(ctx.destination);
-      source.start();
+      if (!pref('sfx') || document.visibilityState !== 'visible') return;
+      unlock();
+      if (ctx && ctx.state === 'running') {
+        const buffer = await load(name);
+        if (buffer && ctx.state === 'running') {
+          const source = ctx.createBufferSource(), gain = ctx.createGain();
+          source.buffer = buffer; gain.gain.value = volume;
+          source.connect(gain).connect(ctx.destination);
+          source.start();
+          return;
+        }
+      }
+      fallbackPlay(name, volume);
+    }
+    function burst(name, count = 1, gap = 105, volume = 1) {
+      const n = Math.max(1, Math.min(5, count));
+      for (let i = 0; i < n; i++) {
+        if (i === 0) play(name, volume);
+        else setTimeout(() => play(name, volume * .92), i * gap);
+      }
     }
     function set(kind, on) {
       try { localStorage.setItem('gc-sound-' + kind, on ? 'on' : 'off'); } catch { /* private mode keeps defaults */ }
@@ -60,7 +110,7 @@ window.createGamesUI = ({
     }
     document.addEventListener('pointerdown', unlock, true);
     document.addEventListener('visibilitychange', sync);
-    return { play, pref, set, music(on) { wanted = on; sync(); } };
+    return { play, burst, preload, pref, set, music(on) { wanted = on; sync(); } };
   })();
 
   function dispose() {
@@ -69,6 +119,8 @@ window.createGamesUI = ({
       stopStream(current);
       clearInterval(current.clock);
       clearTimeout(current.celebrateTimer);
+      clearTimeout(current.autoSheetTimer);
+      clearInterval(current.sheetTicker);
       current = null;
     }
     sound.music(false);
@@ -370,6 +422,7 @@ window.createGamesUI = ({
       generation: 0, attempt: 0, status: 'connecting', offset: 0, notice: '', history: [],
     };
     $('#screen').classList.add('gc-scene', 'gc-table-screen');
+    sound.preload();
     sound.music(true);
     accept(c, data.table, true);
     c.clock = setInterval(() => { if (!live(c)) return; tick(c); }, 250);
@@ -466,9 +519,9 @@ window.createGamesUI = ({
     }
     if (legal.all_in > 0) options.all_in = { amount: legal.all_in };
     const players = (e.seats || []).map(p => ({
-      ...p, cards: p.hole, folded: p.status === 'folded', all_in: p.status === 'all_in',
-      invested: p.committed, hand_name: result?.players?.[p.player]?.hand,
-      best5: result?.players?.[p.player]?.shown ? result.players[p.player].best5 : null,
+      ...p, cards: p.hole, shown: !!p.shown, folded: p.status === 'folded', all_in: p.status === 'all_in',
+      invested: p.committed, hand_name: p.hand_name || result?.players?.[p.player]?.hand || null,
+      best5: p.best5 || (result?.players?.[p.player]?.shown ? result.players[p.player].best5 : null),
     }));
     return {
       ...h, current_player: h.current_player ?? e.current_player,
@@ -486,10 +539,19 @@ window.createGamesUI = ({
     if (t.game === 'holdem') t = { ...t, hand: holdemHand(t.hand), last_hand: holdemHand(t.last_hand) };
     c.offset = Number(t.server_time) - Date.now() / 1000;
     c.table = t; wallet = t.me.wallet;
-    if (t.last_hand && !c.history.some(h => h.number === t.last_hand.number)) c.history.unshift(t.last_hand);
+    if (t.last_hand) {
+      const idx = c.history.findIndex(h => h.number === t.last_hand.number);
+      if (idx >= 0) c.history[idx] = t.last_hand;
+      else c.history.unshift(t.last_hand);
+    }
     c.history = c.history.slice(0, 10);
     react(c, previous, t);
     paintTable(c);
+    const openResult = $('.gc-sheet [data-gc-result-hand]');
+    if (openResult && Number(openResult.dataset.gcResultHand) === t.last_hand?.number
+      && previous?.last_hand?.revealed?.length !== t.last_hand?.revealed?.length) {
+      resultSheet(c, t.last_hand);
+    }
     if (t.phase === 'closed') { stopStream(c); streamStatus(c, 'paused'); }
     const me = t.seats.find(s => s.player === t.me.player);
     const notice = t.me.notice;
@@ -499,7 +561,8 @@ window.createGamesUI = ({
     } else if (notice && notice !== c.notice) { c.notice = notice; toast(notice, true); }
     if (!notice) c.notice = '';
   }
-  // Finished hands stay on the felt briefly (winner, nets, shown cards) before any result sheet.
+  // Finished hands stay on the felt for ~5s (or show a 5s settlement sheet) with optional card reveal.
+  const FX_MS = 1800, CELEBRATE_MS = 5000, ZJH_FELT_MS = 1800, RESULT_SHOW_MS = 5000;
   function react(c, previous, t) {
     const ph = previous?.hand, fx = events(previous, t);
     const loud = ['allin', 'raise', 'chip', 'fold', 'check', 'look'].find(k => fx.some(e => e.kind === k));
@@ -507,7 +570,30 @@ window.createGamesUI = ({
     if (t.hand && t.hand.number !== ph?.number) {
       c.celebrate = null;
       c.dealAt = performance.now();
-      if (previous && !isBoard(t.game)) sound.play('deal');
+      const fresh = previous || (t.server_time - (t.hand.created_at || t.server_time) < 4);
+      if (fresh && !isBoard(t.game)) sound.burst('deal', t.game === 'zjh' ? 3 : 2, 105);
+    } else if (t.game === 'holdem' && t.hand && ph && t.hand.number === ph.number) {
+      const prevBoard = ph.engine?.board?.length || 0, nextBoard = t.hand.engine?.board?.length || 0;
+      if (nextBoard > prevBoard) sound.burst('deal', nextBoard - prevBoard, 115);
+    }
+    const ixList = t.interactions || [];
+    if (c.lastInteractSeq == null) {
+      c.lastInteractSeq = ixList.reduce((m, x) => Math.max(m, x.seq || 0), 0);
+    } else {
+      for (const ix of ixList) {
+        if ((ix.seq || 0) <= c.lastInteractSeq) continue;
+        c.lastInteractSeq = ix.seq;
+        if (ix.kind === 'prop') {
+          sound.play(ix.sfx || 'tap');
+          fx.push({ kind: 'prop', item: ix.item, emoji: ix.emoji, label: ix.label, player: ix.actor, target: ix.target, actorName: ix.actor_name, targetName: ix.target_name, ms: 2400 });
+        } else if (ix.kind === 'phrase') {
+          sound.play('chat', .85);
+          fx.push({ kind: 'phrase', player: ix.actor, label: ix.text, ms: 3600 });
+        } else if (ix.kind === 'reveal') {
+          sound.play('flip');
+          fx.push({ kind: 'reveal', player: ix.actor, label: `🃏 亮牌${ix.hand_name ? ' · ' + ix.hand_name : ''}`, ms: 3200 });
+        }
+      }
     }
     if (t.hand?.turn !== ph?.turn || t.hand?.number !== ph?.number) { c.sel = null; c.preview = null; }
     if (isBoard(t.game) && ph) {
@@ -522,9 +608,10 @@ window.createGamesUI = ({
       && (ph?.current_player !== t.me.player || ph?.number !== t.hand.number)) sound.play('turn');
     if (ph && t.last_hand?.number === ph.number && t.hand?.number !== ph.number) {
       const h = t.last_hand, net = h.result?.net || {}, motion = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const feltMs = t.game === 'zjh' ? ZJH_FELT_MS : CELEBRATE_MS;
       clearTimeout(c.celebrateTimer);
       if (motion) {
-        c.celebrate = { hand: h, at: performance.now() };
+        c.celebrate = { hand: h, at: performance.now(), ms: feltMs };
         fx.push(...Object.entries(net).filter(([, n]) => n).map(([player, n]) =>
           ({ player, kind: n > 0 ? 'win' : 'loss', label: signed(n), ms: CELEBRATE_MS })));
       }
@@ -534,12 +621,12 @@ window.createGamesUI = ({
         if (!live(c) || motion && c.celebrate?.hand !== h) return;
         if (motion) { c.celebrate = null; paintTable(c); }
         const me = c.table.seats.find(s => s.player === c.table.me.player);
-        if (c.table.game === 'zjh' && !c.table.hand && !me?.auto && !$('.gc-sheet')) resultSheet(c, h);
-      }, motion ? CELEBRATE_MS : 0);
+        if (c.table.game === 'zjh' && !c.table.hand && !me?.auto && !$('.gc-sheet')) resultSheet(c, c.table.last_hand || h, null, motion);
+      }, motion ? feltMs : 0);
     }
     if (fx.length) pushFx(c, fx);
   }
-  const celebrating = c => !c.table.hand && c.celebrate && performance.now() - c.celebrate.at < CELEBRATE_MS ? c.celebrate.hand : null;
+  const celebrating = c => !c.table.hand && c.celebrate && performance.now() - c.celebrate.at < (c.celebrate.ms || CELEBRATE_MS) ? (c.table.last_hand || c.celebrate.hand) : null;
   // The server sends state, not an action log, so table effects are derived from consecutive snapshots.
   function events(prev, t) {
     const ph = prev?.hand;
@@ -573,7 +660,6 @@ window.createGamesUI = ({
     if (t.game === 'holdem' && actor && !acted && moved && before.has(actor)) out.push({ player: actor, kind: 'check', label: '过牌' });
     return out;
   }
-  const FX_MS = 1700, CELEBRATE_MS = 2800;
   function pushFx(c, list) {
     const at = performance.now();
     c.fx = [...(c.fx || []).filter(f => at - f.at < (f.ms || FX_MS)), ...list.map(f => ({ ...f, at }))];
@@ -595,9 +681,28 @@ window.createGamesUI = ({
     const layer = document.createElement('div');
     layer.className = 'gc-fx-layer';
     layer.innerHTML = c.fx.map(f => {
-      const age = at - f.at, spot = seatPoint(c, f.player);
-      if (age >= (f.ms || FX_MS) || !spot) return '';
+      const age = at - f.at;
+      if (age >= (f.ms || FX_MS)) return '';
       const delay = `animation-delay:-${Math.round(age)}ms`;
+      if (f.kind === 'prop') {
+        const from = seatPoint(c, f.player) || { x: o.width / 2, y: o.height - 90 };
+        const to = seatPoint(c, f.target);
+        if (!to) return '';
+        const ringEl = $(`.gc-table [data-gc-player="${CSS.escape(f.target)}"] .gc-avatar-ring`)
+          || (f.target === c.table.me.player ? $('.gc-me-row .gc-avatar-ring') : null);
+        if (ringEl && age > 420 && age < 1600 && (f.item === 'bomb' || f.item === 'poop')) {
+          ringEl.classList.add('gc-hit-shake');
+        }
+        return `<span class="gc-fx-proj gc-proj-${esc(f.item)}" style="left:${from.x}px;top:${from.y}px;--dx:${to.x - from.x}px;--dy:${to.y - from.y}px;${delay}">${esc(f.emoji)}</span>`
+          + `<div class="gc-fx-impact gc-impact-${esc(f.item)}" style="left:${to.x}px;top:${to.y}px;animation-delay:${Math.round(430 - age)}ms"><span>${esc(f.emoji)}</span><i></i></div>`
+          + `<div class="gc-fx-banner" style="${delay}">${esc(f.emoji)} <b>${esc(f.actorName)}</b> 向 <b>${esc(f.targetName)}</b> ${esc(f.item === 'flower' ? '献上鲜花' : f.item === 'champagne' ? '敬了香槟' : '扔了' + f.label)}</div>`;
+      }
+      const spot = seatPoint(c, f.player);
+      if (!spot) return '';
+      if (f.kind === 'phrase') {
+        const left = Math.max(82, Math.min(o.width - 82, spot.x));
+        return `<div class="gc-fx-speech" style="left:${left}px;top:${Math.max(46, spot.y - 42)}px;${delay}">💬 ${esc(f.label)}</div>`;
+      }
       const bubble = `<div class="gc-fx-bubble gc-fx-${f.kind}" style="left:${spot.x}px;top:${spot.y - 34}px;${delay}">${esc(f.label)}${f.amount ? ' ' + num(f.amount) : ''}</div>`;
       const chip = pot && ['chip', 'raise', 'allin'].includes(f.kind) ? `<span class="gc-fx-chip" style="left:${spot.x}px;top:${spot.y}px;--dx:${pot.x - spot.x}px;--dy:${pot.y - spot.y}px;${delay}">${img('chip')}</span>` : '';
       return bubble + chip;
@@ -657,10 +762,11 @@ window.createGamesUI = ({
     const p = handPlayers(t, hand).find(p => p.player === seat.player);
     const active = t.hand?.current_player === seat.player;
     const won = !t.hand && hand?.result?.winners?.includes(seat.player);
+    const canInteract = !!t.me.player && seat.player !== t.me.player && t.phase !== 'closed';
     return `
       <div class="gc-seat gc-pos${pos} ${p?.folded ? 'gc-folded' : ''} ${won ? 'gc-winner' : ''}" data-gc-player="${esc(seat.player)}">
-        <div class="gc-avatar-ring ${active ? 'gc-active' : ''}" ${active ? 'data-gc-ring' : ''}>
-          ${avatar(seat, t)}${markers(seat, t)}
+        <div class="gc-avatar-ring ${active ? 'gc-active' : ''} ${canInteract ? 'gc-interactable' : ''}" ${active ? 'data-gc-ring' : ''} ${canInteract ? `data-gc-interact-seat="${esc(seat.player)}" title="点击互动"` : ''}>
+          ${avatar(seat, t)}${markers(seat, t)}${canInteract ? '<i class="gc-gift-dot" aria-hidden="true">🎁</i>' : ''}
           <span class="gc-seat-status ${seat.auto ? 'gc-auto-status' : seat.ready ? 'gc-ready-status' : ''}">${seatStatus(seat, t, p)}</span>
         </div>
         <div class="gc-seat-name">${esc(seat.name)}</div>
@@ -698,23 +804,26 @@ window.createGamesUI = ({
     return `
       <div class="gc-croupier" aria-hidden="true"><span class="gc-croupier-silhouette"></span><img src="/app/assets/game-assets/dealer-${tier}.webp" alt="" onload="this.parentElement.classList.add('has-art')" onerror="this.remove()"></div>`;
   }
-  function celebration(t, h) {
+  function celebration(t, h, myBest = []) {
     const winners = h.result?.winners || [];
     const who = winners.map(id => t.seats.find(s => s.player === id)?.name || '已离桌玩家').join('、');
     const won = Math.max(0, ...winners.map(id => h.result?.net?.[id] || 0));
     const why = t.game === 'holdem' ? h.engine?.street === 'showdown' ? '摊牌比大小' : '其他人都弃牌了'
       : { last_player: '其他人都出局了', all_in: '孤注一掷 · 全员比牌', round_limit: '满 10 轮 · 统一比牌' }[h.reason] || '比牌结束';
-    const board = t.game === 'holdem' ? `<div class="gc-board">${(h.engine?.board || []).map(code => card(code, 'sm')).join('')}</div>` : '';
+    const board = t.game === 'holdem' ? `<div class="gc-board">${(h.engine?.board || []).map(code => card(code, 'sm', myBest)).join('')}</div>` : '';
+    const revealBtn = h.can_reveal ? `<button class="btn sm gc-reveal-btn" type="button" data-gc-reveal="${h.number}">🃏 亮牌</button>`
+      : (t.me.player && h.revealed?.includes(t.me.player) ? '<span class="gc-revealed-pill">🃏 已亮牌</span>' : '');
     return `
       <div class="${t.game === 'holdem' ? 'gc-holdem-center' : 'gc-pot'} gc-celebrate">${board}
         ${img('crown', 'gc-celebrate-crown')}
         <div class="gc-celebrate-name">${esc(who || '本手')} 赢了</div>
         <div class="gc-pot-value num">+${num(won)}</div>
         <div class="small">${why}</div>
+        <div class="gc-celebrate-actions">${revealBtn}<button class="gc-tool sm" type="button" data-gc-history>结算单</button></div>
       </div>`;
   }
-  function tableCenter(t, shown = null) {
-    if (shown) return celebration(t, shown);
+  function tableCenter(t, shown = null, myBest = []) {
+    if (shown) return celebration(t, shown, myBest);
     if (!t.hand) {
       const s = startState(t);
       return `
@@ -733,7 +842,7 @@ window.createGamesUI = ({
       return `
         <div class="gc-holdem-center">
           <div class="tiny muted">第 ${h.number} 手 · ${esc({ preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌' }[e.street] || '进行中')}</div>
-          <div class="gc-board">${Array.from({ length: 5 }, (_, i) => i < (e.board || []).length ? card(e.board[i], 'sm') : '<span class="gc-card-slot"></span>').join('')}</div>
+          <div class="gc-board">${Array.from({ length: 5 }, (_, i) => i < (e.board || []).length ? card(e.board[i], 'sm', myBest) : '<span class="gc-card-slot"></span>').join('')}</div>
           <div class="gc-pot-value">${img('chip-stack')} ${num(e.pot)}</div>
           <div class="gc-pots">${(e.pots || []).map((p, i) => `<span>${i ? '边池 ' + i : '主池'} ${num(p.amount)}</span>`).join('')}</div>
           <span class="gc-ticker">${t.seats.find(s => s.player === h.current_player)?.name ? esc(t.seats.find(s => s.player === h.current_player).name) + ' 行动中' : '等待服务端发牌'}</span>
@@ -759,7 +868,7 @@ window.createGamesUI = ({
       if (t.game === 'holdem' && (t.phase === 'between' || t.hand_no > 0)) return `
         <div class="gc-wait-bar">${me.away ? '暂离中 · 下一手跳过你，不扣盲注'
           : !me.stack ? '筹码已用完，请补码或离桌'
-          : t.countdown_at ? '<span data-gc-countdown>4</span> 秒后继续发牌' : esc(state.reason)}</div>`;
+          : t.countdown_at ? '<span data-gc-countdown>5</span> 秒后继续发牌' : esc(state.reason)}${t.last_hand?.can_reveal ? ` <button class="btn sm gc-reveal-btn" type="button" data-gc-reveal="${t.last_hand.number}">🃏 亮牌</button>` : ''}</div>`;
       return `
         <div class="gc-wait-reason">${t.countdown_at ? '全员已准备 · <b data-gc-countdown>5</b> 秒后开局' : esc(state.reason)}</div>
         <div class="gc-actions">${t.game !== 'holdem' ? `
@@ -1058,6 +1167,7 @@ window.createGamesUI = ({
     const bottom = me || t.seats.find(s => s.seat === anchor);
     const shown = celebrating(c), view = t.hand || shown;
     const p = handPlayers(t, view).find(p => p.player === bottom?.player);
+    const myBest = p?.best5 || [];
     const dealAge = c.dealAt ? performance.now() - c.dealAt : Infinity;
     const look = !!t.hand?.legal_actions?.look;
     const timeout = me?.auto && t.me.notice?.includes('超时');
@@ -1076,6 +1186,7 @@ window.createGamesUI = ({
           <div class="grow"><b>${esc(names[t.game])} <span class="gc-tier-chip ${tierClasses[t.tier] || ''}">${esc(t.tier_name)}</span></b>
             <div class="tiny muted">${t.game === 'zjh' ? `底注 ${num(t.rules.ante)} · ${t.rules.cap == null ? '不封顶' : '封顶 ' + num(t.rules.cap)}` : `无限注 · 盲注 ${num(t.rules.small_blind)}/${num(t.rules.big_blind)}`} · 不抽水</div>
           </div>
+          <button class="gc-tool gc-sound-btn" type="button" data-gc-chat aria-label="快捷语" ${disabled(!me || t.phase === 'closed')}>💬</button>
           <button class="gc-tool gc-sound-btn" data-gc-sound aria-label="声音">${icon(sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x')}</button>
           <button class="gc-tool" data-gc-rules>玩法</button>
         </header>
@@ -1090,13 +1201,13 @@ window.createGamesUI = ({
         <div class="gc-connection-row">
           <button class="gc-connection" data-gc-connection data-state="${c.status}"></button>
           ${timeout && t.game === 'holdem' ? timeoutHtml
-            : t.currency === 'beans' ? '<span>练习场 · 机器人陪玩</span>' : '<button class="link" data-gc-broadcast>群播报说明</button>'}
+            : t.currency === 'beans' ? '<span>练习场 · 点玩家头像可送花/丢炸弹</span>' : '<button class="link" data-gc-broadcast>群播报说明</button>'}
         </div>
         ${t.game === 'zjh' ? timeoutHtml : ''}
         <div data-gc-retry-slot>${pendingHtml()}</div>
         <div class="gc-felt">${croupier(t)}
           <div class="gc-oval"></div>
-          ${seats}${tableCenter(t, shown)}
+          ${seats}${tableCenter(t, shown, myBest)}
         </div>
         <div class="gc-dock">${bottom ? `
           <div class="gc-me-row">
@@ -1116,14 +1227,17 @@ window.createGamesUI = ({
           </div>` : ''}
       ${view ? `
           <button class="gc-hand" aria-label="${look ? '看牌' : '自己的手牌'}" ${look ? `data-gc-action="look" ${disabled(false)}` : 'disabled'}>
-            ${p ? cards(p.cards, t.game === 'zjh' ? 3 : 2, 'lg') : '<span class="muted">本手旁观，从下一手加入</span>'}
+            ${p ? cards(p.cards, t.game === 'zjh' ? 3 : 2, 'lg', myBest) : '<span class="muted">本手旁观，从下一手加入</span>'}
           </button>
-          <div class="gc-hand-label">${shown ? esc(shownLabel(shown, p, t)) : look ? '点自己的牌，随时看牌' : esc(p?.hand_name || (p?.folded ? '已弃牌' : p?.seen ? '已看牌' : t.game === 'zjh' ? '闷牌中' : '两张底牌 + 五张公共牌，选最好的五张'))}</div>` : `
+          <div class="gc-hand-label">${handRankHtml(view, shown, look, p, t)}</div>` : `
           <div class="gc-wait-message">${t.last_hand ? `
-            <button class="gc-result-peek" data-gc-history>
-              ${img('crown')} 第 ${t.last_hand.number} 手已结算${t.last_hand.result?.net?.[t.me.player] != null
-                ? ' · 本手 ' + signed(t.last_hand.result.net[t.me.player]) : ''} <span>查看 ›</span>
-            </button>` : `${img('emblem-' + t.game)}
+            <div class="gc-result-peek-row">
+              <button class="gc-result-peek" data-gc-history>
+                ${img('crown')} 第 ${t.last_hand.number} 手已结算${t.last_hand.result?.net?.[t.me.player] != null
+                  ? ' · 本手 ' + signed(t.last_hand.result.net[t.me.player]) : ''} <span>查看 ›</span>
+              </button>
+              ${t.last_hand.can_reveal ? `<button class="btn sm gc-reveal-btn" type="button" data-gc-reveal="${t.last_hand.number}">🃏 亮牌</button>` : ''}
+            </div>` : `${img('emblem-' + t.game)}
             <span>${me ? t.game === 'holdem' ? '首手房主开始，满 6 人自动开局' : '房主开始或全员准备后开局' : '先看桌，再决定是否入座'}
               <small>${t.game === 'zjh' ? '入座不扣分 · 每步 30 秒' : '首手房主开始 · 之后连续发牌'}</small>
             </span>`}</div>`}
@@ -1135,10 +1249,21 @@ window.createGamesUI = ({
     streamStatus(c, c.status);
     drawFx(c);
   }
-  function shownLabel(h, p, t) {
-    const net = h.result?.net?.[t.me.player];
-    const result = net > 0 ? `本手赢 ${num(net)}` : net < 0 ? `本手输 ${num(-net)}` : '';
-    return [p?.hand_name, result].filter(Boolean).join(' · ') || '本手已结束';
+  function handRankHtml(view, shown, look, p, t) {
+    if (!p) return '<span class="muted">本手旁观中</span>';
+    if (shown) {
+      const net = shown.result?.net?.[t.me.player];
+      const delta = net > 0 ? ` · 赢 +${num(net)}` : net < 0 ? ` · 输 −${num(-net)}` : '';
+      const privacy = shown.revealed?.includes(t.me.player) ? ' · 已亮牌' : ' · 默认未亮牌';
+      return p.hand_name
+        ? `<span class="gc-hand-badge">🃏 最大牌型：<b>${esc(p.hand_name)}</b>${esc(delta + privacy)}</span>`
+        : esc('本手已结束' + delta);
+    }
+    if (look) return '<span class="gc-hand-hint">🔒 闷牌中 · 点手牌看牌显示当前最大牌型</span>';
+    if (p.hand_name) {
+      return `<span class="gc-hand-badge ${p.folded ? 'dim' : ''}">🃏 当前最大：<b>${esc(p.hand_name)}</b>${p.folded ? '（已弃牌）' : ''}</span>`;
+    }
+    return esc(p.folded ? '已弃牌' : p.seen ? '已看牌' : '等待发牌');
   }
   function tick(c) {
     if (!live(c)) return;
@@ -1211,7 +1336,62 @@ window.createGamesUI = ({
     });
     const comparison = $('[data-gc-comparisons]', root);
     if (comparison) comparison.onclick = () => comparisonSheet(c);
+    $$('[data-gc-reveal]', root).forEach(b => b.onclick = e => {
+      e.stopPropagation();
+      tableWrite(c, 'reveal', { hand_no: Number(b.dataset.gcReveal) });
+    });
+    $$('[data-gc-interact-seat]', root).forEach(el => el.onclick = e => {
+      e.stopPropagation();
+      const target = t.seats.find(s => s.player === el.dataset.gcInteractSeat);
+      if (target) interactSheet(c, target);
+    });
+    const chatBtn = $('[data-gc-chat]', root);
+    if (chatBtn) chatBtn.onclick = () => phraseSheet(c);
     bindPending(root);
+  }
+  function interactSheet(c, target) {
+    const t = c.table, isBeans = t.currency === 'beans', avail = funds(t.me.wallet, t);
+    showSheet(`
+      <div class="gc-interact-head">
+        ${avatar(target, t)}
+        <div class="grow">
+          <h3>与 ${esc(target.name)} 互动</h3>
+          <div class="tiny muted">可用 ${num(avail)} ${unit(t)} · 点击道具立即投掷</div>
+        </div>
+      </div>
+      <div class="gc-prop-grid">${PROPS.map(([id, emoji, name, pts, bns, desc]) => {
+        const cost = isBeans ? bns : pts;
+        return `
+          <button class="gc-prop-card" type="button" data-gc-prop="${id}" ${disabled(avail < cost)}>
+            <span class="gc-prop-emoji">${emoji}</span>
+            <b>${esc(name)}</b>
+            <small class="muted">${esc(desc)}</small>
+            <em class="num">${num(cost)} ${unit(t)}</em>
+          </button>`;
+      }).join('')}</div>
+      <button class="link gc-close" data-cancel>取消</button>`, (root, close) => {
+      $$('[data-gc-prop]', root).forEach(b => b.onclick = async () => {
+        const item = b.dataset.gcProp;
+        close();
+        await tableWrite(c, 'interact', { kind: 'prop', item, target: target.player });
+      });
+    });
+  }
+  function phraseSheet(c) {
+    showSheet(`
+      <h3>💬 快捷互动语</h3>
+      <div class="tiny muted" style="margin:2px 0 10px">点击立即在牌桌头像上方弹出气泡（免费）</div>
+      <div class="gc-phrase-list">${PHRASES.map(([id, text]) => `
+        <button class="gc-phrase-item" type="button" data-gc-phrase="${id}">
+          <span>${esc(text)}</span><i>发送 ›</i>
+        </button>`).join('')}</div>
+      <button class="link gc-close" data-cancel>关闭</button>`, (root, close) => {
+      $$('[data-gc-phrase]', root).forEach(b => b.onclick = async () => {
+        const phrase_id = b.dataset.gcPhrase;
+        close();
+        await tableWrite(c, 'interact', { kind: 'phrase', phrase_id });
+      });
+    });
   }
   function soundSheet() {
     const row = (kind, title, note) => `
@@ -1350,9 +1530,14 @@ window.createGamesUI = ({
       };
     });
   }
-  function resultSheet(c, h, focusId = null) {
+  function resultSheet(c, h, focusId = null, autoClose = false) {
     if (!h) return;
+    clearTimeout(c.autoSheetTimer);
+    clearInterval(c.sheetTicker);
     const t = c.table, result = h.result || {}, players = handPlayers(t, h), holdem = t.game === 'holdem';
+    const isLatest = t.last_hand?.number === h.number;
+    const canReveal = isLatest && !!t.last_hand?.can_reveal;
+    const myRevealed = (h.revealed || []).includes(t.me.player);
     const focus = players.find(p => p.player === focusId && p.best5) || players.find(p => p.best5);
     const best = focus?.best5 || [];
     const playerName = id => esc(t.seats.find(s => s.player === id)?.name || '已离桌玩家');
@@ -1363,33 +1548,63 @@ window.createGamesUI = ({
         `<br>未跟注退回：${playerName(id)} ${num(amount)}`
       ).join('')}</div>` : '';
     showSheet(`
-      <div class="gc-result-head">${img('crown')}
-        <h3>第 ${h.number} 手结算</h3>
-        <span class="tiny muted">${holdem ? '' : esc({ last_player: '其他人都出局了 · ', all_in: '孤注一掷，全员比牌 · ', round_limit: '满 10 轮，统一比牌 · ' }[h.reason] || '')}不抽水 · ${holdem ? '牌桌仍会连续发牌' : '继续玩需重新准备'}</span>
+      <div class="gc-result-head" data-gc-result-hand="${h.number}">${img('crown')}
+        <h3>第 ${h.number} 手结算${autoClose ? ' <span class="gc-auto-close-pill" data-gc-sheet-sec>5s</span>' : ''}</h3>
+        <span class="tiny muted">${holdem ? '' : esc({ last_player: '其他人都出局了 · ', all_in: '孤注一掷，全员比牌 · ', round_limit: '满 10 轮，统一比牌 · ' }[h.reason] || '')}默认不公开未赢摊牌底牌 · 不抽水</span>
       </div>
       ${holdem ? `
         <div class="gc-board">${(h.engine.board || []).map(code => card(code, 'sm', best)).join('')}</div>` : ''}${players.map(p => {
       const winner = result.winners?.includes(p.player), net = result.net?.[p.player];
+      const isMe = p.player === t.me.player;
+      const pubShown = p.shown || (h.revealed || []).includes(p.player);
+      const subText = p.hand_name
+        ? `${p.hand_name}${isMe && !pubShown ? ' · 仅自己可见' : pubShown ? ' · 已亮牌' : ''}`
+        : (p.folded ? '已弃牌 · 默认不亮牌' : '默认不亮牌');
       return `
         <div class="gc-result-row ${winner ? 'winner' : ''}">
           <div class="grow">
-            <button class="gc-result-player" ${p.best5 ? `data-gc-focus="${esc(p.player)}"` : 'disabled'}><b>${playerName(p.player)}${winner ? ' · 胜' : ''}</b></button>
-            <div class="tiny muted">${esc(p.hand_name || (p.folded ? '已弃牌 · 牌面不公开' : '未公开牌型'))}${holdem && result.players?.[p.player]?.stack != null ? ' · 筹码 ' + num(result.players[p.player].stack) : ''}</div>
+            <button class="gc-result-player" ${p.best5 ? `data-gc-focus="${esc(p.player)}"` : 'disabled'}><b>${playerName(p.player)}${winner ? ' · 胜' : ''}${isMe ? '（我）' : ''}</b></button>
+            <div class="tiny muted">${esc(subText)}${holdem && result.players?.[p.player]?.stack != null ? ' · 筹码 ' + num(result.players[p.player].stack) : ''}</div>
           </div>
           <div class="gc-result-cards">${cards(p.cards, holdem ? 2 : 3, 'xs', focus?.player === p.player ? best : [])}</div>
           <b class="${net >= 0 ? 'gc-up' : 'gc-down'}">${net == null ? '—' : signed(net)}</b>
         </div>`;
     }).join('')}${best.length ? `
         <div class="gc-center small">${playerName(focus.player)} · 最好的 5 张（点玩家切换）</div>
-        <div class="gc-best-five">${best.map(code => card(code, 'sm', best)).join('')}</div>` : ''}${pots}
+        <div class="gc-best-five">${best.map(code => card(code, 'sm', best)).join('')}</div>` : ''}
+      ${canReveal ? `
+        <button class="btn block gc-reveal-sheet-btn" type="button" data-gc-sheet-reveal="${h.number}">🃏 亮牌（向全桌展示本手底牌）</button>`
+        : (isLatest && t.me.player && myRevealed ? '<div class="gc-center tiny muted" style="margin:6px 0">🃏 本手已向全桌亮牌</div>' : '')}
+      ${pots}
       <div class="gc-note">${holdem ? '本手输赢留在桌上筹码中，离桌时才退回可用积分。' : '本手冻结已结算，没用完的部分已退回。'}<br>可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分</div>
       ${holdem ? `
         <div class="gc-history-buttons">${c.history.map(x => `
           <button class="btn ghost sm" data-gc-hand="${x.number}">#${x.number}</button>`).join('')}</div>
         <div class="tiny muted">仅保留本次查看期间最近 10 手；重开页面只显示服务端返回的上一手。</div>` : ''}
-      <button class="btn block" data-cancel>回到牌桌</button>`, root => {
-      $$('[data-gc-hand]', root).forEach(b => b.onclick = () => resultSheet(c, c.history.find(x => x.number === Number(b.dataset.gcHand))));
-      $$('[data-gc-focus]', root).forEach(b => b.onclick = () => resultSheet(c, h, b.dataset.gcFocus));
+      <button class="btn block" data-cancel>回到牌桌</button>`, (root, close) => {
+      const stopAuto = () => {
+        clearTimeout(c.autoSheetTimer);
+        clearInterval(c.sheetTicker);
+        const badge = $('[data-gc-sheet-sec]', root);
+        if (badge) badge.remove();
+      };
+      if (autoClose) {
+        let leftSec = Math.round(RESULT_SHOW_MS / 1000);
+        c.sheetTicker = setInterval(() => {
+          leftSec = Math.max(0, leftSec - 1);
+          const badge = $('[data-gc-sheet-sec]', root);
+          if (badge) badge.textContent = `${leftSec}s`;
+        }, 1000);
+        c.autoSheetTimer = setTimeout(() => { clearInterval(c.sheetTicker); close(); }, RESULT_SHOW_MS);
+      }
+      const revBtn = $('[data-gc-sheet-reveal]', root);
+      if (revBtn) revBtn.onclick = async () => {
+        stopAuto();
+        revBtn.disabled = true;
+        await tableWrite(c, 'reveal', { hand_no: Number(revBtn.dataset.gcSheetReveal) });
+      };
+      $$('[data-gc-hand]', root).forEach(b => b.onclick = () => { stopAuto(); resultSheet(c, c.history.find(x => x.number === Number(b.dataset.gcHand))); });
+      $$('[data-gc-focus]', root).forEach(b => b.onclick = () => { stopAuto(); resultSheet(c, h, b.dataset.gcFocus); });
     });
   }
   function broadcast(t = null) {

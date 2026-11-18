@@ -15,7 +15,7 @@ PAGES.groups = async (context = pageContext('groups')) => {
   if(whitelist) view.prepend(whitelist);
   const special=document.createElement('section');
   special.className='card';special.id='level-special-rights';
-  special.innerHTML='<div class="card-body"><h3>白名单与特殊权益</h3><p>已有与未来销售白名单保留原豁免。永久卡、有效限时卡及个人覆盖仍优先，升级不会清除。专属Lv8仅在成员详情明确授予，不参与自然升级。</p><a class="btn" href="#/members">成员个人权益</a> <a class="btn" href="#/automation?category=points">白名单卡与道具设置</a></div>';
+  special.innerHTML='<div class="card-body"><h3>白名单与特殊权益</h3><p>已有与未来销售白名单保留原豁免。永久卡、有效限时卡及个人覆盖仍优先，升级不会清除。专属Lv8/Lv9仅在成员详情明确授予，不参与自然升级。</p><a class="btn" href="#/members">成员个人权益</a> <a class="btn" href="#/automation?category=points">白名单卡与道具设置</a></div>';
   view.insertBefore(special,compatibility);
   const data = await api('/api/activity/config');
   if (!context.isCurrent()) return;
@@ -23,10 +23,10 @@ PAGES.groups = async (context = pageContext('groups')) => {
   host.className='card';host.id='activity-level-admin';
   const keys = [['name','名称'],['title','称号'],['icon','图标'],['threshold','成长门槛'],['price','30天积分'],['bandwidth_limit_kbps','带宽kbps'],['max_streams','同播'],['request_quota','月求片'],['max_devices','设备数']];
   host.innerHTML=`<div class="card-head"><h3>等级与权益</h3><span>版本 ${data.revision}</span></div><div class="card-body">
-    <p class="help">Lv1～7按独立成长值升级，Lv8仅迁移或管理员明确授予。升级不清个人覆盖/道具，白名单仍保留原豁免与销售。</p>
+    <p class="help">Lv1～7按独立成长值升级，Lv8/Lv9仅迁移或管理员明确授予。升级不清个人覆盖/道具，白名单仍保留原豁免与销售。</p>
     <label><input type="checkbox" id="level-enabled" ${data.config.enabled?'checked':''}>启用等级基础权益（迁移须先预览确认）</label>
     <label><input type="checkbox" id="level-delete-enabled" ${data.config.delete_enabled?'checked':''}>启用到期72小时真实删除（默认关闭，须另获授权）</label>
-    <div class="table-wrap" style="overflow-x:auto;max-width:100%"><table style="min-width:1100px"><thead><tr><th>等级</th>${keys.map(([,name])=>`<th>${esc(name)}</th>`).join('')}</tr></thead><tbody>${data.config.levels.map((l,i)=>`<tr><td>Lv${l.level}</td>${keys.map(([key])=>`<td><input aria-label="Lv${l.level} ${key}" data-level-row="${i}" data-level-key="${key}" value="${esc(l[key]===null?'专属':l[key])}" ${key==='threshold'&&i===7?'disabled':''} ${typeof l[key]==='number'?'type="number" min="0"':'type="text"'} style="min-width:90px;width:100%"></td>`).join('')}</tr>`).join('')}</tbody></table></div>
+    <div class="table-wrap" style="overflow-x:auto;max-width:100%"><table style="min-width:1100px"><thead><tr><th>等级</th>${keys.map(([,name])=>`<th>${esc(name)}</th>`).join('')}</tr></thead><tbody>${data.config.levels.map((l,i)=>`<tr><td>Lv${l.level}</td>${keys.map(([key])=>`<td><input aria-label="Lv${l.level} ${key}" data-level-row="${i}" data-level-key="${key}" value="${esc(l[key]===null?'专属':l[key])}" ${key==='threshold'&&i>=7?'disabled':''} ${typeof l[key]==='number'?'type="number" min="0"':'type="text"'} style="min-width:90px;width:100%"></td>`).join('')}</tr>`).join('')}</tbody></table></div>
     <div class="toolbar"><button id="level-save" class="btn primary">保存等级配置</button><button id="level-preview" class="btn">迁移预览</button><button id="level-delete-preview" class="btn">删除候选预览</button></div><div id="level-feedback" role="status"></div><div id="level-preview-results"></div></div>`;
   document.querySelector('#view').prepend(host);
   document.querySelector('#level-save').onclick=async()=>{

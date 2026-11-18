@@ -503,3 +503,52 @@ def test_practice_robots_have_empty_avatars(gc, game):
     t = waiting_table(gc, game, 1, tier='practice')
     assert next(p['avatar'] for p in t['seats'] if not p['bot']) == miniapp.avatar_url('9000')
     assert all(p['avatar'] == '' for p in t['seats'] if p['bot'])
+
+
+def test_live_hand_rank_default_hidden_settlement_reveal_and_interactions(api):
+    client, application = api
+    service = application.state.game_center
+    service.config()['holdem_enabled'] = True
+    points = service.points
+    h0, h1 = headers(9000), headers(9001)
+    r = client.post(BASE + '/tables', headers=h0, json={'game': 'holdem', 'tier': 'novice', 'buy_in': 100, 'request_id': 'ix_create_01'})
+    tid = r.json()['table']['id']
+    client.post(f'{BASE}/tables/{tid}/seat', headers=h1, json={'buy_in': 100, 'request_id': 'ix_seat_01'})
+    started = client.post(f'{BASE}/tables/{tid}/start', headers=h0, json={'request_id': 'ix_start_01'}).json()['table']
+    me_seat = next(s for s in started['hand']['engine']['seats'] if s['player'] == started['me']['player'])
+    other_seat = next(s for s in started['hand']['engine']['seats'] if s['player'] != started['me']['player'])
+    assert me_seat['hand_name'] and other_seat['hand_name'] is None
+
+    # Prop interaction spends tiered points (bomb = 5) from spendable wallet without disturbing table escrow
+    before_pts = points.balance('u0')
+    before_u1 = points.balance('u1')
+    ix_res = client.post(f'{BASE}/tables/{tid}/interact', headers=h0,
+                         json={'kind': 'prop', 'item': 'bomb', 'target': other_seat['player'], 'request_id': 'ix_bomb_01'})
+    assert ix_res.status_code == 200
+    assert points.balance('u0') == before_pts - 5
+    assert points.balance('u1') == before_u1
+    assert ix_res.json()['table']['interactions'][-1]['item'] == 'bomb'
+
+    # Quick phrase interaction
+    ph_res = client.post(f'{BASE}/tables/{tid}/interact', headers=h1,
+                         json={'kind': 'phrase', 'phrase_id': 'tatian', 'request_id': 'ix_phrase_01'})
+    assert ph_res.status_code == 200
+    assert '顺为凡，逆则仙' in ph_res.json()['table']['interactions'][-1]['text']
+
+    # Uncontested fold settlement: neither winner nor folder is revealed to others until explicit reveal
+    actor_tg = 9000 if started['hand']['current_player'] == me_seat['player'] else 9001
+    folded = client.post(f'{BASE}/tables/{tid}/actions', headers=headers(actor_tg),
+                         json={'hand_no': 1, 'turn': 1, 'action': 'fold', 'request_id': 'ix_fold_01'}).json()['table']
+    assert folded['last_hand']['revealed'] == [] and folded['last_hand']['can_reveal'] is True
+    v_spec = client.get(f'{BASE}/tables/{tid}', headers=headers(9002)).json()['table']
+    assert all('hole' not in s for s in v_spec['last_hand']['engine']['seats'])
+
+    # Winner clicks reveal -> everyone sees the revealed hole cards and hand_name
+    winner_tg = 9001 if actor_tg == 9000 else 9000
+    rev = client.post(f'{BASE}/tables/{tid}/reveal', headers=headers(winner_tg),
+                      json={'hand_no': 1, 'request_id': 'ix_reveal_01'}).json()['table']
+    assert len(rev['last_hand']['revealed']) == 1
+    v_spec_after = client.get(f'{BASE}/tables/{tid}', headers=headers(9002)).json()['table']
+    shown_seats = [s for s in v_spec_after['last_hand']['engine']['seats'] if 'hole' in s]
+    assert len(shown_seats) == 1 and shown_seats[0]['hand_name']
+

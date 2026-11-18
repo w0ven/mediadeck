@@ -13,11 +13,11 @@ from app.modules.economy_rules import BEIJING, day_bounds, economy_write
 
 WATCH_RULE = "activity-watch-v1"
 LEVEL_THRESHOLDS = (0, 120, 360, 900, 1800, 3600, 7200)
-LEVEL_NAMES = ("布衣", "游侠", "逍遥", "剑仙", "真君", "道尊", "帝君")
-LEVEL_TITLES = ("偷得浮生半日闲", "一身侠气走江湖", "醉卧美人膝", "一剑霜寒十四州",
-                "笑问青天几时老", "坐看万古浮沉", "一念山河定")
+LEVEL_NAMES = ("凡尘", "筑基", "金丹", "元婴", "化神", "渡劫", "仙帝")
+LEVEL_TITLES = ("初入仙途问长生", "御剑乘风斩尘缘", "一粒金丹吞入腹", "一剑霜寒十四州",
+                "神游太虚碎星辰", "九霄雷动破苍穹", "独断万古镇诸天")
 LEVEL_PRICES = (80, 75, 70, 65, 60, 55, 50)
-LEVEL_ICONS = ('🌱', '🗡', '🍃', '⚔', '☁', '☯', '👑')
+LEVEL_ICONS = ('🌱', '🗡', '🔥', '⚔', '🌩', '☯', '👑')
 
 
 def reward_total(seconds):
