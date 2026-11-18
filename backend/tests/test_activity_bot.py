@@ -57,7 +57,7 @@ def test_private_card_zero_viewing_and_renew_preview_confirmation_retry(env):
     async def run():
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        for text in ('🌱 Lv1 布衣「偷得浮生半日闲」', '成长 0',
+        for text in ('<code>🌱 Lv1 · 凡尘</code>', '⋆ <b>凡尘 🌱 初入仙途问长生</b> ⋆', '成长 0',
                      '续期 80 积分 / 30 天',
                      '自动保号：未开启', '到期 · 剩'):
             assert text in body
@@ -139,7 +139,8 @@ def test_expired_and_manually_disabled_can_view_confirm_without_unblocking(env, 
     e.bot._on_member_changed = AsyncMock(return_value={'remote_ok':False})
     async def run():
         mid = await private_command(e, '/me')
-        assert '🌱 Lv1 布衣「偷得浮生半日闲」' in e.tg.text(VIEWER, mid)
+        body = e.tg.text(VIEWER, mid)
+        assert '<code>🌱 Lv1 · 凡尘</code>' in body and '⋆ <b>凡尘 🌱 初入仙途问长生</b> ⋆' in body
         await tap(e, 'activity:renew', mid)
         confirm = find_action(e, mid, 'activity:confirm:')
         await tap(e, confirm, mid)
@@ -249,7 +250,7 @@ def test_whitelist_card_keeps_rewards_and_usage_without_renewal_clutter(env, pub
     member = e.members.get('u1')
     body = e.bot._brief_card(member) if public else e.bot._account_card(member)
     assert '白名单' in body and '♾ 永久' in body
-    for text in ('积分', '成长', '偷得浮生半日闲'):
+    for text in ('积分', '成长', '初入仙途问长生'):
         assert text in body
     for text in ('续费预算', '本级续费', '缺口', '近30天核验', '合格日', '有效日', '自动保号', '删除候选'):
         assert text not in body
@@ -273,7 +274,8 @@ def test_whitelist_and_worn_title_in_bot_card_and_no_web_code(env):
         await e.bot._titles.wear('u1', title['id'])
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        assert '🌱 Lv1 布衣「清风明月」 · 白名单' in body and '♾ 永久有效' in body
+        assert '<code>🌱 Lv1 · 凡尘</code>  <code>💠 尊享白名单</code>' in body
+        assert '⋆ <b>凡尘 🌱 清风明月</b> ⋆' in body and '♾ 永久有效' in body
         assert not {'activity:renew', 'activity:auto:on', 'activity:auto:off'} & {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'activity:status', mid)
         assert 'activity:renew' not in {b['callback_data'] for b in actions(e, mid)}
@@ -353,17 +355,21 @@ def test_level_name_and_title_are_one_identity_on_account_home_and_activity(env)
     cfg['config']['levels'][1].update(name='听风', icon='🍃', title='风止星归')
     e.levels.save_config(cfg['config'], cfg['revision'])
     e.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u1',120,'test','level2',?)", (int(time.time()),))
-    label = '🍃 Lv2 听风「风止星归」'
+    pill = '🍃 Lv2 · 听风'
+    plaque = '✦ 听风 🍃 风止星归 ✦'
     member = e.members.get('u1')
     for card in (e.bot._account_card(member), e.bot._brief_card(member), e.bot._home(str(VIEWER), 'Demo')[0]):
-        assert label in plain(card)
+        assert pill in plain(card) and plaque in plain(card)
         assert plain(card).count('风止星归') == 1
     async def run():
         mid = await private_command(e, '/activity')
-        assert label in plain(e.tg.text(VIEWER, mid))
+        text = plain(e.tg.text(VIEWER, mid))
+        assert pill in text and plaque in text
     asyncio.run(run())
     member['activity_level'].update(name='<听风&>', title='<风止&星归>', icon='🍃')
-    assert '🍃 Lv2 &lt;听风&amp;&gt;「&lt;风止&amp;星归&gt;」' in e.bot._group_label(member)
+    escaped = e.bot._group_label(member)
+    assert '<code>🍃 Lv2 · &lt;听风&amp;&gt;</code>' in escaped
+    assert '✦ <b>&lt;听风&amp;&gt; 🍃 &lt;风止&amp;星归&gt;</b> ✦' in escaped
 
 
 def test_unmanaged_account_does_not_offer_automatic_charging(env):

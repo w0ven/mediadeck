@@ -36,12 +36,28 @@ def expiry_line(expires_at, now=None):
     return f'⏳ {beijing_stamp(expires_at)} 到期 · {remain_label(left)}'
 
 
+def growth_bar(level, slots=8):
+    if not level.get('next_threshold'):
+        if level['level'] == 9:
+            return '<code>✦踏天逆仙✦</code>'
+        if level['level'] == 8:
+            return '<code>✦道祖敕封✦</code>'
+        return '<code>' + '▰' * slots + '</code>'
+    cur = max(0, int(level.get('growth') or 0))
+    nxt = max(1, int(level['next_threshold']))
+    filled = min(slots, int(cur * slots // nxt))
+    if cur > 0 and filled == 0:
+        filled = 1
+    return '<code>' + '▰' * filled + '▱' * (slots - filled) + '</code>'
+
+
 def growth_line(level):
-    text = f"📈 成长 {level['growth']}"
+    bar = growth_bar(level)
+    text = f"📈 {bar} 成长 {level['growth']}"
     if level.get('next_threshold'):
         gap = max(0, level['next_threshold'] - level['growth'])
         return text + f" / {level['next_threshold']} · 距 Lv{level['level'] + 1} 还差 {gap}"
-    return text + (' · 专属等级' if level['level'] == 8 else ' · 已满级')
+    return text + (' · 专属等级' if level['level'] in (8, 9) else ' · 已满级')
 
 
 def renewal_blockers(info):
@@ -92,17 +108,17 @@ class ActivityBotMixin:
         title = info['worn_title'] or level['title']
         badge = self._whitelist_decoration(member) or '👤 '
         status = self._status_label(member)
-        lines = [badge + f"<b>{escape(str(member.get('username') or '—'))}</b>",
-                 self._group_label(member, title=title)]
-        if info['exempt']:
-            lines.append(status + ' · ♾ 永久有效')
-        else:
-            lines += [status, expiry_line(info['expires_at'])]
-        lines += ['', f"🪙 积分 <b>{info['balance']}</b>", growth_line(level),
-                  *self._settled_reward_lines(info)]
+        term = '♾ 永久有效' if info['exempt'] else expiry_line(info['expires_at'])
+        hero = [*self._identity_plaque_lines(member, title=title), f"{status} · {term}"]
+        econ = [f"🪙 积分 <b>{info['balance']}</b>", growth_line(level), *self._settled_reward_lines(info)]
         renewal = self._renewal_lines(info)
         if renewal:
-            lines += ['', *renewal]
+            econ += renewal
+        lines = [
+            badge + f"<b>{escape(str(member.get('username') or '—'))}</b>",
+            '<blockquote>' + '\n'.join(hero) + '</blockquote>',
+            '<blockquote>' + '\n'.join(econ) + '</blockquote>',
+        ]
         return lines, info
 
     @staticmethod
@@ -116,33 +132,50 @@ class ActivityBotMixin:
         return rows
 
     def _activity_page(self, member, info):
-        """Level detail: identity, effective rights and watch time; no account repeats."""
+        """Level detail: jade-tablet identity, power gauge, rights, watch stats and 9-realm ladder."""
         level = info['level']
-        lines = ['🌱 <b>等级与权益</b>', '',
-                 self._group_label(member, title=info['worn_title'] or level['title']),
-                 growth_line(level), *self._settled_reward_lines(info)]
+        levels_svc = getattr(self._members, '_levels', None)
+        all_levels = (levels_svc.config()['config']['levels'] if levels_svc is not None else [])
+        hero_lines = [*self._identity_plaque_lines(member, title=info['worn_title'] or level['title']),
+                      growth_line(level), *self._settled_reward_lines(info)]
         if info['exempt']:
-            lines.append('💠 白名单 · ♾ 永久有效')
+            hero_lines.append(f"{self._status_label(member)} · ♾ 永久有效")
         else:
-            lines += [expiry_line(info['expires_at']), *self._renewal_lines(info)]
+            hero_lines += [expiry_line(info['expires_at']), *self._renewal_lines(info)]
         streams = member.get('max_streams')
         quota = member['group'].get('request_quota')
-        lines += ['', '✨ <b>当前权益</b>',
-                  f"🚀 带宽 {bandwidth_value(member)}",
-                  f"📺 同播 {streams or '不限'}{' 路' if streams else ''} · 🎬 每月求片 {quota or '不限'}{' 次' if quota else ''}",
-                  ('📥 可下载' if member.get('allow_download') else '📥 不可下载')
-                  + (' · 🎞 可转码' if member.get('allow_transcode') else ' · 🎞 不可转码')]
+        right_lines = [f"🚀 带宽 <b>{bandwidth_value(member)}</b>",
+                       f"📺 同播 <b>{streams or '不限'}{' 路' if streams else ''}</b> · 🎬 每月求片 <b>{quota or '不限'}{' 次' if quota else ''}</b>",
+                       ('📥 可下载' if member.get('allow_download') else '📥 不可下载')
+                       + (' · 🎞 可转码' if member.get('allow_transcode') else ' · 🎞 不可转码')]
         cap = device_cap(member)
         if cap:
-            lines.append(f"📱 最多登录 {cap} 台设备")
+            right_lines.append(f"📱 最多登录 <b>{cap} 台</b>设备")
+        sections = [
+            '🌱 <b>等级与权益</b> · 仙籍玉简',
+            '<blockquote>' + '\n'.join(hero_lines) + '</blockquote>',
+            '<blockquote><b>✨ 当前权益</b>\n' + '\n'.join(right_lines) + '</blockquote>',
+        ]
         if self._stats is not None and hasattr(self._stats, 'watch_summary'):
             history = self._stats.watch_summary(member['emby_user_id']) or {}
-            lines += ['', '📊 <b>观看时长</b>',
-                      '近 24 小时 '+duration(history.get('seconds_24h'))+' · 近 30 天 '+duration(history.get('seconds_30d')),
-                      '累计 '+duration(history.get('recorded_seconds'))]
+            sections.append(
+                '<blockquote><b>📊 观看时长</b>\n'
+                f"近 24 小时 <b>{duration(history.get('seconds_24h'))}</b> · 近 30 天 <b>{duration(history.get('seconds_30d'))}</b>\n"
+                f"累计 <b>{duration(history.get('recorded_seconds'))}</b></blockquote>"
+            )
+        if all_levels and not info['exempt']:
+            ladder = []
+            for row in all_levels:
+                lv_no = row['level']
+                cur = lv_no == level['level']
+                mark = '🔥' if cur else ('✦' if lv_no < level['level'] and level['level'] <= 7 else '·')
+                gate = f"{row['threshold']}成长" if row.get('threshold') is not None else '圣谕敕封'
+                entry = f"{mark} {escape(row['icon'])} Lv{lv_no} {escape(row['name'])}「{escape(row['title'])}」· {gate}"
+                ladder.append(f"<b>{entry} ◀ 当前</b>" if cur else entry)
+            sections.append('<blockquote expandable><b>🌌 九重仙途 · 境界总览</b>\n' + '\n'.join(ladder) + '</blockquote>')
         if member.get('note'):
-            lines += ['', '📝 备注：'+escape(str(member['note']))]
-        return '\n'.join(lines)
+            sections.append('📝 备注：' + escape(str(member['note'])))
+        return '\n'.join(sections)
 
     async def _activity_action(self, chat_id, message_id, member, action, *, actor, in_group=False, callback=False):
         # Even a forwarded/foreign group card never performs a private money action.

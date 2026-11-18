@@ -395,7 +395,9 @@ def test_mini_app_browser_flows(client, tmp_path):
         page.evaluate('window.__back()')
 
         page.locator('[data-go="level"]').click()
-        page.get_by_text('升级之路').wait_for()
+        page.get_by_text('九重登仙天梯').wait_for()
+        assert '踏天' in page.locator('.realm-ladder').inner_text()
+        assert '顺为凡，逆则仙，只在心中一念间' in page.locator('.realm-ladder').inner_text()
         assert page.evaluate('Telegram.WebApp.BackButton.visible')
         fits('miniapp-level.png')
         page.evaluate('window.__back()')

@@ -6,9 +6,29 @@ import secrets
 
 from app.modules import zjh_engine as engine
 
+_ZJH_RANKS = {11: 'J', 12: 'Q', 13: 'K', 14: 'A'}
+
 
 def card_code(card):
     return '23456789TJQKA'[card % 13] + 'shcd'[card // 13]
+
+
+def zjh_hand_name(cards, allow_235=False, has_trips=False):
+    rank = engine.strength(cards)
+    top = _ZJH_RANKS.get(rank[1], str(rank[1]))
+    if allow_235 and engine._special(cards):
+        return '特殊 235 · 吃豹子' if has_trips else '特殊 235 · 单张'
+    if rank[0] == 5:
+        return f'豹子 · {top}'
+    if rank[0] == 4:
+        return f'顺金 · {top} 高'
+    if rank[0] == 3:
+        return f'金花 · {top} 高'
+    if rank[0] == 2:
+        return f'顺子 · {top} 高'
+    if rank[0] == 1:
+        return f'对子 · {top}'
+    return f'高牌 · {top}'
 
 
 class ZjhGame:
@@ -138,10 +158,47 @@ class ZjhGame:
             elif not who['bot']:
                 conn.execute('UPDATE gc_beans SET balance=balance+? WHERE user_id=?',
                              (who['budget'] - p['invested'] + award, who['uid']))
+        hand['revealed'] = list(result['winners']) if hand['engine']['reason'] != 'last_player' else []
         hand['settled_at'] = clock
         service.finish_hand(conn, table, clock)
 
     @staticmethod
+    def hand_label_for(hand, player):
+        raw = hand['engine']
+        target = next((p for p in raw['players'] if p['player'] == player), None)
+        if not target:
+            return ''
+        live = [p for p in raw['players'] if not p['folded']]
+        has_trips = any(engine.strength(p['cards'])[0] == 5 for p in live)
+        return zjh_hand_name(target['cards'], raw.get('allow_235', False), has_trips)
+
+    @staticmethod
     def view(hand, player):
-        return {**engine.view(hand['engine'], player), 'number': hand['number'],
-                'commitment': hand['commitment']}
+        raw = hand['engine']
+        out = engine.view(raw, player)
+        live = [p for p in raw['players'] if not p['folded']]
+        has_trips = any(engine.strength(p['cards'])[0] == 5 for p in live)
+        by_id = {p['player']: p for p in raw['players']}
+        if raw['finished']:
+            revealed = set(hand['revealed']) if 'revealed' in hand else set(raw['showdown'])
+            for pub in out['players']:
+                pid = pub['player']
+                orig = by_id[pid]
+                public_shown = pid in revealed
+                visible = public_shown or (pid == player and orig['seen'])
+                pub['shown'] = public_shown
+                pub['cards'] = list(orig['cards']) if visible else None
+                pub['hand_name'] = zjh_hand_name(orig['cards'], raw.get('allow_235', False), has_trips) if visible else None
+            out['revealed'] = sorted(revealed)
+            out['can_reveal'] = bool(player and player in hand['users'] and player not in revealed)
+        else:
+            for pub in out['players']:
+                pid = pub['player']
+                orig = by_id[pid]
+                visible = pid == player and orig['seen']
+                pub['shown'] = False
+                pub['cards'] = list(orig['cards']) if visible else None
+                pub['hand_name'] = zjh_hand_name(orig['cards'], raw.get('allow_235', False), False) if visible else None
+            out['revealed'] = []
+            out['can_reveal'] = False
+        return {**out, 'number': hand['number'], 'commitment': hand['commitment']}

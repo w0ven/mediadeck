@@ -227,7 +227,7 @@ def test_group_myinfo_is_own_brief_card(bot):
     run(bot._handle_message(_msg("/myinfo", user=ALICE, username="alice_tg")))
     body = last_text(bot)
     assert body.startswith(f'👤 <a href="tg://user?id={ALICE}">')
-    assert "普通用户 · ✅ 正常" in body and "到期" in body
+    assert "<code>普通用户</code>" in body and "✅ 正常" in body and "到期" in body
     assert "密码" not in body and "token" not in body
     assert "选择要查看的内容" not in body
     assert bot._panel[f"g:{GROUP}:0:{ALICE}"]

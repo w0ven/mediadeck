@@ -66,6 +66,11 @@ def test_upgrade_changes_only_base_rights_preserves_personal_cards_and_special(e
     env.db.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) VALUES('u',-7200,'test','reset',?)", (NOW,))
     assert env.members.get('u')['activity_level']['level'] == 8
     assert env.members.get('u')['activity_level']['price'] == 1
+    env.levels.grant_special('u', 'test', 9)
+    lv9 = env.members.get('u')['activity_level']
+    assert lv9['level'] == 9 and lv9['name'] == '踏天'
+    assert lv9['title'] == '顺为凡，逆则仙，只在心中一念间'
+    assert lv9['price'] == 1 and lv9['max_devices'] == 10 and lv9['next_threshold'] is None
 
 
 def test_zero_viewing_can_renew_but_funds_window_and_manual_restrictions_remain(env):

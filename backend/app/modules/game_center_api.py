@@ -194,7 +194,7 @@ def register(app, member_context):
     # Static SSE route is registered first so it cannot be mistaken for a mutation.
     @app.post(PREFIX + '/tables/{table_id}/{operation}')
     async def operation(table_id: str, operation: str, body: dict = json_body, ctx=ctx_dep):
-        if operation not in ('seat', 'leave', 'ready', 'start', 'auto', 'actions', 'away', 'top-up'):
+        if operation not in ('seat', 'leave', 'ready', 'start', 'auto', 'actions', 'away', 'top-up', 'reveal', 'interact'):
             raise _fail(404, 'not_found', '操作不存在')
         return await mutate(ctx, operation, body, table_id)
 

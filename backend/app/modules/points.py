@@ -47,6 +47,7 @@ REASON_LABELS = {
     "game.buy_in": "牌桌带入",
     "game.top_up": "牌桌补码",
     "game.cash_out": "牌桌离桌结算",
+    "game.interact": "牌桌互动道具",
     "xiangqi.stake": "象棋本局押注冻结",
     "xiangqi.win": "象棋获胜结算（含本金）",
     "xiangqi.refund": "象棋和棋或作废退回押注",

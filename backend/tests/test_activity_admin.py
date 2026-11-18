@@ -69,7 +69,7 @@ def test_admin_browser_config_and_migration(client, tmp_path, monkeypatch):
         assert page.locator('.hg-whitelist-group').is_visible()
         assert not page.locator('#level-legacy-groups').evaluate('(e)=>e.open')
         assert not page.locator('#group-create').is_visible()
-        assert len(set(page.locator('[data-level-key="icon"]').evaluate_all('(es)=>es.map(e=>e.value)'))) == 8
+        assert len(set(page.locator('[data-level-key="icon"]').evaluate_all('(es)=>es.map(e=>e.value)'))) == 9
         page.locator('#level-legacy-groups > summary').click()
         assert '不会覆盖等级基础权益' in page.locator('#level-legacy-groups').inner_text()
         page.locator('#level-legacy-groups > summary').click()

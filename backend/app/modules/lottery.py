@@ -45,7 +45,7 @@ AUDIENCES = {'all': '全部群友', 'member': '仅已注册', 'guest': '仅未�
 LEGACY_DEFAULTS = {'min_level': 0, 'min_points': 0, 'min_watch_hours': 0, 'reminder': False, 'pin': False,
                    'winner_dm': False, 'live_count': False}
 INTERNAL = ('chat_id', 'thread_id', 'anti_multi', 'reminder', 'pin', 'winner_dm', 'live_count', 'public_rules_version')
-LEVEL_MAX = 8
+LEVEL_MAX = 9
 # Reminder: ~1h before the deadline; not when published < 90 min before it;
 # skipped once fewer than 10 min remain (missed maintenance window).
 REMINDER_LEAD, REMINDER_NOTICE, REMINDER_CUTOFF = 3600, 5400, 600

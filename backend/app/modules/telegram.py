@@ -1525,32 +1525,53 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         return '💠 ' if member.get('group_id') == WHITELIST_GROUP_ID else ''
 
     @staticmethod
+    def _plaque_ornament(lv: int) -> str:
+        return {1: '⋆', 2: '✦', 7: '👑', 8: '🪷'}.get(lv, '❖')
+
+    @staticmethod
+    def _identity_plaque_lines(member: dict[str, Any], *, title: str | None = None) -> list[str]:
+        level = member.get('activity_level')
+        if level:
+            lv = int(level['level'])
+            icon = escape(str(level['icon']))
+            name = escape(str(level['name']))
+            shown = escape(str(title if title is not None else level['title']))
+            pills = [f"<code>{icon} Lv{lv} · {name}</code>"]
+            if member.get('group_id') == WHITELIST_GROUP_ID:
+                pills.append('<code>💠 尊享白名单</code>')
+            elif lv in (8, 9):
+                pills.append('<code>✦ 圣谕敕封</code>')
+            rows = ['  '.join(pills)]
+            if shown:
+                orn = TelegramBot._plaque_ornament(lv)
+                rows.append(f"{orn} <b>{name} {icon} {shown}</b> {orn}")
+            return rows
+        return [f"<code>{escape(str(member.get('group_name') or '默认'))}</code>"]
+
+    @staticmethod
     def _group_label(member: dict[str, Any], *, title: str | None = None) -> str:
         level = member.get('activity_level')
         if level:
-            # A level's name + title are one identity, not a detached signature.
-            shown = title if title is not None else level['title']
-            label = f"{level['icon']} Lv{level['level']} {level['name']}" + (f"「{shown}」" if shown else '')
-            return escape(label) + (' · 白名单' if member.get('group_id') == WHITELIST_GROUP_ID else '')
-        name = escape(str(member.get('group_name') or '默认'))
-        return name
+            return '\n'.join(TelegramBot._identity_plaque_lines(member, title=title))
+        return escape(str(member.get('group_name') or '默认'))
 
     def _home(self, tg_user_id: str, tg_name: str) -> tuple[str, list[list[dict[str, str]]]]:
         member = self._member_for_chat(tg_user_id)
         if not member:
             return self._guest_home(tg_name), self.guest_menu()
+        info = self._member_level_info(member)
+        worn = (info['worn_title'] or info['level']['title']) if isinstance(info, dict) else None
         bits = [self._status_label(member), _member_expiry_label(member)]
-        group = self._group_label(member)
-        lines = [
-            self._whitelist_decoration(member) + "🎬 <b>我的影库</b>\n",
-            f"👋 {escape(str(member.get('username') or '成员'))}，欢迎回来",
-            group,
-            " · ".join(bits),
-        ]
         user_id = str(member.get("emby_user_id") or "")
         balance = self._balance(user_id)
         if balance or self._plugin_on("checkin") or self._plugin_on("points_transfer"):
-            lines.append(f"🪙 积分 <b>{balance}</b>")
+            bits.append(f"🪙 积分 <b>{balance}</b>")
+        jade = [*self._identity_plaque_lines(member, title=worn), " · ".join(bits)]
+        lines = [
+            self._whitelist_decoration(member)
+            + f"🎬 <b>我的影库</b> · 欢迎回来，<b>{escape(str(member.get('username') or '成员'))}</b>",
+            "<blockquote>" + "\n".join(jade) + "</blockquote>",
+        ]
         menu = self.member_menu()
         miniapp = str(self._cfg().get("miniapp_url") or "").strip()
         if miniapp and not _GROUP.get():
