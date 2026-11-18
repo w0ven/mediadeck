@@ -686,6 +686,11 @@ class Database:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
+        self._ro_local = threading.local()
+        self._ro_conns: list[sqlite3.Connection] = []
+        self._ro_lock = threading.Lock()
+        self._write_version = 0
+        self._sample_reset_version = 0
         self._migrate()
 
     @property
@@ -876,6 +881,7 @@ class Database:
             try:
                 yield self._conn
                 self._conn.commit()
+                self._write_version += 1
             except BaseException:
                 self._conn.rollback()
                 raise
@@ -891,6 +897,29 @@ class Database:
                 self._conn.execute('ROLLBACK TO viewing_snapshot')
                 self._conn.execute('RELEASE viewing_snapshot')
 
+    def _readonly_conn(self) -> sqlite3.Connection:
+        conn = getattr(self._ro_local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                f"{self._path.resolve().as_uri()}?mode=ro",
+                uri=True, timeout=15.0,
+            )
+            conn.execute("PRAGMA query_only=ON")
+            self._ro_local.conn = conn
+            with self._ro_lock:
+                self._ro_conns.append(conn)
+        return conn
+
+    def query_tuples(self, sql: str, params: tuple = (), *, readonly: bool = False) -> list[tuple[Any, ...]]:
+        """Low-overhead tuple read; readonly=True uses a thread-local WAL reader so heavy analytics never block writes."""
+        if readonly and self._path.exists():
+            try:
+                return self._readonly_conn().execute(sql, params).fetchall()
+            except sqlite3.Error:
+                pass
+        with self._lock:
+            return [tuple(r) for r in self._conn.execute(sql, params).fetchall()]
+
     def query(self, sql: str, params: tuple = ()) -> list[dict[str, Any]]:
         with self._lock:
             cur = self._conn.execute(sql, params)
@@ -903,8 +932,18 @@ class Database:
     def execute(self, sql: str, params: tuple = ()) -> int:
         with self.write() as conn:
             cur = conn.execute(sql, params)
+            low = sql.lower()
+            if 'watch_verified_samples' in low and ('delete' in low or 'update' in low or 'replace' in low):
+                self._sample_reset_version += 1
             return cur.rowcount
 
     def close(self) -> None:
+        with self._ro_lock:
+            for conn in self._ro_conns:
+                try:
+                    conn.close()
+                except sqlite3.Error:
+                    pass
+            self._ro_conns.clear()
         with self._lock:
             self._conn.close()

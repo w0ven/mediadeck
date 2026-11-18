@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import time
 from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
@@ -90,6 +91,7 @@ class StatsService:
         self._measured_cutover = measured_cutover
         epoch = db.one("SELECT value FROM meta WHERE key='watch_verified_since'") or {}
         self._verification_since = float(epoch.get('value') or 0)
+        self._hours_cache: tuple[int, float, int, float, float, dict[str, float]] | None = None
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
@@ -128,14 +130,27 @@ class StatsService:
         """One verified interval ledger for profiles, user charts and daily series."""
         where = ' AND emby_user_id=?' if user_id is not None else ''
         args = (user_id,) if user_id is not None else ()
-        rows = self._db.query(
+        sql = (
             'SELECT emby_user_id,SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))) AS seconds '
             'FROM watch_verified_samples WHERE ended_at>? AND started_at<?' + where +
-            ' GROUP BY emby_user_id', (until, since, since, until, *args))
+            ' GROUP BY emby_user_id'
+        )
+        if hasattr(self._db, 'query_tuples'):
+            rows = self._db.query_tuples(sql, (until, since, since, until, *args), readonly=True)
+            return {uid: {'seconds': float(secs or 0),
+                          'uncertain_records': 0, 'incomplete': False} for uid, secs in rows}
+        rows = self._db.query(sql, (until, since, since, until, *args))
         return {row['emby_user_id']: {'seconds': float(row['seconds'] or 0),
                                     'uncertain_records': 0, 'incomplete': False} for row in rows}
 
     def watch_window(self, since: float, until: float, user_id: str | None = None) -> dict[str, Any]:
+        if user_id is None and hasattr(self._db, 'query_tuples'):
+            rows = self._db.query_tuples(
+                'SELECT COALESCE(SUM(MAX(0,MIN(ended_at,?)-MAX(started_at,?))),0) '
+                'FROM watch_verified_samples WHERE ended_at>? AND started_at<?',
+                (until, since, since, until), readonly=True)
+            seconds = float(rows[0][0] or 0) if rows else 0.0
+            return {'seconds': int(seconds), 'incomplete': False, 'uncertain_records': 0}
         rows = self.watch_windows(since, until, user_id).values()
         seconds = sum(r['seconds'] for r in rows)
         uncertain = sum(r['uncertain_records'] for r in rows)
@@ -313,13 +328,53 @@ class StatsService:
                 " SUM(plays) AS plays, COUNT(DISTINCT emby_user_id) AS users"
                 " FROM usage_daily WHERE day >= ? GROUP BY day", (wanted[0],))
         }
+        now = time.time()
+        first_ts = datetime.fromisoformat(wanted[0]).replace(tzinfo=UTC).timestamp()
+        last_ts = min(datetime.fromisoformat(wanted[-1]).replace(tzinfo=UTC).timestamp() + 86400, now)
+        day_secs: dict[int, float] = {}
+        if last_ts > first_ts and hasattr(self._db, 'query_tuples'):
+            # Aggregate single-day rows in SQL via the covering (ended_at, started_at)
+            # index and only pull rare cross-midnight intervals into Python.
+            for day_idx, secs in self._db.query_tuples(
+                "SELECT CAST(MAX(started_at, ?) / 86400 AS INT) AS d,"
+                " SUM(MIN(ended_at, ?) - MAX(started_at, ?)) AS s "
+                "FROM watch_verified_samples "
+                "WHERE ended_at > ? AND started_at < ? "
+                "AND CAST(MAX(started_at, ?) / 86400 AS INT) = CAST((MIN(ended_at, ?) - 1e-6) / 86400 AS INT) "
+                "GROUP BY d",
+                (first_ts, last_ts, first_ts, first_ts, last_ts, first_ts, last_ts),
+                readonly=True,
+            ):
+                day_secs[int(day_idx)] = day_secs.get(int(day_idx), 0.0) + float(secs or 0.0)
+            for s, e in self._db.query_tuples(
+                "SELECT MAX(started_at, ?), MIN(ended_at, ?) "
+                "FROM watch_verified_samples "
+                "WHERE ended_at > ? AND started_at < ? "
+                "AND CAST(MAX(started_at, ?) / 86400 AS INT) != CAST((MIN(ended_at, ?) - 1e-6) / 86400 AS INT)",
+                (first_ts, last_ts, first_ts, last_ts, first_ts, last_ts),
+                readonly=True,
+            ):
+                cur_s, cur_e = float(s), float(e)
+                while cur_s < cur_e:
+                    d_idx = math.floor(cur_s / 86400)
+                    stop = min(cur_e, (d_idx + 1) * 86400)
+                    day_secs[d_idx] = day_secs.get(d_idx, 0.0) + (stop - cur_s)
+                    cur_s = stop
+            series = []
+            for d in wanted:
+                start = datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()
+                secs = int(day_secs.get(int(start // 86400), 0.0))
+                series.append({'day': d, 'hours': round(secs / 3600, 2),
+                               'incomplete': False, 'plays': int((rows.get(d) or {}).get('plays') or 0),
+                               'users': int((rows.get(d) or {}).get('users') or 0)})
+            return series
         series = []
         for d in wanted:
             start = datetime.fromisoformat(d).replace(tzinfo=UTC).timestamp()
-            watch = self.watch_window(start, min(start+86400,time.time()))
-            series.append({'day':d,'hours':round(watch['seconds']/3600,2),
-                           'incomplete':watch['incomplete'],'plays':int((rows.get(d) or {}).get('plays') or 0),
-                           'users':int((rows.get(d) or {}).get('users') or 0)})
+            watch = self.watch_window(start, min(start + 86400, now))
+            series.append({'day': d, 'hours': round(watch['seconds'] / 3600, 2),
+                           'incomplete': watch['incomplete'], 'plays': int((rows.get(d) or {}).get('plays') or 0),
+                           'users': int((rows.get(d) or {}).get('users') or 0)})
         return series
 
     # -- leaderboards --------------------------------------------------------
@@ -530,8 +585,40 @@ class StatsService:
 
     def hours_this_month(self) -> dict[str, float]:
         now = time.time()
-        since = datetime.now(UTC).replace(day=1,hour=0,minute=0,second=0,microsecond=0).timestamp()
-        return {uid: round(row['seconds']/3600, 1)
+        since = datetime.now(UTC).replace(day=1, hour=0, minute=0, second=0, microsecond=0).timestamp()
+        if hasattr(self._db, 'query_tuples') and 'query' not in getattr(self._db, '__dict__', {}):
+            reset_ver = getattr(self._db, '_sample_reset_version', 0)
+            rows = self._db.query_tuples(
+                'SELECT COUNT(*), COALESCE(MAX(ended_at), 0) FROM watch_verified_samples WHERE ended_at>?',
+                (since,), readonly=True)
+            cur_count = int(rows[0][0] or 0) if rows else 0
+            cur_max_end = float(rows[0][1] or 0.0) if rows else 0.0
+            now_mono = time.monotonic()
+            cached = self._hours_cache
+            if (cached is not None
+                    and cached[0] == int(since)
+                    and cached[4] == reset_ver
+                    and now_mono - cached[1] <= 600.0
+                    and cur_count >= cached[2]
+                    and cur_max_end >= cached[3]):
+                if cur_count == cached[2] and cur_max_end == cached[3]:
+                    return {uid: round(secs / 3600, 1) for uid, secs in cached[5].items()}
+                if cur_max_end > cached[3]:
+                    tail = self._db.query_tuples(
+                        'SELECT emby_user_id, MAX(0, MIN(ended_at, ?) - MAX(started_at, ?)) '
+                        'FROM watch_verified_samples WHERE ended_at>? AND started_at<?',
+                        (now, since, cached[3], now), readonly=True)
+                    if len(tail) == cur_count - cached[2]:
+                        totals = cached[5]
+                        for uid, secs in tail:
+                            totals[uid] = totals.get(uid, 0.0) + float(secs or 0.0)
+                        self._hours_cache = (int(since), cached[1], cur_count, cur_max_end, reset_ver, totals)
+                        return {uid: round(secs / 3600, 1) for uid, secs in totals.items()}
+            raw = self.watch_windows(since, now)
+            totals = {uid: float(row['seconds']) for uid, row in raw.items()}
+            self._hours_cache = (int(since), now_mono, cur_count, cur_max_end, reset_ver, totals)
+            return {uid: round(secs / 3600, 1) for uid, secs in totals.items()}
+        return {uid: round(row['seconds'] / 3600, 1)
                 for uid, row in self.watch_windows(since, now).items()}
 
     def member_detail(self, user_id: str, days: int = 30) -> dict[str, Any]:
