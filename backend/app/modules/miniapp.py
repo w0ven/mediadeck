@@ -223,7 +223,11 @@ def register(app: Any) -> None:
         expiry = info['expires_at']
         group = member.get('group') or {}
         blockers = []
-        if not info['managed']:
+        if info['exempt']:
+            blockers.append('白名单账号永久有效，无需续期')
+        elif not expiry:
+            blockers.append('当前账号永久有效，无需续期')
+        elif not info['managed']:
             blockers.append('账号尚未开通等级续期')
         if info['lifecycle'] != 'ready':
             blockers.append('账号删除流程待确认，请联系管理员')
@@ -249,7 +253,7 @@ def register(app: Any) -> None:
             'renewal': {'price': info['renewal_price'], 'shortfall': info['shortfall'],
                         'window_open': info['window_open'], 'opens_at': expiry - 3 * DAY if expiry else None,
                         'auto_renew': info['auto_renew'], 'blockers': blockers,
-                        'available': info['managed'] and not info['exempt']},
+                        'available': bool(info['managed'] and not info['exempt'] and expiry)},
             'binding': levels.binding_revision(uid),
             'rights': {'bandwidth_kbps': member.get('bandwidth_limit_kbps'),
                        'max_streams': member.get('max_streams'),
@@ -294,9 +298,7 @@ def register(app: Any) -> None:
                'balance_after': info['balance'] - info['renewal_price'],
                'expires_at': expiry, 'new_expires_at': new_expiry,
                'level': {k: info['level'].get(k) for k in ('level', 'name', 'icon')},
-               'blockers': payload['blockers'] if payload['available'] else ['白名单账号永久有效，无需续期'
-                                                                               if info['exempt'] else
-                                                                               '账号尚未开通等级续期']}
+               'blockers': payload['blockers']}
         if out['blockers']:
             return out
         nonce = secrets.token_hex(12)

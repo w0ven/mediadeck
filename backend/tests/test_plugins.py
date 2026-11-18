@@ -755,8 +755,12 @@ def test_weekly_watch_rank_on_sunday_and_not_midweek() -> None:
 def test_expiry_reminder_notifies_members_inside_the_window() -> None:
     soon = time.time() + 2 * 86400
     far = time.time() + 40 * 86400
+    managed = dict(_member("3", expires_at=soon), activity_managed=True)
+    exempt = dict(_member("4", expires_at=soon), activity_exempt=True)
     members = FakeMembers([_member("1", expires_at=soon),
-                           _member("2", expires_at=far)])
+                           _member("2", expires_at=far),
+                           managed,
+                           exempt])
     bot = FakeBot()
     summary = asyncio.run(ExpiryReminderPlugin(
         make_ctx(members=members, telegram=bot)).run(

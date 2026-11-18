@@ -233,9 +233,13 @@ def _fmt_expiry(expires_at: int | None) -> str:
     if left <= 0:
         return "已过期"
     days = left // 86400
-    if days >= 1:
+    if days >= 3:
         return f"{days} 天后到期"
-    return f"{max(1, left // 3600)} 小时内到期"
+    if days >= 1:
+        hours = (left % 86400) // 3600
+        return f"{days} 天 {hours} 小时后到期" if hours else f"{days} 天后到期"
+    hours = left // 3600
+    return f"{hours} 小时后到期" if hours >= 1 else "不到 1 小时到期"
 
 
 def _member_expiry_label(member: dict[str, Any]) -> str:
@@ -5659,12 +5663,17 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._edit(chat_id, message_id, "旧版求片按钮已停用，请重新打开求片中心。", [[{"text":"求片中心", "callback_data":"request_center"}]])
             return
         if data == "expiry":
+            if member.get("activity_managed") and getattr(self._members, "_levels", None) is not None:
+                await self._activity_action(
+                    chat_id, int(message_id), member, "status",
+                    actor=tg_user_id, in_group=in_group, callback=True)
+                return
             expires = member.get("expires_at_effective", member.get("expires_at"))
             when = time.strftime("%Y-%m-%d", time.localtime(expires)) if expires else "永久有效"
+            tail = "" if (member.get("activity_exempt") or not expires) else "\n\n<i>需要续期请联系管理员。</i>"
             await self._edit(
                 chat_id, message_id,
-                f"⏳ <b>有效期</b>\n\n到期时间：{when}\n状态：{_fmt_expiry(expires)}\n\n"
-                "<i>需要续期请联系管理员。</i>",
+                f"⏳ <b>有效期</b>\n\n到期时间：{when}\n状态：{_fmt_expiry(expires)}{tail}",
                 self.member_menu())
             return
         if data == "devices":
@@ -5892,7 +5901,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
     async def notify_expiring(self, members: list[dict[str, Any]]) -> int:
         sent = 0
         for member in members:
-            if not member.get("tg_user_id"):
+            if not member.get("tg_user_id") or member.get("activity_managed") or member.get("activity_exempt"):
                 continue
             ok = await self.notify_member(
                 member,

@@ -775,7 +775,8 @@ class ExpiryReminderPlugin(Plugin):
         if self.ctx.members is None:
             return {"ok": False, "错误": "成员服务不可用"}
         days = max(1, int(config.get("days_ahead") or 3))
-        due = self.ctx.members.expiring_within(days)
+        due = [m for m in self.ctx.members.expiring_within(days)
+               if not m.get("activity_managed") and not m.get("activity_exempt")]
         delivery = _delivery_state(self, config)
         sent = errors = 0
         linked = sum(1 for m in due if m.get("tg_user_id"))

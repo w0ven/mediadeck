@@ -106,8 +106,14 @@
     if (!ts) return '永久有效';
     const s = ts - Date.now() / 1000;
     if (s <= 0) return '已到期';
-    if (s >= 86400) return `剩 ${Math.floor(s / 86400)} 天`;
-    return `剩不到 ${Math.max(1, Math.floor(s / 3600) + 1)} 小时`;
+    if (s >= 3 * 86400) return `剩 ${Math.floor(s / 86400)} 天`;
+    if (s >= 86400) {
+      const d = Math.floor(s / 86400);
+      const h = Math.floor((s % 86400) / 3600);
+      return h ? `剩 ${d} 天 ${h} 小时` : `剩 ${d} 天`;
+    }
+    const h = Math.floor(s / 3600);
+    return h >= 1 ? `剩 ${h} 小时` : '剩不到 1 小时';
   }
   function dur(seconds) {
     const s = Math.max(0, Math.round(Number(seconds) || 0));
@@ -438,11 +444,16 @@
     let renewCard = '';
     if (renew.available) {
       const when = renew.window_open ? '现在可以续期' : (renew.opens_at ? `${stamp(renew.opens_at)} 起可续` : '');
+      const autoHint = renew.auto_renew
+        ? (renew.shortfall
+          ? `<div style="color:var(--warn,#ffb84d)">积分不足 · 还差 ${num(renew.shortfall)} 积分</div>`
+          : '<div style="color:var(--ok)">已就绪 · 到期前自动顺延</div>')
+        : `<div>每次 ${num(renew.price)} 积分 / 30 天${renew.shortfall ? ` · 还差 ${num(renew.shortfall)}` : ''}</div>`;
       renewCard = `<div class="card">
         <div class="row"><div class="grow"><b>续期</b><div class="tiny muted"><div>到期 ${stamp(me.expires_at)}</div>${when ? `<div>${when}</div>` : ''}</div></div>
           <button class="btn${renew.blockers.length ? ' dis' : ''}" type="button" id="renew">续期 30 天</button></div>
         <div class="row" style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
-          <div class="grow"><div>自动保号</div><div class="tiny muted"><div>到期前 24 小时内积分足够即自动续期</div><div>每次 ${num(renew.price)} 积分 / 30 天</div></div></div>
+          <div class="grow"><div>自动保号</div><div class="tiny muted"><div>到期前 72 小时内积分足够即自动续期</div>${autoHint}</div></div>
           <button class="switch${renew.auto_renew ? ' on' : ''}" type="button" id="auto" role="switch" aria-checked="${renew.auto_renew}" aria-label="自动保号"></button>
         </div></div>`;
     }
@@ -539,7 +550,7 @@
     const done = await confirmSheet({
       title: enabled ? '开启自动保号' : '关闭自动保号',
       note: enabled
-        ? '到期前 24 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。积分不足时不扣分，也不会续期。<br>账号到期后无法播放，超过 72 小时可能被删除。'
+        ? '到期前 72 小时内，如果积分足够，会按当时的等级价格自动扣积分续期 30 天。积分不足时不扣分，也不会续期。<br>账号到期后无法播放，超过 72 小时可能被删除。'
         : '关闭后不再自动扣积分续期；当前到期时间不变，仍可手动续期。',
       okText: enabled ? '确认开启' : '确认关闭',
       danger: !enabled,

@@ -178,6 +178,13 @@ def test_auto_renew_requires_current_binding(client):
     assert stale.status_code == 409
     ok = client.post('/api/app/auto-renew', auth=None, headers=headers(), json={'enabled': True, 'binding': me['binding']})
     assert ok.json()['auto_renew'] is True
+    # Permanent non-whitelist member reports permanent status cleanly instead of "尚未开通等级续期".
+    app.state.db.execute("UPDATE members SET expires_at=NULL WHERE emby_user_id='u1'")
+    perm_me = client.get('/api/app/me', auth=None, headers=headers()).json()
+    assert perm_me['renewal']['available'] is False
+    assert '当前账号永久有效，无需续期' in perm_me['renewal']['blockers']
+    perm_preview = client.post('/api/app/renew/preview', auth=None, headers=headers()).json()
+    assert perm_preview['blockers'] == ['当前账号永久有效，无需续期']
 
 
 def test_shop_redeem_is_idempotent(client):

@@ -2,17 +2,35 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import time
 from datetime import datetime
 from uuid import uuid4
 
 from app.modules import member_ops
+from app.modules.bot_activity import remain_label
 from app.modules.economy_rules import BEIJING, economy_write
 from app.modules.expiry_notices import ExpiryNotices
 from app.modules.levels import DAY
 from app.modules.members import MANUAL_STATES
 from app.modules.plugins import Plugin, Spec
 from app.modules.usage import run_usage_io
+
+
+def _bj_time(ts):
+    return datetime.fromtimestamp(ts, BEIJING).strftime('%Y-%m-%d %H:%M')
+
+
+async def _send_private(bot, chat, body, keyboard):
+    try:
+        params = inspect.signature(bot.send).parameters
+        supports_kb = 'keyboard' in params or any(
+            p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+        )
+    except (TypeError, ValueError):
+        supports_kb = True
+    return await (bot.send(chat, body, keyboard=keyboard) if supports_kb else bot.send(chat, body))
 
 
 def unsettled(conn, uid):
@@ -149,7 +167,63 @@ class LevelLifecycle:
 
 class LevelLifecyclePlugin(Plugin):
     spec = Spec(id='activity_lifecycle', name='等级自动保号与到期检查', icon='⏳', interval=60,
-                description='用户主动开启才自动续费；过期72小时后只预览，真实删除还需等级配置单独启用。')
+                description='用户主动开启后到期前72小时内自动续费；过期72小时后只预览，真实删除还需等级配置单独启用。')
+
+    async def _deliver_auto_receipts(self, levels, now):
+        bot = self.ctx.telegram
+        if not bot or not getattr(bot, 'enabled', False):
+            return 0
+        sent = 0
+        pending = levels.db.query(
+            "SELECT user_id, expiry FROM activity_notices WHERE stage='auto_renewed' AND sent_at IS NULL AND retry_at<=?",
+            (now,),
+        )
+        for item in pending:
+            uid, prev_expiry = item['user_id'], item['expiry']
+            member = levels.members.get(uid)
+            chat = (member or {}).get('tg_user_id')
+            rec = levels.db.one(
+                "SELECT result_json FROM economy_receipts WHERE scope='activity.renew' AND request_id=? AND user_id=?",
+                (f'auto:{prev_expiry}', uid),
+            )
+            if not chat or not rec:
+                levels.db.execute(
+                    "UPDATE activity_notices SET sent_at=? WHERE user_id=? AND expiry=? AND stage='auto_renewed'",
+                    (now, uid, prev_expiry),
+                )
+                continue
+            with economy_write(levels.db) as conn:
+                cur = conn.execute(
+                    "SELECT sent_at, retry_at FROM activity_notices WHERE user_id=? AND expiry=? AND stage='auto_renewed'",
+                    (uid, prev_expiry),
+                ).fetchone()
+                if not cur or cur['sent_at'] or cur['retry_at'] > now:
+                    continue
+                conn.execute(
+                    "UPDATE activity_notices SET retry_at=? WHERE user_id=? AND expiry=? AND stage='auto_renewed'",
+                    (now + 300, uid, prev_expiry),
+                )
+            data = json.loads(rec['result_json'])
+            suffix = '顺延 30 天' if data['previous_expires_at'] >= now - DAY else '有效期 30 天'
+            body = (
+                "✅ <b>自动保号续期成功</b>\n\n"
+                f"💰 本次扣除：{data['cost']} 积分（剩余 {data['balance']} 积分）\n"
+                f"⏪ 原到期：{_bj_time(data['previous_expires_at'])}\n"
+                f"⏩ 新到期：{_bj_time(data['expires_at'])}（{suffix}）"
+            )
+            keyboard = [[{'text': '🌱 等级与权益', 'callback_data': 'activity:status'},
+                         {'text': '👤 个人信息', 'callback_data': 'me'}]]
+            try:
+                acknowledged = await _send_private(bot, chat, body, keyboard)
+            except Exception:  # noqa: BLE001 - retain retry without claiming delivery
+                acknowledged = False
+            if acknowledged:
+                levels.db.execute(
+                    "UPDATE activity_notices SET sent_at=? WHERE user_id=? AND expiry=? AND stage='auto_renewed'",
+                    (now, uid, prev_expiry),
+                )
+                sent += 1
+        return sent
 
     async def notices(self, levels, now):
         bot = self.ctx.telegram
@@ -169,16 +243,66 @@ class LevelLifecyclePlugin(Plugin):
                 conn.execute('INSERT INTO activity_notices VALUES(?,?,?,NULL,?) ON CONFLICT(user_id,expiry,stage) DO UPDATE SET retry_at=excluded.retry_at',
                              (uid, expiry, stage, now+300))
             info = levels.status(uid, now)
-            body = (f"保号提醒：续费30天需{info['renewal_price']}积分，余额缺口{info['shortfall']}。\n"
-                    f"到期：{datetime.fromtimestamp(expiry, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
-                    f"删除候选时间：{datetime.fromtimestamp(expiry+3*DAY, BEIJING).strftime('%Y-%m-%d %H:%M 北京时间')}\n"
-                    '到期停止播放，保留期间仍可查看/积分续费。/activity 查看，/renew30 续30天；自动保号需主动开启。')
-            if info['shortfall']:
-                held = levels.db.one("SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND scope IN ('gc_zjh','gc_holdem')", (uid,))['n']
+            price = info['renewal_price']
+            shortfall = info['shortfall']
+            balance = info.get('balance', max(0, price - shortfall))
+            auto_renew = bool(info.get('auto_renew', member.get('auto_renew')))
+            exp_str = _bj_time(expiry)
+            del_str = _bj_time(expiry + 3 * DAY)
+            held = 0
+            if shortfall:
+                held = levels.db.one(
+                    "SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND scope IN ('gc_zjh','gc_holdem')",
+                    (uid,),
+                )['n']
+            if stage == 'expired':
+                bal_desc = f"当前余额 {balance} 积分，还差 {shortfall} 积分" if shortfall else f"当前余额 {balance} 积分，可直接续期"
+                body = (
+                    "🛑 <b>账号已到期 · 保号期提醒</b>\n\n"
+                    f"账号已于 {exp_str} 到期，当前已暂停播放。\n"
+                    f"续期 30 天需 {price} 积分（{bal_desc}）。"
+                )
                 if held:
-                    body += f'\n有 {held} 积分正冻结在牌桌。'
+                    body += f"\n另有 {held} 积分正冻结在牌桌。"
+                body += f"\n\n请在 {del_str} 前完成积分续期以恢复使用，超期未续账号可能被清理。"
+                keyboard = [[{'text': '⏳ 续期 30 天', 'callback_data': 'activity:renew'},
+                             {'text': '🌱 等级与权益', 'callback_data': 'activity:status'}]]
+            elif auto_renew:
+                remain_str = remain_label(expiry - now)
+                gap_desc = (f"当前余额 {balance} 积分（还差 {shortfall} 积分），自动保号暂无法扣费。"
+                            if shortfall else f"当前余额 {balance} 积分，账号当前状态暂不自动扣费。")
+                body = (
+                    "⚠️ <b>自动保号积分不足提醒</b>\n\n"
+                    f"账号将于 {exp_str} 到期（{remain_str}）。\n"
+                    f"续期 30 天需 {price} 积分，{gap_desc}"
+                )
+                if held:
+                    body += f"\n另有 {held} 积分正冻结在牌桌。"
+                body += (
+                    "\n\n到期后暂停播放，72 小时保留期内补足积分后仍会自动/手动续期；"
+                    f"超期未续可能被清理（清理候选：{del_str}）。"
+                )
+                keyboard = [[{'text': '⏳ 续期 30 天', 'callback_data': 'activity:renew'},
+                             {'text': '🌱 等级与权益', 'callback_data': 'activity:status'}]]
+            else:
+                remain_str = remain_label(expiry - now)
+                bal_desc = f"当前余额 {balance} 积分，还差 {shortfall} 积分" if shortfall else f"当前余额 {balance} 积分"
+                body = (
+                    "⏳ <b>账号即将到期提醒</b>\n\n"
+                    f"账号将于 {exp_str} 到期（{remain_str}）。\n"
+                    f"续期 30 天需 {price} 积分（{bal_desc}）。\n"
+                    "🤖 自动保号当前为「未开启」，可点击下方按钮手动续期或开启自动保号。"
+                )
+                if held:
+                    body += f"\n另有 {held} 积分正冻结在牌桌。"
+                body += (
+                    "\n\n到期后暂停播放，72 小时保留期内仍可积分续期；"
+                    f"超期未续可能被清理（清理候选：{del_str}）。"
+                )
+                keyboard = [[{'text': '⏳ 续期 30 天', 'callback_data': 'activity:renew'},
+                             {'text': '🤖 开启自动保号', 'callback_data': 'activity:auto:on'}]]
             try:
-                acknowledged = await bot.send(chat, body)
+                acknowledged = await _send_private(bot, chat, body, keyboard)
             except Exception:  # noqa: BLE001 - retain retry without claiming delivery
                 acknowledged = False
             if acknowledged:
@@ -196,13 +320,20 @@ class LevelLifecyclePlugin(Plugin):
         for row in levels.db.query("SELECT emby_user_id FROM activity_members WHERE auto_renew=1 AND lifecycle='ready'"):
             uid = row['emby_user_id']
             member = levels.members.get(uid)
-            if not member or not member.get('expires_at_effective') or member['expires_at_effective']-now > DAY:
+            if not member or not member.get('expires_at_effective') or member['expires_at_effective']-now > 3*DAY:
                 continue
+            prev_expiry = member['expires_at_effective']
             try:
-                await run_usage_io(levels.renew, uid, f"auto:{member['expires_at_effective']}", now=now, automatic=True)
+                await run_usage_io(levels.renew, uid, f"auto:{prev_expiry}", now=now, automatic=True)
+                if member.get('tg_user_id'):
+                    levels.db.execute(
+                        "INSERT OR IGNORE INTO activity_notices VALUES(?,?,'auto_renewed',NULL,0)",
+                        (uid, prev_expiry),
+                    )
                 renewed += 1
             except ValueError as exc:
                 errors.append({'user_id': uid, 'reason': str(exc)})
+        await self._deliver_auto_receipts(levels, now)
         notices = await self.notices(levels, now)
         receipts = ExpiryNotices(levels.db, lambda: self.ctx.store.section('telegram'))
         service = LevelLifecycle(levels, self.ctx.emby, receipts=receipts)

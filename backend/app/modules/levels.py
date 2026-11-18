@@ -256,8 +256,8 @@ class LevelService:
             if automatic and member.get('status') in ('suspended', 'pending'):
                 raise ValueError('人工禁用或未开通账号不自动扣费')
             expiry = member.get('expires_at_effective')
-            if not expiry or expiry-now > (DAY if automatic else 3*DAY):
-                raise ValueError("仅到期前72小时内可续30天，自动保号在24小时内检查")
+            if not expiry or expiry-now > 3*DAY:
+                raise ValueError("仅到期前72小时内可续30天")
             # Viewing earns rewards independently; renewal spends the current level price.
             level = member['activity_level']
             cost = level['price']
