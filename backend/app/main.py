@@ -2418,21 +2418,31 @@ async def members_list(status: str | None = None, group_id: str | None = None,
         app.state.members.list, status=status, group_id=group_id,
         role=role, search=search, limit=fetch_limit,
         register_via=register_via, inviter_id=inviter_id)
-    playback = await asyncio.to_thread(
-        app.state.stats.member_activity, members, now=now,
-        sampling_status=app.state.usage.status())
-    hours = {}
-    with contextlib.suppress(Exception):
-        hours = await asyncio.to_thread(app.state.stats.hours_this_month)
-    balances = {}
-    with contextlib.suppress(Exception):
-        balances = await asyncio.to_thread(app.state.points.balances)
+
+    async def _safe_hours() -> dict[str, float]:
+        with contextlib.suppress(Exception):
+            return await asyncio.to_thread(app.state.stats.hours_this_month)
+        return {}
+
+    async def _safe_balances() -> dict[str, int]:
+        with contextlib.suppress(Exception):
+            return await asyncio.to_thread(app.state.points.balances)
+        return {}
+
+    playback, hours, balances, known, emby_result = await asyncio.gather(
+        asyncio.to_thread(
+            app.state.stats.member_activity, members, now=now,
+            sampling_status=app.state.usage.status()),
+        _safe_hours(),
+        _safe_balances(),
+        asyncio.to_thread(member_ops.known_member_ids, app.state.members),
+        _member_emby_snapshot(),
+    )
+    emby_users, unmanaged_error = emby_result
     for member in members:
         member.update(playback[member['emby_user_id']])
         member["watch_hours"] = hours.get(member["emby_user_id"], 0.0)
         member["points"] = balances.get(member["emby_user_id"], 0)
-    known = await asyncio.to_thread(member_ops.known_member_ids, app.state.members)
-    emby_users, unmanaged_error = await _member_emby_snapshot()
     if emby_users:
         for member in members:
             user = emby_users.get(member["emby_user_id"]) or {}
