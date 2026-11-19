@@ -2406,11 +2406,22 @@ PAGES.requests = async (context = pageContext('requests')) => {
       cols: ['编号','海报','片名 / 需求','类型','求片人','状态','操作人','时间','操作'],
       rows: rows.slice(0,10).map(r=>`<tr>
     <td>#${Number(r.id)}</td><td class="hide-sm">${requestPoster(r)}</td><td><div class="u-name">${esc(r.display_title)}</div><div class="u-sub muted" style="white-space:pre-line">${esc(r.demand_text || '')}</div>${r.note?`<div class="u-sub">备注：${esc(r.note)}</div>`:''}${r.status==='rejected'&&r.result_note?`<div class="u-sub">理由：${esc(r.result_note)}</div>`:''}</td>
-    <td>${esc(r.media_label)}</td><td>${esc(r.username)}</td><td>${requestStatusTag(r)}</td><td${r.claimed_by_name ? '' : ' class="hide-sm"'}>${esc(r.claimed_by_name || '—')}</td><td>${esc(fmtAgeTs(r.created_at))}</td><td class="row-actions">${requestActions(r)}</td></tr>`).join(''),
+    <td>${esc(r.media_label)}</td><td><div>${esc(r.username)}</div>${requestRequesterTg(r)?`<div class="u-sub muted">${esc(requestRequesterTg(r))}</div>`:''}</td><td>${requestStatusTag(r)}</td><td${r.claimed_by_name ? '' : ' class="hide-sm"'}>${esc(r.claimed_by_name || '—')}</td><td>${esc(fmtAgeTs(r.created_at))}</td><td class="row-actions">${requestActions(r)}</td></tr>`).join(''),
       empty: filtered ? '没有符合筛选的工单' : `没有${statusLabel === '全部' ? '' : statusLabel}工单`,
       pager: `<button class="btn sm" onclick="pageRequests(-1)" ${requestsView.page===0?'disabled':''}>上一页</button><span class="muted">第 ${requestsView.page+1} 页</span><button class="btn sm" onclick="pageRequests(1)" ${rows.length<=10?'disabled':''}>下一页</button>`,
     })}`;
 };
+function requestRequesterTg(r) {
+  if (!r) return '';
+  const bits = [];
+  if (r.tg_display_name) bits.push(r.tg_display_name);
+  if (r.tg_username) bits.push('@' + String(r.tg_username).replace(/^@+/, ''));
+  return bits.join(' · ');
+}
+function requestRequesterLabel(r) {
+  const tg = requestRequesterTg(r);
+  return tg ? `${r.username || '—'}（${tg}）` : (r.username || '—');
+}
 function switchRequestStatus(status) { go(requestsRoute({status, page:0, selected:null})); }
 function filterRequests() { go(requestsRoute({type:$('#request-type').value, search:$('#request-search').value.trim(), page:0, selected:null})); }
 function pageRequests(delta) { go(requestsRoute({page:Math.max(0,requestsView.page+delta)})); }
@@ -2425,7 +2436,7 @@ async function renderRequestDetail(context) {
   const eventLabel = {created:'提交',modified:'修改需求',accepted:'已接受',rejected:'已拒绝',cancelled:'已取消',question:'上片员询问',reply:'用户回复',internal:'内部备注',correction:'管理员纠错',refund:'额度退回'};
   $('#view').innerHTML = `<div class="page-actions">${back}<button class="btn" onclick="renderPage('requests', true)">刷新</button></div>
     <div class="card request-detail"><div class="card-body">
-    <h2>工单 #${id} · ${esc(row.display_title)} ${requestStatusTag(row)}</h2><p>${requestPoster(row)} ${esc(row.media_label)} · <a href="https://www.themoviedb.org/${esc(row.media_type)}/${Number(row.tmdb_id)}" target="_blank" rel="noopener">TMDB 详情 ↗</a> · 求片人 ${esc(row.username)}</p><p class="muted">${esc(row.original_title||'')}</p><p>${esc((row.overview||'').slice(0,250))}</p>
+    <h2>工单 #${id} · ${esc(row.display_title)} ${requestStatusTag(row)}</h2><p>${requestPoster(row)} ${esc(row.media_label)} · <a href="https://www.themoviedb.org/${esc(row.media_type)}/${Number(row.tmdb_id)}" target="_blank" rel="noopener">TMDB 详情 ↗</a> · 求片人 ${esc(requestRequesterLabel(row))}</p><p class="muted">${esc(row.original_title||'')}</p><p>${esc((row.overview||'').slice(0,250))}</p>
     <p style="white-space:pre-line">${esc(row.demand_text)}\n备注：${esc(row.note||'无要求')}</p>
     ${row.status==='accepted'?'<div class="help">上片员已接受你的请求，将安排下载，请耐心等待下载完成并入库</div>':''}
     ${row.status==='rejected'&&row.result_note?`<p>拒绝理由：${esc(row.result_note)}</p>`:''}

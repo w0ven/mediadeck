@@ -278,8 +278,11 @@ html[data-theme="light"] .plaque.t9::before{background:linear-gradient(105deg,tr
 .btn.dis,.btn:disabled{opacity:1;background:var(--glass2);color:var(--hint);box-shadow:none;border:1px solid var(--line)}
 .pills button.have{opacity:.6}
 
-.rrow .nm{display:flex;align-items:center;gap:6px}
+.rrow .nm{display:flex;align-items:center;gap:5px;flex-wrap:nowrap}
 .rrow .nm-txt{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rrow .nm .lvtag,.pod-tags .lvtag{flex:none}
+.pod-tags{display:flex;align-items:center;justify-content:center;gap:3px;flex-wrap:wrap;margin:3px 0 2px}
+.pod-tags .lvtag.xs{font-size:9.5px;padding:1px 5px}
 
 .lv9-art{width:1.22em;height:1.22em;border-radius:5px;object-fit:cover;vertical-align:-.2em;box-shadow:0 0 8px rgba(92,214,255,.75);border:1px solid rgba(158,243,255,.7);flex:none}
 .plaque .emb .lv9-art{width:17px;height:17px;border-radius:50%;vertical-align:middle}

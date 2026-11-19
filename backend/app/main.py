@@ -3733,12 +3733,25 @@ async def economy_title_retry(user_id: str):
 
 
 # ---- media requests ---------------------------------------------------------
+def _enrich_request_requester(row: dict[str, Any]) -> dict[str, Any]:
+    out = dict(row)
+    member = app.state.members.get(row["emby_user_id"]) if row.get("emby_user_id") else None
+    tid = str((member or {}).get("tg_user_id") or row.get("tg_user_id") or "")
+    tg_bot = getattr(app.state, "telegram", None)
+    profile = (getattr(tg_bot, "_tg_profiles", None) or {}).get(tid) or {}
+    out["tg_user_id"] = tid
+    out["tg_display_name"] = str((member or {}).get("tg_display_name") or profile.get("display_name") or "").strip()
+    out["tg_username"] = str((member or {}).get("tg_username") or profile.get("username") or "").strip().lstrip("@")
+    return out
+
+
 @app.get("/api/requests", dependencies=[Depends(_auth)])
 async def requests_list(status: str | None = None, limit: int = 100, offset: int = 0,
                         media_type: str | None = None, search: str = '') -> list[dict[str, Any]]:
     try:
-        return app.state.requests.list(status=parse_status(status), limit=limit, offset=offset,
+        rows = app.state.requests.list(status=parse_status(status), limit=limit, offset=offset,
                                        media_type=media_type, search=search)
+        return [_enrich_request_requester(r) for r in rows]
     except (RequestError, ConfigError) as exc:
         raise HTTPException(400, str(exc)) from None
 
@@ -3753,7 +3766,8 @@ async def requests_detail(request_id: int, offset: int = 0) -> dict[str, Any]:
     row = app.state.requests.get(request_id)
     if not row:
         raise HTTPException(404, '求片记录不存在')
-    return dict(row, events=app.state.requests.events(request_id, internal=True, limit=21, offset=offset),
+    return dict(_enrich_request_requester(row),
+                events=app.state.requests.events(request_id, internal=True, limit=21, offset=offset),
                 notifications=app.state.requests.notification_status(request_id))
 
 

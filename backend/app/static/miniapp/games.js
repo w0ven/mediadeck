@@ -1187,6 +1187,7 @@ window.createGamesUI = ({
             <div class="tiny muted">${t.game === 'zjh' ? `底注 ${num(t.rules.ante)} · ${t.rules.cap == null ? '不封顶' : '封顶 ' + num(t.rules.cap)}` : `无限注 · 盲注 ${num(t.rules.small_blind)}/${num(t.rules.big_blind)}`} · 不抽水</div>
           </div>
           <button class="gc-tool gc-sound-btn" type="button" data-gc-chat aria-label="快捷语" ${disabled(!me || t.phase === 'closed')}>💬</button>
+          <button class="gc-tool gc-sound-btn" type="button" data-gc-hand-ranks aria-label="牌型参考">🃏</button>
           <button class="gc-tool gc-sound-btn" data-gc-sound aria-label="声音">${icon(sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x')}</button>
           <button class="gc-tool" data-gc-rules>玩法</button>
         </header>
@@ -1347,6 +1348,7 @@ window.createGamesUI = ({
     });
     const chatBtn = $('[data-gc-chat]', root);
     if (chatBtn) chatBtn.onclick = () => phraseSheet(c);
+    $$('[data-gc-hand-ranks]', root).forEach(b => b.onclick = () => handRanksSheet(t.game, t.rules, t));
     bindPending(root);
   }
   function interactSheet(c, target) {
@@ -1376,6 +1378,58 @@ window.createGamesUI = ({
         await tableWrite(c, 'interact', { kind: 'prop', item, target: target.player });
       });
     });
+  }
+  const HOLDEM_HAND_RANKS = [
+    { rank: 1, name: '皇家同花顺', desc: '同花色 10-J-Q-K-A（最大）', cards: [12, 11, 10, 9, 8] },
+    { rank: 2, name: '同花顺', desc: '同花色五张连号（A2345 最小）', cards: [20, 19, 18, 17, 16] },
+    { rank: 3, name: '四条', desc: '四张同点数 + 任意单牌', cards: [12, 25, 38, 51, 11] },
+    { rank: 4, name: '葫芦', desc: '三张同点数 + 一对', cards: [11, 24, 37, 10, 23] },
+    { rank: 5, name: '同花', desc: '五张同花色，不连号', cards: [25, 22, 20, 17, 14] },
+    { rank: 6, name: '顺子', desc: '五张不同花色连号', cards: [10, 22, 34, 46, 6] },
+    { rank: 7, name: '三条', desc: '三张同点数 + 两张单牌', cards: [9, 22, 35, 12, 46] },
+    { rank: 8, name: '两对', desc: '两组对子 + 一张单牌', cards: [12, 25, 36, 49, 7] },
+    { rank: 9, name: '一对', desc: '一组对子 + 三张单牌', cards: [11, 24, 38, 47, 5] },
+    { rank: 10, name: '高牌', desc: '未成以上牌型，依次比最大单张', cards: [12, 22, 33, 44, 1] },
+  ];
+  const ZJH_HAND_RANKS = [
+    { rank: 1, name: '豹子', desc: '三张相同点数（AAA 最大）', cards: [12, 25, 38] },
+    { rank: 2, name: '顺金', desc: '同花色三张连号（QKA 最大，A23 最小）', cards: [25, 24, 23] },
+    { rank: 3, name: '金花', desc: '三张同花色，不连号', cards: [12, 9, 6] },
+    { rank: 4, name: '顺子', desc: '三张不同花色连号（QKA 最大，A23 最小）', cards: [12, 24, 36] },
+    { rank: 5, name: '对子', desc: '两张相同点数 + 一张单牌', cards: [11, 24, 38] },
+    { rank: 6, name: '单张', desc: '散牌，按最大单张依次比较', cards: [12, 22, 33] },
+  ];
+  function handRanksSheet(game = 'holdem', config = {}, t = null) {
+    const zjh = game === 'zjh';
+    const items = zjh ? ZJH_HAND_RANKS : HOLDEM_HAND_RANKS;
+    const myPlayer = t && (t.hand || t.last_hand) ? handPlayers(t, t.hand || t.last_hand).find(p => p.player === t.me?.player) : null;
+    const currentName = myPlayer?.hand_name ? String(myPlayer.hand_name).split(/[·\s]/)[0] : '';
+    const extra235 = zjh ? `
+      <div class="gc-rank-row gc-rank-special ${config.allow_235 ? 'on' : ''}">
+        <div class="gc-rank-meta">
+          <div class="gc-rank-title"><span class="gc-rank-no">特</span><b>235 特殊牌</b>${config.allow_235 ? '<span class="gc-rank-badge">本桌已开启</span>' : '<span class="gc-rank-badge off">本桌未开启</span>'}</div>
+          <div class="tiny muted">${config.allow_235 ? '不同花色 2-3-5 专吃豹子；无豹子时按普通单张算' : '当前场次未启用 235 吃豹子规则'}</div>
+        </div>
+        <div class="gc-rank-cards">${cards([0, 14, 29], 3, 'xs')}</div>
+      </div>` : '';
+    showSheet(`
+      <h3>🃏 ${names[game]} · 牌型大小参考</h3>
+      <div class="tiny muted" style="margin:2px 0 10px">从大到小依次排列 · 同牌型按关键牌点数比较，不比花色</div>
+      <div class="gc-rank-list">
+        ${items.map(it => {
+          const hit = currentName && (currentName === it.name || it.name.startsWith(currentName));
+          return `
+          <div class="gc-rank-row ${it.rank <= 3 ? 'top' : ''} ${hit ? 'cur' : ''}">
+            <div class="gc-rank-meta">
+              <div class="gc-rank-title"><span class="gc-rank-no">${it.rank}</span><b>${esc(it.name)}</b>${hit ? '<span class="gc-rank-badge cur">当前手牌</span>' : ''}</div>
+              <div class="tiny muted">${esc(it.desc)}</div>
+            </div>
+            <div class="gc-rank-cards">${cards(it.cards, it.cards.length, 'xs')}</div>
+          </div>`;
+        }).join('')}
+        ${extra235}
+      </div>
+      <button class="btn block" data-cancel>知道了</button>`);
   }
   function phraseSheet(c) {
     showSheet(`

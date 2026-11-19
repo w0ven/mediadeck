@@ -1,4 +1,4 @@
-"""COLA EMBY posters shared by title charts, member charts and personal reports."""
+"""Peekpeek+ posters shared by title charts, member charts and personal reports."""
 from __future__ import annotations
 
 import asyncio
@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 ASSETS = Path(__file__).resolve().parent / 'rank_assets'
 CANVAS = (1200, 2400)
-BRAND = 'COLA EMBY'
+BRAND = 'Peekpeek+'
 WHITELIST_GROUP_ID = 'whitelist'
 FONT_PATHS = (
     ASSETS / 'font' / 'PingFang-Bold.ttf',
@@ -190,7 +190,9 @@ class _Poster:
                 self.image.alpha_composite(picture, (index * tile_width, 0))
         self.fade(0, 0, self.width, 250, 60, 25)
         self.fade(0, 140, self.width, 440, 0, 255)
-        self.draw.rounded_rectangle((36, 34, 300, 106), radius=10, fill=(*BG, 185))
+        brand_width = int(_font(34).getlength(BRAND))
+        box_right = max(300, 77 + brand_width + 28)
+        self.draw.rounded_rectangle((36, 34, box_right, 106), radius=10, fill=(*BG, 185))
         self.draw.rectangle((54, 54, 60, 84), fill=GOLD)
         self.text(77, 52, BRAND, 34, GOLD)
         self.text(600, 330, title, 75, TEXT, 'mt')

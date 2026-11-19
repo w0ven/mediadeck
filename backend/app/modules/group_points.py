@@ -12,7 +12,9 @@ import secrets
 import sqlite3
 import time
 from html import escape
+from typing import Any
 
+from app.modules.bot_views import watch_rank_mention
 from app.modules.economy_rules import economy_write, encode, receipt, save_receipt
 
 COMMANDS = {"/transfer", "/转账"}
@@ -286,6 +288,35 @@ class GroupPointsBotMixin:
             lambda: self._plugin_on("points_transfer"),
         )
 
+    def _group_points_actor_label(self, tg_id: Any, user_id: Any = None, fallback_name: Any = None) -> str:
+        tid = str(tg_id or "")
+        member = None
+        if self._members is not None:
+            if user_id:
+                member = self._members.get(str(user_id))
+            if not member and tid:
+                member = self._members.find_by_telegram(tid)
+        profiles = getattr(self, "_tg_profiles", None) or {}
+        profile = profiles.get(tid) or {}
+        nick = str((member or {}).get("tg_display_name") or profile.get("display_name") or "").strip()
+        handle = str((member or {}).get("tg_username") or profile.get("username") or "").strip().lstrip("@")
+        if nick or handle:
+            mention = watch_rank_mention({
+                "tg_user_id": tid,
+                "tg_display_name": nick,
+                "tg_username": handle,
+            })
+            acct = str((member or {}).get("username") or fallback_name or "").strip()
+            if acct and acct != nick and acct != f"@{handle}":
+                return f"{mention}（{escape(acct)}）"
+            return mention
+        acct = str((member or {}).get("username") or fallback_name or "").strip()
+        if acct:
+            if tid.isascii() and tid.isdigit() and 0 < int(tid) < 2**63:
+                return f'<a href="tg://user?id={int(tid)}">{escape(acct)}</a>'
+            return f"<b>{escape(acct)}</b>"
+        return f"<code>{escape(tid)}</code>" if tid else "—"
+
     async def _group_points_command(self, message):
         text = str(message.get("text") or "").strip()
         parts = text.split()
@@ -310,11 +341,14 @@ class GroupPointsBotMixin:
             if row["status"] != "pending" or row["expires_at"] <= time.time():
                 raise GroupPointsError("此请求已结束，请重新发起。")
             mint = row["mode"] == "mint"
+            sender_label = self._group_points_actor_label(row["actor_tg_id"], row["actor_user_id"])
+            target_label = self._group_points_actor_label(row["to_tg_id"], row["to_user_id"], row["to_name"])
             body = "🛠 <b>管理员发放</b>" if mint else "💸 <b>普通积分转账</b>"
             if not mint:
                 body += "\n确认后从本人积分扣除数量，手续费包含在该数量内。"
             body += (
-                f"\n收款账号：<b>{escape(row['to_name'])}</b>\n收款人TG ID：<code>{row['to_tg_id']}</code>"
+                f"\n{'发放人' if mint else '付款人'}：{sender_label}"
+                f"\n收款人：{target_label}\n收款人TG ID：<code>{row['to_tg_id']}</code>"
                 f"\n数量：<b>{row['amount']}</b> · 手续费：{row['fee']} · 到账：<b>{row['amount'] - row['fee']}</b>"
                 "\n仅发起人可确认，10分钟有效。"
             )
@@ -405,15 +439,23 @@ class GroupPointsBotMixin:
             "已取消，未执行。"
             if result.get("cancelled")
             else (
-                "✅ 积分奖励发放成功"
+                "✅ <b>积分奖励发放成功</b>"
                 if result["mode"] == "mint"
-                else "✅ 积分转账成功"
+                else "✅ <b>积分转账成功</b>"
             )
         )
         if not result.get("cancelled"):
-            row = self._db.one('SELECT to_name,to_tg_id FROM group_points_intents WHERE nonce=?', (data.split(':', 1)[1],))
+            row = self._db.one(
+                'SELECT actor_tg_id,actor_user_id,to_name,to_tg_id,to_user_id FROM group_points_intents WHERE nonce=?',
+                (data.split(':', 1)[1],),
+            )
             if row:
-                text += f"\n收款人：{row['to_name']} · TG ID：{row['to_tg_id']}"
+                sender_label = self._group_points_actor_label(row["actor_tg_id"], row["actor_user_id"])
+                target_label = self._group_points_actor_label(row["to_tg_id"], row["to_user_id"], row["to_name"])
+                if result["mode"] == "mint":
+                    text += f"\n发放人：{sender_label} ➜ 收款人：{target_label}"
+                else:
+                    text += f"\n转账方：{sender_label} ➜ 收款方：{target_label}"
             text += f"\n数量：{result['amount']} · 手续费：{result['fee']} · 对方到账：{result['received']}"
         await self._call(
             "editMessageText",
@@ -421,6 +463,8 @@ class GroupPointsBotMixin:
                 "chat_id": message["chat"]["id"],
                 "message_id": message["message_id"],
                 "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
                 "reply_markup": {"inline_keyboard": []},
             },
         )

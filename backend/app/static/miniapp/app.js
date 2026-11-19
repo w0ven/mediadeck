@@ -165,11 +165,13 @@
   }
   function lvTag(tag, xs = false, bare = false) {
     if (!tag) return '';
+    const hasLevel = tag.level != null;
+    const wlHtml = tag.whitelist ? `<span class="lvtag ${xs ? 'xs ' : ''}wl">💠 白名单</span>` : '';
+    if (!hasLevel) return wlHtml;
     const art = bare ? (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : '')
       : (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : (tag.icon ? esc(emo(tag.icon)) + ' ' : ''));
-    const label = tag.whitelist ? '💠 白名单'
-      : `${art}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}`;
-    return `<span class="lvtag ${xs ? 'xs ' : ''}${lvClass(tag)}">${label}</span>`;
+    const lvHtml = `<span class="lvtag ${xs ? 'xs ' : ''}lv${esc(tag.level)}">${art}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}</span>`;
+    return wlHtml ? `${lvHtml}${wlHtml}` : lvHtml;
   }
   function growthMeter(lv, nextLevel, today) {
     // Same reading as the Bot's "成长 120 / 360": share of the next threshold reached.
@@ -208,7 +210,10 @@
   function myTag() {
     const me = S.me;
     if (!me) return null;
-    return me.whitelist ? { whitelist: true } : { level: me.level.level, name: me.level.name, icon: me.level.icon };
+    const tag = me.level && me.level.level != null
+      ? { level: me.level.level, name: me.level.name, icon: me.level.icon } : {};
+    if (me.whitelist) tag.whitelist = true;
+    return Object.keys(tag).length ? tag : null;
   }
   function posterHtml(src, title, extra = '') {
     const img = src ? `<img src="${esc(src)}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.parentElement.classList.add('no-img');this.remove()">` : '';
@@ -920,7 +925,7 @@
     const pod = (r, cls) => {
       const rk = cls === 'g' ? 1 : cls === 's' ? 2 : 3;
       return r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar)}<span class="pod-rk num">${rk}</span>
-        <div class="small"><b>${esc(r.name)}</b></div><div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>';
+        <div class="small"><b>${esc(r.name)}</b></div>${r.tag ? `<div class="pod-tags">${lvTag(r.tag, true)}</div>` : ''}<div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>';
     };
     const mine = data.mine;
     body.innerHTML = `

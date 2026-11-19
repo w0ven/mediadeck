@@ -419,3 +419,16 @@ def test_group_bulletin_falls_back_to_text_without_a_poster(bot):
     assert len(sent) == 1 and '求片开始入库' in sent[0]['text'] and '已入库一部分' in sent[0]['text']
     state = bot.db.one("SELECT state FROM request_outbox WHERE kind='announce'")['state']
     assert state == 'sent'
+
+
+def test_request_cards_and_rows_include_requester_tg_nickname_and_handle(bot):
+    row = submit(bot)
+    bot.db.execute(
+        "UPDATE members SET tg_display_name=?, tg_username=? WHERE emby_user_id='u1'",
+        ('小可乐', 'cola_fan'),
+    )
+    bot._tg_profiles.pop('900', None)
+    fresh = bot.service.get(row['id'])
+    body = bot._rq_body(fresh)
+    assert '求片人：u1（<a href="tg://user?id=900">小可乐</a> · @cola_fan）' in body
+

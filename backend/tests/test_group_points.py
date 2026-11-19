@@ -724,3 +724,25 @@ def test_anonymous_admin_transfer_is_attributed_to_the_admin_with_that_title(env
 
     asyncio.run(run())
     assert "无法核实匿名管理身份" not in responses(env)
+
+
+def test_group_transfer_receipt_shows_sender_and_recipient(env):
+    env.services.points.add("u1", 500, "test")
+
+    async def run():
+        m = msg("/transfer 100", actor=VIEWER, mid=250)
+        m["from"]["first_name"] = "付款大佬"
+        m["from"]["username"] = "payer_tg"
+        m["reply_to_message"]["from"]["first_name"] = "收款锦鲤"
+        m["reply_to_message"]["from"]["username"] = "recv_tg"
+        intent = await dispatch(env, m)
+        assert intent and intent["mode"] == "transfer"
+        confirm_card = env.tg.text(GROUP, intent["confirmation_message_id"])
+        assert "付款人" in confirm_card and "付款大佬" in confirm_card and "收款锦鲤" in confirm_card
+        await confirm(env, intent, actor=VIEWER)
+        receipt = env.tg.text(GROUP, intent["confirmation_message_id"])
+        assert "积分转账成功" in receipt
+        assert "转账方：" in receipt and "付款大佬" in receipt and "收款方：" in receipt and "收款锦鲤" in receipt
+
+    asyncio.run(run())
+

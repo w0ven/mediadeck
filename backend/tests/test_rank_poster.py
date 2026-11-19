@@ -55,3 +55,9 @@ def test_bulletin_split_keeps_newlines() -> None:
     parts = TelegramBot._split_bulletin("a\nb\nc\nd", limit=4)
     assert parts[0] == "a\nb"
     assert "\n".join(parts) == "a\nb\nc\nd"
+
+
+def test_rank_poster_brand_is_peekpeek_plus() -> None:
+    from app.modules.rank_poster import BRAND
+    assert BRAND == "Peekpeek+"
+
