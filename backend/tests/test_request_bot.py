@@ -432,3 +432,25 @@ def test_request_cards_and_rows_include_requester_tg_nickname_and_handle(bot):
     body = bot._rq_body(fresh)
     assert '求片人：u1（<a href="tg://user?id=900">小可乐</a> · @cola_fan）' in body
 
+
+def test_refresh_retires_deleted_telegram_card_instead_of_retrying_forever(bot):
+    row = submit(bot)
+    dead_card = card_with(bot, 'accept', '801')
+    alive_card = card_with(bot, 'accept', '802')
+    orig_call = bot.transport.call
+
+    async def call_with_deleted_msg(method, payload=None, timeout=None):
+        p = dict(payload or {})
+        if method.startswith('editMessage') and str(p.get('chat_id')) == '801' and int(p.get('message_id') or 0) == dead_card['message_id']:
+            bot._last_error = 'Bad Request: message to edit not found'
+            return None
+        return await orig_call(method, payload, timeout)
+
+    bot._call = call_with_deleted_msg
+    bot.service.finish(row['id'], 'up2', 'rejected', note='暂无片源')
+    run(bot.flush_request_notifications())
+    refresh_job = bot.db.one("SELECT * FROM request_outbox WHERE kind='refresh' ORDER BY id DESC LIMIT 1")
+    assert refresh_job['state'] == 'sent'
+    assert not bot.db.one("SELECT 1 FROM request_cards WHERE chat_id='801' AND message_id=?", (dead_card['message_id'],))
+    assert bot.db.one("SELECT 1 FROM request_cards WHERE chat_id='802' AND message_id=?", (alive_card['message_id'],))
+

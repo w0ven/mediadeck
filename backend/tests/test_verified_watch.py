@@ -165,3 +165,30 @@ def test_cross_day_intervals_clip_user_title_and_personal_identically(env):
     assert stats.top_watchers(since=end-86400, until=end)[0]['seconds'] == 20
     assert stats.top_titles(1, calendar=True, now=end+60)[0]['seconds'] == 20
     assert stats.watch_window(end, end+60, 'u')['seconds'] == 10
+
+
+def test_prune_bounds_operational_tables_without_touching_recent_or_active_state(env, monkeypatch):
+    db, _, _, stats = env
+    now = BASE + 100 * 86400
+    monkeypatch.setattr('app.modules.stats.time.time', lambda: now)
+    db.execute("INSERT INTO watch_checkpoints VALUES('live-sid','{}')")
+    db.execute("INSERT INTO watch_playbacks VALUES('u','closed-old','s1','d','f',?,?, '{}')", (now - 20 * 86400, now - 15 * 86400))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','abandoned-old','s2','d','f',?,0,'{}')", (now - 20 * 86400,))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','live-old','live-sid','d','f',?,0,'{}')", (now - 20 * 86400,))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','closed-recent','s3','d','f',?,?, '{}')", (now - 5 * 86400, now - 2 * 86400))
+    for idx in range(105):
+        db.execute("INSERT INTO plugin_runs(plugin_id,ok,summary,started_at,duration_ms,trigger) VALUES('p1',1,'{}',?,1,'schedule')",
+                   (now - 30 * 86400 + idx,))
+    db.execute("INSERT INTO meta VALUES('telegram.membership:1:event:-1001:10', ?)", (json.dumps([int(now - 20 * 86400), 1, 'present']),))
+    db.execute("INSERT INTO meta VALUES('telegram.membership:1:event:-1001:11', ?)", (json.dumps([int(now - 2 * 86400), 2, 'present']),))
+    db.execute("INSERT INTO meta VALUES('telegram.membership:1:latest', '{\"running\":false}')")
+    result = stats.prune(keep_days=400)
+    assert result['watch_playbacks'] == 2
+    assert result['plugin_runs'] == 5
+    assert result['membership_events'] == 1
+    remaining_pb = {r['play_id'] for r in db.query('SELECT play_id FROM watch_playbacks')}
+    assert remaining_pb == {'live-old', 'closed-recent'}
+    assert db.one("SELECT COUNT(*) AS n FROM plugin_runs WHERE plugin_id='p1'")['n'] == 100
+    assert not db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:event:-1001:10'")
+    assert db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:event:-1001:11'")
+    assert db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:latest'")

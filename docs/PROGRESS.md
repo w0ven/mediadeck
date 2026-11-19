@@ -2,6 +2,25 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-20 — stop infinite request-outbox retries on deleted Telegram cards and bound operational SQLite tables
+
+- `RequestBotMixin._rq_refresh` previously left deleted or blocked Telegram card rows in
+  `request_cards` / `request_notices` and returned `ok=False`, while `RequestService.delivery_result`
+  requeued failed outbox rows every 60 seconds with no retry ceiling—causing resolved tickets with a
+  user-deleted message to re-edit surviving cards and hit Telegram every minute indefinitely (~40,000
+  attempts on production).
+- `_rq_refresh` now retires dead `request_cards` and `request_notices` entries when Telegram reports
+  a permanent target error (`message to edit not found`, `message_id_invalid`, `chat not found`,
+  `bot was blocked`, `user is deactivated`), while preserving retries on transient transport/5xx/429
+  errors; `RequestService` adds exponential backoff (`60s` up to `3600s`) and caps automatic outbox
+  retries at `MAX_OUTBOX_ATTEMPTS = 20` (`state='failed'`), with manual `retry_notifications`
+  resetting both `pending` and `failed` jobs.
+- `StatsService.prune` and `GroupMembership.prune_cache` now bound operational SQLite tables on the
+  daily retention cycle: closed and abandoned inactive `watch_playbacks` older than 14 days,
+  `plugin_runs` older than 14 days beyond the newest 100 runs per plugin, `meta`
+  `telegram.membership:%:event:%` deduplication markers older than 14 days, settled
+  `activity_watch_intervals` older than 90 days, expired `request_inputs`, and `PRAGMA optimize`.
+
 ## 2026-11-20 — accept minimal player progress reports without IsPaused and handle truncated Emby runtime probes
 
 - Minimal Emby clients (such as Flow Android TV) post `/Sessions/Playing/Progress` with

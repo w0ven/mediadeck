@@ -1119,6 +1119,28 @@ class RequestBotMixin:
             await self.send(chat, "⚠ " + escape(str(exc)))
         return True
 
+    @staticmethod
+    def _rq_target_gone(err: object) -> bool:
+        low = str(err or "").lower()
+        return any(
+            marker in low
+            for marker in (
+                "message to edit not found",
+                "message_id_invalid",
+                "message can't be edited",
+                "chat not found",
+                "bot was blocked",
+                "user is deactivated",
+                "bot was kicked",
+                "have no rights to send",
+            )
+        )
+
+    def _rq_retire_dead_card(self, card: dict) -> None:
+        self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
+        self._rq_db.execute("DELETE FROM request_inputs WHERE token=?", (card["token"],))
+        self._photo_panels.discard((str(card["chat_id"]), int(card["message_id"])))
+
     async def _rq_refresh(self, rid):
         row = self._requests.get(rid)
         if not row:
@@ -1148,9 +1170,10 @@ class RequestBotMixin:
                         "reply_markup": {"inline_keyboard": []},
                     },
                 )
-                self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
+                self._rq_retire_dead_card(card)
                 continue
             try:
+                self._last_error = ""
                 with self._bind_session("", ""):
                     if payload.get("mode") == "staff":
                         mid = await self._rq_list(card["chat_id"], card["message_id"], member, payload)
@@ -1161,13 +1184,19 @@ class RequestBotMixin:
                             refresh_only=True,
                         )
                 if not mid:
+                    if self._rq_target_gone(self._last_error):
+                        self._rq_retire_dead_card(card)
+                        continue
                     await self._call("editMessageReplyMarkup", {
                         "chat_id": card["chat_id"], "message_id": card["message_id"],
                         "reply_markup": {"inline_keyboard": []},
                     })
+                    if self._rq_target_gone(self._last_error):
+                        self._rq_retire_dead_card(card)
+                        continue
                 ok = bool(mid) and ok
             except RequestError:
-                self._rq_db.execute("DELETE FROM request_cards WHERE token=?", (card["token"],))
+                self._rq_retire_dead_card(card)
                 await self._call(
                     "editMessageReplyMarkup",
                     {
@@ -1184,6 +1213,7 @@ class RequestBotMixin:
                 (notice["tg_user_id"], notice["message_id"]),
             ):
                 continue
+            self._last_error = ""
             with self._bind_session("", ""):
                 result = await self._edit(
                     notice["tg_user_id"],
@@ -1201,11 +1231,23 @@ class RequestBotMixin:
                 })
                 if not result and 'not modified' in str(self._last_error).lower():
                     result = True
+                if not result and self._rq_target_gone(self._last_error):
+                    self._rq_db.execute(
+                        "DELETE FROM request_notices WHERE request_id=? AND tg_user_id=? AND message_id=?",
+                        (rid, str(notice["tg_user_id"]), notice["message_id"]),
+                    )
+                    result = True
                 if not result:
                     await self._call("editMessageReplyMarkup", {
                         "chat_id": notice["tg_user_id"], "message_id": notice["message_id"],
                         "reply_markup": {"inline_keyboard": []},
                     })
+                    if self._rq_target_gone(self._last_error):
+                        self._rq_db.execute(
+                            "DELETE FROM request_notices WHERE request_id=? AND tg_user_id=? AND message_id=?",
+                            (rid, str(notice["tg_user_id"]), notice["message_id"]),
+                        )
+                        result = True
             ok = bool(result) and ok
         return ok
 
