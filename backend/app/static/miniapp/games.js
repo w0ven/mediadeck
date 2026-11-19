@@ -112,6 +112,79 @@ window.createGamesUI = ({
     document.addEventListener('visibilitychange', sync);
     return { play, burst, preload, pref, set, music(on) { wanted = on; sync(); } };
   })();
+  // Telegram WebApp HapticFeedback + Web Vibration API fallback; safely no-ops when user turns haptics off.
+  const haptic = (() => {
+    const enabled = () => sound.pref('haptic');
+    const apiHaptic = () => tg?.HapticFeedback || window.Telegram?.WebApp?.HapticFeedback || null;
+    const vib = pattern => { try { navigator.vibrate?.(pattern); } catch { /* ignore */ } };
+    function impact(style = 'light') {
+      if (!enabled()) return;
+      const h = apiHaptic();
+      if (h?.impactOccurred) { try { h.impactOccurred(style); return; } catch { /* ignore */ } }
+      vib(style === 'heavy' ? 40 : style === 'medium' ? 24 : 12);
+    }
+    function notify(type = 'success') {
+      if (!enabled()) return;
+      const h = apiHaptic();
+      if (h?.notificationOccurred) { try { h.notificationOccurred(type); return; } catch { /* ignore */ } }
+      vib(type === 'error' ? [30, 45, 30] : type === 'warning' ? [25, 40, 25] : [18, 30, 24]);
+    }
+    function select() {
+      if (!enabled()) return;
+      const h = apiHaptic();
+      if (h?.selectionChanged) { try { h.selectionChanged(); return; } catch { /* ignore */ } }
+      vib(8);
+    }
+    function turnAlert() {
+      if (!enabled()) return;
+      const h = apiHaptic();
+      if (h?.notificationOccurred && h?.impactOccurred) {
+        try {
+          h.notificationOccurred('warning');
+          setTimeout(() => { try { h.impactOccurred('medium'); } catch { /* ignore */ } }, 140);
+          return;
+        } catch { /* ignore */ }
+      }
+      vib([35, 65, 55]);
+    }
+    return { impact, notify, select, turnAlert };
+  })();
+  // Hold'em chip display mode: chips vs big blinds (persisted per browser).
+  let bbMode = (() => { try { return localStorage.getItem('gc-holdem-bb') === '1'; } catch { return false; } })();
+  function setBbMode(on) {
+    bbMode = !!on;
+    try { localStorage.setItem('gc-holdem-bb', bbMode ? '1' : '0'); } catch { /* ignore */ }
+  }
+  function fmtChips(amount, t, forceChips = false) {
+    const n = Number(amount || 0);
+    if (!forceChips && bbMode && t?.game === 'holdem' && t.rules?.big_blind > 0) {
+      const bb = n / t.rules.big_blind;
+      return `${Number.isInteger(bb) ? bb : bb.toFixed(1).replace(/\.0$/, '')} BB`;
+    }
+    return num(n);
+  }
+  const HOLDEM_ACTION_ZH = { fold: '弃牌', check: '过牌', call: '跟注', bet: '下注', raise: '加注', all_in: '全下' };
+  const STREET_ZH = { preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌' };
+  function holdemPositionName(seatNum, t, hand = t.hand) {
+    const e = hand?.engine;
+    if (!e || !e.seats?.length) return '';
+    const n = e.seats.length;
+    if (e.button === seatNum) return n === 2 ? 'BTN/SB' : 'BTN';
+    if (e.small_blind_seat === seatNum) return 'SB';
+    if (e.big_blind_seat === seatNum) return 'BB';
+    const ordered = [...e.seats].sort((a, b) => ((a.seat - e.button - 1 + 6) % 6) - ((b.seat - e.button - 1 + 6) % 6));
+    const idx = ordered.findIndex(s => s.seat === seatNum);
+    if (idx < 0) return '';
+    const fromEnd = n - 1 - idx;
+    if (fromEnd === 1) return 'CO';
+    if (fromEnd === 2) return 'HJ';
+    return 'UTG';
+  }
+  function clearRunoutTimers(c) {
+    if (!c?.runoutTimers) return;
+    for (const id of c.runoutTimers) clearTimeout(id);
+    c.runoutTimers = [];
+  }
 
   function dispose() {
     if (current) {
@@ -121,6 +194,7 @@ window.createGamesUI = ({
       clearTimeout(current.celebrateTimer);
       clearTimeout(current.autoSheetTimer);
       clearInterval(current.sheetTicker);
+      clearRunoutTimers(current);
       current = null;
     }
     sound.music(false);
@@ -420,6 +494,7 @@ window.createGamesUI = ({
     const c = current = {
       id, alive, table: null, disposed: false, stream: null,
       generation: 0, attempt: 0, status: 'connecting', offset: 0, notice: '', history: [],
+      preAction: null, raiseBar: null, runout: null, runoutTimers: [], boardAnimFrom: 0,
     };
     $('#screen').classList.add('gc-scene', 'gc-table-screen');
     sound.preload();
@@ -545,8 +620,22 @@ window.createGamesUI = ({
       else c.history.unshift(t.last_hand);
     }
     c.history = c.history.slice(0, 10);
+    // Keep inline raise panel in sync with turn; clear pre-action on hand/street change or unexpected bet increase.
+    if (t.game === 'holdem') {
+      if (!t.hand || c.raiseBar && (c.raiseBar.handNo !== t.hand.number || c.raiseBar.turn !== t.hand.turn || t.hand.current_player !== t.me.player)) {
+        c.raiseBar = null;
+      }
+      if (!t.hand || c.preAction && (c.preAction.handNo !== t.hand.number || c.preAction.street !== t.hand.engine?.street)) {
+        c.preAction = null;
+      } else if (c.preAction?.kind === 'call_exact' && t.hand) {
+        const meSeat = handPlayers(t, t.hand).find(x => x.player === t.me.player);
+        const curNeed = Math.max(0, (t.hand.engine?.current_bet || 0) - (meSeat?.bet || 0));
+        if (curNeed > c.preAction.amount) c.preAction = null;
+      }
+    }
     react(c, previous, t);
     paintTable(c);
+    maybeRunPreAction(c);
     const openResult = $('.gc-sheet [data-gc-result-hand]');
     if (openResult && Number(openResult.dataset.gcResultHand) === t.last_hand?.number
       && previous?.last_hand?.revealed?.length !== t.last_hand?.revealed?.length) {
@@ -563,18 +652,54 @@ window.createGamesUI = ({
   }
   // Finished hands stay on the felt for ~5s (or show a 5s settlement sheet) with optional card reveal.
   const FX_MS = 1800, CELEBRATE_MS = 5000, ZJH_FELT_MS = 1800, RESULT_SHOW_MS = 5000;
+  function maybeRunPreAction(c) {
+    const t = c.table, pre = c.preAction;
+    if (!pre || t.game !== 'holdem' || !t.hand || busy) return;
+    if (t.hand.current_player !== t.me.player) return;
+    const me = t.seats.find(s => s.player === t.me.player);
+    if (!me || me.auto || me.leave_after) { c.preAction = null; return; }
+    const legal = t.hand.legal_actions || {};
+    let op = null;
+    if (pre.kind === 'check_fold') {
+      op = legal.check ? 'check' : legal.fold ? 'fold' : null;
+    } else if (pre.kind === 'check_only') {
+      op = legal.check ? 'check' : null;
+    } else if (pre.kind === 'call_exact') {
+      if (legal.check && pre.amount === 0) op = 'check';
+      else if (legal.call && legal.call.amount <= pre.amount) op = 'call';
+    }
+    c.preAction = null;
+    if (!op) {
+      haptic.notify('warning');
+      paintTable(c);
+      return;
+    }
+    const snapHand = t.hand.number, snapTurn = t.hand.turn;
+    setTimeout(() => {
+      if (!live(c) || c.table.hand?.number !== snapHand || c.table.hand?.turn !== snapTurn || busy) return;
+      haptic.impact('light');
+      action(c, op);
+    }, 90);
+  }
   function react(c, previous, t) {
     const ph = previous?.hand, fx = events(previous, t);
     const loud = ['allin', 'raise', 'chip', 'fold', 'check', 'look'].find(k => fx.some(e => e.kind === k));
     if (loud) sound.play({ look: 'flip', chip: 'chip' }[loud] || loud);
     if (t.hand && t.hand.number !== ph?.number) {
+      clearRunoutTimers(c);
+      c.runout = null;
       c.celebrate = null;
+      c.boardAnimFrom = 0;
       c.dealAt = performance.now();
       const fresh = previous || (t.server_time - (t.hand.created_at || t.server_time) < 4);
       if (fresh && !isBoard(t.game)) sound.burst('deal', t.game === 'zjh' ? 3 : 2, 105);
     } else if (t.game === 'holdem' && t.hand && ph && t.hand.number === ph.number) {
       const prevBoard = ph.engine?.board?.length || 0, nextBoard = t.hand.engine?.board?.length || 0;
-      if (nextBoard > prevBoard) sound.burst('deal', nextBoard - prevBoard, 115);
+      if (nextBoard > prevBoard) {
+        c.boardAnimFrom = prevBoard;
+        c.boardDealAt = performance.now();
+        sound.burst('deal', nextBoard - prevBoard, 115);
+      }
     }
     const ixList = t.interactions || [];
     if (c.lastInteractSeq == null) {
@@ -605,24 +730,75 @@ window.createGamesUI = ({
       }
     }
     if (t.me.player && t.hand?.current_player === t.me.player
-      && (ph?.current_player !== t.me.player || ph?.number !== t.hand.number)) sound.play('turn');
+      && (ph?.current_player !== t.me.player || ph?.number !== t.hand.number || ph?.turn !== t.hand.turn && !ph?.current_player)) {
+      sound.play('turn', 1);
+      haptic.turnAlert();
+      c.turnAlertAt = performance.now();
+    }
     if (ph && t.last_hand?.number === ph.number && t.hand?.number !== ph.number) {
       const h = t.last_hand, net = h.result?.net || {}, motion = !matchMedia('(prefers-reduced-motion: reduce)').matches;
       const feltMs = t.game === 'zjh' ? ZJH_FELT_MS : CELEBRATE_MS;
       clearTimeout(c.celebrateTimer);
-      if (motion) {
-        c.celebrate = { hand: h, at: performance.now(), ms: feltMs };
-        fx.push(...Object.entries(net).filter(([, n]) => n).map(([player, n]) =>
-          ({ player, kind: n > 0 ? 'win' : 'loss', label: signed(n), ms: CELEBRATE_MS })));
+      clearRunoutTimers(c);
+      c.runout = null;
+      const totalBoard = h.engine?.board?.length || 0;
+      const runFrom = t.game === 'holdem' && h.runout_from != null && h.runout_from < totalBoard ? h.runout_from : null;
+      const startCelebrate = () => {
+        if (!live(c) || c.table.hand) return;
+        c.runout = null;
+        if (motion) {
+          c.celebrate = { hand: h, at: performance.now(), ms: feltMs };
+          pushFx(c, Object.entries(net).filter(([, n]) => n).map(([player, n]) =>
+            ({ player, kind: n > 0 ? 'win' : 'loss', label: signed(n), ms: CELEBRATE_MS })));
+        }
+        if (net[t.me.player] > 0) { sound.play('win'); haptic.notify('success'); }
+        else if (net[t.me.player] < 0) { sound.play('lose'); haptic.notify('error'); }
+        paintTable(c);
+        c.celebrateTimer = setTimeout(() => {
+          if (!live(c) || motion && c.celebrate?.hand !== h) return;
+          if (motion) { c.celebrate = null; paintTable(c); }
+          const me = c.table.seats.find(s => s.player === c.table.me.player);
+          if (c.table.game === 'zjh' && !c.table.hand && !me?.auto && !$('.gc-sheet')) resultSheet(c, c.table.last_hand || h, null, motion);
+        }, motion ? feltMs : 0);
+      };
+      if (motion && runFrom !== null) {
+        // Dramatic street-by-street All-in runout reveal before winner banner.
+        const stages = [];
+        if (runFrom < 3 && totalBoard >= 3) stages.push(3);
+        if (runFrom < 4 && totalBoard >= 4) stages.push(4);
+        if (runFrom < 5 && totalBoard >= 5) stages.push(5);
+        c.runout = { hand: h, shownCount: runFrom };
+        haptic.impact('heavy');
+        let delay = 220;
+        stages.forEach((cnt, idx) => {
+          const prevCnt = idx === 0 ? runFrom : stages[idx - 1];
+          c.runoutTimers.push(setTimeout(() => {
+            if (!live(c) || c.table.hand) return;
+            c.runout = { hand: h, shownCount: cnt };
+            c.boardAnimFrom = prevCnt;
+            c.boardDealAt = performance.now();
+            sound.burst('deal', cnt - prevCnt, 100);
+            haptic.impact(cnt === 5 ? 'medium' : 'light');
+            paintTable(c);
+          }, delay));
+          delay += cnt === 3 ? 850 : 780;
+        });
+        c.runoutTimers.push(setTimeout(startCelebrate, delay + 250));
+      } else {
+        if (motion) {
+          c.celebrate = { hand: h, at: performance.now(), ms: feltMs };
+          fx.push(...Object.entries(net).filter(([, n]) => n).map(([player, n]) =>
+            ({ player, kind: n > 0 ? 'win' : 'loss', label: signed(n), ms: CELEBRATE_MS })));
+        }
+        if (net[t.me.player] > 0) { sound.play('win'); haptic.notify('success'); }
+        else if (net[t.me.player] < 0) { sound.play('lose'); haptic.notify('error'); }
+        c.celebrateTimer = setTimeout(() => {
+          if (!live(c) || motion && c.celebrate?.hand !== h) return;
+          if (motion) { c.celebrate = null; paintTable(c); }
+          const me = c.table.seats.find(s => s.player === c.table.me.player);
+          if (c.table.game === 'zjh' && !c.table.hand && !me?.auto && !$('.gc-sheet')) resultSheet(c, c.table.last_hand || h, null, motion);
+        }, motion ? feltMs : 0);
       }
-      if (net[t.me.player] > 0) sound.play('win');
-      else if (net[t.me.player] < 0) sound.play('lose');
-      c.celebrateTimer = setTimeout(() => {
-        if (!live(c) || motion && c.celebrate?.hand !== h) return;
-        if (motion) { c.celebrate = null; paintTable(c); }
-        const me = c.table.seats.find(s => s.player === c.table.me.player);
-        if (c.table.game === 'zjh' && !c.table.hand && !me?.auto && !$('.gc-sheet')) resultSheet(c, c.table.last_hand || h, null, motion);
-      }, motion ? feltMs : 0);
     }
     if (fx.length) pushFx(c, fx);
   }
@@ -730,10 +906,12 @@ window.createGamesUI = ({
       <div class="gc-plaque ${esc(lvClass(tag))}">${plaque(title, tag, false, profile?.level || tag)}</div>` : '';
   }
   const ranks = ['2','3','4','5','6','7','8','9','10','J','Q','K','A'];
-  function card(code, size = '', best = []) {
-    if (!Number.isInteger(code) || code < 0 || code > 51) return `<span class="gc-card gc-card-back ${size}" aria-label="未公开的牌">${img('card-back')}</span>`;
+  function card(code, size = '', best = [], extraCls = '') {
+    if (!Number.isInteger(code) || code < 0 || code > 51) return `<span class="gc-card gc-card-back ${size} ${extraCls}" aria-label="未公开的牌">${img('card-back')}</span>`;
     const s = Math.floor(code / 13), suit = ['♠', '♥', '♣', '♦'][s], rank = ranks[code % 13];
-    return `<span class="gc-card ${s === 1 || s === 3 ? 'red' : ''} ${size} ${best.includes(code) ? 'gc-best' : ''}" aria-label="${['黑桃','红桃','梅花','方块'][s]}${rank}"><span class="gc-card-rank">${rank}<i>${suit}</i></span><span class="gc-card-suit">${suit}</span></span>`;
+    const isBest = best.length > 0 && best.includes(code);
+    const dim = best.length >= 5 && !isBest ? 'gc-card-dim' : '';
+    return `<span class="gc-card ${s === 1 || s === 3 ? 'red' : ''} ${size} ${isBest ? 'gc-best' : ''} ${dim} ${extraCls}" aria-label="${['黑桃','红桃','梅花','方块'][s]}${rank}"><span class="gc-card-rank">${rank}<i>${suit}</i></span><span class="gc-card-suit">${suit}</span></span>`;
   }
   function cards(values, count, size = '', best = []) { return Array.from({ length: count }, (_, i) => card(values?.[i], size, best)).join(''); }
   const handPlayers = (t, h = t.hand) => h ? t.game === 'holdem' ? h.engine?.players || [] : h.players || [] : [];
@@ -753,7 +931,18 @@ window.createGamesUI = ({
     const e = t.hand?.engine || { button: t.button };
     return `${e.button === seat.seat ? img('dealer-button', 'gc-dealer', '庄家 D') : ''}${e.small_blind_seat === seat.seat ? '<span class="gc-blind">小盲</span>' : e.big_blind_seat === seat.seat ? '<span class="gc-blind bb">大盲</span>' : ''}`;
   }
-  function seatHtml(seat, pos, t, hand = t.hand) {
+  function seatActionBadge(seat, t, hand, p) {
+    if (t.game !== 'holdem' || !hand || !p) return null;
+    if (seat.leave_after || seat.away || seat.auto) return null;
+    if (t.hand?.current_player === seat.player) return null;
+    const last = hand.last_actions?.[seat.player];
+    if (!last) return null;
+    const act = last.all_in ? 'all_in' : last.action;
+    const zh = HOLDEM_ACTION_ZH[act];
+    if (!zh) return null;
+    return { text: zh, cls: `gc-act-${act}` };
+  }
+  function seatHtml(seat, pos, t, hand = t.hand, highlightBest = []) {
     if (!seat) return `
       <div class="gc-seat gc-pos${pos} gc-empty-seat">
         <div class="gc-avatar-ring">＋</div>
@@ -763,18 +952,26 @@ window.createGamesUI = ({
     const active = t.hand?.current_player === seat.player;
     const won = !t.hand && hand?.result?.winners?.includes(seat.player);
     const canInteract = !!t.me.player && seat.player !== t.me.player && t.phase !== 'closed';
+    const actBadge = seatActionBadge(seat, t, hand, p);
+    const statusText = actBadge ? actBadge.text : seatStatus(seat, t, p);
+    const statusCls = seat.auto ? 'gc-auto-status' : seat.ready ? 'gc-ready-status' : actBadge ? actBadge.cls : '';
+    const streetBet = t.game === 'holdem' ? (p?.bet || 0) : (p?.invested ?? p?.bet ?? 0);
+    const showBet = t.game === 'holdem' ? streetBet > 0 : !!p;
+    const showBest = won ? highlightBest : [];
+    const stackVal = fmtChips(p?.stack ?? seat.stack, t);
+    const hasDealer = t.game === 'holdem' && (t.hand?.engine?.button ?? t.button) === seat.seat;
     return `
-      <div class="gc-seat gc-pos${pos} ${p?.folded ? 'gc-folded' : ''} ${won ? 'gc-winner' : ''}" data-gc-player="${esc(seat.player)}">
+      <div class="gc-seat gc-pos${pos} ${p?.folded ? 'gc-folded' : ''} ${won ? 'gc-winner' : ''} ${p?.all_in ? 'gc-allin-seat' : ''} ${hasDealer ? 'gc-has-dealer' : ''}" data-gc-player="${esc(seat.player)}">
         <div class="gc-avatar-ring ${active ? 'gc-active' : ''} ${canInteract ? 'gc-interactable' : ''}" ${active ? 'data-gc-ring' : ''} ${canInteract ? `data-gc-interact-seat="${esc(seat.player)}" title="点击互动"` : ''}>
           ${avatar(seat, t)}${markers(seat, t)}${canInteract ? '<i class="gc-gift-dot" aria-hidden="true">🎁</i>' : ''}
-          <span class="gc-seat-status ${seat.auto ? 'gc-auto-status' : seat.ready ? 'gc-ready-status' : ''}">${seatStatus(seat, t, p)}</span>
+          <span class="gc-seat-status ${statusCls}">${statusText}</span>
         </div>
         <div class="gc-seat-name">${esc(seat.name)}</div>
         <div class="gc-seat-tags">${seat.player === t.host ? '<span class="gc-host">房主</span>' : ''}${label(seat, t)}</div>
         ${titlePlaque(seat, t)}${t.game === 'holdem' ? `
-          <div class="gc-stack num">${num(p?.stack ?? seat.stack)}</div>` : ''}${p ? `
-          <div class="gc-mini-cards">${cards(p.cards, t.game === 'zjh' ? 3 : 2, 'xs')}</div>
-          <span class="gc-bet num">${img('chip')} ${num(p.invested ?? p.bet)}</span>` : ''}
+          <div class="gc-stack num" data-gc-bb-toggle title="点击切换筹码 / BB">${stackVal}</div>` : ''}${p ? `
+          <div class="gc-mini-cards">${cards(p.cards, t.game === 'zjh' ? 3 : 2, 'xs', showBest)}</div>
+          ${showBet ? `<span class="gc-bet num">${img('chip')} ${fmtChips(streetBet, t)}</span>` : ''}` : ''}
       </div>`;
   }
   function startState(t) {
@@ -804,26 +1001,49 @@ window.createGamesUI = ({
     return `
       <div class="gc-croupier" aria-hidden="true"><span class="gc-croupier-silhouette"></span><img src="/app/assets/game-assets/dealer-${tier}.webp" alt="" onload="this.parentElement.classList.add('has-art')" onerror="this.remove()"></div>`;
   }
-  function celebration(t, h, myBest = []) {
+  function boardCardsHtml(board, best, animFrom, freshBoard) {
+    return Array.from({ length: 5 }, (_, i) => {
+      if (i >= (board || []).length) return '<span class="gc-card-slot"></span>';
+      const flipCls = freshBoard && i >= animFrom ? 'gc-card-flip' : '';
+      return card(board[i], 'sm', best, flipCls);
+    }).join('');
+  }
+  function celebration(t, h, highlightBest = []) {
     const winners = h.result?.winners || [];
     const who = winners.map(id => t.seats.find(s => s.player === id)?.name || '已离桌玩家').join('、');
     const won = Math.max(0, ...winners.map(id => h.result?.net?.[id] || 0));
-    const why = t.game === 'holdem' ? h.engine?.street === 'showdown' ? '摊牌比大小' : '其他人都弃牌了'
+    const isShowdown = t.game === 'holdem' && Object.values(h.result?.players || {}).some(r => r.shown);
+    const winHandName = isShowdown ? winners.map(id => h.result?.players?.[id]?.hand).find(Boolean) : '';
+    const why = t.game === 'holdem'
+      ? (isShowdown ? (winHandName ? `摊牌 · ${winHandName}` : '摊牌比大小') : '其他人都弃牌了')
       : { last_player: '其他人都出局了', all_in: '孤注一掷 · 全员比牌', round_limit: '满 10 轮 · 统一比牌' }[h.reason] || '比牌结束';
-    const board = t.game === 'holdem' ? `<div class="gc-board">${(h.engine?.board || []).map(code => card(code, 'sm', myBest)).join('')}</div>` : '';
+    const board = t.game === 'holdem' ? `<div class="gc-board">${(h.engine?.board || []).map(code => card(code, 'sm', highlightBest)).join('')}</div>` : '';
     const revealBtn = h.can_reveal ? `<button class="btn sm gc-reveal-btn" type="button" data-gc-reveal="${h.number}">🃏 亮牌</button>`
       : (t.me.player && h.revealed?.includes(t.me.player) ? '<span class="gc-revealed-pill">🃏 已亮牌</span>' : '');
     return `
       <div class="${t.game === 'holdem' ? 'gc-holdem-center' : 'gc-pot'} gc-celebrate">${board}
         ${img('crown', 'gc-celebrate-crown')}
         <div class="gc-celebrate-name">${esc(who || '本手')} 赢了</div>
-        <div class="gc-pot-value num">+${num(won)}</div>
-        <div class="small">${why}</div>
+        <div class="gc-pot-value num">+${fmtChips(won, t)}</div>
+        <div class="small">${esc(why)}</div>
         <div class="gc-celebrate-actions">${revealBtn}<button class="gc-tool sm" type="button" data-gc-history>结算单</button></div>
       </div>`;
   }
-  function tableCenter(t, shown = null, myBest = []) {
-    if (shown) return celebration(t, shown, myBest);
+  function tableCenter(c, t, shown = null, highlightBest = []) {
+    if (!t.hand && c.runout && t.game === 'holdem') {
+      const h = c.runout.hand, e = h.engine || {};
+      const visibleBoard = (e.board || []).slice(0, c.runout.shownCount);
+      const streetLbl = visibleBoard.length >= 5 ? '河牌 · 决胜' : visibleBoard.length === 4 ? '转牌 · 跑马' : visibleBoard.length >= 3 ? '翻牌 · 跑马' : '全下摊牌';
+      const freshBoard = c.boardDealAt && (performance.now() - c.boardDealAt < 700);
+      return `
+        <div class="gc-holdem-center gc-runout-center">
+          <div class="gc-street-pill gc-runout-pill">🔥 全下跑马 · ${streetLbl}</div>
+          <div class="gc-board">${boardCardsHtml(visibleBoard, [], c.boardAnimFrom || 0, freshBoard)}</div>
+          <div class="gc-pot-value num">${img('chip-stack')} ${fmtChips(e.pot, t)}</div>
+          <div class="gc-pots">${(e.pots || []).map((p, i) => `<span>${i ? '边池 ' + i : '主池'} ${fmtChips(p.amount, t)}</span>`).join('')}</div>
+        </div>`;
+    }
+    if (shown) return celebration(t, shown, highlightBest);
     if (!t.hand) {
       const s = startState(t);
       return `
@@ -839,13 +1059,15 @@ window.createGamesUI = ({
     const h = t.hand;
     if (t.game === 'holdem') {
       const e = h.engine || {};
+      const freshBoard = c.boardDealAt && (performance.now() - c.boardDealAt < 700);
+      const actorName = t.seats.find(s => s.player === h.current_player)?.name;
       return `
         <div class="gc-holdem-center">
-          <div class="tiny muted">第 ${h.number} 手 · ${esc({ preflop: '翻牌前', flop: '翻牌', turn: '转牌', river: '河牌', showdown: '摊牌' }[e.street] || '进行中')}</div>
-          <div class="gc-board">${Array.from({ length: 5 }, (_, i) => i < (e.board || []).length ? card(e.board[i], 'sm', myBest) : '<span class="gc-card-slot"></span>').join('')}</div>
-          <div class="gc-pot-value">${img('chip-stack')} ${num(e.pot)}</div>
-          <div class="gc-pots">${(e.pots || []).map((p, i) => `<span>${i ? '边池 ' + i : '主池'} ${num(p.amount)}</span>`).join('')}</div>
-          <span class="gc-ticker">${t.seats.find(s => s.player === h.current_player)?.name ? esc(t.seats.find(s => s.player === h.current_player).name) + ' 行动中' : '等待服务端发牌'}</span>
+          <div class="gc-street-pill">第 ${h.number} 手 · ${esc(STREET_ZH[e.street] || '进行中')}</div>
+          <div class="gc-board">${boardCardsHtml(e.board || [], highlightBest, c.boardAnimFrom || 0, freshBoard)}</div>
+          <button class="gc-pot-value gc-pot-btn num" type="button" data-gc-bb-toggle title="点击切换筹码 / 大盲(BB)显示">${img('chip-stack')} ${fmtChips(e.pot, t)}</button>
+          <div class="gc-pots">${(e.pots || []).map((p, i) => `<span>${i ? '边池 ' + i : '主池'} ${fmtChips(p.amount, t)}</span>`).join('')}</div>
+          <span class="gc-ticker">${actorName ? esc(actorName) + ' 行动中' : '等待服务端发牌'}</span>
         </div>`;
     }
     return `
@@ -857,7 +1079,88 @@ window.createGamesUI = ({
         <span class="gc-ticker">${esc(t.seats.find(s => s.player === h.current_player)?.name || '玩家')} 行动中</span>
       </div>`;
   }
-  function controls(t, me) {
+  function holdemPresets(t, h, legal) {
+    const e = h.engine || {}, bb = Math.max(1, t.rules?.big_blind || 1);
+    const potAfterCall = (e.pot || 0) + (h.legal_actions?.call?.amount || 0);
+    const curBet = e.current_bet || 0;
+    const clamp = v => Math.max(legal.min, Math.min(legal.max, Math.round(v)));
+    const isUnopenedPreflop = e.street === 'preflop' && curBet <= bb;
+    const candidates = isUnopenedPreflop
+      ? [
+          { label: '2BB', val: clamp(bb * 2), sizeKey: '2bb' },
+          { label: '2.5BB', val: clamp(bb * 2.5), sizeKey: '2.5bb' },
+          { label: '3BB', val: clamp(bb * 3), sizeKey: '3bb' },
+          { label: '½ 池', val: clamp(curBet + potAfterCall * 0.5), sizeKey: '0.5', keep: true },
+          { label: '全下', val: legal.max, sizeKey: '0', keep: true },
+        ]
+      : [
+          { label: '⅓ 池', val: clamp(curBet + potAfterCall / 3), sizeKey: '0.33' },
+          { label: '½ 池', val: clamp(curBet + potAfterCall * 0.5), sizeKey: '0.5', keep: true },
+          { label: '¾ 池', val: clamp(curBet + potAfterCall * 0.75), sizeKey: '0.75' },
+          { label: '1 池', val: clamp(curBet + potAfterCall), sizeKey: '1' },
+          { label: '全下', val: legal.max, sizeKey: '0', keep: true },
+        ];
+    const seen = new Set();
+    return candidates.filter(p => {
+      if (p.keep) { seen.add(p.val); return true; }
+      if (seen.has(p.val)) return false;
+      seen.add(p.val);
+      return true;
+    });
+  }
+  function inlineRaiseHtml(c, t) {
+    const rb = c.raiseBar, h = t.hand;
+    if (!rb || !h || t.game !== 'holdem') return '';
+    const legal = h.legal_actions?.[rb.op];
+    if (!legal || legal.min == null) return '';
+    const val = Math.max(legal.min, Math.min(legal.max, Math.round(rb.value ?? legal.min)));
+    rb.value = val;
+    const bb = Math.max(1, t.rules?.big_blind || 1);
+    const bbText = (val / bb).toFixed(1).replace(/\.0$/, '');
+    const presets = holdemPresets(t, h, legal);
+    const isAllIn = val >= legal.max;
+    const mySeat = handPlayers(t, h).find(x => x.player === t.me.player);
+    const mySeatCards = t.game === 'holdem' && c.raiseBar && mySeat?.cards?.length
+      ? `<span class="gc-raise-hole">${mySeat.cards.map(code => {
+          if (!Number.isInteger(code)) return '';
+          const s = Math.floor(code / 13), suit = ['♠', '♥', '♣', '♦'][s], rank = ranks[code % 13];
+          return `<em class="${s === 1 || s === 3 ? 'red' : ''}">${rank}${suit}</em>`;
+        }).join('')}</span>`
+      : '';
+    return `
+      <div class="gc-raise-inline" data-gc-raise-inline>
+        <div class="gc-raise-head">
+          <span class="gc-raise-title">${rb.op === 'raise' ? '加注到' : '下注到'}</span>
+          <b class="gc-raise-num num" data-gc-raise-val>${num(val)} <small>(${bbText} BB)</small></b>
+          ${mySeatCards}
+          <button class="gc-raise-close" type="button" data-gc-raise-cancel aria-label="收起加注条">✕</button>
+        </div>
+        <div class="gc-raise-presets">${presets.map(pr => `
+          <button class="gc-preset-btn ${val === pr.val ? 'on' : ''}" type="button" data-gc-size="${pr.sizeKey}" data-gc-preset-val="${pr.val}">${esc(pr.label)}</button>`).join('')}
+        </div>
+        <div class="gc-raise-slider-row">
+          <button class="gc-step-btn" type="button" data-gc-raise-step="${-bb}" aria-label="减少 1 BB">−</button>
+          <input class="gc-range" type="range" aria-label="加注到" min="${legal.min}" max="${legal.max}" step="1" value="${val}">
+          <button class="gc-step-btn" type="button" data-gc-raise-step="${bb}" aria-label="增加 1 BB">＋</button>
+          <button class="gc-raise-go ${isAllIn ? 'allin' : ''}" type="button" data-gc-raise-confirm ${disabled(false)}>${isAllIn ? '全下' : rb.op === 'raise' ? '确认加注' : '确认下注'}</button>
+        </div>
+      </div>`;
+  }
+  function preActionHtml(c, t, me, player) {
+    if (t.game !== 'holdem' || !t.hand || !player || player.folded || player.all_in || me.auto || me.leave_after) return '';
+    const e = t.hand.engine || {};
+    const toCall = Math.max(0, (e.current_bet || 0) - (player.bet || 0));
+    const callCap = Math.min(toCall, player.stack || 0);
+    const pre = c.preAction;
+    const isSel = kind => pre && pre.handNo === t.hand.number && pre.street === e.street && pre.kind === kind;
+    return `
+      <div class="gc-preactions" role="group" aria-label="预选行动">
+        <button class="gc-pre-btn ${isSel('check_fold') ? 'on' : ''}" type="button" data-gc-pre="check_fold"><i></i>过/弃</button>
+        <button class="gc-pre-btn ${isSel('check_only') ? 'on' : ''}" type="button" data-gc-pre="check_only" ${toCall > 0 ? 'disabled' : ''}><i></i>自动过牌</button>
+        <button class="gc-pre-btn ${isSel('call_exact') ? 'on' : ''}" type="button" data-gc-pre="call_exact" data-gc-pre-amt="${callCap}"><i></i>${callCap > 0 ? (callCap >= player.stack ? '跟注全下' : '跟注 ' + fmtChips(callCap, t)) : '过牌/跟0'}</button>
+      </div>`;
+  }
+  function controls(c, t, me) {
     if (t.phase === 'closed') return '<button class="btn block" data-gc-back>返回游戏中心</button>';
     if (!me) return `
       <div class="gc-note">你正在看桌，尚未入座，不会扣分。${t.phase === 'playing' ? '现在入座从下一手参与。' : ''}</div>
@@ -888,16 +1191,20 @@ window.createGamesUI = ({
       fold: '弃牌', call: t.game === 'holdem' && legal.call?.amount === player?.stack ? '跟注全下' : '跟注',
       check: '过牌', raise: '加注', bet: '下注', compare: '比牌', all_in: t.game === 'zjh' ? '孤注一掷' : '全下',
     };
+    const holdemRaiseOpen = t.game === 'holdem' && c.raiseBar && legal[c.raiseBar.op];
+    const preHtml = !actions.length ? preActionHtml(c, t, me, player) : '';
     return `
+      ${holdemRaiseOpen ? inlineRaiseHtml(c, t) : ''}
       ${actions.length ? `
         <div class="gc-actions">${actions.map(a => `
           <button class="gc-action ${['call', 'check'].includes(a) ? 'main'
-            : ['raise', 'bet'].includes(a) ? 'alt' : ['compare', 'all_in'].includes(a) ? 'warm' : ''}"
+            : ['raise', 'bet'].includes(a) ? (holdemRaiseOpen && c.raiseBar.op === a ? 'alt on' : 'alt')
+            : ['compare', 'all_in'].includes(a) ? 'warm' : ''}"
             data-gc-action="${esc(a)}" ${disabled(false)}>
             ${esc(labels[a] || a)}
-            <small>${legal[a].amount != null ? num(legal[a].amount)
-              : legal[a].min != null ? '最小到 ' + num(legal[a].min) : a === 'fold' ? '放弃本手' : '按规则执行'}</small>
-          </button>`).join('')}</div>` : `
+            <small>${legal[a].amount != null ? fmtChips(legal[a].amount, t)
+              : legal[a].min != null ? '最小 ' + fmtChips(legal[a].min, t) : a === 'fold' ? '放弃本手' : '按规则执行'}</small>
+          </button>`).join('')}</div>` : preHtml || `
         <div class="gc-wait-bar">${me.auto ? '托管正在替你操作，可随时取消' : '等待其他玩家 · 本手未轮到你'}</div>`}
       <div class="gc-turn-line">行动剩余 <b data-gc-seconds>—</b> 秒 · 超时进入托管
         <button class="link" data-gc-rules>了解托管</button>
@@ -1040,7 +1347,7 @@ window.createGamesUI = ({
       <div class="gc-note">你正在观战，入座后就能对弈。${t.currency === 'beans' ? '' : `每局押 ${num(t.rules.stake)} 积分，开局才冻结。`}</div>
       <button class="btn block" data-gc-seat ${disabled(t.seats.length >= 2)}>${t.seats.length >= 2 ? '本桌已满' : '入座 · 不扣分'}</button>`;
     const h = t.hand;
-    if (!h) return outcome + controls(t, me);
+    if (!h) return outcome + controls(c, t, me);
     const legal = h.legal_actions || {}, offer = h.draw_offer, mine = myTurn(t);
     return `
       ${offer && offer.player !== t.me.player ? `
@@ -1165,8 +1472,16 @@ window.createGamesUI = ({
     const t = c.table, me = t.seats.find(s => s.player === t.me.player);
     const anchor = me?.seat ?? 0;
     const bottom = me || t.seats.find(s => s.seat === anchor);
-    const shown = celebrating(c), view = t.hand || shown;
+    const runoutHand = !t.hand && c.runout ? c.runout.hand : null;
+    const shown = runoutHand ? null : celebrating(c), view = t.hand || runoutHand || shown;
     const p = handPlayers(t, view).find(p => p.player === bottom?.player);
+    // On Hold'em showdown celebration, highlight the winner's best 5 cards on the board; otherwise highlight my own best 5.
+    let highlightBest = p?.best5 || [];
+    if (shown && t.game === 'holdem') {
+      const winners = shown.result?.winners || [];
+      const winBest = winners.map(id => shown.result?.players?.[id]?.best5).find(b => b?.length);
+      if (winBest?.length) highlightBest = winBest;
+    }
     const myBest = p?.best5 || [];
     const dealAge = c.dealAt ? performance.now() - c.dealAt : Infinity;
     const look = !!t.hand?.legal_actions?.look;
@@ -1176,10 +1491,14 @@ window.createGamesUI = ({
         <button class="btn sm" data-gc-takeover>取消托管</button>
       </div>` : '';
     const seats = Array.from({ length: t.max_players - 1 }, (_, i) =>
-      seatHtml(t.seats.find(s => s.seat === (anchor + i + 1) % t.max_players), i + 1, t, view)).join('');
+      seatHtml(t.seats.find(s => s.seat === (anchor + i + 1) % t.max_players), i + 1, t, view, highlightBest)).join('');
+    const myPos = t.game === 'holdem' && bottom && view ? holdemPositionName(bottom.seat, t, view) : '';
+    const logCount = (t.hand?.action_log || t.last_hand?.action_log || []).length;
+    const myTurnNow = !!(t.me.player && t.hand?.current_player === t.me.player);
+    const turnPulse = myTurnNow && c.turnAlertAt && (performance.now() - c.turnAlertAt < 1800);
     const oldScroll = $('#screen').scrollTop;
     setScreen(`
-      <section class="gc gc-table ${t.game === 'holdem' ? 'gc-holdem' : 'gc-zjh'} gc-felt-${Object.hasOwn(tierClasses, t.tier) ? t.tier : 'practice'} ${dealAge < 1200 ? 'gc-dealing' : ''}"
+      <section class="gc gc-table ${t.game === 'holdem' ? 'gc-holdem' : 'gc-zjh'} ${c.raiseBar && t.game === 'holdem' ? 'gc-raise-open' : ''} gc-felt-${Object.hasOwn(tierClasses, t.tier) ? t.tier : 'practice'} ${dealAge < 1200 ? 'gc-dealing' : ''}"
         style="--deal-age:-${Math.round(Math.min(dealAge, 1200))}ms" data-table-id="${esc(t.id)}" data-revision="${t.revision}" data-phase="${esc(t.phase)}">
         <header class="gc-table-bar">
           <button class="gc-tool" data-gc-back>‹ 返回</button>
@@ -1195,7 +1514,9 @@ window.createGamesUI = ({
           <button class="gc-auto ${me?.auto ? 'on' : ''}" role="switch" aria-checked="${!!me?.auto}" aria-label="托管" data-gc-auto ${disabled(!me || me.leave_after)}><i></i>${me?.auto ? '取消托管' : '托管'}</button>
           ${t.game === 'holdem' ? `
             <button class="gc-tool ${me?.away ? 'on' : ''}" data-gc-away ${disabled(!me || me.leave_after)}>暂离${me?.away ? '中' : ''}</button>
-            <button class="gc-tool" data-gc-topup ${disabled(!me || me.leave_after || t.phase === 'playing')}>补码</button>` : ''}
+            <button class="gc-tool" data-gc-topup ${disabled(!me || me.leave_after || t.phase === 'playing')}>补码</button>
+            <button class="gc-tool ${bbMode ? 'on' : ''}" type="button" data-gc-bb-toggle title="切换筹码 / 大盲(BB)显示">${bbMode ? 'BB' : '筹码'}</button>
+            <button class="gc-tool" type="button" data-gc-action-log ${logCount ? '' : 'disabled'}>记录</button>` : ''}
           <button class="link" data-gc-history ${c.history.length ? '' : 'disabled'}>${t.game === 'holdem' ? '最近手牌' : '上手结算'}</button>
           <button class="link" data-gc-leave ${disabled(!me)}>离桌</button>
         </div>
@@ -1208,9 +1529,9 @@ window.createGamesUI = ({
         <div data-gc-retry-slot>${pendingHtml()}</div>
         <div class="gc-felt">${croupier(t)}
           <div class="gc-oval"></div>
-          ${seats}${tableCenter(t, shown, myBest)}
+          ${seats}${tableCenter(c, t, shown, highlightBest)}
         </div>
-        <div class="gc-dock">${bottom ? `
+        <div class="gc-dock ${myTurnNow ? 'gc-my-turn' : ''} ${turnPulse ? 'gc-turn-pulse' : ''}">${bottom ? `
           <div class="gc-me-row">
             <div class="gc-avatar-ring ${t.hand?.current_player === bottom.player ? 'gc-active' : ''}"
               ${t.hand?.current_player === bottom.player ? 'data-gc-ring' : ''}>
@@ -1219,16 +1540,16 @@ window.createGamesUI = ({
             </div>
             <div class="grow">
               <div class="gc-me-name">
-                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${label(bottom, t)}
-                ${p ? `<span class="gc-bet num">${img('chip')} ${num(t.game === 'holdem' ? p.bet : p.invested)}</span>` : ''}
+                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${myPos ? `<span class="gc-pos-tag">${esc(myPos)}</span>` : ''}${label(bottom, t)}
+                ${p && (t.game !== 'holdem' || p.bet > 0) ? `<span class="gc-bet num">${img('chip')} ${fmtChips(t.game === 'holdem' ? p.bet : p.invested, t)}</span>` : ''}
               </div>
               ${titlePlaque(bottom, t)}
-              <div class="tiny muted">${me ? `${t.game === 'holdem' ? '桌上筹码 ' + num(p?.stack ?? me.stack) + ' · ' : ''}可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分` : '旁观视角 · 不展示未公开手牌'}</div>
+              <div class="tiny muted">${me ? `${t.game === 'holdem' ? '桌上筹码 ' + fmtChips(p?.stack ?? me.stack, t) + ' · ' : ''}可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分` : '旁观视角 · 不展示未公开手牌'}</div>
             </div>
           </div>` : ''}
       ${view ? `
           <button class="gc-hand" aria-label="${look ? '看牌' : '自己的手牌'}" ${look ? `data-gc-action="look" ${disabled(false)}` : 'disabled'}>
-            ${p ? cards(p.cards, t.game === 'zjh' ? 3 : 2, 'lg', myBest) : '<span class="muted">本手旁观，从下一手加入</span>'}
+            ${p ? cards(p.cards, t.game === 'zjh' ? 3 : 2, 'lg', shown ? highlightBest : myBest) : '<span class="muted">本手旁观，从下一手加入</span>'}
           </button>
           <div class="gc-hand-label">${handRankHtml(view, shown, look, p, t)}</div>` : `
           <div class="gc-wait-message">${t.last_hand ? `
@@ -1242,7 +1563,7 @@ window.createGamesUI = ({
             <span>${me ? t.game === 'holdem' ? '首手房主开始，满 6 人自动开局' : '房主开始或全员准备后开局' : '先看桌，再决定是否入座'}
               <small>${t.game === 'zjh' ? '入座不扣分 · 每步 30 秒' : '首手房主开始 · 之后连续发牌'}</small>
             </span>`}</div>`}
-      ${controls(t, me)}${t.hand?.comparisons?.length ? '<button class="link gc-close" data-gc-comparisons>查看仅比牌双方可见的结果</button>' : ''}</div>
+      ${controls(c, t, me)}${t.hand?.comparisons?.length ? '<button class="link gc-close" data-gc-comparisons>查看仅比牌双方可见的结果</button>' : ''}</div>
       </section>`);
     $('#screen').scrollTop = oldScroll;
     bindTable(c);
@@ -1261,10 +1582,18 @@ window.createGamesUI = ({
         : esc('本手已结束' + delta);
     }
     if (look) return '<span class="gc-hand-hint">🔒 闷牌中 · 点手牌看牌显示当前最大牌型</span>';
-    if (p.hand_name) {
-      return `<span class="gc-hand-badge ${p.folded ? 'dim' : ''}">🃏 当前最大：<b>${esc(p.hand_name)}</b>${p.folded ? '（已弃牌）' : ''}</span>`;
+    // Show subtle pot-odds pill on Hold'em when it's your turn facing a bet.
+    let oddsHtml = '';
+    if (t.game === 'holdem' && t.hand && t.hand.current_player === t.me.player && t.hand.legal_actions?.call?.amount > 0) {
+      const callAmt = t.hand.legal_actions.call.amount;
+      const pot = t.hand.engine?.pot || 0;
+      const pct = Math.round(callAmt / Math.max(1, pot + callAmt) * 100);
+      oddsHtml = ` <span class="gc-odds-pill" title="需跟注额占跟注后总底池比例">赔率 ${pct}%</span>`;
     }
-    return esc(p.folded ? '已弃牌' : p.seen ? '已看牌' : '等待发牌');
+    if (p.hand_name) {
+      return `<span class="gc-hand-badge ${p.folded ? 'dim' : ''}">🃏 当前最大：<b>${esc(p.hand_name)}</b>${p.folded ? '（已弃牌）' : ''}</span>${oddsHtml}`;
+    }
+    return esc(p.folded ? '已弃牌' : p.seen ? '已看牌' : '等待发牌') + oddsHtml;
   }
   function tick(c) {
     if (!live(c)) return;
@@ -1289,7 +1618,8 @@ window.createGamesUI = ({
     }
     if (t.me.player && t.hand?.current_player === t.me.player && seconds > 0 && seconds <= 5 && c.ticked !== seconds) {
       c.ticked = seconds;
-      sound.play('tick', .7);
+      sound.play('tick', .78);
+      haptic.impact(seconds <= 2 ? 'heavy' : 'light');
     }
     $$('[data-gc-ring]').forEach(el => {
       el.style.setProperty('--gc-progress', `${Math.min(100, seconds / (t.rules.step_seconds || 30) * 100)}%`);
@@ -1331,10 +1661,83 @@ window.createGamesUI = ({
     $$('[data-gc-action]', root).forEach(b => b.onclick = () => {
       const op = b.dataset.gcAction;
       if (op === 'compare') return compareSheet(c);
-      if (t.game === 'holdem' && ['raise', 'bet'].includes(op)) return raiseSheet(c, op);
-      if (op === 'all_in') return confirmAction(c, op);
+      if (t.game === 'holdem' && ['raise', 'bet'].includes(op)) {
+        haptic.select();
+        const legal = t.hand?.legal_actions?.[op];
+        if (!legal) return;
+        if (c.raiseBar && c.raiseBar.op === op && c.raiseBar.turn === t.hand.turn) {
+          c.raiseBar = null;
+        } else {
+          c.raiseBar = { op, value: legal.min, handNo: t.hand.number, turn: t.hand.turn };
+        }
+        return paintTable(c);
+      }
+      if (op === 'all_in') { haptic.impact('medium'); return confirmAction(c, op); }
+      c.raiseBar = null;
+      haptic.impact(op === 'fold' ? 'light' : 'medium');
       action(c, op);
     });
+    const raiseInline = $('[data-gc-raise-inline]', root);
+    if (raiseInline && c.raiseBar && t.hand) {
+      const op = c.raiseBar.op, h = t.hand, legal = h.legal_actions?.[op];
+      if (legal) {
+        const range = $('.gc-range', raiseInline);
+        const bb = Math.max(1, t.rules?.big_blind || 1);
+        const valEl = $('[data-gc-raise-val]', raiseInline);
+        const confirmBtn = $('[data-gc-raise-confirm]', raiseInline);
+        const updateInline = v => {
+          const next = Math.max(legal.min, Math.min(legal.max, Math.round(v)));
+          c.raiseBar.value = next;
+          range.value = String(next);
+          const bbText = (next / bb).toFixed(1).replace(/\.0$/, '');
+          valEl.innerHTML = `${num(next)} <small>(${bbText} BB)</small>`;
+          const isAll = next >= legal.max;
+          confirmBtn.textContent = isAll ? '全下' : op === 'raise' ? '确认加注' : '确认下注';
+          confirmBtn.classList.toggle('allin', isAll);
+          $$('[data-gc-preset-val]', raiseInline).forEach(btn => btn.classList.toggle('on', Number(btn.dataset.gcPresetVal) === next));
+        };
+        range.oninput = () => { haptic.select(); updateInline(Number(range.value)); };
+        $$('[data-gc-preset-val]', raiseInline).forEach(btn => btn.onclick = () => {
+          haptic.select();
+          updateInline(Number(btn.dataset.gcPresetVal));
+        });
+        $$('[data-gc-raise-step]', raiseInline).forEach(btn => btn.onclick = () => {
+          haptic.select();
+          updateInline((c.raiseBar.value ?? legal.min) + Number(btn.dataset.gcRaiseStep));
+        });
+        $('[data-gc-raise-cancel]', raiseInline).onclick = () => { c.raiseBar = null; paintTable(c); };
+        confirmBtn.onclick = async () => {
+          if (c.table.hand?.turn !== h.turn || c.table.hand_no !== h.number) {
+            c.raiseBar = null; paintTable(c); return toast('牌局已变化，请重新选择', true);
+          }
+          const amount = c.raiseBar.value;
+          haptic.impact(amount >= legal.max ? 'heavy' : 'medium');
+          c.raiseBar = null;
+          await action(c, op, { amount });
+        };
+      }
+    }
+    $$('[data-gc-pre]', root).forEach(b => b.onclick = () => {
+      if (!t.hand || b.disabled) return;
+      haptic.select();
+      const kind = b.dataset.gcPre;
+      const amt = Number(b.dataset.gcPreAmt || 0);
+      const street = t.hand.engine?.street || 'preflop';
+      if (c.preAction && c.preAction.kind === kind && c.preAction.handNo === t.hand.number && c.preAction.street === street) {
+        c.preAction = null;
+      } else {
+        c.preAction = { kind, amount: amt, handNo: t.hand.number, street };
+      }
+      paintTable(c);
+    });
+    $$('[data-gc-bb-toggle]', root).forEach(el => el.onclick = e => {
+      e.stopPropagation();
+      haptic.select();
+      setBbMode(!bbMode);
+      paintTable(c);
+    });
+    const logBtn = $('[data-gc-action-log]', root);
+    if (logBtn) logBtn.onclick = () => actionLogSheet(c);
     const comparison = $('[data-gc-comparisons]', root);
     if (comparison) comparison.onclick = () => comparisonSheet(c);
     $$('[data-gc-reveal]', root).forEach(b => b.onclick = e => {
@@ -1447,21 +1850,60 @@ window.createGamesUI = ({
       });
     });
   }
+  function actionLogSheet(c) {
+    const t = c.table, h = t.hand || t.last_hand;
+    const logs = h?.action_log || [];
+    const nameOf = id => esc(t.seats.find(s => s.player === id)?.name || '已离桌玩家');
+    const grouped = [];
+    for (const item of logs) {
+      const st = item.street || 'preflop';
+      let group = grouped.at(-1);
+      if (!group || group.street !== st) {
+        group = { street: st, items: [] };
+        grouped.push(group);
+      }
+      group.items.push(item);
+    }
+    const body = grouped.length ? grouped.map(g => `
+      <div class="gc-log-group">
+        <div class="gc-log-street">${esc(STREET_ZH[g.street] || g.street)}</div>
+        ${g.items.map(it => {
+          const act = it.all_in ? 'all_in' : it.action;
+          const zh = HOLDEM_ACTION_ZH[act] || act;
+          const val = it.action === 'raise' || it.action === 'bet'
+            ? `到 ${fmtChips(it.to, t)}`
+            : it.amount > 0 ? fmtChips(it.amount, t) : '';
+          return `
+            <div class="gc-log-row">
+              <b>${nameOf(it.player)}</b>
+              <span class="gc-log-act gc-act-${esc(act)}">${esc(zh)}${val ? ' ' + esc(val) : ''}</span>
+              ${it.auto ? '<span class="tiny muted">托管</span>' : ''}
+            </div>`;
+        }).join('')}
+      </div>`).join('') : '<div class="empty">本手暂无行动记录</div>';
+    showSheet(`
+      <h3>📜 第 ${h?.number || 0} 手行动记录</h3>
+      <div class="tiny muted" style="margin:2px 0 10px">盲注 ${num(t.rules.small_blind)}/${num(t.rules.big_blind)} · 按街次顺序记录</div>
+      <div class="gc-log-list">${body}</div>
+      <button class="btn block" data-cancel>回到牌桌</button>`);
+  }
   function soundSheet() {
     const row = (kind, title, note) => `
       <button class="gc-switch-row" role="switch" aria-checked="${sound.pref(kind)}" data-gc-sound-kind="${kind}">
         <span><b>${title}</b><small>${note}</small></span><i></i>
       </button>`;
     showSheet(`
-      <h3>声音</h3>
+      <h3>声音与触感</h3>
       ${row('music', '背景音乐', '只在牌桌播放，切到后台自动暂停')}
       ${row('sfx', '音效', '发牌、下注、弃牌、轮到你和输赢提示')}
+      ${row('haptic', '触感反馈', '轮到行动、加注和摊牌时轻震动（Telegram 客户端支持）')}
       <button class="btn block" data-cancel>好的</button>`, root => {
       $$('[data-gc-sound-kind]', root).forEach(b => b.onclick = () => {
         const on = b.getAttribute('aria-checked') !== 'true';
         sound.set(b.dataset.gcSoundKind, on);
         b.setAttribute('aria-checked', String(on));
         if (on && b.dataset.gcSoundKind === 'sfx') sound.play('tap');
+        if (on && b.dataset.gcSoundKind === 'haptic') haptic.impact('light');
         $('[data-gc-sound] use')?.setAttribute('href', `#i-${sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x'}`);
       });
     });

@@ -9,33 +9,123 @@ from app.modules.game_center_zjh import card_code
 from app.modules.play_money import integer
 
 
+def _preflop_score(hole):
+    """Return a rough 0..1 preflop strength using only the actor's own two cards."""
+    r1, r2 = sorted((c % 13 + 2 for c in hole), reverse=True)
+    suited = hole[0] // 13 == hole[1] // 13
+    gap = r1 - r2
+    if r1 == r2:
+        # 22 ~ 0.56, 77 ~ 0.69, JJ ~ 0.84, AA ~ 0.96
+        return min(0.96, 0.50 + (r1 - 1) * 0.035)
+    score = 0.14 + (r1 * 1.45 + r2 * 0.85) / 48.0
+    if suited:
+        score += 0.065
+    if gap == 1:
+        score += 0.05
+    elif gap == 2:
+        score += 0.025
+    elif gap >= 4:
+        score -= 0.035
+    if r1 == 14 and r2 >= 10:
+        score += 0.07
+    elif r1 >= 12 and r2 >= 10:
+        score += 0.04
+    return max(0.10, min(0.92, score))
+
+
+def _draw_bonus(hole, board):
+    """Estimate flush/straight draw equity bump on flop/turn using only public board + own hole."""
+    if len(board) not in (3, 4):
+        return 0.0
+    cards = hole + board
+    bonus = 0.0
+    if max(sum(c // 13 == suit for c in cards) for suit in range(4)) == 4:
+        bonus += 0.13 if len(board) == 3 else 0.09
+    ranks = sorted({c % 13 + 2 for c in cards})
+    if 14 in ranks:
+        ranks = [1] + ranks
+    best_run = 1
+    run = 1
+    for i in range(1, len(ranks)):
+        if ranks[i] == ranks[i - 1] + 1:
+            run += 1
+            best_run = max(best_run, run)
+        else:
+            run = 1
+    if best_run >= 4:
+        bonus += 0.10 if len(board) == 3 else 0.07
+    return bonus
+
+
 def robot_action(state, player, rng=None):
-    """Practice AI sees only its own hole + board; every choice uses engine limits."""
+    """Practice AI sees only its own hole + public board/state; every choice uses engine limits."""
     rng = rng or secrets.SystemRandom()
     options = engine.legal_actions(state, player)
     actor = next(p for p in state['seats'] if p['player'] == player)
     hole, board = actor['hole'], state['board']
+    bb = max(1, state['big_blind'])
+    pot = sum(p['committed'] for p in state['seats'])
+    live = [p for p in state['seats'] if not p['folded']]
+    # Position ratio: 0 = earliest (UTG), 1 = latest (BTN/CO)
+    ordered = sorted(live, key=lambda p: (p['seat'] - state['button'] - 1) % 6)
+    pos_idx = next((i for i, p in enumerate(ordered) if p['player'] == player), 0)
+    pos_ratio = pos_idx / max(1, len(ordered) - 1)
+    # Deterministic per-seat style (tight/balanced/loose-aggressive) without peeking hidden cards.
+    style_seed = sum(ord(ch) for ch in str(player)) % 3
+    aggression = (-0.04, 0.0, 0.05)[style_seed]
+
     if not board:
-        a, b = [c % 13 + 2 for c in hole]
-        equity = (.57 + a / 50 if a == b else .17 + (a + b) / 65
-                  + .08 * (hole[0] // 13 == hole[1] // 13) + .07 * (abs(a - b) == 1))
+        equity = _preflop_score(hole) + (pos_ratio - 0.45) * 0.08 + aggression * 0.6
+        facing_raise = state['current_bet'] > bb
+        can_raise = options['min_raise_to'] is not None
+        if not facing_raise:
+            # Standard open-raise 2.5–3.2 BB with playable range; limp/check occasionally from late/BB
+            open_thresh = 0.56 - pos_ratio * 0.10 - aggression
+            if can_raise and equity >= open_thresh and rng.random() < (0.82 if equity >= 0.72 else 0.58):
+                mult = 2.5 if len(ordered) <= 3 else (2.5 + rng.random() * 0.8)
+                target = min(options['max_raise_to'], max(options['min_raise_to'], round(bb * mult)))
+                return ('bet' if state['current_bet'] == 0 else 'raise'), target
+        else:
+            # Facing a preflop raise: 3-bet premium hands, call suited/pairs/broadways with good odds
+            three_bet_thresh = 0.78 - pos_ratio * 0.04 - aggression * 0.5
+            if can_raise and equity >= three_bet_thresh and rng.random() < (0.72 if equity >= 0.86 else 0.35):
+                target = min(options['max_raise_to'], max(options['min_raise_to'],
+                             round(state['current_bet'] * (2.6 + rng.random() * 0.6))))
+                return 'raise', target
     else:
         strength, _, _ = engine.best_hand(hole + board)
-        equity = (.17, .43, .61, .72, .80, .86, .93, .97, .99)[strength[0]] + strength[1] / 14 * .06
-        if len(board) < 5 and max(sum(c // 13 == suit for c in hole + board) for suit in range(4)) == 4:
-            equity += .1
-    pot = sum(p['committed'] for p in state['seats'])
-    odds = options['call'] / max(1, pot + options['call'])
-    bluff = rng.random() < .07
-    if (options['min_raise_to'] is not None and (equity > .72 or bluff)
-            and rng.random() < (.55 if equity > .9 else .24)):
-        target = min(options['max_raise_to'], max(options['min_raise_to'],
-                     state['current_bet'] + round((pot + options['call']) * (.45 + rng.random() * .3))))
-        return ('bet' if state['current_bet'] == 0 else 'raise'), target
+        equity = (.17, .44, .63, .75, .83, .88, .94, .97, .99)[strength[0]] + strength[1] / 14 * .06
+        equity = min(0.99, equity + _draw_bonus(hole, board))
+        # Postflop C-bet / value bet / semi-bluff
+        if options['min_raise_to'] is not None:
+            is_unopened = state['current_bet'] == 0
+            cbet_bluff = is_unopened and pos_ratio >= 0.5 and rng.random() < (0.20 + max(0.0, aggression))
+            value_bet = equity >= (0.60 if is_unopened else 0.74)
+            semi_bluff = _draw_bonus(hole, board) >= 0.09 and rng.random() < (0.38 if is_unopened else 0.16)
+            if (value_bet or semi_bluff or cbet_bluff) and rng.random() < (0.78 if equity >= 0.82 else 0.45):
+                frac = (0.33 + rng.random() * 0.25) if cbet_bluff else (0.50 + rng.random() * 0.35)
+                target = min(options['max_raise_to'], max(options['min_raise_to'],
+                             state['current_bet'] + max(bb, round((pot + options['call']) * frac))))
+                return ('bet' if is_unopened else 'raise'), target
+
     if options['check']:
         return 'check', None
-    if ((equity < odds + .14 and not bluff)
-            or (equity < .45 and options['call'] > state['big_blind'] * 5 and rng.random() < .65)):
+    call_amt = options['call']
+    odds = call_amt / max(1, pot + call_amt)
+    bluff_call = rng.random() < 0.05
+    if not board:
+        # Preflop call decision scaled by BB pressure and position
+        bb_cost = call_amt / bb
+        if equity < odds + 0.10 and not bluff_call:
+            return 'fold', None
+        if bb_cost > 5 and equity < 0.66 and rng.random() < 0.75:
+            return 'fold', None
+        if bb_cost > 12 and equity < 0.78 and rng.random() < 0.85:
+            return 'fold', None
+        return 'call', None
+    if ((equity < odds + 0.12 and not bluff_call)
+            or (equity < 0.48 and call_amt > bb * 5 and rng.random() < 0.68)
+            or (call_amt >= actor['stack'] and equity < 0.62 and rng.random() < 0.78)):
         return 'fold', None
     return 'call', None
 
@@ -148,6 +238,7 @@ class HoldemGame:
                 'commitment': hashlib.sha256((codes + '|' + salt).encode('ascii')).hexdigest(),
                 'deal_order': [p['player'] for p in sorted(players, key=lambda p: (p['seat'] - button - 1) % 6)],
                 'users': {p['player']: {'uid': p['uid'], 'bot': p['bot'], 'budget': p['stack']} for p in players},
+                'action_log': [], 'runout_from': None,
                 'created_at': clock, 'settled_at': None, 'engine': state}
         table.update(hand=hand, button=button, phase='playing', countdown_at=None, idle_deadline=None)
         self._sync_stacks(table)
@@ -178,10 +269,36 @@ class HoldemGame:
         from app.modules.game_center import GameError
         if player['leave_after'] and not automatic:
             raise GameError('wrong_phase', '已申请离桌，等待本手结算', 409)
+        before_state = table['hand']['engine']
+        before_street = before_state['street']
+        before_board_len = len(before_state['board'])
+        before_seat = next(s for s in before_state['seats'] if s['player'] == player['player'])
+        before_committed = before_seat['committed']
+        act_name = body.get('action')
         try:
-            state = engine.apply_action(table['hand']['engine'], player['player'], body.get('action'), body.get('amount'))
+            state = engine.apply_action(before_state, player['player'], act_name, body.get('amount'))
         except engine.EngineError as exc:
             raise GameError('illegal_action', str(exc)) from None
+        after_seat = next(s for s in state['seats'] if s['player'] == player['player'])
+        # Compute net delta contributed on this action (before uncalled refund if hand ended)
+        added = max(0, after_seat['committed'] - before_committed)
+        if state['finished']:
+            added += state.get('uncalled', {}).get(player['player'], 0)
+        to_amt = after_seat['bet'] if state['street'] == before_street else (before_seat['bet'] + added)
+        log = table['hand'].setdefault('action_log', [])
+        log.append({
+            'street': before_street,
+            'player': player['player'],
+            'action': act_name,
+            'amount': added,
+            'to': to_amt if act_name in ('bet', 'raise', 'all_in') else added,
+            'all_in': after_seat['stack'] == 0 and not after_seat['folded'],
+            'auto': bool(automatic),
+        })
+        if state['finished'] and len(state['board']) > before_board_len:
+            is_showdown = any(v['shown'] for v in state['result']['players'].values())
+            if is_showdown:
+                table['hand']['runout_from'] = before_board_len
         table['hand']['engine'] = state
         table['hand']['turn'] += 1
         self._sync_stacks(table)
@@ -379,7 +496,15 @@ class HoldemGame:
                     seat['best5'] = None
             can_reveal = False
             rev_list = []
+        action_log = list(hand.get('action_log') or [])
+        last_actions = {}
+        cur_street = public['street']
+        for item in action_log:
+            if item.get('street') == cur_street or item.get('action') == 'fold' or item.get('all_in'):
+                last_actions[item['player']] = item
         return {'number': hand['number'], 'turn': hand['turn'], 'commitment': hand['commitment'],
                 'current_player': public['current_player'], 'finished': public['finished'], 'engine': public,
                 'legal_actions': public['legal_actions'], 'result': public['results'],
-                'revealed': rev_list, 'can_reveal': can_reveal}
+                'revealed': rev_list, 'can_reveal': can_reveal,
+                'action_log': action_log[-40:], 'last_actions': last_actions,
+                'runout_from': hand.get('runout_from')}

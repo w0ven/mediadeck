@@ -597,6 +597,7 @@
   border-radius: 11px;
   padding: 5px 10px;
   backdrop-filter: blur(8px);
+  white-space: nowrap;
 }
 .gc-tools .link:disabled {
   opacity: .4;
@@ -605,6 +606,27 @@
   font-size: 10px;
   min-height: 29px;
   padding: 4px 7px;
+  white-space: nowrap;
+}
+.gc-holdem .gc-tools {
+  gap: 4px;
+  padding: 5px 8px;
+}
+.gc-holdem .gc-tools .gc-auto {
+  padding: 4px 6px;
+  font-size: 11px;
+  gap: 4px;
+  min-height: 28px;
+}
+.gc-holdem .gc-tools .gc-tool {
+  font-size: 10px;
+  min-height: 28px;
+  padding: 3px 6px;
+}
+.gc-holdem .gc-tools .link {
+  font-size: 10px;
+  padding: 4px 7px;
+  min-height: 28px;
 }
 .gc-tool.on {
   border-color: #ffcc5c88;
@@ -1072,6 +1094,7 @@
   white-space: normal;
 }
 .gc-dock {
+  position: relative;
   flex: none;
   margin: 0 6px;
   padding: 10px 12px 12px;
@@ -2053,25 +2076,42 @@
 
 /* Six-seat Hold'em perimeter / community board. */
 .gc-holdem .gc-felt {
-  min-height: 380px;
-  margin: 0 5px;
+  min-height: 368px;
+  margin: 0 4px;
+}
+.gc-holdem .gc-croupier {
+  width: 96px;
+  height: 112px;
+  top: 0;
+}
+.gc-holdem .gc-croupier-silhouette::before {
+  left: 36px;
+  top: 10px;
+  width: 24px;
+  height: 28px;
+}
+.gc-holdem .gc-croupier-silhouette::after {
+  left: 16px;
+  right: 16px;
+  top: 40px;
+  height: 68px;
 }
 .gc-holdem .gc-oval {
-  top: 132px;
+  top: 90px;
   bottom: 3%;
-  left: 9%;
-  right: 9%;
+  left: 8%;
+  right: 8%;
 }
 .gc-holdem .gc-seat {
-  width: 70px;
+  width: 72px;
 }
 .gc-holdem .gc-pos1 {
   left: 0;
-  top: calc(100% - 132px);
+  top: calc(100% - 134px);
 }
 .gc-holdem .gc-pos2 {
   left: 0;
-  top: 20px;
+  top: 14px;
 }
 .gc-holdem .gc-pos3 {
   left: auto;
@@ -2080,11 +2120,11 @@
 }
 .gc-holdem .gc-pos4 {
   right: 0;
-  top: calc(50% - 61px);
+  top: calc(50% - 62px);
 }
 .gc-holdem .gc-pos5 {
   right: 0;
-  top: calc(100% - 122px);
+  top: calc(100% - 124px);
 }
 .gc-holdem .gc-seat .gc-avatar-ring {
   width: 35px;
@@ -2130,9 +2170,9 @@
 .gc-holdem .gc-seat .gc-bet {
   position: static;
   font-size: 9px;
-  padding: 0 4px;
-  line-height: 12px;
-  margin-top: 1px;
+  padding: 0 5px;
+  line-height: 13px;
+  margin-top: 2px;
   white-space: nowrap;
 }
 .gc-holdem .gc-seat .gc-bet img {
@@ -2148,6 +2188,7 @@
   padding: 0 6px;
   border-radius: 99px;
   background: var(--plate);
+  cursor: pointer;
 }
 .gc-dealer {
   position: absolute;
@@ -2160,34 +2201,56 @@
 .gc-holdem-center {
   position: absolute;
   left: 50%;
-  /* Leave a small gap below the 166px decorative dealer, even on short screens. */
-  top: max(172px, 40%);
+  /* Sit comfortably below the compact 112px Hold'em dealer with >= 10px breathing room. */
+  top: max(124px, 34%);
   transform: translateX(-50%);
   text-align: center;
-  width: 218px;
+  width: 224px;
   z-index: 2;
 }
 .gc-board {
   display: flex;
   justify-content: center;
   gap: 5px;
-  margin: 7px 0;
+  margin: 6px 0 7px;
+}
+.gc-holdem .gc-board .gc-card.sm,
+.gc-card-slot {
+  width: 40px;
+  height: 56px;
 }
 .gc-card-slot {
   display: block;
-  width: 38px;
-  height: 53px;
   border: 1px dashed #c6cfff4d;
-  border-radius: 5px;
+  border-radius: 6px;
   background: #070b202b;
   box-shadow: inset 0 0 14px #0004;
+}
+.gc-holdem .gc-wait-center {
+  top: max(124px, calc(56% - 54px));
 }
 .gc-holdem-center .gc-pot-value {
   font-size: 22px;
 }
+.gc-pot-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  border: 1px solid rgba(255, 204, 92, .32);
+  border-radius: 99px;
+  background: rgba(16, 4, 34, .46);
+  padding: 2px 12px;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: transform .12s ease, border-color .15s ease;
+}
+.gc-pot-btn:active {
+  transform: scale(.96);
+}
 .gc-pot-value img {
-  width: 28px;
-  height: 26px;
+  width: 26px;
+  height: 24px;
 }
 .gc-pots {
   display: flex;
@@ -2205,14 +2268,17 @@
   color: #ffe4ac;
 }
 .gc-holdem .gc-hand {
-  min-height: 80px;
+  min-height: 82px;
 }
 .gc-holdem .gc-hand .gc-card.lg {
-  width: 56px;
-  height: 78px;
+  width: 58px;
+  height: 81px;
+}
+.gc-holdem .gc-hand .gc-card:first-child {
+  transform: rotate(-5deg) translateY(2px);
 }
 .gc-holdem .gc-hand .gc-card:nth-child(2) {
-  transform: rotate(7deg) translateY(4px);
+  transform: rotate(6deg) translateY(3px);
 }
 .gc-blind {
   position: absolute;
@@ -2544,7 +2610,20 @@ html[data-theme="light"] .gc-feature {
     width: 154px;
   }
   .gc-tools {
-    gap: 5px;
+    gap: 4px;
+  }
+  .gc-holdem .gc-tools {
+    gap: 3px;
+    padding: 4px 6px;
+  }
+  .gc-holdem .gc-tools .gc-auto {
+    font-size: 10px;
+    padding: 3px 5px;
+  }
+  .gc-holdem .gc-tools .gc-tool,
+  .gc-holdem .gc-tools .link {
+    font-size: 9.5px;
+    padding: 3px 5px;
   }
   .gc-table-bar {
     gap: 6px;
@@ -2557,14 +2636,16 @@ html[data-theme="light"] .gc-feature {
     font-size: 10px;
   }
   .gc-holdem-center {
-    width: 200px;
+    width: 204px;
   }
   .gc-board {
     gap: 4px;
   }
-  .gc-board .gc-card.sm, .gc-card-slot {
-    width: 35px;
-    height: 49px;
+  .gc-holdem .gc-board .gc-card.sm,
+  .gc-board .gc-card.sm,
+  .gc-card-slot {
+    width: 37px;
+    height: 52px;
   }
   .gc-holdem .gc-seat {
     width: 66px;
@@ -2591,7 +2672,7 @@ html[data-theme="light"] .gc-feature {
     min-height: 340px;
   }
   .gc-holdem .gc-felt {
-    min-height: 380px;
+    min-height: 364px;
   }
   .gc-card.lg {
     width: 62px;
@@ -2702,18 +2783,26 @@ html[data-theme="light"] .gc-feature {
   position: absolute;
   right: -4px;
   top: -4px;
-  width: 16px;
-  height: 16px;
+  width: 15px;
+  height: 15px;
   border-radius: 50%;
   background: rgba(24, 14, 48, .85);
   border: 1px solid rgba(255, 214, 122, .6);
   display: grid;
   place-items: center;
   font-style: normal;
-  font-size: 9px;
+  font-size: 8px;
   line-height: 1;
-  z-index: 3;
+  z-index: 2;
   pointer-events: none;
+}
+.gc-dealer {
+  z-index: 4;
+}
+.gc-holdem .gc-seat.gc-has-dealer .gc-gift-dot {
+  right: auto;
+  left: -4px;
+  top: -4px;
 }
 .gc-chat-btn {
   flex: none;
@@ -3061,4 +3150,387 @@ html[data-theme="light"] .gc-feature {
 .gc-rank-cards .gc-card.xs .gc-card-suit {
   font-size: 12px;
 }
+
+/* Pro Hold'em UX: persistent action pills, inline raise bar, pre-actions, runout flip, odds & action log */
+.gc-seat-status.gc-act-check {
+  background: rgba(25, 135, 84, .92);
+  border-color: rgba(105, 240, 174, .75);
+  color: #e6fff3;
+}
+.gc-seat-status.gc-act-call {
+  background: rgba(34, 102, 214, .92);
+  border-color: rgba(130, 186, 255, .75);
+  color: #eaf4ff;
+}
+.gc-seat-status.gc-act-bet,
+.gc-seat-status.gc-act-raise {
+  background: linear-gradient(135deg, #b568ff, #f2b741);
+  border-color: #ffe7a0;
+  color: #1f0a35;
+}
+.gc-seat-status.gc-act-all_in {
+  background: linear-gradient(135deg, #ff5b7f, #ff8f3f);
+  border-color: #ffd1a6;
+  color: #fff;
+  box-shadow: 0 0 10px rgba(255, 91, 127, .6);
+}
+.gc-seat-status.gc-act-fold {
+  background: rgba(68, 66, 86, .85);
+  border-color: rgba(255, 255, 255, .18);
+  color: #b7b3cc;
+}
+.gc-allin-seat .gc-avatar-ring {
+  box-shadow: 0 0 0 2px #ff7b6b, 0 0 18px rgba(255, 92, 138, .65);
+}
+.gc-street-pill {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  color: #e8defc;
+  background: rgba(22, 7, 46, .56);
+  border: 1px solid rgba(255, 224, 150, .28);
+  border-radius: 99px;
+  padding: 1px 10px;
+  line-height: 15px;
+}
+.gc-runout-pill {
+  color: #ffe7a0;
+  background: linear-gradient(135deg, rgba(255, 92, 138, .38), rgba(242, 193, 78, .34));
+  border-color: rgba(255, 214, 122, .7);
+  box-shadow: 0 0 14px rgba(255, 118, 122, .45);
+}
+.gc-pos-tag {
+  display: inline-block;
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 14px;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: rgba(114, 152, 255, .24);
+  border: 1px solid rgba(154, 188, 255, .5);
+  color: #d8e7ff;
+  white-space: nowrap;
+}
+.gc-odds-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 16px;
+  line-height: 16px;
+  padding: 0 7px;
+  border-radius: 99px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #bde6ff;
+  background: rgba(58, 160, 255, .2);
+  border: 1px solid rgba(120, 198, 255, .45);
+  vertical-align: top;
+}
+.gc-card-dim {
+  opacity: .56;
+  filter: saturate(.72);
+}
+.gc-card-flip {
+  animation: gc-board-flip .36s cubic-bezier(.22, .85, .36, 1) both;
+}
+@keyframes gc-board-flip {
+  0% {
+    opacity: 0;
+    transform: perspective(260px) rotateY(-80deg) translateY(-10px) scale(.86);
+  }
+  100% {
+    opacity: 1;
+    transform: perspective(260px) rotateY(0) translateY(0) scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gc-card-flip {
+    animation: none !important;
+  }
+}
+
+/* Inline Hold'em raise panel: floats inside the lower dock above action buttons, never covering community cards or pushing the viewport */
+.gc-raise-inline {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: 84px;
+  z-index: 12;
+  padding: 8px 10px;
+  border-radius: 16px;
+  background: linear-gradient(155deg, rgba(46, 17, 94, .97), rgba(22, 7, 50, .98));
+  border: 1px solid rgba(255, 214, 122, .58);
+  box-shadow: 0 -6px 24px rgba(10, 0, 28, .66), 0 8px 24px rgba(10, 0, 28, .55), inset 0 1px 0 rgba(255, 255, 255, .22);
+  backdrop-filter: blur(16px);
+  animation: gc-raise-pop .16s ease-out both;
+}
+@keyframes gc-raise-pop {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@media (max-height:760px) {
+  .gc-raise-inline {
+    bottom: 76px;
+    padding: 7px 9px;
+  }
+}
+.gc-raise-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.gc-raise-title {
+  font-size: 11px;
+  color: #d6c8f5;
+  font-weight: 700;
+}
+.gc-raise-num {
+  font-size: 16px;
+  font-weight: 900;
+  color: #ffe28a;
+  margin-right: auto;
+}
+.gc-raise-num small {
+  font-size: 11px;
+  font-weight: 700;
+  color: #bde6ff;
+}
+.gc-raise-close {
+  width: 24px;
+  height: 24px;
+  border-radius: 99px;
+  border: 1px solid rgba(255, 255, 255, .2);
+  background: rgba(255, 255, 255, .1);
+  color: #fff;
+  font-size: 12px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.gc-raise-presets {
+  display: flex;
+  gap: 5px;
+  margin-bottom: 7px;
+}
+.gc-preset-btn {
+  flex: 1;
+  min-width: 0;
+  height: 27px;
+  border-radius: 9px;
+  border: 1px solid rgba(196, 176, 255, .32);
+  background: rgba(255, 255, 255, .09);
+  color: #efe9ff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 0 3px;
+  white-space: nowrap;
+}
+.gc-preset-btn.on {
+  background: linear-gradient(135deg, #ffe597, #e4a124);
+  border-color: #fff0bd;
+  color: #2c1700;
+  box-shadow: 0 2px 10px rgba(242, 193, 78, .45);
+}
+.gc-raise-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.gc-raise-slider-row .gc-range {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  accent-color: #f2c14e;
+}
+.gc-step-btn {
+  width: 28px;
+  height: 28px;
+  flex: none;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, .26);
+  background: rgba(255, 255, 255, .12);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+}
+.gc-raise-go {
+  flex: none;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 10px;
+  border: 1px solid #fff0bd;
+  background: linear-gradient(135deg, #ffe494, #e19d1d);
+  color: #2b1600;
+  font-size: 12px;
+  font-weight: 900;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(242, 193, 78, .42);
+}
+.gc-raise-go.allin {
+  border-color: #ffc2cf;
+  background: linear-gradient(135deg, #ff6b81, #ff8f3f);
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(255, 92, 138, .55);
+}
+.gc-action.alt.on {
+  box-shadow: 0 0 0 2px #ffe494, 0 6px 18px rgba(242, 193, 78, .45);
+}
+
+/* Pre-action toggle row when waiting for your turn */
+.gc-preactions {
+  display: flex;
+  gap: 6px;
+}
+.gc-pre-btn {
+  flex: 1;
+  min-width: 0;
+  min-height: 44px;
+  border-radius: 13px;
+  border: 1px solid rgba(255, 255, 255, .24);
+  background: rgba(255, 255, 255, .1);
+  color: #ece6ff;
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 6px 4px;
+  white-space: nowrap;
+}
+.gc-pre-btn i {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border-radius: 4px;
+  border: 1.5px solid rgba(255, 255, 255, .45);
+  background: rgba(0, 0, 0, .2);
+  display: inline-block;
+  position: relative;
+}
+.gc-pre-btn.on {
+  background: linear-gradient(135deg, rgba(123, 140, 255, .42), rgba(176, 123, 255, .42));
+  border-color: #c8b8ff;
+  color: #fff;
+  box-shadow: 0 4px 14px rgba(123, 140, 255, .36);
+}
+.gc-pre-btn.on i {
+  border-color: #ffe28a;
+  background: #ffe28a;
+}
+.gc-pre-btn.on i::after {
+  content: "";
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  width: 4px;
+  height: 7px;
+  border: solid #2a1400;
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg);
+}
+.gc-pre-btn:disabled {
+  opacity: .38;
+}
+
+/* Action log sheet */
+.gc-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 52vh;
+  overflow-y: auto;
+  margin-bottom: 12px;
+}
+.gc-log-group {
+  padding: 8px 10px;
+  border-radius: 13px;
+  background: var(--glass);
+  border: 1px solid var(--line);
+}
+.gc-log-street {
+  font-size: 11px;
+  font-weight: 800;
+  color: #ffe28a;
+  margin-bottom: 6px;
+}
+.gc-log-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 0;
+  font-size: 12px;
+  border-top: 1px dashed rgba(255, 255, 255, .08);
+}
+.gc-log-row:first-of-type {
+  border-top: 0;
+}
+.gc-log-row b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gc-log-act {
+  margin-left: auto;
+  padding: 1px 8px;
+  border-radius: 99px;
+  font-size: 11px;
+  font-weight: 700;
+  background: rgba(255, 255, 255, .12);
+  color: #fff;
+  white-space: nowrap;
+}
+.gc-log-act.gc-act-check { background: rgba(25, 135, 84, .35); color: #8ff5c0; }
+.gc-log-act.gc-act-call { background: rgba(58, 160, 255, .28); color: #b7dcff; }
+.gc-log-act.gc-act-bet,
+.gc-log-act.gc-act-raise { background: rgba(242, 193, 78, .28); color: #ffe28a; }
+.gc-log-act.gc-act-all_in { background: rgba(255, 92, 138, .35); color: #ffc2d4; }
+.gc-log-act.gc-act-fold { background: rgba(255, 255, 255, .1); color: #aca7c2; }
+
+/* My-turn visual emphasis & compact hole-card reminder on inline raise bar */
+.gc-dock.gc-my-turn {
+  border-color: rgba(255, 214, 122, .72);
+  box-shadow: 0 -10px 30px rgba(242, 193, 78, .28), 0 -4px 18px rgba(67, 211, 158, .22), inset 0 1px 0 rgba(255, 232, 160, .65);
+}
+.gc-dock.gc-turn-pulse {
+  animation: gc-turn-flash .85s ease-out 2;
+}
+@keyframes gc-turn-flash {
+  0%, 100% {
+    box-shadow: 0 -10px 30px rgba(242, 193, 78, .28), inset 0 1px 0 rgba(255, 232, 160, .65);
+  }
+  50% {
+    box-shadow: 0 -12px 38px rgba(67, 211, 158, .52), 0 -4px 22px rgba(255, 214, 122, .52), inset 0 2px 0 rgba(255, 245, 196, .95);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gc-dock.gc-turn-pulse {
+    animation: none !important;
+  }
+}
+.gc-raise-hole {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, .92);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .3);
+  font-size: 11px;
+  font-weight: 900;
+  line-height: 16px;
+}
+.gc-raise-hole em {
+  font-style: normal;
+  color: #1a1b2a;
+}
+.gc-raise-hole em.red {
+  color: #d62839;
+}
+
+
 
