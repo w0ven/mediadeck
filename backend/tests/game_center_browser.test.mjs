@@ -460,7 +460,7 @@ async function holdemAction(env, pages, id, action, amount) {
   await page.locator(`[data-gc-action="${action}"]`).click();
   if (['bet', 'raise'].includes(action)) {
     if (amount === 'half') await page.locator('[data-gc-size="0.5"]').click();
-    else await page.locator('.gc-sheet .gc-range').evaluate((el, value) => {
+    else await page.locator('[data-gc-raise-inline] .gc-range, .gc-sheet .gc-range').evaluate((el, value) => {
       el.value = String(value); el.dispatchEvent(new Event('input', { bubbles: true }));
     }, amount ?? legal.min_raise_to);
     await page.locator('[data-gc-raise-confirm]').click();
@@ -607,6 +607,41 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
     await host.unroute('**/game-assets/dealer-normal.webp');
     await host.reload();
     await host.locator('.gc-croupier.has-art').waitFor();
+
+    // Verify pro Hold'em UX: inline raise bar (no blocking sheet), pre-action auto-execution, BB mode toggle, action log, and sound haptic toggle.
+    test_pro_ux: {
+      // Wait for hand 2, check BB mode toggle on host
+      await host.locator('[data-gc-bb-toggle]').first().click();
+      assert.match(await host.locator('.gc-pot-btn').innerText(), /BB/);
+      await host.locator('[data-gc-bb-toggle]').first().click();
+      assert(!/BB/.test(await host.locator('.gc-pot-btn').innerText()));
+      // Open inline raise panel on host without spawning a modal sheet; verify presets & +/- steppers work
+      await host.locator('[data-gc-action="bet"]').click();
+      await host.locator('[data-gc-raise-inline]').waitFor();
+      assert.equal(await host.locator('.gc-sheet').count(), 0, 'Holdem raise uses inline bar rather than blocking sheet');
+      await shots(host, '15-holdem-inline-raise');
+      await host.locator('[data-gc-raise-step="10"]').click();
+      await host.locator('[data-gc-raise-cancel]').click();
+      assert.equal(await host.locator('[data-gc-raise-inline]').count(), 0);
+      // Open action log sheet and verify recorded actions
+      await host.locator('[data-gc-action-log]').click();
+      await host.locator('.gc-log-list .gc-log-row').first().waitFor();
+      await closeSheet(host);
+      // Verify pre-action bar on waiting player (guest = user 2)
+      await syncTable(guest, await tableFor(env, id, 2));
+      await guest.locator('[data-gc-pre="check_fold"]').waitFor();
+      await shots(guest, '16-holdem-preactions');
+      await guest.locator('[data-gc-pre="check_fold"]').click();
+      await guest.locator('[data-gc-pre="check_fold"].on').waitFor();
+      // Cancel pre-action before continuing the existing timeout test cleanly
+      await guest.locator('[data-gc-pre="check_fold"]').click();
+      assert.equal(await guest.locator('[data-gc-pre].on').count(), 0);
+      // Verify my-turn visual emphasis & haptic/sound toggle in sound sheet
+      assert.equal(await host.locator('.gc-dock.gc-my-turn').count(), 1);
+      await host.locator('[data-gc-sound]').click();
+      await host.locator('[data-gc-sound-kind="haptic"]').waitFor();
+      await closeSheet(host);
+    }
 
     await env.call({ kind: 'advance', table: id, deadline: 'turn' });
     await host.locator('[data-gc-takeover-sheet]').waitFor();

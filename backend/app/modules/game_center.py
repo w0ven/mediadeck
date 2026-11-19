@@ -283,7 +283,14 @@ class GameCenter:
     def arm_auto(self, table, clock):
         current = self.games[table['game']].engine.current_player(table['hand']['engine'])
         p = next(p for p in table['seats'] if p['player'] == current)
-        table['auto_at'] = min(clock + 1.5, table['turn_deadline']) if p['auto'] or p['bot'] else None
+        if p['bot'] and table['game'] == 'holdem':
+            # Natural human-like pacing for practice bots (0.9s–2.0s) while deterministic human auto stays 1.5s.
+            delay = 0.9 + (hash((table['id'], table['hand']['number'], table['hand']['turn'], p['player'])) % 12) * 0.1
+            table['auto_at'] = min(clock + round(delay, 2), table['turn_deadline'])
+        elif p['auto'] or p['bot']:
+            table['auto_at'] = min(clock + 1.5, table['turn_deadline'])
+        else:
+            table['auto_at'] = None
 
     def arm_turn(self, table, clock):
         table['turn_deadline'] = clock + table['rules']['step_seconds']

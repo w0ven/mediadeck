@@ -813,3 +813,21 @@ def test_member_facing_game_modules_do_not_brand_the_admin_panel():
     root = Path(__file__).parents[1] / 'app/modules'
     for name in ['game_center.py', 'game_center_holdem.py', 'game_center_zjh.py', 'zjh_engine.py', 'holdem_engine.py']:
         assert 'MediaDeck' not in (root / name).read_text()
+
+
+def test_action_log_last_actions_and_allin_runout_metadata(hc):
+    t = start(hc, 2, buy=100)
+    t = act(hc, t, 'raise', 6)
+    hand = t['hand']
+    assert len(hand['action_log']) == 1
+    first = hand['action_log'][0]
+    assert first['street'] == 'preflop' and first['action'] == 'raise' and first['to'] == 6
+    assert hand['last_actions'][first['player']]['action'] == 'raise'
+    # All-in call from preflop triggers a full runout from 0 board cards.
+    t = act(hc, t, 'all_in')
+    t = act(hc, t, 'call')
+    assert t['hand'] is None and t['last_hand'] is not None
+    assert t['last_hand']['runout_from'] == 0
+    assert len(t['last_hand']['action_log']) == 3
+    assert t['last_hand']['action_log'][-1]['action'] == 'call'
+
