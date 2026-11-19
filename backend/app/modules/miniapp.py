@@ -126,12 +126,16 @@ def _rank_label(row: dict[str, Any], profiles: dict[str, dict[str, str]]) -> str
 def _level_tag(member: dict[str, Any] | None) -> dict[str, Any] | None:
     if not member:
         return None
-    if member.get('group_id') == WHITELIST_GROUP_ID:
-        return {'whitelist': True}
     level = member.get('activity_level')
-    if not level:
+    is_wl = member.get('group_id') == WHITELIST_GROUP_ID
+    if not is_wl and not level:
         return None
-    return {'level': level['level'], 'name': level['name'], 'icon': level['icon']}
+    tag: dict[str, Any] = {}
+    if is_wl:
+        tag['whitelist'] = True
+    if level:
+        tag.update({'level': level['level'], 'name': level['name'], 'icon': level['icon']})
+    return tag
 
 
 def _library_url(base: str, item_id: str) -> str:

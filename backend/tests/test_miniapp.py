@@ -491,3 +491,19 @@ def test_page_versions_every_cdn_cached_script_and_style(client, monkeypatch):
     for asset in ('app.css', 'app.js', 'games.css', 'games.js', 'lottery.css', 'lottery.js', 'ux.js'):
         assert f'/app/assets/{asset}?v=abc1234' in html
     assert '/app/assets/games.js"' not in html and '/app/assets/games.css"' not in html
+
+
+def test_whitelist_member_keeps_level_tag_in_rankings(client):
+    from app.modules.miniapp import _level_tag
+
+    wl_member = {
+        'group_id': 'whitelist',
+        'activity_level': {'level': 4, 'name': '元婴', 'icon': '⚔️'},
+    }
+    tag = _level_tag(wl_member)
+    assert tag == {'whitelist': True, 'level': 4, 'name': '元婴', 'icon': '⚔️'}
+    assert _level_tag({'group_id': 'whitelist'}) == {'whitelist': True}
+    assert _level_tag({'group_id': 'standard', 'activity_level': {'level': 2, 'name': '筑基', 'icon': '🗡️'}}) == {
+        'level': 2, 'name': '筑基', 'icon': '🗡️',
+    }
+

@@ -2967,3 +2967,98 @@ html[data-theme="light"] .gc-feature {
   color: #1f1100 !important;
   font-weight: 800;
 }
+.gc-rank-list {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.gc-rank-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .14);
+}
+.gc-rank-row.top {
+  background: linear-gradient(135deg, rgba(242, 193, 78, .14), rgba(140, 88, 255, .12));
+  border-color: rgba(242, 193, 78, .35);
+}
+.gc-rank-row.cur {
+  background: linear-gradient(135deg, rgba(255, 214, 102, .24), rgba(120, 96, 255, .24));
+  border-color: #ffd97d;
+  box-shadow: 0 0 14px rgba(255, 214, 102, .28);
+}
+.gc-rank-row.gc-rank-special {
+  border-style: dashed;
+  border-color: rgba(163, 173, 255, .4);
+}
+.gc-rank-row.gc-rank-special.on {
+  background: rgba(92, 214, 255, .12);
+  border-color: rgba(120, 230, 255, .55);
+}
+.gc-rank-meta {
+  min-width: 0;
+  flex: 1;
+}
+.gc-rank-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 2px;
+  font-size: 13px;
+  color: #fff;
+}
+.gc-rank-no {
+  display: inline-grid;
+  place-items: center;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 800;
+  color: #241200;
+  background: linear-gradient(135deg, #ffe7a0, #e6a832);
+  flex: none;
+}
+.gc-rank-row:not(.top) .gc-rank-no {
+  color: #efe9ff;
+  background: rgba(255, 255, 255, .16);
+}
+.gc-rank-badge {
+  font-size: 10px;
+  font-weight: 700;
+  padding: 1px 6px;
+  border-radius: 99px;
+  color: #241200;
+  background: linear-gradient(135deg, #ffe7a0, #f2b741);
+  white-space: nowrap;
+}
+.gc-rank-badge.off {
+  color: #d2c9ec;
+  background: rgba(255, 255, 255, .12);
+}
+.gc-rank-cards {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.gc-rank-cards .gc-card.xs {
+  width: 24px;
+  height: 34px;
+  border-radius: 4px;
+  margin: 0;
+}
+.gc-rank-cards .gc-card.xs .gc-card-rank {
+  font-size: 9px;
+  line-height: 1;
+  top: 2px;
+  left: 2px;
+}
+.gc-rank-cards .gc-card.xs .gc-card-suit {
+  font-size: 12px;
+}
+

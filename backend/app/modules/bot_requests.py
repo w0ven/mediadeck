@@ -311,7 +311,7 @@ class RequestBotMixin:
                         + '\n' + row['media_label']
                         + (' · ' + self._rq_season_label(row['demand'])
                            if row['media_type'] == 'tv' and row['demand']['scope'] in ('series', 'season') else '')
-                        + ('\n求片人：' + escape(row['username']) if mode == 'staff' else ''))
+                        + ('\n求片人：' + self._rq_requester_label(row) if mode == 'staff' else ''))
             label = f"#{row['id']} {row['display_title']} · {row['status_label']}"
             keys.append([button(short_label(label, 55), f"view:{row['id']}")])
         if not rows:
@@ -542,6 +542,29 @@ class RequestBotMixin:
         stamp = time.strftime('%Y-%m-%d %H:%M', time.localtime(event['created_at']))
         return f"处理人：{escape(name)}\n处理时间：{stamp}"
 
+    def _rq_requester_label(self, row, *, compact=False):
+        acct = short_label(row['username'], 30) if compact else str(row.get('username') or '—')
+        member = self._members.get(row["emby_user_id"]) if self._members and row.get("emby_user_id") else None
+        tid = str((member or {}).get("tg_user_id") or row.get("tg_user_id") or "")
+        profiles = getattr(self, "_tg_profiles", None) or {}
+        profile = profiles.get(tid) or {}
+        nick = str(profile.get("display_name") or (member or {}).get("tg_display_name") or row.get("tg_display_name") or "").strip()
+        handle = str(profile.get("username") or (member or {}).get("tg_username") or row.get("tg_username") or "").strip().lstrip("@")
+        parts = [escape(acct)]
+        tg_bits = []
+        if nick:
+            if tid.isascii() and tid.isdigit() and 0 < int(tid) < 2**63:
+                tg_bits.append(f'<a href="tg://user?id={int(tid)}">{escape(short_label(nick, 30))}</a>')
+            else:
+                tg_bits.append(escape(short_label(nick, 30)))
+        if handle:
+            tg_bits.append(f"@{escape(handle)}")
+        elif not nick and tid.isascii() and tid.isdigit() and 0 < int(tid) < 2**63:
+            return f'<a href="tg://user?id={int(tid)}">{escape(acct)}</a>'
+        if tg_bits:
+            return f"{parts[0]}（{' · '.join(tg_bits)}）"
+        return parts[0]
+
     def _rq_body(self, row, *, compact=False, requirements=True, event_id=None, snapshot=False):
         if compact:
             row = dict(row, title=short_label(row['title'], 40) if row['title'] else '',
@@ -551,7 +574,7 @@ class RequestBotMixin:
         status = {"open": "🟠 待处理", "accepted": "✅ 已处理 · 已接受",
                   "rejected": "⛔ 已处理 · 已拒绝", "cancelled": "↩ 已处理 · 已撤回"}[row["status"]]
         body = f"<b>{status}</b>\n{self._rq_title(row)}\n{row['media_label']} · #{row['id']}\n"
-        body += "求片人：" + escape(row["username"])
+        body += "求片人：" + self._rq_requester_label(row, compact=compact)
         demand = "\n".join(line for line in row["demand_text"].splitlines()
                            if not line.endswith("：无要求"))
         if requirements and not compact and row["media_type"] == "tv" and row["demand"]["scope"] in ("series", "season"):

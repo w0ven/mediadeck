@@ -216,7 +216,7 @@
 <b>🟠 待处理</b>
 <a href="https://www.themoviedb.org/movie/551">搏击俱乐部 (1999)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 已提交，扣 1 次。
@@ -232,7 +232,7 @@
 <b>🟠 待处理</b>
 <a href="https://www.themoviedb.org/movie/551">庆州纪行 (2026)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 ```
 
@@ -251,7 +251,7 @@
 <b>待处理</b> · #1
 庆州纪行 (2026)
 电影
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 ```
 
 按钮：
@@ -288,7 +288,7 @@
 <b>⛔ 已处理 · 已拒绝</b>
 <a href="https://www.themoviedb.org/movie/551">庆州纪行 (2026)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 处理人：up1
@@ -305,7 +305,7 @@
 <b>⛔ 已处理 · 已拒绝</b>
 <a href="https://www.themoviedb.org/movie/551">庆州纪行 (2026)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 
 处理人：up1
 处理时间：2026-10-07 02:00
@@ -321,7 +321,7 @@
 <b>⛔ 已处理 · 已拒绝</b>
 <a href="https://www.themoviedb.org/movie/551">庆州纪行 (2026)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 处理人：up1
@@ -338,7 +338,7 @@
 <b>⛔ 已处理 · 已拒绝</b>
 <a href="https://www.themoviedb.org/movie/551">庆州纪行 (2026)</a>
 电影 · #1
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 处理人：up1
@@ -402,7 +402,7 @@
 <b>✅ 已处理 · 已接受</b>
 <a href="https://www.themoviedb.org/tv/1396">测试剧集 (1999)</a>
 剧集 · #2
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 季范围：第1、3、5-7季
 
 处理人：up1
@@ -419,7 +419,7 @@
 <b>✅ 已处理 · 已接受</b>
 <a href="https://www.themoviedb.org/tv/1396">测试剧集 (1999)</a>
 剧集 · #2
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 
 处理人：up1
 处理时间：2026-10-07 02:00
@@ -435,7 +435,7 @@
 <b>⛔ 已处理 · 已拒绝</b>
 <a href="https://www.themoviedb.org/tv/1396">测试剧集 (1999)</a>
 剧集 · #2
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 
 处理人：admin1
 处理时间：2026-10-07 02:00
@@ -451,7 +451,7 @@
 <b>✅ 已处理 · 已接受</b>
 <a href="https://www.themoviedb.org/tv/1396">测试剧集 (1999)</a>
 剧集 · #2
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 
 处理人：up1
 处理时间：2026-10-07 02:00
@@ -467,7 +467,7 @@
 <b>🟠 待处理</b>
 <a href="https://www.themoviedb.org/movie/560">搏击俱乐部 (1999)</a>
 电影 · #3
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 ```
 
@@ -481,7 +481,7 @@
 <b>🟠 待处理</b>
 <a href="https://www.themoviedb.org/movie/560">搏击俱乐部 (1999)</a>
 电影 · #3
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 已关注原单，未扣次。
@@ -496,7 +496,7 @@
 <b>↩ 已处理 · 已撤回</b>
 <a href="https://www.themoviedb.org/movie/560">搏击俱乐部 (1999)</a>
 电影 · #3
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 电影整片
 
 处理人：u1
@@ -512,7 +512,7 @@
 <b>↩ 已处理 · 已撤回</b>
 <a href="https://www.themoviedb.org/movie/560">搏击俱乐部 (1999)</a>
 电影 · #3
-求片人：u1
+求片人：u1（<a href="tg://user?id=900">测试</a>）
 
 处理人：u1
 处理时间：2026-10-07 02:00

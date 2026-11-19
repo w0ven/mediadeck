@@ -2754,9 +2754,11 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._edit(chat_id, message_id, f"❌ 转账失败：{_public_error(exc)}",
                              self.member_menu())
             return
+        sender_name = escape(str(member.get('username') or '—'))
+        to_name = escape(str(extra.get('to_name') or '—'))
         await self._edit(
             chat_id, message_id,
-            f"✅ <b>转账成功</b>\n收款人：{escape(str(extra.get('to_name') or '—'))}\n"
+            f"✅ <b>转账成功</b>\n付款人：<b>{sender_name}</b> ➜ 收款人：<b>{to_name}</b>\n"
             f"转出：<b>{result.get('amount')}</b>"
             + (f"（手续费 {result.get('fee')}）" if result.get("fee") else "")
             + f"\n对方到账：<b>{result.get('received')}</b>\n"
