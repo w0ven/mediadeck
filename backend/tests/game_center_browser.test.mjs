@@ -376,6 +376,7 @@ test('real ZJH member UI, host/ready/action/auto, deep links, native SSE reconne
     const finisher = t.hand.current_player === t.me.player ? host : guest;
     await closeSheet(finisher);
     await finisher.locator('[data-gc-action="fold"]').click();
+    await waitRevision(finisher, t.revision + 1);
     t = (await env.request(1, '/tables/' + id)).table;
     assert.equal(t.phase, 'waiting'); assert.equal(t.me.wallet.frozen, 0);
     await waitRevision(host, t.revision);
