@@ -465,12 +465,26 @@ class UsageSampler:
             return
         reported = payload.get('PlayState') if isinstance(payload.get('PlayState'), dict) else {}
         position = payload.get('PositionTicks', reported.get('PositionTicks'))
-        paused = payload.get('IsPaused', reported.get('IsPaused'))
+        missing_pause = 'IsPaused' not in payload and 'IsPaused' not in reported
+        event_name = str(payload.get('EventName') or '').strip().lower()
+        if missing_pause:
+            paused = event_name in ('pause', 'paused')
+        else:
+            paused = payload.get('IsPaused', reported.get('IsPaused'))
         rate = payload.get('PlaybackRate', reported.get('PlaybackRate'))
         missing_rate = 'PlaybackRate' not in payload and 'PlaybackRate' not in reported
+        # Some Emby items carry a stale/truncated probe duration (e.g. 15s for a
+        # full episode); trust the larger positive runtime when the player also
+        # reports the container's actual RunTimeTicks.
+        reported_runtime = _number(payload.get('RunTimeTicks', reported.get('RunTimeTicks')))
+        effective_runtime = state.get('runtime_ticks')
+        state_runtime = _number(effective_runtime)
+        if (reported_runtime is not None and reported_runtime > 0
+                and (state_runtime is None or state_runtime <= 0 or reported_runtime > state_runtime)):
+            effective_runtime = reported_runtime
         observation = watch_observation({
             'DeviceId': device, 'PlaySessionId': play,
-            'NowPlayingItem': {'Id': item, 'RunTimeTicks': state.get('runtime_ticks')},
+            'NowPlayingItem': {'Id': item, 'RunTimeTicks': effective_runtime},
             'PlayState': {'PositionTicks': position, 'IsPaused': paused, 'PlaybackRate': rate},
             'LastActivityDate': datetime.fromtimestamp(received_at, UTC).isoformat()}, now)
         observation['accepted_report'] = True
@@ -479,7 +493,7 @@ class UsageSampler:
             if observation['reason'] == 'rate_unknown':
                 observation['reason'] = ('' if -2 <= now-received_at <= WATCH_HEARTBEAT_MAX_AGE
                                          else 'heartbeat_stale')
-        if payload.get('IsSeeking') is True or str(payload.get('EventName') or '').lower() in ('seek', 'seeking'):
+        if payload.get('IsSeeking') is True or event_name in ('seek', 'seeking'):
             observation['reason'] = 'seek_or_buffering'
         signature = [observation['position'], paused, observation['rate']]
         if signature == state.get('report_signature') and not observation['reason']:
