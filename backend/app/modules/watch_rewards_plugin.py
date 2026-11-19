@@ -19,4 +19,13 @@ class WatchRewardsPlugin(Plugin):
             return {"ok": True, "状态": "未启用，不发放奖励"}
         service = getattr(self.ctx, "activity", None) or ActivityService(self.ctx.db, self.ctx.points)
         await run_usage_io(service.activate)
-        return await run_usage_io(service.settle)
+        result = await run_usage_io(service.settle)
+        promotions = result.pop("promotions", None) or []
+        bot = getattr(self.ctx, "telegram", None)
+        members = getattr(self.ctx, "members", None)
+        if promotions and bot is not None and members is not None and hasattr(bot, "notify_realm_breakthrough"):
+            for uid, old_lv, new_lv in promotions:
+                member = await run_usage_io(members.get, uid)
+                if member:
+                    await bot.notify_realm_breakthrough(member, old_lv, new_lv, granted_special=False)
+        return result

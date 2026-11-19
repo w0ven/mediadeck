@@ -88,6 +88,7 @@ class ActivityService:
                 conn.execute("DELETE FROM activity_watch_pending WHERE run_key=? AND ended_at=?",
                              (row["run_key"], row["ended_at"]))
             paid = grown = 0
+            promotions: list[tuple[str, int, int]] = []
             for uid, day in sorted(changed):
                 seconds = conn.execute(
                     "SELECT COALESCE(SUM(ended_at-started_at),0) FROM activity_watch_intervals "
@@ -98,12 +99,20 @@ class ActivityService:
                 delta = points - (prior["points"] if prior else 0)
                 growth_delta = growth - (prior["growth"] if prior else 0)
                 if delta:
+                    before_growth = conn.execute(
+                        "SELECT COALESCE(SUM(delta),0) FROM growth_ledger WHERE emby_user_id=?",
+                        (uid,)).fetchone()[0]
                     ref = f"{WATCH_RULE}:{day}:{steps}"
                     self.points._apply(conn, uid, delta, "watch.reward", ref, "activity", int(now))
                     conn.execute("INSERT INTO growth_ledger(emby_user_id,delta,reason,ref,created_at) "
                                  "VALUES(?,?,?,?,?)", (uid, growth_delta, "watch.reward", ref, int(now)))
                     paid += delta
                     grown += growth_delta
+                    if growth_delta > 0:
+                        old_lv = level_for(before_growth)["level"]
+                        new_lv = level_for(before_growth + growth_delta)["level"]
+                        if new_lv > old_lv:
+                            promotions.append((uid, old_lv, new_lv))
                 conn.execute(
                     "INSERT INTO activity_watch_days VALUES(?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(emby_user_id,day) DO UPDATE SET "
@@ -112,7 +121,7 @@ class ActivityService:
                     (uid, day, seconds, steps, points, growth, WATCH_RULE, int(now)))
             pending = conn.execute("SELECT COUNT(*) FROM activity_watch_pending").fetchone()[0]
             return {"ok": True, "active": True, "samples": len(rows), "days": len(changed),
-                    "points": paid, "growth": grown, "pending": pending}
+                    "points": paid, "growth": grown, "pending": pending, "promotions": promotions}
 
     @staticmethod
     def _union(conn, uid, day, start, end):

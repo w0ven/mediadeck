@@ -112,7 +112,8 @@ def test_activity_member_pages_escape_dynamic_text_and_fit_telegram(env, monkeyp
     for text in ('个人覆盖', '有效道具优先', '满10分钟', '自动结算', '免签到',
                  '到期停播', '72小时', '管理员开关和复核', '非发奖依据'):
         assert text not in details
-    assert all(len(button['callback_data'].encode()) <= 64 for row in keyboard for button in row)
+    assert all(len(button['callback_data'].encode()) <= 64
+               for row in keyboard for button in row if 'callback_data' in button)
 
 
 @pytest.mark.parametrize('change,reason', [('money','还差'),('early','72 小时'),('deleting','待确认')])
@@ -202,7 +203,7 @@ def test_auto_renew_explains_opt_in_before_confirm_and_can_disable(env, entry):
         else:
             mid = await private_command(e, entry)
         if entry != '开启自动保号':
-            assert {'activity:auto:on', 'activity:renew'} <= {b['callback_data'] for b in actions(e, mid)}
+            assert {'activity:auto:on', 'activity:renew'} <= {b.get('callback_data') for b in actions(e, mid)}
             assert '🤖 开启自动保号' in {b['text'] for b in actions(e, mid)}
             await tap(e, 'activity:auto:on', mid)
         body = e.tg.text(VIEWER, mid)
@@ -278,7 +279,7 @@ def test_whitelist_and_worn_title_in_bot_card_and_no_web_code(env):
         assert '⋆ <b>凡尘 <tg-emoji emoji-id="6048768009651101568">🌱</tg-emoji> 清风明月</b> ⋆' in body and '♾ 永久有效' in body
         assert not {'activity:renew', 'activity:auto:on', 'activity:auto:off'} & {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'activity:status', mid)
-        assert 'activity:renew' not in {b['callback_data'] for b in actions(e, mid)}
+        assert 'activity:renew' not in {b.get('callback_data') for b in actions(e, mid)}
         await private_command(e, '/webaccount')
         assert '登录码' not in str(posted(e))
     asyncio.run(run())

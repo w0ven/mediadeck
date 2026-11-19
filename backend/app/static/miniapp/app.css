@@ -88,6 +88,18 @@ button{cursor:pointer}
 html[data-theme="light"] .hero{background:radial-gradient(260px 160px at 100% 0,color-mix(in srgb,var(--c) 45%,transparent),transparent 70%),linear-gradient(160deg,color-mix(in srgb,var(--b) 88%,#1a1f3d),color-mix(in srgb,var(--b) 50%,#1a1f3d))}
 .hero .sheen{position:absolute;inset:0;background:linear-gradient(115deg,transparent 30%,rgba(255,255,255,.10) 45%,transparent 60%);pointer-events:none}
 .hero .avatar{background:linear-gradient(135deg,var(--a),var(--b))}
+.avatar.aura{position:relative;overflow:visible}
+.avatar.aura img{border-radius:50%}
+.avatar.aura::after{content:"";position:absolute;inset:-3px;border-radius:50%;padding:2.5px;pointer-events:none;
+  -webkit-mask:linear-gradient(#fff 0 0) content-box,linear-gradient(#fff 0 0);-webkit-mask-composite:xor;mask-composite:exclude;
+  animation:auraSpin 6s linear infinite}
+.avatar.aura-hi::after{background:conic-gradient(from 0deg,#a855f7,#38bdf8,#fde047,#a855f7)}
+.avatar.aura-wl::after{background:conic-gradient(from 0deg,#38bdf8,#e0f2fe,#818cf8,#38bdf8);box-shadow:0 0 12px rgba(56,189,248,.55)}
+.avatar.aura-lv7::after{background:conic-gradient(from 0deg,#fef08a,#f59e0b,#fffbeb,#f59e0b,#fef08a);box-shadow:0 0 14px rgba(251,191,36,.65)}
+.avatar.aura-lv8::after{background:conic-gradient(from 0deg,#f9a8d4,#fde68a,#c084fc,#f472b6,#f9a8d4);box-shadow:0 0 16px rgba(244,114,182,.65)}
+.avatar.aura-lv9::after{inset:-4px;padding:3px;background:conic-gradient(from 0deg,#e0f2fe,#38bdf8,#c084fc,#67e8f9,#ffffff,#e0f2fe);box-shadow:0 0 18px rgba(56,189,248,.82),0 0 26px rgba(192,132,252,.5);animation-duration:4s}
+@keyframes auraSpin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion: reduce){.avatar.aura::after{animation:none}}
 
 .plaque{position:relative;display:inline-flex;align-items:center;gap:8px;padding:5px 18px;margin:2px 0;isolation:isolate;max-width:100%}
 .plaque::before{content:"";position:absolute;inset:0;z-index:-1;border-radius:6px;

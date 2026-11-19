@@ -49,3 +49,42 @@ def test_plaque_places_custom_emoji_outside_code_blocks_and_strips_cleanly() -> 
     assert "<tg-emoji" not in stripped
     assert "🐉 <code>Lv9 · 踏天</code>" in stripped
     assert "💠 <code>尊享白名单</code>" in stripped
+
+
+def test_strip_keyboard_emoji_ids_removes_custom_icons_cleanly() -> None:
+    from app.modules.realm_icons import strip_keyboard_emoji_ids
+    markup = {
+        "inline_keyboard": [
+            [{"text": "个人信息", "icon_custom_emoji_id": "6050688598766788438", "callback_data": "me"}],
+        ],
+    }
+    cleaned = strip_keyboard_emoji_ids(markup)
+    assert cleaned == {"inline_keyboard": [[{"text": "个人信息", "callback_data": "me"}]]}
+
+
+def test_watch_poster_renders_realm_badges_and_whitelist_together() -> None:
+    from app.modules.rank_poster import render_watch_poster
+    data = render_watch_poster(
+        [
+            {
+                "tg_display_name": "踏天尊者",
+                "tg_user_id": "101",
+                "seconds": 7200,
+                "plays": 5,
+                "group_id": "whitelist",
+                "activity_level": {"level": 9, "name": "踏天"},
+            },
+            {
+                "tg_display_name": "元婴剑修",
+                "tg_user_id": "102",
+                "seconds": 3600,
+                "plays": 2,
+                "group_id": "standard",
+                "activity_level": {"level": 4, "name": "元婴"},
+            },
+        ],
+        weekly=True,
+        when="2026-11-19",
+    )
+    assert data[:2] == b"\xff\xd8" and len(data) > 6000
+

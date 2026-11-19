@@ -10,7 +10,7 @@ from app.modules.bot_views import bandwidth_value, duration
 from app.modules.economy_rules import BEIJING, economy_write, encode
 from app.modules.levels import DAY
 from app.modules.member_devices import device_cap
-from app.modules.realm_icons import tg_level_emoji, tg_realm_emoji
+from app.modules.realm_icons import PACK_URL, custom_emoji_id, tg_level_emoji, tg_realm_emoji
 
 
 def beijing_stamp(value):
@@ -129,7 +129,10 @@ class ActivityBotMixin:
             rows.append([{'text':'⏳ 续期 30 天', 'callback_data':'activity:renew'},
                          {'text':'🛑 关闭自动保号' if info['auto_renew'] else '🤖 开启自动保号',
                           'callback_data':'activity:auto:off' if info['auto_renew'] else 'activity:auto:on'}])
-        rows += [[{'text':'◀ 我的账号','callback_data':'me'}, {'text':'🎒 背包','callback_data':'bag'}]]
+        rows += [
+            [{'text': '收藏全套境界表情包', 'icon_custom_emoji_id': custom_emoji_id('orn'), 'url': PACK_URL}],
+            [{'text': '◀ 我的账号', 'callback_data': 'me'}, {'text': '背包', 'icon_custom_emoji_id': custom_emoji_id('btn_bag'), 'callback_data': 'bag'}],
+        ]
         return rows
 
     def _activity_page(self, member, info):

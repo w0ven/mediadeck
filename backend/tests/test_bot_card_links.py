@@ -231,9 +231,9 @@ def test_interactive_code_picker_and_admin_preset_buttons_and_library_stats(env)
         umid = await command(env, '/start', chat=VIEWER, user=VIEWER)
         home_rows = [[b['text'] for b in row] for row in env.tg.message(VIEWER, umid)['reply_markup']['inline_keyboard']]
         assert home_rows == [
-            ['👤 个人信息', '📡 服务器线路'],
-            ['📊 媒体库统计', '🏆 观影/积分榜'],
-            ['🎬 求片中心', '🎒 背包与商城'],
+            ['个人信息', '服务器线路'],
+            ['媒体库统计', '观影/积分榜'],
+            ['求片中心', '背包与商城'],
         ]
         await click(env, 'me_nodes', umid, chat=VIEWER, user=VIEWER)
         nodes_text = env.tg.text(VIEWER, umid)

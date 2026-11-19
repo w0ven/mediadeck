@@ -11,7 +11,7 @@
   };
   const ORN = { 1: '⋆', 2: '✦', 3: '❖', 4: '❖', 5: '❖', 6: '❖', 7: '❖', 8: '❖', 9: '❖' };
   const REALM_ICON_BASE = '/app/assets/realm-icons';
-  const REALM_ICON_VER = 'v1';
+  const REALM_ICON_VER = 'v2';
   const realmIconUrl = (key) => `${REALM_ICON_BASE}/${key}.webp?r=${REALM_ICON_VER}`;
   const realmImg = (key, alt = '', cls = 'realm-ic') => `<img class="${cls}${key === 'lv9' ? ' is-lv9' : ''}" src="${realmIconUrl(key)}" alt="${esc(alt)}" decoding="async">`;
   const STATUS = {
@@ -131,6 +131,16 @@
     const text = String(name || '').replace(/^@/, '').trim();
     const ch = Array.from(text)[0] || '?';
     return esc(ch.toUpperCase());
+  }
+  function avatarAuraCls(tag) {
+    if (!tag) return '';
+    const lv = Number(tag.level) || 0;
+    if (lv >= 9) return 'aura aura-lv9';
+    if (lv === 8) return 'aura aura-lv8';
+    if (lv === 7) return 'aura aura-lv7';
+    if (tag.whitelist) return 'aura aura-wl';
+    if (lv >= 5) return 'aura aura-hi';
+    return '';
   }
   function face(name, url, cls = '', style = '') {
     const img = url ? `<img src="${esc(url)}" alt="" loading="lazy" onerror="this.remove()">` : '';
@@ -490,7 +500,7 @@
     setScreen(`
       <div class="hero ${cls}"><div class="sheen"></div>
         <div class="row" style="justify-content:flex-start;gap:12px">
-          ${face(me.name, me.avatar)}
+          ${face(me.name, me.avatar, avatarAuraCls(tag))}
           <div class="grow">
             <div style="font-weight:800;font-size:17px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(me.name)}</div>
             <div class="row" style="justify-content:flex-start;flex-wrap:wrap;gap:6px;margin-top:4px">
@@ -932,7 +942,7 @@
     if (!rows.length) { body.innerHTML = '<div class="empty">暂无排行数据</div>'; return; }
     const pod = (r, cls) => {
       const rk = cls === 'g' ? 1 : cls === 's' ? 2 : 3;
-      return r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar)}<span class="pod-rk num">${rk}</span>
+      return r ? `<div class="p ${cls}">${cls === 'g' ? '<span class="crown">👑</span>' : ''}${face(r.name, r.avatar, avatarAuraCls(r.tag))}<span class="pod-rk num">${rk}</span>
         <div class="small"><b>${esc(r.name)}</b></div>${r.tag ? `<div class="pod-tags">${lvTag(r.tag, true)}</div>` : ''}<div class="tiny num ${cls === 'g' ? 'gold' : 'muted'}">${value(r.value)}</div></div>` : '<div></div>';
     };
     const mine = data.mine;

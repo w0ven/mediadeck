@@ -124,7 +124,7 @@ def test_announcement_is_one_bold_poem_and_mentions_no_card_or_buttons(env, chat
     assert text.startswith('<b>') and any(text.startswith('<b>' + v + '</b>\n\n') for v, _ in POEMS)
     assert f'<a href="tg://user?id={VIEWER}">&lt;b&gt;Viewer&lt;/b&gt;</a>' in text
     assert f'<a href="tg://user?id={ADMIN}">&lt;i&gt;Operator&lt;/i&gt;</a>' in text
-    assert '🎉 恭喜' in text and '签发的 <b>💠 白名单</b>！' in text
+    assert '🎉</tg-emoji> 恭喜' in text and '签发的 <tg-emoji emoji-id="6048861618463318199">💠</tg-emoji> <b>尊享白名单</b>！' in text
     assert 'reply_markup' not in messages[0]
     for extra in ('有效期', '状态', '流量', '管理目标', '权益', '<i>', '《'):
         assert extra not in text
@@ -154,7 +154,7 @@ def test_grant_button_edits_one_announcement_without_regrant_on_replay(env):
         await click(env, 'admin_prouser', mid)
         assert [m for m, _ in env.tg.calls] == ['answerCallbackQuery', 'editMessageText']
         assert not env.tg.actions(GROUP, mid)
-        assert '🎉 恭喜' in env.tg.text(GROUP, mid)
+        assert '🎉</tg-emoji> 恭喜' in env.tg.text(GROUP, mid)
         await click(env, 'admin_prouser', mid)
         assert '已在白名单' in env.tg.text(GROUP, mid)
         assert '🎉' not in env.tg.text(GROUP, mid)

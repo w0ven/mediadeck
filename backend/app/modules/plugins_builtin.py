@@ -553,7 +553,8 @@ class ViewingReportPlugin(Plugin):
                 name=name, label=label, days=days, hours=hours, plays=plays,
                 works=len(_top_titles(detail, 1000)), titles=titles, covers=covers, backdrops=backdrops,
                 window_label=(detail.get('viewing') or {}).get('label', ''),
-                whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID)
+                whitelist=str(member.get("group_id") or "") == WHITELIST_GROUP_ID,
+                level=member.get("activity_level"))
         except Exception:  # noqa: BLE001 - caption still goes out
             return None
 
