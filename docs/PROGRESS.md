@@ -2,6 +2,26 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-20 — accept minimal player progress reports without IsPaused and handle truncated Emby runtime probes
+
+- Minimal Emby clients (such as Flow Android TV) post `/Sessions/Playing/Progress` with
+  `ItemId`, `PlayMethod`, `PlaySessionId`, `MediaSourceId`, and `PositionTicks` while omitting
+  both `PlaybackRate` and `IsPaused`. Previously `UsageSampler._progress` treated an omitted
+  `IsPaused` key identically to an invalid pause state (`pause_unknown`), suppressing viewing
+  credit continuously while overriding polling snapshots.
+- `UsageSampler._progress` now treats an omitted `IsPaused` key on an authenticated, upstream-
+  accepted progress report as unpaused unless `EventName` is `pause`/`paused`, while still
+  rejecting explicit `IsPaused: true`, `IsPaused: null`, non-boolean values, and stalled
+  positions (`stalled_or_rewound`), and keeping `/Sessions` polling strict.
+- When Emby stores a truncated probe duration (e.g. `15s` for a full episode) and the player
+  reports the real container `RunTimeTicks` in progress payloads, `_progress` now uses the
+  larger positive runtime for the `position <= runtime` bound so normal playback is not rejected
+  as `progress_invalid` while never shrinking valid server durations or accepting positions
+  beyond the reported runtime.
+- Updated and expanded unit tests in `backend/tests/test_progress_watch.py` covering minimal
+  payloads without `IsPaused`, pause-event and stall blocking, invalid `IsPaused` rejection,
+  and truncated-probe `RunTimeTicks` handling.
+
 ## 2026-11-14 — return 503 on upstream Emby timeouts and 5xx during playback admission
 
 - `LiveEmby.verify_token`, `LiveEmby.verify_session_token`, and `LiveEmby.verify_item_access`

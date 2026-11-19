@@ -69,7 +69,8 @@ def test_report_speed_counts_elapsed_not_content_distance(progress, rate):
 
 
 @pytest.mark.parametrize('variant,reason', [
-    ('seek','seek_or_buffering'), ('paused','paused'), ('unknown_pause','pause_unknown'),
+    ('seek','seek_or_buffering'), ('paused','paused'), ('pause_event','paused'),
+    ('unknown_pause','pause_unknown'), ('invalid_pause','pause_unknown'),
     ('missing_position','progress_missing'), ('nan','progress_missing'),
     ('rate_change','rate_changed'), ('invalid_rate','rate_unknown'), ('unknown_rate','rate_unknown'),
     ('runtime','progress_invalid'), ('stale','heartbeat_stale')])
@@ -79,7 +80,11 @@ def test_report_keeps_original_strict_rejection_gate(progress, variant, reason):
     event = payload(35)
     if variant == 'seek': event['PositionTicks'] = 500*10_000_000
     if variant == 'paused': event['IsPaused'] = True
-    if variant == 'unknown_pause': event.pop('IsPaused')
+    if variant == 'pause_event':
+        event.pop('IsPaused')
+        event['EventName'] = 'Pause'
+    if variant == 'unknown_pause': event['IsPaused'] = None
+    if variant == 'invalid_pause': event['IsPaused'] = 'false'
     if variant == 'missing_position': event.pop('PositionTicks')
     if variant == 'nan': event['PositionTicks'] = float('nan')
     if variant == 'rate_change': event['PlaybackRate'] = 2
@@ -90,6 +95,57 @@ def test_report_keeps_original_strict_rejection_gate(progress, variant, reason):
     sampler._progress('u', 'device', event, BASE+35)
     assert seconds(db) == 0
     assert diagnosis(db)['reason'] == reason
+
+
+def test_missing_pause_flag_counts_advancing_progress_and_blocks_stall_pause(progress):
+    # Flow (Android TV) sends only ItemId/PlayMethod/PlaySessionId/MediaSourceId/PositionTicks.
+    db, _, sampler, _, clock = progress
+    def minimal(offset, pos, **extra):
+        clock[0] = BASE+offset
+        ev = {'SessionId':'s', 'PlaySessionId':'run', 'ItemId':'film',
+              'PlayMethod':'DirectPlay', 'PositionTicks':pos*10_000_000, **extra}
+        sampler._progress('u', 'device', ev, clock[0])
+    minimal(5, 5)
+    minimal(15, 15)
+    minimal(25, 25)
+    assert seconds(db) == 20 and diagnosis(db)['reason'] == 'verified'
+    assert diagnosis(db)['timing_basis'] == 'accepted_progress'
+    # Real pause without IsPaused stalls PositionTicks and must never accrue credit.
+    minimal(35, 25)
+    minimal(45, 25)
+    assert seconds(db) == 20 and diagnosis(db)['reason'] == 'stalled_or_rewound'
+    # Explicit EventName=Pause also blocks even if position changed slightly.
+    minimal(55, 35, EventName='Pause')
+    assert seconds(db) == 20 and diagnosis(db)['reason'] == 'paused'
+    # Resuming establishes a new baseline without backfilling the paused window.
+    minimal(65, 45)
+    assert seconds(db) == 20
+    minimal(75, 55)
+    assert seconds(db) == 30 and diagnosis(db)['reason'] == 'verified'
+
+
+def test_reported_runtime_overrides_truncated_emby_probe_runtime(progress):
+    db, _, sampler, _, clock = progress
+    sampler._live['s']['runtime_ticks'] = 150_150_000  # 15.015s truncated Emby probe
+    # Without player RunTimeTicks, position beyond Emby runtime stays progress_invalid.
+    send(sampler, clock, 5, 100)
+    assert seconds(db) == 0 and diagnosis(db)['reason'] == 'progress_invalid'
+    # With player RunTimeTicks=5272s, advancing playback counts normally.
+    send(sampler, clock, 15, 946, RunTimeTicks=5272*10_000_000)
+    send(sampler, clock, 25, 956, RunTimeTicks=5272*10_000_000)
+    assert seconds(db) == 10 and diagnosis(db)['reason'] == 'verified'
+    # Position beyond even the larger reported RunTimeTicks is still rejected.
+    send(sampler, clock, 35, 6000, RunTimeTicks=5272*10_000_000)
+    assert seconds(db) == 10 and diagnosis(db)['reason'] == 'progress_invalid'
+
+
+def test_reported_runtime_never_shrinks_valid_server_runtime_or_hides_invalid_position(progress):
+    db, _, sampler, _, clock = progress
+    send(sampler, clock, 5, 5, RunTimeTicks=10*10_000_000)
+    send(sampler, clock, 15, 15, RunTimeTicks=10*10_000_000)
+    assert seconds(db) == 10  # server runtime (3600s) is preserved over smaller client value
+    send(sampler, clock, 25, 4000, RunTimeTicks=0)
+    assert seconds(db) == 10 and diagnosis(db)['reason'] == 'progress_invalid'
 
 
 def test_missing_rate_uses_accepted_progress_without_inventing_session_rate(progress):
