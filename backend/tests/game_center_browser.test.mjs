@@ -465,6 +465,7 @@ async function holdemAction(env, pages, id, action, amount) {
     }, amount ?? legal.min_raise_to);
     await page.locator('[data-gc-raise-confirm]').click();
   } else if (action === 'all_in') await page.locator('[data-gc-confirm]').click();
+  else if (action === 'fold' && legal.check) await page.locator('[data-gc-free-fold]').click();
   await waitRevision(page, table.revision + 1);
   const sent = env.requests.filter(r => r.user === user && r.path.endsWith('/actions')).at(-1).body;
   assert.equal(sent.hand_no, table.hand_no);
@@ -636,8 +637,13 @@ test('real Holdem: buy-in, quick/deep-link join, host start, continuous hands, b
       // Cancel pre-action before continuing the existing timeout test cleanly
       await guest.locator('[data-gc-pre="check_fold"]').click();
       assert.equal(await guest.locator('[data-gc-pre].on').count(), 0);
-      // Verify my-turn visual emphasis & haptic/sound toggle in sound sheet
+      // Verify my-turn visual emphasis (ticker pill + dock glow), free-fold guard & haptic/sound toggle
       assert.equal(await host.locator('.gc-dock.gc-my-turn').count(), 1);
+      assert.match(await host.locator('.gc-ticker.gc-ticker-me').innerText(), /轮到你行动/);
+      // Clicking fold when free check is available must prompt confirmation rather than folding immediately
+      await host.locator('[data-gc-action="fold"]').click();
+      await host.locator('[data-gc-free-check]').waitFor();
+      await closeSheet(host);
       await host.locator('[data-gc-sound]').click();
       await host.locator('[data-gc-sound-kind="haptic"]').waitFor();
       await closeSheet(host);
