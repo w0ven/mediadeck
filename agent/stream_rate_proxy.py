@@ -80,6 +80,7 @@ def parse_rate(value: str) -> int:
 class RateServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
+    request_queue_size = 256
 
     def __init__(self, bind: tuple[str, int], routes: dict[str, int]):
         super().__init__(bind, RateHandler)

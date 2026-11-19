@@ -17,7 +17,7 @@ import os
 import re
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
 from urllib.error import HTTPError, URLError
 from urllib.parse import unquote_to_bytes, urlencode
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
@@ -26,6 +26,12 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 #: the peer-address -> user map. Large enough to cover a busy hour, small
 #: enough to read instantly on a multi-hundred-MB log.
 SEED_BYTES = 4 * 1024 * 1024
+
+
+class ThreadingHTTPServer(_ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 256
 
 
 class _NoRedirect(HTTPRedirectHandler):
