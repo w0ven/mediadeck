@@ -70,7 +70,14 @@ from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
 from app.modules.group_points import GroupPointsBotMixin, GroupPointsError, reliable_user
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.member_rewards import RewardError, grant_reward
-from app.modules.realm_icons import strip_tg_emoji_tags, tg_level_emoji, tg_realm_emoji
+from app.modules.realm_icons import (
+    PACK_URL,
+    custom_emoji_id,
+    strip_keyboard_emoji_ids,
+    strip_tg_emoji_tags,
+    tg_level_emoji,
+    tg_realm_emoji,
+)
 from app.modules.rebinding import RebindingService
 from app.modules.red_packets import CALLBACKS as PACKET_CALLBACKS
 from app.modules.report_delivery import CALL_DELIVERY
@@ -283,8 +290,8 @@ RULES_TEXT = """📜 <b>使用准则</b>
 
 发送 /start 回到菜单。"""
 
-MEMBER_COMMANDS = {"start", "help", "me", "myinfo", "rules", "rank", "today"}
-GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "usage", "rank", "today", "rules", "help")
+MEMBER_COMMANDS = {"start", "help", "me", "myinfo", "card", "rules", "rank", "today"}
+GROUP_MEMBER_COMMANDS = ("start", "me", "myinfo", "card", "usage", "rank", "today", "rules", "help")
 GROUP_ADMIN_COMMANDS = (
     "kk", "renew", "score", "prouser", "revuser", "rmemby", "rm",
 )
@@ -555,19 +562,23 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return None
         if not body.get("ok"):
             desc = str(body.get("description") or "Telegram 拒绝了请求")
+            has_custom_text = isinstance(payload, dict) and any(
+                "<tg-emoji" in str(payload.get(k) or "") for k in ("text", "caption")
+            )
+            has_custom_btn = isinstance(payload, dict) and "icon_custom_emoji_id" in json.dumps(
+                payload.get("reply_markup") or {}, ensure_ascii=False
+            )
             if (
                 method in ("sendMessage", "editMessageText", "sendPhoto", "editMessageCaption")
-                and isinstance(payload, dict)
-                and any(
-                    "<tg-emoji" in str(payload.get(k) or "")
-                    for k in ("text", "caption")
-                )
-                and any(w in desc.lower() for w in ("custom emoji", "tg-emoji", "emoji", "entity"))
+                and (has_custom_text or has_custom_btn)
+                and any(w in desc.lower() for w in ("custom emoji", "tg-emoji", "emoji", "entity", "button_icon"))
             ):
                 fallback_payload = dict(payload)
                 for k in ("text", "caption"):
                     if isinstance(fallback_payload.get(k), str) and "<tg-emoji" in fallback_payload[k]:
                         fallback_payload[k] = strip_tg_emoji_tags(fallback_payload[k])
+                if has_custom_btn:
+                    fallback_payload["reply_markup"] = strip_keyboard_emoji_ids(fallback_payload.get("reply_markup"))
                 with contextlib.suppress(Exception):
                     client = await self._client()
                     if client is not None:
@@ -643,6 +654,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         commands = [
             {"command": "start", "description": "打开私聊" if group else "打开菜单"},
             {"command": "me", "description": "我的简卡" if group else "我的账号"},
+            {"command": "card", "description": "亮出我的仙道铭牌"},
             {"command": "usage", "description": "权益与观看时长"},
         ]
         if not group:
@@ -1347,14 +1359,14 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         except Exception:  # noqa: BLE001 - a broken registry hides the button
             return False
 
-    def member_menu(self) -> list[list[dict[str, str]]]:
+    def member_menu(self) -> list[list[dict[str, Any]]]:
         return [
-            [{"text": "👤 个人信息", "callback_data": "me"},
-             {"text": "📡 服务器线路", "callback_data": "me_nodes"}],
-            [{"text": "📊 媒体库统计", "callback_data": "library_stats"},
-             {"text": "🏆 观影/积分榜", "callback_data": "rank"}],
-            [{"text": "🎬 求片中心", "callback_data": "request_center"},
-             {"text": "🎒 背包与商城", "callback_data": "bag"}],
+            [{"text": "个人信息", "icon_custom_emoji_id": custom_emoji_id("btn_me"), "callback_data": "me"},
+             {"text": "服务器线路", "icon_custom_emoji_id": custom_emoji_id("btn_nodes"), "callback_data": "me_nodes"}],
+            [{"text": "媒体库统计", "icon_custom_emoji_id": custom_emoji_id("btn_stats"), "callback_data": "library_stats"},
+             {"text": "观影/积分榜", "icon_custom_emoji_id": custom_emoji_id("btn_rank"), "callback_data": "rank"}],
+            [{"text": "求片中心", "icon_custom_emoji_id": custom_emoji_id("btn_req"), "callback_data": "request_center"},
+             {"text": "背包与商城", "icon_custom_emoji_id": custom_emoji_id("btn_bag"), "callback_data": "bag"}],
         ]
 
     def _with_admin_row(self, rows: list[list[dict[str, str]]],
@@ -1602,7 +1614,11 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         miniapp = str(self._cfg().get("miniapp_url") or "").strip()
         if miniapp and not _GROUP.get():
             # Telegram rejects web_app buttons outside private chats.
-            menu.insert(0, [{"text": "📱 打开会员面板（Mini App）", "web_app": {"url": miniapp}}])
+            menu.insert(0, [{
+                "text": "打开会员面板（Mini App）",
+                "icon_custom_emoji_id": custom_emoji_id("btn_miniapp"),
+                "web_app": {"url": miniapp},
+            }])
         return "\n".join(lines), self._with_admin_row(menu, member)
 
     def _guest_home(self, tg_name: str) -> str:
@@ -3769,6 +3785,88 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             AccountCardCleanup(self._db).enqueue(self._active_bot_id, int(chat_id), _THREAD.get() or 0,
                                                  mid, 'feedback', _ACTOR.get())
 
+    def _plaque_showcase_card(self, member: dict[str, Any]) -> str:
+        """Compact jade-tablet plaque showcase for `/card` (never leaks Emby account name in group)."""
+        info = self._member_level_info(member)
+        title = (info['worn_title'] or info['level']['title']) if isinstance(info, dict) else None
+        if _GROUP.get():
+            name = self._member_nickname(member, link=True, fallback="仙友") or "<b>仙友</b>"
+        else:
+            name = f"<b>{escape(str(member.get('username') or '—'))}</b>"
+        plaque_lines = self._identity_plaque_lines(member, title=title)
+        stats_bits = []
+        if isinstance(info, dict):
+            lv = info['level']
+            stats_bits.append(f"🪙 积分 <b>{info['balance']}</b>")
+            stats_bits.append(f"✨ 修为 <b>{lv.get('growth', 0)}</b>")
+        if stats_bits:
+            plaque_lines.append(" · ".join(stats_bits))
+        lead = tg_realm_emoji("wl", "💠") + " " if member.get("group_id") == WHITELIST_GROUP_ID else tg_realm_emoji("orn", "✨") + " "
+        return f"{lead}{name} · <b>仙道玉简</b>\n<blockquote>" + "\n".join(plaque_lines) + "</blockquote>"
+
+    async def _show_plaque_card(self, chat_id: Any, member: dict[str, Any]) -> bool:
+        body = self._plaque_showcase_card(member)
+        if _GROUP.get():
+            shown = await self._show(chat_id, body)
+            if shown:
+                self._queue_account_cleanup(chat_id, self._panel.get(self._pkey(chat_id)))
+            return shown
+        kb = [[{"text": "收藏本服境界表情包", "icon_custom_emoji_id": custom_emoji_id("orn"), "url": PACK_URL}],
+              [{"text": "◀ 返回首页", "callback_data": "home"}]]
+        return await self._show(chat_id, body, kb)
+
+    async def notify_realm_breakthrough(self, member: dict[str, Any], old_level: int, new_level: int,
+                                        *, granted_special: bool = False) -> None:
+        """Send a ceremonial breakthrough card via DM (and group bulletin for high/special realms)."""
+        if not member or new_level <= old_level:
+            return
+        level = member.get("activity_level") or {}
+        if int(level.get("level") or 0) != int(new_level):
+            return
+        info = self._member_level_info(member)
+        worn = (info['worn_title'] or level.get('title')) if isinstance(info, dict) else level.get('title')
+        plaque = self._identity_plaque_lines(member, title=worn)
+        celeb = tg_realm_emoji("celebrate", "🎉")
+        lv_ic = tg_level_emoji(new_level, str(level.get("icon") or ""))
+        lv_name = escape(str(level.get("name") or f"Lv{new_level}"))
+        heading = (
+            f"{celeb} <b>圣谕敕封 · 荣登 {lv_ic} Lv{new_level} {lv_name}</b>"
+            if granted_special
+            else f"{celeb} <b>恭喜破境飞升 · 晋升 {lv_ic} Lv{new_level} {lv_name}</b>"
+        )
+        perks = []
+        bw = level.get("bandwidth_limit_kbps")
+        if bw:
+            perks.append(f"🚀 带宽 {round(int(bw) / 1000)} Mbps")
+        if level.get("max_streams"):
+            perks.append(f"📺 同播 {level['max_streams']} 路")
+        if level.get("request_quota"):
+            perks.append(f"🎬 求片 {level['request_quota']} 次/月")
+        if level.get("max_devices"):
+            perks.append(f"📱 设备上限 {level['max_devices']} 台")
+        jade = [*plaque]
+        if perks:
+            jade.append(" · ".join(perks))
+        dm_body = f"{heading}\n<blockquote>" + "\n".join(jade) + "</blockquote>"
+        tg_id = str(member.get("tg_user_id") or "").strip()
+        if tg_id:
+            with contextlib.suppress(Exception):
+                await self.send(tg_id, dm_body, [
+                    [{"text": "收藏全套境界表情包", "icon_custom_emoji_id": custom_emoji_id("orn"), "url": PACK_URL}],
+                ])
+        if granted_special or new_level >= 5:
+            group_chat = str(self._cfg().get("registration_notify_chat_id") or "").strip()
+            if group_chat:
+                who = self._member_nickname(member, link=True, fallback="道友") or "<b>一位道友</b>"
+                grp_head = (
+                    f"{celeb} <b>圣谕敕封喜报</b> · 恭贺 {who} 获封 {lv_ic} <b>Lv{new_level} {lv_name}</b>！"
+                    if granted_special
+                    else f"{celeb} <b>破境飞升喜报</b> · 恭贺 {who} 突破至 {lv_ic} <b>Lv{new_level} {lv_name}</b>！"
+                )
+                grp_body = f"{grp_head}\n<blockquote>" + "\n".join(plaque) + "</blockquote>"
+                with contextlib.suppress(Exception):
+                    await self.send_message(group_chat, grp_body)
+
     async def _show_account_card(self, chat_id, member):
         if _GROUP.get():
             shown = await self._show(chat_id, self._brief_card(member))
@@ -4099,6 +4197,12 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
                                  self.guest_menu())
                 return
             return await self._show_account_card(chat_id, member)
+        if command == "card":
+            if not member:
+                if not in_group:
+                    await self._show(chat_id, "这个 Telegram 还没有账号。", self.guest_menu())
+                return
+            return await self._show_plaque_card(chat_id, member)
         if not self.is_admin(member):
             if in_group:
                 return
@@ -4279,8 +4383,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             if notice:
                 body = '⚠ ' + member_mention(updated) + '：白名单已写入本地，远端未确认，请管理员重试同步。'
             else:
-                body = (poetry_line() + '\n\n🎉 恭喜 ' + member_mention(updated)
-                        + '\n获得 ' + member_mention(reviewer) + ' 签发的 <b>💠 白名单</b>！')
+                body = (poetry_line() + f"\n\n{tg_realm_emoji('celebrate', '🎉')} 恭喜 " + member_mention(updated)
+                        + f"\n获得 {member_mention(reviewer)} 签发的 {tg_realm_emoji('wl', '💠')} <b>尊享白名单</b>！")
         self._hold_admin_user(chat_id, updated, actor)
         await self._show(chat_id, body)
         self._remember_admin_panel(chat_id, updated, actor)
@@ -6200,6 +6304,14 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         else:
             return None
         for row in rows:
+            uid = str(row.get("user_id") or row.get("emby_user_id") or "")
+            if uid and self._members is not None:
+                m = self._members.get(uid)
+                if m:
+                    if m.get("activity_level"):
+                        row["activity_level"] = m["activity_level"]
+                    if m.get("group_id") and not row.get("group_id"):
+                        row["group_id"] = m["group_id"]
             profile = self._tg_profiles.get(str(row.get("tg_user_id") or ""))
             if not profile:
                 continue

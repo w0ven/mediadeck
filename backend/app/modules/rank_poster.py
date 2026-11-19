@@ -11,6 +11,7 @@ from typing import Any
 from PIL import Image, ImageDraw, ImageEnhance, ImageFont, ImageOps
 
 ASSETS = Path(__file__).resolve().parent / 'rank_assets'
+REALM_ICONS = ASSETS / 'realm_icons'
 CANVAS = (1200, 2400)
 BRAND = 'Peekpeek+'
 WHITELIST_GROUP_ID = 'whitelist'
@@ -246,10 +247,56 @@ class _Poster:
         self.draw.ellipse((x - 3, y - 3, x + size + 2, y + size + 2), fill=GOLD)
         self.image.paste(face, (x, y), mask)
 
+    def _load_realm_icon(self, key: str, size: int) -> Image.Image | None:
+        path = REALM_ICONS / f'{key}.png'
+        if not path.is_file():
+            return None
+        try:
+            with Image.open(path) as src:
+                return src.convert('RGBA').resize((size, size), Image.Resampling.LANCZOS)
+        except OSError:
+            return None
+
     def badge(self, x: int, y: int) -> None:
-        self.draw.rounded_rectangle((x, y, x + 158, y + 34), radius=5,
-                                    fill=(100, 91, 53, 65), outline=(196, 178, 120, 130), width=1)
-        self.text(x + 13, y + 5, '白名单 · 专属', 21, GOLD)
+        self.draw.rounded_rectangle((x, y, x + 178, y + 34), radius=6,
+                                    fill=(28, 72, 108, 175), outline=(120, 212, 255, 190), width=1)
+        icon = self._load_realm_icon('wl', 24)
+        if icon is not None:
+            self.image.alpha_composite(icon, (x + 8, y + 5))
+            self.text(x + 36, y + 5, '白名单 · 专属', 20, (206, 242, 255))
+        else:
+            self.text(x + 13, y + 5, '白名单 · 专属', 21, GOLD)
+
+    def realm_badge(self, right_x: int, y: int, level: dict[str, Any] | None) -> int:
+        """Draw a realm pill ending at right_x; returns its left x coordinate."""
+        if not isinstance(level, dict) or not level.get('level'):
+            return right_x
+        lv = int(level['level'])
+        name = _line(level.get('name')) or f'Lv{lv}'
+        label = f'Lv{lv} · {name}'
+        palette = {
+            1: ((28, 66, 52, 175), (96, 214, 152, 185), (195, 252, 224)),
+            2: ((24, 58, 92, 175), (96, 178, 255, 185), (204, 234, 255)),
+            3: ((86, 46, 20, 175), (251, 162, 74, 185), (255, 232, 194)),
+            4: ((26, 62, 106, 185), (103, 218, 255, 200), (210, 245, 255)),
+            5: ((68, 36, 108, 185), (192, 132, 252, 200), (240, 220, 255)),
+            6: ((88, 68, 22, 185), (250, 204, 21, 205), (255, 245, 196)),
+            7: ((102, 70, 18, 195), (253, 224, 71, 220), (255, 248, 205)),
+            8: ((98, 36, 86, 195), (244, 138, 204, 215), (255, 224, 244)),
+            9: ((26, 54, 114, 210), (125, 225, 255, 235), (222, 248, 255)),
+        }
+        fill, outline, fg = palette.get(lv, ((64, 72, 82, 170), (196, 178, 120, 150), GOLD))
+        txt_w = int(_font(20).getlength(label))
+        icon = self._load_realm_icon(f'lv{lv}', 24)
+        pill_w = (36 if icon is not None else 16) + txt_w + 14
+        x = right_x - pill_w
+        self.draw.rounded_rectangle((x, y, right_x, y + 34), radius=6, fill=fill, outline=outline, width=1)
+        if icon is not None:
+            self.image.alpha_composite(icon, (x + 7, y + 5))
+            self.text(x + 35, y + 5, label, 20, fg)
+        else:
+            self.text(x + 12, y + 5, label, 20, fg)
+        return x
 
     def movement(self, x: int, y: int, row: dict[str, Any]) -> None:
         if not row.get('comparison_available'):
@@ -354,8 +401,12 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
         poster.text(413, 678, _clip(name, 700, 47), 47)
         poster.text(413, 756, _duration(first), 43, GOLD)
         poster.text(413, 822, f"{int(first.get('plays') or 0)} 次播放", 26, MUTED)
+        right = 1147
         if _is_whitelist(first):
-            poster.badge(964, 827)
+            poster.badge(right - 178, 822)
+            right -= 188
+        if isinstance(first.get('activity_level'), dict):
+            poster.realm_badge(right, 822, first['activity_level'])
         poster.rule(48, 927, 1152)
         for rank, row in enumerate(rows[1:], 2):
             y = 967 + (rank - 2) * 119
@@ -365,8 +416,12 @@ def render_watch_poster(rows: list[dict[str, Any]], *, weekly: bool = False,
             poster.text(254, y + 7, _clip(name, 565, 33), 33)
             poster.text(1147, y + 9, _duration(row), 32, GOLD, 'rt')
             poster.text(254, y + 58, f"{int(row.get('plays') or 0)} 次播放", 24, MUTED)
+            right = 1147
             if _is_whitelist(row):
-                poster.badge(986, y + 54)
+                poster.badge(right - 178, y + 54)
+                right -= 188
+            if isinstance(row.get('activity_level'), dict):
+                poster.realm_badge(right, y + 54, row['activity_level'])
             poster.rule(48, y + 107, 1152, 60)
     else:
         poster.text(600, 986, '本期暂无观影时长记录', 38, MUTED, 'mt')
@@ -380,15 +435,20 @@ def render_viewing_poster(*, name: str, label: str, days: int, hours: float,
                           titles: list[dict[str, Any]] | None = None,
                           covers: dict[str, bytes] | None = None,
                           whitelist: bool = False, window_label: str = '',
-                          backdrops: dict[str, bytes] | None = None) -> bytes:
+                          backdrops: dict[str, bytes] | None = None,
+                          level: dict[str, Any] | None = None) -> bytes:
     titles, covers, backdrops = list((titles or [])[:5]), covers or {}, backdrops or {}
     height = max(1440, 1270 + len(titles) * 166) if titles else 1500
     poster = _Poster((1200, height))
     poster.header('我的观影' + label, _clip(_visible_label(name) or '会员', 920, 32),
                   window_label or f'近 {int(days)} 天 · 你的私人片单',
                   _heroes(titles, covers, backdrops))
+    right = 1156
     if whitelist:
-        poster.badge(998, 54)
+        poster.badge(right - 178, 54)
+        right -= 188
+    if isinstance(level, dict):
+        poster.realm_badge(right, 54, level)
     metrics = ((225, f'{hours:g}', '小时观影'), (600, str(int(plays)), '次播放'), (975, str(int(works)), '部作品'))
     for x, value, caption in metrics:
         size = 60

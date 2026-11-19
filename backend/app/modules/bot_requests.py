@@ -8,6 +8,7 @@ import time
 from html import escape
 
 from app.modules.bot_views import short_label, watch_rank_mention
+from app.modules.realm_icons import tg_realm_emoji
 from app.modules.requests import (
     STATUS_LABELS,
     RequestError,
@@ -613,14 +614,16 @@ class RequestBotMixin:
         else:
             want = ""
         complete = stage == "complete"
-        lines = [
-            "🎉 <b>求片入库啦</b>" if complete else "🎞 <b>求片开始入库</b>",
-            "",
-            f"🎬 <b>{self._rq_title(row)}</b>",
+        celeb = tg_realm_emoji("celebrate", "🎉")
+        movie_ic = tg_realm_emoji("btn_req", "🎬")
+        head = f"{celeb} <b>求片入库啦</b>" if complete else f"{movie_ic} <b>求片开始入库</b>"
+        jade = [
+            f"{movie_ic} <b>{self._rq_title(row)}</b>",
             f"🏷 {row['media_label']}" + (f" · {escape(want)}" if want else ""),
             f"🙋 求片人：{who}",
             "✅ 已全部入库，现在就能看" if complete else "🟡 已入库一部分，可以先看起来",
         ]
+        lines = [head, "<blockquote>" + "\n".join(jade) + "</blockquote>"]
         overview = str(row.get("overview") or "").strip()
         if overview:
             lines += ["", f"<i>{escape(short_label(overview, 120))}</i>"]

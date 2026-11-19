@@ -16,6 +16,7 @@ from typing import Any
 
 from app.modules.bot_views import watch_rank_mention
 from app.modules.economy_rules import economy_write, encode, receipt, save_receipt
+from app.modules.realm_icons import tg_realm_emoji
 
 COMMANDS = {"/transfer", "/转账"}
 CALLBACKS = ("gpok:", "gpcancel:")
@@ -439,9 +440,9 @@ class GroupPointsBotMixin:
             "已取消，未执行。"
             if result.get("cancelled")
             else (
-                "✅ <b>积分奖励发放成功</b>"
+                f"{tg_realm_emoji('celebrate', '🎉')} <b>积分奖励发放成功</b>"
                 if result["mode"] == "mint"
-                else "✅ <b>积分转账成功</b>"
+                else f"{tg_realm_emoji('orn', '✨')} <b>积分转账成功</b>"
             )
         )
         if not result.get("cancelled"):
@@ -449,14 +450,16 @@ class GroupPointsBotMixin:
                 'SELECT actor_tg_id,actor_user_id,to_name,to_tg_id,to_user_id FROM group_points_intents WHERE nonce=?',
                 (data.split(':', 1)[1],),
             )
+            detail_lines = []
             if row:
                 sender_label = self._group_points_actor_label(row["actor_tg_id"], row["actor_user_id"])
                 target_label = self._group_points_actor_label(row["to_tg_id"], row["to_user_id"], row["to_name"])
                 if result["mode"] == "mint":
-                    text += f"\n发放人：{sender_label} ➜ 收款人：{target_label}"
+                    detail_lines.append(f"发放人：{sender_label} ➜ 收款人：{target_label}")
                 else:
-                    text += f"\n转账方：{sender_label} ➜ 收款方：{target_label}"
-            text += f"\n数量：{result['amount']} · 手续费：{result['fee']} · 对方到账：{result['received']}"
+                    detail_lines.append(f"转账方：{sender_label} ➜ 收款方：{target_label}")
+            detail_lines.append(f"数量：{result['amount']} · 手续费：{result['fee']} · 对方到账：{result['received']}")
+            text += "\n<blockquote>" + "\n".join(detail_lines) + "</blockquote>"
         await self._call(
             "editMessageText",
             {

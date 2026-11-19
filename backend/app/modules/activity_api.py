@@ -53,10 +53,21 @@ def register(app, auth):
         if payload.get('confirm') is not True:
             raise HTTPException(409, '须明确确认授予专属等级')
         target_level = payload.get('level', 8)
-        return await call(app.state.levels.grant_special, uid, actor, target_level)
+        before = (await call(app.state.members.get, uid)) or {}
+        old_lv = int((before.get('activity_level') or {}).get('level') or 0)
+        updated = await call(app.state.levels.grant_special, uid, actor, target_level)
+        if target_level in (8, 9) and updated and getattr(app.state, 'telegram', None) is not None:
+            await app.state.telegram.notify_realm_breakthrough(updated, old_lv, int(target_level), granted_special=True)
+        return updated
 
     @app.post('/api/activity/members/{uid}/grant-special', dependencies=[Depends(auth)])
     async def grant_special(uid: str, payload: dict = Body(...), actor: str = Depends(auth)):  # noqa: B008
         if payload.get('confirm') is not True:
             raise HTTPException(409, '须明确确认授予专属等级')
-        return await call(app.state.levels.grant_special, uid, actor, payload.get('level', 9))
+        target_level = payload.get('level', 9)
+        before = (await call(app.state.members.get, uid)) or {}
+        old_lv = int((before.get('activity_level') or {}).get('level') or 0)
+        updated = await call(app.state.levels.grant_special, uid, actor, target_level)
+        if target_level in (8, 9) and updated and getattr(app.state, 'telegram', None) is not None:
+            await app.state.telegram.notify_realm_breakthrough(updated, old_lv, int(target_level), granted_special=True)
+        return updated

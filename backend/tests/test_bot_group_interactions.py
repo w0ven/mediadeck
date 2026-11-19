@@ -443,7 +443,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
                        if m == "setMyCommands" and p["scope"]["type"] == "chat")
     admin_cmds = next(p["commands"] for m, p in bot.calls
                       if m == "setMyCommands" and p["scope"]["type"] == "chat_member")
-    assert {c["command"] for c in member_cmds} == {"start", "me", "usage", "rank", "today", "rules", "help", "transfer", "redpacket",
+    assert {c["command"] for c in member_cmds} == {"start", "me", "card", "usage", "rank", "today", "rules", "help", "transfer", "redpacket",
                                                "games", "blackwhite", "niuniu", "pk", "pkrank", "pkme", "pointsrank"}
     assert next(c['description'] for c in member_cmds if c['command']=='games') == '一起玩 · 坐庄请发 /猜大小 庄本'
     assert next(c['description'] for c in admin_cmds if c['command']=='games') == '一起玩 · 坐庄请发 /猜大小 庄本'
