@@ -42,18 +42,37 @@ window.createGamesUI = ({
   const sound = (() => {
     const base = '/app/assets/game-assets/audio/', buffers = new Map(), rawBytes = new Map();
     const ALL_SFX = ['deal', 'flip', 'chip', 'raise', 'fold', 'check', 'allin', 'turn', 'win', 'lose', 'tap', 'tick', 'flower', 'poop', 'champagne', 'bomb', 'chat'];
-    let ctx = null, track = null, wanted = false;
+    let ctx = null, track = null, wanted = false, unlocked = false;
     const pref = kind => { try { return localStorage.getItem('gc-sound-' + kind) !== 'off'; } catch { return true; } };
     function sync() {
       const on = wanted && pref('music') && document.visibilityState === 'visible';
       if (on && !track) { track = new Audio(base + 'music.mp3'); track.loop = true; track.volume = .45; }
       if (on) track.play().catch(() => {});
       else track?.pause();
+      if (document.visibilityState === 'visible' && ctx && ctx.state !== 'running') {
+        ctx.resume().catch(() => {});
+      }
     }
-    function unlock() {
+    function unlock(fromGesture = false) {
       const Context = window.AudioContext || window.webkitAudioContext;
       if (!ctx && Context) ctx = new Context();
-      if (ctx?.state === 'suspended') ctx.resume().catch(() => {});
+      if (ctx) {
+        if (ctx.state !== 'running') ctx.resume().catch(() => {});
+        // iOS WKWebView (Telegram iOS) needs a 1-sample silent buffer started inside a user gesture
+        // so later async SSE events (like "your turn") can play through Web Audio without being muted.
+        if (fromGesture && !unlocked) {
+          try {
+            const silent = ctx.createBuffer(1, 1, 22050);
+            const src = ctx.createBufferSource();
+            src.buffer = silent;
+            src.connect(ctx.destination);
+            src.start(0);
+            unlocked = true;
+          } catch { /* ignore */ }
+          // Eagerly decode critical turn/countdown cues as soon as AudioContext unlocks.
+          for (const key of ['turn', 'tick', 'deal', 'chip', 'raise']) load(key);
+        }
+      }
       sync();
     }
     function fetchBytes(name) {
@@ -84,15 +103,20 @@ window.createGamesUI = ({
     }
     async function play(name, volume = 1) {
       if (!pref('sfx') || document.visibilityState !== 'visible') return;
-      unlock();
-      if (ctx && ctx.state === 'running') {
-        const buffer = await load(name);
-        if (buffer && ctx.state === 'running') {
-          const source = ctx.createBufferSource(), gain = ctx.createGain();
-          source.buffer = buffer; gain.gain.value = volume;
-          source.connect(gain).connect(ctx.destination);
-          source.start();
-          return;
+      unlock(false);
+      if (ctx) {
+        if (ctx.state !== 'running') {
+          try { await ctx.resume(); } catch { /* ignore */ }
+        }
+        if (ctx.state === 'running') {
+          const buffer = await load(name);
+          if (buffer && ctx.state === 'running') {
+            const source = ctx.createBufferSource(), gain = ctx.createGain();
+            source.buffer = buffer; gain.gain.value = volume;
+            source.connect(gain).connect(ctx.destination);
+            source.start();
+            return;
+          }
         }
       }
       fallbackPlay(name, volume);
@@ -108,7 +132,10 @@ window.createGamesUI = ({
       try { localStorage.setItem('gc-sound-' + kind, on ? 'on' : 'off'); } catch { /* private mode keeps defaults */ }
       sync();
     }
-    document.addEventListener('pointerdown', unlock, true);
+    const gestureUnlock = () => unlock(true);
+    document.addEventListener('pointerdown', gestureUnlock, true);
+    document.addEventListener('touchstart', gestureUnlock, { capture: true, passive: true });
+    document.addEventListener('click', gestureUnlock, true);
     document.addEventListener('visibilitychange', sync);
     return { play, burst, preload, pref, set, music(on) { wanted = on; sync(); } };
   })();
@@ -117,6 +144,7 @@ window.createGamesUI = ({
     const enabled = () => sound.pref('haptic');
     const apiHaptic = () => tg?.HapticFeedback || window.Telegram?.WebApp?.HapticFeedback || null;
     const vib = pattern => { try { navigator.vibrate?.(pattern); } catch { /* ignore */ } };
+    let lastSelectAt = 0;
     function impact(style = 'light') {
       if (!enabled()) return;
       const h = apiHaptic();
@@ -129,8 +157,13 @@ window.createGamesUI = ({
       if (h?.notificationOccurred) { try { h.notificationOccurred(type); return; } catch { /* ignore */ } }
       vib(type === 'error' ? [30, 45, 30] : type === 'warning' ? [25, 40, 25] : [18, 30, 24]);
     }
-    function select() {
+    function select(throttleMs = 0) {
       if (!enabled()) return;
+      if (throttleMs > 0) {
+        const nowTs = performance.now();
+        if (nowTs - lastSelectAt < throttleMs) return;
+        lastSelectAt = nowTs;
+      }
       const h = apiHaptic();
       if (h?.selectionChanged) { try { h.selectionChanged(); return; } catch { /* ignore */ } }
       vib(8);
@@ -138,9 +171,9 @@ window.createGamesUI = ({
     function turnAlert() {
       if (!enabled()) return;
       const h = apiHaptic();
-      if (h?.notificationOccurred && h?.impactOccurred) {
+      if (h?.impactOccurred) {
         try {
-          h.notificationOccurred('warning');
+          h.impactOccurred('heavy');
           setTimeout(() => { try { h.impactOccurred('medium'); } catch { /* ignore */ } }, 140);
           return;
         } catch { /* ignore */ }
@@ -193,6 +226,7 @@ window.createGamesUI = ({
       clearInterval(current.clock);
       clearTimeout(current.celebrateTimer);
       clearTimeout(current.autoSheetTimer);
+      clearTimeout(current.turnAlertTimer);
       clearInterval(current.sheetTicker);
       clearRunoutTimers(current);
       current = null;
@@ -495,6 +529,7 @@ window.createGamesUI = ({
       id, alive, table: null, disposed: false, stream: null,
       generation: 0, attempt: 0, status: 'connecting', offset: 0, notice: '', history: [],
       preAction: null, raiseBar: null, runout: null, runoutTimers: [], boardAnimFrom: 0,
+      draggingRaise: false, deferredPaint: false, turnAlertTimer: null,
     };
     $('#screen').classList.add('gc-scene', 'gc-table-screen');
     sound.preload();
@@ -633,9 +668,25 @@ window.createGamesUI = ({
         if (curNeed > c.preAction.amount) c.preAction = null;
       }
     }
-    react(c, previous, t);
-    paintTable(c);
-    maybeRunPreAction(c);
+    const preOp = resolvePreAction(c, t);
+    react(c, previous, t, !!preOp);
+    if (c.draggingRaise && t.game === 'holdem' && t.hand && c.raiseBar
+      && t.hand.number === c.raiseBar.handNo && t.hand.turn === c.raiseBar.turn
+      && t.hand.current_player === t.me.player) {
+      // Avoid ripping the <input type="range"> out from under the player's finger on cosmetic updates (chat/props).
+      c.deferredPaint = true;
+    } else {
+      c.draggingRaise = false;
+      c.deferredPaint = false;
+      paintTable(c);
+    }
+    if (preOp) executePreAction(c, t, preOp);
+    else if (c.preAction && t.hand?.current_player === t.me.player) {
+      // Pre-action could not be fulfilled (e.g. opponent raised past check_only / call_exact); clear & alert.
+      c.preAction = null;
+      haptic.notify('warning');
+      paintTable(c);
+    }
     const openResult = $('.gc-sheet [data-gc-result-hand]');
     if (openResult && Number(openResult.dataset.gcResultHand) === t.last_hand?.number
       && previous?.last_hand?.revealed?.length !== t.last_hand?.revealed?.length) {
@@ -652,28 +703,23 @@ window.createGamesUI = ({
   }
   // Finished hands stay on the felt for ~5s (or show a 5s settlement sheet) with optional card reveal.
   const FX_MS = 1800, CELEBRATE_MS = 5000, ZJH_FELT_MS = 1800, RESULT_SHOW_MS = 5000;
-  function maybeRunPreAction(c) {
-    const t = c.table, pre = c.preAction;
-    if (!pre || t.game !== 'holdem' || !t.hand || busy) return;
-    if (t.hand.current_player !== t.me.player) return;
+  function resolvePreAction(c, t) {
+    const pre = c.preAction;
+    if (!pre || t.game !== 'holdem' || !t.hand || busy) return null;
+    if (t.hand.current_player !== t.me.player) return null;
     const me = t.seats.find(s => s.player === t.me.player);
-    if (!me || me.auto || me.leave_after) { c.preAction = null; return; }
+    if (!me || me.auto || me.leave_after) { c.preAction = null; return null; }
     const legal = t.hand.legal_actions || {};
-    let op = null;
-    if (pre.kind === 'check_fold') {
-      op = legal.check ? 'check' : legal.fold ? 'fold' : null;
-    } else if (pre.kind === 'check_only') {
-      op = legal.check ? 'check' : null;
-    } else if (pre.kind === 'call_exact') {
-      if (legal.check && pre.amount === 0) op = 'check';
-      else if (legal.call && legal.call.amount <= pre.amount) op = 'call';
+    if (pre.kind === 'check_fold') return legal.check ? 'check' : legal.fold ? 'fold' : null;
+    if (pre.kind === 'check_only') return legal.check ? 'check' : null;
+    if (pre.kind === 'call_exact') {
+      if (legal.check && pre.amount === 0) return 'check';
+      if (legal.call && legal.call.amount <= pre.amount) return 'call';
     }
+    return null;
+  }
+  function executePreAction(c, t, op) {
     c.preAction = null;
-    if (!op) {
-      haptic.notify('warning');
-      paintTable(c);
-      return;
-    }
     const snapHand = t.hand.number, snapTurn = t.hand.turn;
     setTimeout(() => {
       if (!live(c) || c.table.hand?.number !== snapHand || c.table.hand?.turn !== snapTurn || busy) return;
@@ -681,10 +727,11 @@ window.createGamesUI = ({
       action(c, op);
     }, 90);
   }
-  function react(c, previous, t) {
+  function react(c, previous, t, suppressTurnAlert = false) {
     const ph = previous?.hand, fx = events(previous, t);
     const loud = ['allin', 'raise', 'chip', 'fold', 'check', 'look'].find(k => fx.some(e => e.kind === k));
     if (loud) sound.play({ look: 'flip', chip: 'chip' }[loud] || loud);
+    let dealDelayMs = loud ? 180 : 0;
     if (t.hand && t.hand.number !== ph?.number) {
       clearRunoutTimers(c);
       c.runout = null;
@@ -692,13 +739,17 @@ window.createGamesUI = ({
       c.boardAnimFrom = 0;
       c.dealAt = performance.now();
       const fresh = previous || (t.server_time - (t.hand.created_at || t.server_time) < 4);
-      if (fresh && !isBoard(t.game)) sound.burst('deal', t.game === 'zjh' ? 3 : 2, 105);
+      if (fresh && !isBoard(t.game)) {
+        sound.burst('deal', t.game === 'zjh' ? 3 : 2, 105);
+        dealDelayMs = 260;
+      }
     } else if (t.game === 'holdem' && t.hand && ph && t.hand.number === ph.number) {
       const prevBoard = ph.engine?.board?.length || 0, nextBoard = t.hand.engine?.board?.length || 0;
       if (nextBoard > prevBoard) {
         c.boardAnimFrom = prevBoard;
         c.boardDealAt = performance.now();
         sound.burst('deal', nextBoard - prevBoard, 115);
+        dealDelayMs = nextBoard - prevBoard >= 3 ? 380 : 220;
       }
     }
     const ixList = t.interactions || [];
@@ -729,11 +780,20 @@ window.createGamesUI = ({
         if (t.game === 'xiangqi' && h.in_check && h.last_move) fx.push({ player: h.last_move.player, kind: 'raise', label: '将军' });
       }
     }
-    if (t.me.player && t.hand?.current_player === t.me.player
+    const meSeatObj = t.seats.find(s => s.player === t.me.player);
+    if (!suppressTurnAlert && !meSeatObj?.auto && t.me.player && t.hand?.current_player === t.me.player
       && (ph?.current_player !== t.me.player || ph?.number !== t.hand.number || ph?.turn !== t.hand.turn && !ph?.current_player)) {
-      sound.play('turn', 1);
-      haptic.turnAlert();
       c.turnAlertAt = performance.now();
+      clearTimeout(c.turnAlertTimer);
+      const snapHand = t.hand.number, snapTurn = t.hand.turn;
+      const fireTurnCue = () => {
+        if (!live(c) || c.table.hand?.number !== snapHand || c.table.hand?.turn !== snapTurn) return;
+        if (c.table.hand?.current_player !== c.table.me.player) return;
+        sound.play('turn', 1);
+        haptic.turnAlert();
+      };
+      if (dealDelayMs > 0) c.turnAlertTimer = setTimeout(fireTurnCue, dealDelayMs);
+      else fireTurnCue();
     }
     if (ph && t.last_hand?.number === ph.number && t.hand?.number !== ph.number) {
       const h = t.last_hand, net = h.result?.net || {}, motion = !matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -769,7 +829,7 @@ window.createGamesUI = ({
         if (runFrom < 5 && totalBoard >= 5) stages.push(5);
         c.runout = { hand: h, shownCount: runFrom };
         haptic.impact('heavy');
-        let delay = 220;
+        let delay = 150;
         stages.forEach((cnt, idx) => {
           const prevCnt = idx === 0 ? runFrom : stages[idx - 1];
           c.runoutTimers.push(setTimeout(() => {
@@ -777,13 +837,13 @@ window.createGamesUI = ({
             c.runout = { hand: h, shownCount: cnt };
             c.boardAnimFrom = prevCnt;
             c.boardDealAt = performance.now();
-            sound.burst('deal', cnt - prevCnt, 100);
+            sound.burst('deal', cnt - prevCnt, 90);
             haptic.impact(cnt === 5 ? 'medium' : 'light');
             paintTable(c);
           }, delay));
-          delay += cnt === 3 ? 850 : 780;
+          delay += cnt === 3 ? 580 : 560;
         });
-        c.runoutTimers.push(setTimeout(startCelebrate, delay + 250));
+        c.runoutTimers.push(setTimeout(startCelebrate, delay + 180));
       } else {
         if (motion) {
           c.celebrate = { hand: h, at: performance.now(), ms: feltMs };
@@ -1061,13 +1121,14 @@ window.createGamesUI = ({
       const e = h.engine || {};
       const freshBoard = c.boardDealAt && (performance.now() - c.boardDealAt < 700);
       const actorName = t.seats.find(s => s.player === h.current_player)?.name;
+      const isMeActing = !!(t.me.player && h.current_player === t.me.player);
       return `
         <div class="gc-holdem-center">
           <div class="gc-street-pill">第 ${h.number} 手 · ${esc(STREET_ZH[e.street] || '进行中')}</div>
           <div class="gc-board">${boardCardsHtml(e.board || [], highlightBest, c.boardAnimFrom || 0, freshBoard)}</div>
           <button class="gc-pot-value gc-pot-btn num" type="button" data-gc-bb-toggle title="点击切换筹码 / 大盲(BB)显示">${img('chip-stack')} ${fmtChips(e.pot, t)}</button>
           <div class="gc-pots">${(e.pots || []).map((p, i) => `<span>${i ? '边池 ' + i : '主池'} ${fmtChips(p.amount, t)}</span>`).join('')}</div>
-          <span class="gc-ticker">${actorName ? esc(actorName) + ' 行动中' : '等待服务端发牌'}</span>
+          <span class="gc-ticker ${isMeActing ? 'gc-ticker-me' : ''}">${isMeActing ? '⚡ 轮到你行动' : actorName ? esc(actorName) + ' 行动中' : '等待服务端发牌'}</span>
         </div>`;
     }
     return `
@@ -1673,6 +1734,10 @@ window.createGamesUI = ({
         return paintTable(c);
       }
       if (op === 'all_in') { haptic.impact('medium'); return confirmAction(c, op); }
+      if (t.game === 'holdem' && op === 'fold' && t.hand?.legal_actions?.check) {
+        haptic.notify('warning');
+        return confirmFreeFold(c);
+      }
       c.raiseBar = null;
       haptic.impact(op === 'fold' ? 'light' : 'medium');
       action(c, op);
@@ -1696,7 +1761,16 @@ window.createGamesUI = ({
           confirmBtn.classList.toggle('allin', isAll);
           $$('[data-gc-preset-val]', raiseInline).forEach(btn => btn.classList.toggle('on', Number(btn.dataset.gcPresetVal) === next));
         };
-        range.oninput = () => { haptic.select(); updateInline(Number(range.value)); };
+        const endDrag = () => {
+          if (!c.draggingRaise) return;
+          c.draggingRaise = false;
+          if (c.deferredPaint) { c.deferredPaint = false; paintTable(c); }
+        };
+        range.onpointerdown = () => { c.draggingRaise = true; };
+        range.onpointerup = endDrag;
+        range.onpointercancel = endDrag;
+        range.onchange = endDrag;
+        range.oninput = () => { haptic.select(60); updateInline(Number(range.value)); };
         $$('[data-gc-preset-val]', raiseInline).forEach(btn => btn.onclick = () => {
           haptic.select();
           updateInline(Number(btn.dataset.gcPresetVal));
@@ -1966,6 +2040,28 @@ window.createGamesUI = ({
       <button class="btn block" data-gc-confirm ${disabled(false)}>确认</button>
       <button class="link gc-close" data-cancel>取消</button>`, (root, close) => {
       $('[data-gc-confirm]', root).onclick = async () => { if (c.table.hand?.turn !== h.turn || c.table.hand_no !== h.number) { close(); return toast('牌局已变化，请重新选择', true); } if (await action(c, op)) close(); };
+    });
+  }
+  function confirmFreeFold(c) {
+    const h = c.table.hand;
+    showSheet(`
+      <h3>当前可以免费过牌</h3>
+      <p>现在无需补任何筹码就能继续看牌，确定要直接弃牌吗？</p>
+      <button class="btn block" data-gc-free-check ${disabled(false)}>改为过牌（免费）</button>
+      <button class="btn block danger" style="margin-top:8px" data-gc-free-fold ${disabled(false)}>仍然弃牌</button>
+      <button class="link gc-close" data-cancel>取消</button>`, (root, close) => {
+      $('[data-gc-free-check]', root).onclick = async () => {
+        if (c.table.hand?.turn !== h.turn || c.table.hand_no !== h.number) { close(); return toast('牌局已变化，请重新选择', true); }
+        haptic.impact('medium');
+        c.raiseBar = null;
+        if (await action(c, 'check')) close();
+      };
+      $('[data-gc-free-fold]', root).onclick = async () => {
+        if (c.table.hand?.turn !== h.turn || c.table.hand_no !== h.number) { close(); return toast('牌局已变化，请重新选择', true); }
+        haptic.impact('light');
+        c.raiseBar = null;
+        if (await action(c, 'fold')) close();
+      };
     });
   }
   function buySheet(tier, w, topup, stack, submit) {

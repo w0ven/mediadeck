@@ -816,18 +816,21 @@ def test_member_facing_game_modules_do_not_brand_the_admin_panel():
 
 
 def test_action_log_last_actions_and_allin_runout_metadata(hc):
-    t = start(hc, 2, buy=100)
+    # Seat 3 players so at least 2 remain with chips after a heads-up all-in, verifying the 7s runout gap.
+    t = start(hc, 3, buy=[80, 120, 120])
     t = act(hc, t, 'raise', 6)
     hand = t['hand']
     assert len(hand['action_log']) == 1
     first = hand['action_log'][0]
     assert first['street'] == 'preflop' and first['action'] == 'raise' and first['to'] == 6
     assert hand['last_actions'][first['player']]['action'] == 'raise'
-    # All-in call from preflop triggers a full runout from 0 board cards.
+    # First opponent calls all-in (short stack), third folds -> preflop runout from 0 board cards.
     t = act(hc, t, 'all_in')
+    t = act(hc, t, 'fold')
     t = act(hc, t, 'call')
     assert t['hand'] is None and t['last_hand'] is not None
     assert t['last_hand']['runout_from'] == 0
-    assert len(t['last_hand']['action_log']) == 3
+    assert t['countdown_at'] == hc.clock + 7  # Runout hands get extra 2s to view reveal & result
+    assert len(t['last_hand']['action_log']) == 4
     assert t['last_hand']['action_log'][-1]['action'] == 'call'
 

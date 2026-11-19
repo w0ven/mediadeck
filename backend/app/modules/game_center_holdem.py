@@ -201,7 +201,10 @@ class HoldemGame:
         if len(self.eligible(table)) < 2:
             table.update(phase='waiting', countdown_at=None, idle_deadline=table['idle_deadline'] or clock + 600)
         elif table['hand_no']:
-            table.update(phase='between', countdown_at=table['countdown_at'] or clock + 5, idle_deadline=None)
+            last = table.get('last_hand') or {}
+            # Give All-in runout hands an extra 2s so players can enjoy the street reveal & showdown banner.
+            gap = 7 if last.get('runout_from') is not None else 5
+            table.update(phase='between', countdown_at=table['countdown_at'] or clock + gap, idle_deadline=None)
         elif len(table['seats']) == self.max_players:
             self.start(service, conn, table, clock)
 

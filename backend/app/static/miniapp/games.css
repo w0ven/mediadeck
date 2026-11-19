@@ -3531,6 +3531,22 @@ html[data-theme="light"] .gc-feature {
 .gc-raise-hole em.red {
   color: #d62839;
 }
+.gc-ticker.gc-ticker-me {
+  color: #1f1200;
+  font-weight: 900;
+  background: linear-gradient(135deg, #ffe79a, #f2be47 55%, #66e4ad);
+  box-shadow: 0 0 14px rgba(255, 224, 130, .65), inset 0 1px 0 rgba(255, 255, 255, .75);
+  animation: gc-ticker-pulse 1.35s ease-in-out infinite;
+}
+@keyframes gc-ticker-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .gc-ticker.gc-ticker-me {
+    animation: none !important;
+  }
+}
 
 
 
