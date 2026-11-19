@@ -2,6 +2,16 @@
 
 Newest entries first. Every working session appends one entry.
 
+## 2026-11-20 — raise TCP listen backlog on streaming gateway and loopback agent HTTP servers
+
+- Python's standard `ThreadingHTTPServer` defaults to `request_queue_size = 5` (`listen(fd, 5)`),
+  which dropped SYN packets under concurrent multi-Range player startup bursts (SenPlayer, Hills,
+  Infuse) on `:8339` (`deploy/gateway/gateway.py`) and `:9820` (`agent/stream_rate_proxy.py`),
+  surfacing in nginx as `upstream timed out (110: Connection timed out) while reading upstream`.
+- Raised `request_queue_size = 256` with `daemon_threads = True` and `allow_reuse_address = True`
+  across `RateServer`, `GatewayServer`, `ProbeServer` (`agent/loadprobe.py`), and `MeterServer`
+  (`agent/meterd.py`).
+
 ## 2026-11-20 — stop infinite request-outbox retries on deleted Telegram cards and bound operational SQLite tables
 
 - `RequestBotMixin._rq_refresh` previously left deleted or blocked Telegram card rows in

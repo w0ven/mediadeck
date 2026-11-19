@@ -17,9 +17,15 @@ import threading
 import time
 import urllib.parse
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+
+class ThreadingHTTPServer(_ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+    request_queue_size = 256
 
 
 class DenyPublisher:

@@ -38,6 +38,9 @@ def test_loadprobe_announce_is_loopback_only(monkeypatch):
     # is collected any more (docs/TRAFFIC_RETIREMENT.md).
     assert codes[-1] == 204
     assert not hasattr(module, "SpeedLog")
+    assert load("loadprobe").ThreadingHTTPServer.request_queue_size >= 256
+    assert load("meterd").ThreadingHTTPServer.request_queue_size >= 256
+    assert load("stream_rate_proxy").RateServer.request_queue_size >= 256
 
 
 def test_installer_bootstraps_certificate_before_tls_site_and_has_meter_tools():

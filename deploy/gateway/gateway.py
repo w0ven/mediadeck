@@ -246,4 +246,8 @@ class Handler(BaseHTTPRequestHandler):
    hs={k:v for k,v in r.getheaders() if k.lower() not in ('content-length','transfer-encoding','connection','server','date')}
    self.send(r.status,body,hs)
   finally:c.close()
-if __name__=='__main__':ThreadingHTTPServer(('127.0.0.1',8339),Handler).serve_forever()
+class GatewayServer(ThreadingHTTPServer):
+ daemon_threads=True
+ allow_reuse_address=True
+ request_queue_size=256
+if __name__=='__main__':GatewayServer(('127.0.0.1',8339),Handler).serve_forever()
