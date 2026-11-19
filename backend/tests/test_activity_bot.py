@@ -57,7 +57,7 @@ def test_private_card_zero_viewing_and_renew_preview_confirmation_retry(env):
     async def run():
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        for text in ('<code>🌱 Lv1 · 凡尘</code>', '⋆ <b>凡尘 🌱 初入仙途问长生</b> ⋆', '成长 0',
+        for text in ('🌱</tg-emoji> <code>Lv1 · 凡尘</code>', '⋆ <b>凡尘 <tg-emoji emoji-id="6048768009651101568">🌱</tg-emoji> 初入仙途问长生</b> ⋆', '成长 0',
                      '续期 80 积分 / 30 天',
                      '自动保号：未开启', '到期 · 剩'):
             assert text in body
@@ -140,7 +140,7 @@ def test_expired_and_manually_disabled_can_view_confirm_without_unblocking(env, 
     async def run():
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        assert '<code>🌱 Lv1 · 凡尘</code>' in body and '⋆ <b>凡尘 🌱 初入仙途问长生</b> ⋆' in body
+        assert '🌱</tg-emoji> <code>Lv1 · 凡尘</code>' in body and '初入仙途问长生</b> ⋆' in body
         await tap(e, 'activity:renew', mid)
         confirm = find_action(e, mid, 'activity:confirm:')
         await tap(e, confirm, mid)
@@ -274,8 +274,8 @@ def test_whitelist_and_worn_title_in_bot_card_and_no_web_code(env):
         await e.bot._titles.wear('u1', title['id'])
         mid = await private_command(e, '/me')
         body = e.tg.text(VIEWER, mid)
-        assert '<code>🌱 Lv1 · 凡尘</code>  <code>💠 尊享白名单</code>' in body
-        assert '⋆ <b>凡尘 🌱 清风明月</b> ⋆' in body and '♾ 永久有效' in body
+        assert '🌱</tg-emoji> <code>Lv1 · 凡尘</code>  <tg-emoji emoji-id="6048861618463318199">💠</tg-emoji> <code>尊享白名单</code>' in body
+        assert '⋆ <b>凡尘 <tg-emoji emoji-id="6048768009651101568">🌱</tg-emoji> 清风明月</b> ⋆' in body and '♾ 永久有效' in body
         assert not {'activity:renew', 'activity:auto:on', 'activity:auto:off'} & {b['callback_data'] for b in actions(e, mid)}
         await tap(e, 'activity:status', mid)
         assert 'activity:renew' not in {b['callback_data'] for b in actions(e, mid)}
@@ -368,7 +368,7 @@ def test_level_name_and_title_are_one_identity_on_account_home_and_activity(env)
     asyncio.run(run())
     member['activity_level'].update(name='<听风&>', title='<风止&星归>', icon='🍃')
     escaped = e.bot._group_label(member)
-    assert '<code>🍃 Lv2 · &lt;听风&amp;&gt;</code>' in escaped
+    assert '🍃 <code>Lv2 · &lt;听风&amp;&gt;</code>' in escaped
     assert '✦ <b>&lt;听风&amp;&gt; 🍃 &lt;风止&amp;星归&gt;</b> ✦' in escaped
 
 

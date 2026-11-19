@@ -126,7 +126,7 @@ def test_current_user_ux_previews(request, monkeypatch):
     pages = render_ux_previews(e)
     assert PREVIEW.read_text() == preview_document(pages)
     account, rows = pages['我的账号 · 完整等级与直接保号入口']
-    assert '<code>🗡 Lv2 · 筑基</code>' in account and '✦ <b>筑基 🗡 御剑乘风斩尘缘</b> ✦' in account
+    assert '🗡️</tg-emoji> <code>Lv2 · 筑基</code>' in account and '✦ <b>筑基 <tg-emoji emoji-id="6050704202382974828">🗡️</tg-emoji> 御剑乘风斩尘缘</b> ✦' in account
     assert '观影奖励' not in account
     assert '今日观影奖励 +8 积分 · +5 成长' in pages['我的账号 · 今日观影奖励'][0]
     assert rows[0] == ['⏳ 续期 30 天', '🤖 开启自动保号']

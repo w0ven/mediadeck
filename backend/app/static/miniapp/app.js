@@ -9,8 +9,11 @@
     rank: { kind: 'watch', period: 'today' }, bag: 'shop',
     req: { q: '', type: '', results: null, page: 1, total: 1 },
   };
-  const ORN = { 1: '⋆', 2: '✦', 3: '🔥', 4: '⚔', 5: '✧', 6: '◈', 7: '♛', 8: '🪷', 9: '❖' };
-  const LV9_ART = '/app/assets/game-assets/lv9-tatian.webp';
+  const ORN = { 1: '⋆', 2: '✦', 3: '❖', 4: '❖', 5: '❖', 6: '❖', 7: '❖', 8: '❖', 9: '❖' };
+  const REALM_ICON_BASE = '/app/assets/realm-icons';
+  const REALM_ICON_VER = 'v1';
+  const realmIconUrl = (key) => `${REALM_ICON_BASE}/${key}.webp?r=${REALM_ICON_VER}`;
+  const realmImg = (key, alt = '', cls = 'realm-ic') => `<img class="${cls}${key === 'lv9' ? ' is-lv9' : ''}" src="${realmIconUrl(key)}" alt="${esc(alt)}" decoding="async">`;
   const STATUS = {
     active: ['ok', '正常'], suspended: ['bad', '已停用'], expired: ['warn', '已过期'],
     exhausted: ['warn', '已超额'], pending: ['', '待开通'], deleted: ['bad', '已删除'],
@@ -156,8 +159,12 @@
   const mbps = (kbps) => (kbps ? Math.round(kbps / 1000) : null);
 
   function lvIconHtml(lv, iconStr) {
-    if (Number(lv) === 9) return `<img class="lv9-art" src="${LV9_ART}" alt="踏天">`;
+    const n = Number(lv);
+    if (n >= 1 && n <= 9) return realmImg(`lv${n}`, iconStr || `Lv${n}`);
     return iconStr ? esc(emo(iconStr)) : '';
+  }
+  function wlIconHtml() {
+    return realmImg('wl', '白名单');
   }
   function lvClass(tag) {
     if (!tag) return '';
@@ -166,10 +173,10 @@
   function lvTag(tag, xs = false, bare = false) {
     if (!tag) return '';
     const hasLevel = tag.level != null;
-    const wlHtml = tag.whitelist ? `<span class="lvtag ${xs ? 'xs ' : ''}wl">💠 白名单</span>` : '';
+    const wlHtml = tag.whitelist ? `<span class="lvtag ${xs ? 'xs ' : ''}wl">${wlIconHtml()} 白名单</span>` : '';
     if (!hasLevel) return wlHtml;
     const art = bare ? (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : '')
-      : (Number(tag.level) === 9 ? lvIconHtml(9) + ' ' : (tag.icon ? esc(emo(tag.icon)) + ' ' : ''));
+      : (lvIconHtml(tag.level, tag.icon) ? lvIconHtml(tag.level, tag.icon) + ' ' : '');
     const lvHtml = `<span class="lvtag ${xs ? 'xs ' : ''}lv${esc(tag.level)}">${art}Lv${esc(tag.level)}${xs ? '' : ' ' + esc(tag.name || '')}</span>`;
     return wlHtml ? `${lvHtml}${wlHtml}` : lvHtml;
   }
@@ -199,9 +206,11 @@
     </div>`;
   }
   function plaque(text, tag, big = false, ident = null) {
-    const tier = tag && tag.whitelist ? 7 : Math.min(9, Math.max(1, Number(tag && tag.level) || 1));
-    const orn = `<span class="orn">${tag && tag.whitelist ? '◆' : ORN[tier]}</span>`;
-    const embInner = ident ? (Number(ident.level) === 9 ? lvIconHtml(9) : (ident.icon ? esc(emo(ident.icon)) : '')) : '';
+    const lvNum = Number((ident && ident.level) ?? (tag && tag.level)) || 1;
+    const tier = tag && tag.whitelist ? 7 : Math.min(9, Math.max(1, lvNum));
+    const ornInner = lvNum >= 4 || (tag && tag.whitelist) ? realmImg('orn', '❖', 'realm-ic orn-ic') : (ORN[tier] || '❖');
+    const orn = `<span class="orn">${ornInner}</span>`;
+    const embInner = ident ? lvIconHtml(ident.level, ident.icon) : '';
     const head = ident && ident.name
       ? `<span class="txt nm">${esc(ident.name)}</span>${embInner ? `<span class="emb">${embInner}</span>` : ''}` : '';
     const isLong = Array.from(String(text || '')).length >= 10;
@@ -544,7 +553,7 @@
     const lv = preview.level;
     const done = await confirmSheet({
       title: '续期 30 天',
-      tag: `<span class="lvtag ${S.me.whitelist ? 'wl' : 'lv' + lv.level}">${esc(lv.icon)} Lv${esc(lv.level)} 价格</span>`,
+      tag: `<span class="lvtag ${S.me.whitelist ? 'wl' : 'lv' + lv.level}">${lvIconHtml(lv.level, lv.icon)} Lv${esc(lv.level)} 价格</span>`,
       rows: [['费用', `<b>${num(preview.price)} 积分</b>`],
         ['余额', `${num(preview.balance)} → <b>${num(preview.balance_after)}</b>`],
         ['当前到期', stamp(preview.expires_at, true)],
@@ -589,18 +598,17 @@
       : lv.level === 9 ? '九重天外 · 逆仙踏天境'
         : lv.level === 8 ? '八重圣境 · 太清道祖位'
           : `第 ${lv.level} 重境界 · 修真仙途`;
-    const crest = me.whitelist ? '<div class="realm-crest">💠</div>'
-      : lv.level === 9 ? `<div class="realm-crest is-lv9"><img src="${LV9_ART}" alt="踏天"></div>`
-        : `<div class="realm-crest">${esc(emo(lv.icon))}</div>`;
+    const crest = me.whitelist ? `<div class="realm-crest is-art">${realmImg('wl', '白名单', 'crest-art')}</div>`
+      : `<div class="realm-crest is-art${lv.level === 9 ? ' is-lv9' : ''}">${realmImg(`lv${lv.level}`, lv.name || '', 'crest-art')}</div>`;
     const rows = me.levels.map((row) => {
       const isSpecial = row.threshold == null;
       const reached = !me.whitelist && !isSpecial && row.level < lv.level;
       const isCurrent = !me.whitelist && row.level === lv.level;
       const badge = isCurrent ? '<span class="chip cur">🔥 当前境界</span>'
         : reached ? '<span class="chip ok">✦ 已破境</span>'
-          : isSpecial ? '<span class="chip acc">❖ 圣谕敕封</span>'
+          : isSpecial ? `<span class="chip acc">${realmImg('edict', '✦', 'realm-ic')} 圣谕敕封</span>`
             : `<span class="chip">${num(row.threshold)} 成长</span>`;
-      const orb = row.level === 9 ? `<img class="lv9-art" src="${LV9_ART}" alt="">` : esc(emo(row.icon));
+      const orb = realmImg(`lv${row.level}`, row.name || '', 'orb-art');
       return `<div class="realm-step lv${row.level}${isCurrent ? ' cur' : (!reached && !isSpecial ? ' dim-lv' : '')}">
         <div class="realm-orb">${orb}</div>
         <div class="realm-body">
@@ -698,7 +706,7 @@
     const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${lvIconHtml(row.level, row.icon)} Lv${row.level}</span>${plaque(row.title, { level: row.level }, false, row)}</div>`).join('');
     const sample = me.worn_title || me.level.title;
     setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的道号铭牌与流光样式；自定义称号会按佩戴者的境界套用对应样式。</div>
-      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">💠 白名单</span>${plaque(sample, { whitelist: true }, false, me.level)}</div></div>
+      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">${wlIconHtml()} 白名单</span>${plaque(sample, { whitelist: true }, false, me.level)}</div></div>
       <div class="card small" style="margin-top:12px"><div class="tiny muted">铭牌显示「境界名 + 标志 + 道号」，文字带本级配色的仙气流光。Lv3 起铭牌外有光晕；Lv5 起光晕更强、边框发光；Lv7～Lv9 再加扫光和呼吸神环，Lv9 踏天配专属冰龙神印与双极冰紫流光；白名单固定用水晶色。</div></div>`);
   }
 

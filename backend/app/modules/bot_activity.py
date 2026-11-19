@@ -10,6 +10,7 @@ from app.modules.bot_views import bandwidth_value, duration
 from app.modules.economy_rules import BEIJING, economy_write, encode
 from app.modules.levels import DAY
 from app.modules.member_devices import device_cap
+from app.modules.realm_icons import tg_level_emoji, tg_realm_emoji
 
 
 def beijing_stamp(value):
@@ -169,8 +170,9 @@ class ActivityBotMixin:
                 lv_no = row['level']
                 cur = lv_no == level['level']
                 mark = '🔥' if cur else ('✦' if lv_no < level['level'] and level['level'] <= 7 else '·')
-                gate = f"{row['threshold']}成长" if row.get('threshold') is not None else '圣谕敕封'
-                entry = f"{mark} {escape(row['icon'])} Lv{lv_no} {escape(row['name'])}「{escape(row['title'])}」· {gate}"
+                gate = f"{row['threshold']}成长" if row.get('threshold') is not None else f"{tg_realm_emoji('edict', '🌟')} 圣谕敕封"
+                lv_icon = tg_level_emoji(lv_no, str(row['icon']))
+                entry = f"{mark} {lv_icon} Lv{lv_no} {escape(row['name'])}「{escape(row['title'])}」· {gate}"
                 ladder.append(f"<b>{entry} ◀ 当前</b>" if cur else entry)
             sections.append('<blockquote expandable><b>🌌 九重仙途 · 境界总览</b>\n' + '\n'.join(ladder) + '</blockquote>')
         if member.get('note'):

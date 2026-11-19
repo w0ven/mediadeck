@@ -70,6 +70,7 @@ from app.modules.group_points import CALLBACKS as GROUP_POINTS_CALLBACKS
 from app.modules.group_points import GroupPointsBotMixin, GroupPointsError, reliable_user
 from app.modules.groups import WHITELIST_GROUP_ID
 from app.modules.member_rewards import RewardError, grant_reward
+from app.modules.realm_icons import strip_tg_emoji_tags, tg_level_emoji, tg_realm_emoji
 from app.modules.rebinding import RebindingService
 from app.modules.red_packets import CALLBACKS as PACKET_CALLBACKS
 from app.modules.report_delivery import CALL_DELIVERY
@@ -553,9 +554,32 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             self._record_call_error('Telegram 返回格式无效')
             return None
         if not body.get("ok"):
+            desc = str(body.get("description") or "Telegram 拒绝了请求")
+            if (
+                method in ("sendMessage", "editMessageText", "sendPhoto", "editMessageCaption")
+                and isinstance(payload, dict)
+                and any(
+                    "<tg-emoji" in str(payload.get(k) or "")
+                    for k in ("text", "caption")
+                )
+                and any(w in desc.lower() for w in ("custom emoji", "tg-emoji", "emoji", "entity"))
+            ):
+                fallback_payload = dict(payload)
+                for k in ("text", "caption"):
+                    if isinstance(fallback_payload.get(k), str) and "<tg-emoji" in fallback_payload[k]:
+                        fallback_payload[k] = strip_tg_emoji_tags(fallback_payload[k])
+                with contextlib.suppress(Exception):
+                    client = await self._client()
+                    if client is not None:
+                        r2 = await client.post(url, json=fallback_payload, timeout=timeout)
+                        body2 = r2.json()
+                        if isinstance(body2, dict) and body2.get("ok"):
+                            self._record_call_error('')
+                            capture_response(method, fallback_payload, body2.get('result'))
+                            return body2.get("result")
             CALL_DELIVERY.set(delivery_failure(body))
             from app.modules.member_ops import redact
-            self._record_call_error(redact(str(body.get("description") or "Telegram 拒绝了请求").replace(auth_part, '***')))
+            self._record_call_error(redact(desc.replace(auth_part, '***')))
             return None
         self._record_call_error('')
         capture_response(method, payload or {}, body.get('result'))
@@ -1526,21 +1550,23 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
 
     @staticmethod
     def _plaque_ornament(lv: int) -> str:
-        return {1: '⋆', 2: '✦', 7: '👑', 8: '🪷'}.get(lv, '❖')
+        if lv >= 4:
+            return tg_realm_emoji('orn', '✨')
+        return {1: '⋆', 2: '✦', 3: '❖'}.get(lv, tg_realm_emoji('orn', '✨'))
 
     @staticmethod
     def _identity_plaque_lines(member: dict[str, Any], *, title: str | None = None) -> list[str]:
         level = member.get('activity_level')
         if level:
             lv = int(level['level'])
-            icon = escape(str(level['icon']))
+            icon = tg_level_emoji(lv, str(level['icon']))
             name = escape(str(level['name']))
             shown = escape(str(title if title is not None else level['title']))
-            pills = [f"<code>{icon} Lv{lv} · {name}</code>"]
+            pills = [f"{icon} <code>Lv{lv} · {name}</code>"]
             if member.get('group_id') == WHITELIST_GROUP_ID:
-                pills.append('<code>💠 尊享白名单</code>')
+                pills.append(f"{tg_realm_emoji('wl', '💠')} <code>尊享白名单</code>")
             elif lv in (8, 9):
-                pills.append('<code>✦ 圣谕敕封</code>')
+                pills.append(f"{tg_realm_emoji('edict', '🌟')} <code>圣谕敕封</code>")
             rows = ['  '.join(pills)]
             if shown:
                 orn = TelegramBot._plaque_ornament(lv)

@@ -25,7 +25,7 @@ class TelegramHTML(HTMLParser):
         self.parts = []
 
     def handle_starttag(self, tag, attrs):
-        assert tag in {'b', 'i', 'a', 'pre', 'code', 'blockquote'}
+        assert tag in {'b', 'i', 'a', 'pre', 'code', 'blockquote', 'tg-emoji'}
         assert tag != 'blockquote' or 'blockquote' not in self.stack
         self.stack.append(tag)
         if tag == 'blockquote':
