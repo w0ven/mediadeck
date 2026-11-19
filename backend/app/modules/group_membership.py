@@ -636,6 +636,19 @@ class GroupMembership:
             await self._persist(key, marker, key=state_key)
             return True
 
+    def prune_cache(self, now: float | None = None, max_age_seconds: int = 14 * 86400) -> int:
+        cutoff = (time.time() if now is None else now) - max_age_seconds
+        removed = 0
+        for state_key, marker in list(self._event_heads.items()):
+            if isinstance(marker, list) and marker and isinstance(marker[0], (int, float)) and marker[0] < cutoff:
+                lock = self._event_locks.get(state_key)
+                if lock is not None and lock.locked():
+                    continue
+                self._event_heads.pop(state_key, None)
+                self._event_locks.pop(state_key, None)
+                removed += 1
+        return removed
+
     async def gate(self, chat_id: Any, tg_id: str, *, fresh_message: bool = False,
                    reply_to_message_id: int | None = None) -> bool:
         if not self.rules()['gate_enabled']:

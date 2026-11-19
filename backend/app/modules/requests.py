@@ -790,11 +790,14 @@ class RequestService:
     def notices(self, request_id):
         return self._db.query("SELECT * FROM request_notices WHERE request_id=?", (request_id,))
 
+    MAX_OUTBOX_ATTEMPTS = 20
+
     def claim_delivery(self):
         now = int(time.time())
         with self._transaction() as c:
             row = c.execute(
-                "SELECT * FROM request_outbox WHERE state!='sent' AND next_at<=? AND lease_until<=? ORDER BY id LIMIT 1",
+                "SELECT * FROM request_outbox WHERE state IN ('pending','sending') "
+                "AND next_at<=? AND lease_until<=? ORDER BY id LIMIT 1",
                 (now, now),
             ).fetchone()
             if row:
@@ -806,20 +809,34 @@ class RequestService:
         return None
 
     def delivery_result(self, oid, ok, message_id=None):
+        now = int(time.time())
+        if ok:
+            self._db.execute(
+                "UPDATE request_outbox SET state='sent',lease_until=0,next_at=0,"
+                "message_id=COALESCE(?,message_id),error='' WHERE id=?",
+                (message_id, oid),
+            )
+            return
+        row = self._db.one("SELECT attempts FROM request_outbox WHERE id=?", (oid,)) or {}
+        attempts = int(row.get("attempts") or 1)
+        if attempts >= self.MAX_OUTBOX_ATTEMPTS:
+            self._db.execute(
+                "UPDATE request_outbox SET state='failed',lease_until=0,next_at=0,"
+                "message_id=COALESCE(?,message_id),error=? WHERE id=?",
+                (message_id, "Telegram 多次送达失败，已停止自动重试", oid),
+            )
+            return
+        delay = min(3600, 60 * (2 ** min(attempts - 1, 6))) if attempts > 0 else 60
         self._db.execute(
-            "UPDATE request_outbox SET state=?,lease_until=0,next_at=?,message_id=COALESCE(?,message_id),error=? WHERE id=?",
-            (
-                "sent" if ok else "pending",
-                int(time.time()) + (0 if ok else 60),
-                message_id,
-                "" if ok else "Telegram 未确认送达，可重试",
-                oid,
-            ),
+            "UPDATE request_outbox SET state='pending',lease_until=0,next_at=?,"
+            "message_id=COALESCE(?,message_id),error=? WHERE id=?",
+            (now + delay, message_id, "Telegram 未确认送达，可重试", oid),
         )
 
     def retry_notifications(self, rid=None):
         self._db.execute(
-            "UPDATE request_outbox SET next_at=0 WHERE state='pending'"
+            "UPDATE request_outbox SET state='pending',attempts=0,next_at=0,lease_until=0 "
+            "WHERE state IN ('pending','failed')"
             + (" AND request_id=?" if rid is not None else ""),
             (rid,) if rid is not None else (),
         )

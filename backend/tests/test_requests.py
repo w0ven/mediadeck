@@ -234,6 +234,35 @@ def test_outbox_leases_and_retry_never_mutate_request_or_quota(stack):
     assert db.one('SELECT state FROM request_outbox WHERE id=?',(first['id'],))['state']=='sent'
 
 
+def test_outbox_exponential_backoff_caps_infinite_retries_and_manual_retry_revives(stack, monkeypatch):
+    db, _, _, s = stack
+    clock = [1_800_000_000]
+    monkeypatch.setattr('app.modules.requests.time.time', lambda: clock[0])
+    row = create(s)
+    s.finish(row['id'], 'up1', 'rejected', note='暂无片源')
+    job_id = db.one("SELECT id FROM request_outbox WHERE kind='refresh'")['id']
+    # Exhaust remaining non-refresh jobs so claim_delivery focuses on job_id
+    db.execute("UPDATE request_outbox SET state='sent' WHERE id<>?", (job_id,))
+    for attempt in range(1, s.MAX_OUTBOX_ATTEMPTS + 1):
+        claimed = s.claim_delivery()
+        assert claimed and claimed['id'] == job_id
+        s.delivery_result(job_id, False)
+        stored = db.one("SELECT state,attempts,next_at,error FROM request_outbox WHERE id=?", (job_id,))
+        if attempt < s.MAX_OUTBOX_ATTEMPTS:
+            expected_delay = min(3600, 60 * (2 ** min(attempt - 1, 6)))
+            assert stored['state'] == 'pending' and stored['next_at'] == clock[0] + expected_delay
+            assert s.claim_delivery() is None  # backoff respected
+            clock[0] += expected_delay
+        else:
+            assert stored['state'] == 'failed' and stored['next_at'] == 0
+            clock[0] += 86400
+            assert s.claim_delivery() is None  # never spins forever once failed
+    # Manual retry revives failed outbox entries cleanly
+    s.retry_notifications(row['id'])
+    revived = s.claim_delivery()
+    assert revived and revived['id'] == job_id and revived['attempts'] == 0
+
+
 def test_management_api_legacy_410_conflict_optional_reason_and_audit():
     auth=('admin','change-me')
     with TestClient(app) as client:

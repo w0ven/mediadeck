@@ -518,6 +518,9 @@ async def _startup() -> None:
                 prune_due = now + 86400
                 with contextlib.suppress(Exception):
                     await run_usage_io(app.state.stats.prune, int(membership["retention_days"]))
+                if hasattr(app.state, "telegram") and getattr(app.state.telegram, "membership", None):
+                    with contextlib.suppress(Exception):
+                        app.state.telegram.membership.prune_cache(now)
 
     app.state.usage_task = asyncio.create_task(usage_loop())
 

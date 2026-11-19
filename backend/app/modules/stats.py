@@ -647,19 +647,48 @@ class StatsService:
 
     # -- retention -----------------------------------------------------------
     def prune(self, keep_days: int = 400) -> dict[str, int]:
-        """Drop history beyond the retention window.
-
-        play_events is the fastest-growing table in the panel; without this the
-        stats queries degrade steadily and the database grows without bound.
-        """
-        cutoff_ts = int(time.time()) - max(30, keep_days) * 86400
+        """Drop history beyond the retention window and bound operational tables."""
+        now = int(time.time())
+        cutoff_ts = now - max(30, keep_days) * 86400
+        short_cutoff = now - min(max(7, keep_days), 14) * 86400
+        interval_cutoff = now - min(max(30, keep_days), 90) * 86400
         # These tables also hold archived byte counters: never purge them on retirement.
         events = usage = 0
         self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_verified_samples WHERE ended_at < ?', (cutoff_ts,))
-        self._db.execute('DELETE FROM watch_playbacks WHERE issued_at < ? AND closed_at > 0 AND closed_at < ?',
-                         (cutoff_ts, cutoff_ts))
-        audit = self._db.execute(
-            "DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
-        return {"play_events": events, "usage_daily": usage, "audit_log": audit}
+        playbacks = self._db.execute(
+            'DELETE FROM watch_playbacks WHERE '
+            '(closed_at > 0 AND closed_at < ? AND issued_at < ?) '
+            'OR (closed_at = 0 AND issued_at > 0 AND issued_at < ? '
+            'AND session_id NOT IN (SELECT session_id FROM watch_checkpoints))',
+            (short_cutoff, short_cutoff, short_cutoff),
+        )
+        plugin_runs = self._db.execute(
+            'DELETE FROM plugin_runs WHERE started_at < ? AND id NOT IN ('
+            'SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY plugin_id ORDER BY id DESC) AS rn '
+            'FROM plugin_runs) WHERE rn <= 100)',
+            (short_cutoff,),
+        )
+        membership_events = self._db.execute(
+            "DELETE FROM meta WHERE key LIKE 'telegram.membership:%:event:%' "
+            "AND json_valid(value) AND CAST(json_extract(value, '$[0]') AS REAL) > 0 "
+            "AND CAST(json_extract(value, '$[0]') AS REAL) < ?",
+            (short_cutoff,),
+        )
+        tables = {r['name'] for r in self._db.query("SELECT name FROM sqlite_master WHERE type='table'")}
+        if 'activity_watch_intervals' in tables:
+            self._db.execute('DELETE FROM activity_watch_intervals WHERE ended_at < ?', (interval_cutoff,))
+        if 'request_inputs' in tables:
+            self._db.execute('DELETE FROM request_inputs WHERE expires_at > 0 AND expires_at < ?', (now - 86400,))
+        audit = self._db.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
+        with self._db.write() as conn:
+            conn.execute('PRAGMA optimize')
+        return {
+            "play_events": events,
+            "usage_daily": usage,
+            "audit_log": audit,
+            "watch_playbacks": playbacks,
+            "plugin_runs": plugin_runs,
+            "membership_events": membership_events,
+        }
