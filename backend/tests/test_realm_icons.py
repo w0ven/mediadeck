@@ -41,14 +41,14 @@ def test_plaque_places_custom_emoji_outside_code_blocks_and_strips_cleanly() -> 
     }
     lines = TelegramBot._identity_plaque_lines(member)
     assert len(lines) == 2
-    assert '<code><tg-emoji' not in lines[0]
-    assert 'emoji-id="6048888337454867197"' in lines[0]
+    assert '<code>' not in lines[0]
     assert 'emoji-id="6048861618463318199"' in lines[0]
-    assert 'emoji-id="6050968476015665060"' in lines[1]
+    assert 'emoji-id="6048888337454867197"' in lines[1]
     stripped = strip_tg_emoji_tags("\n".join(lines))
     assert "<tg-emoji" not in stripped
-    assert "🐉 <code>Lv9 · 踏天</code>" in stripped
-    assert "💠 <code>尊享白名单</code>" in stripped
+    assert "<b>Lv9 · 踏天</b>" in stripped
+    assert "💠 <b>尊享白名单</b>" in stripped
+    assert "<b>踏天 🐉 顺为凡，逆则仙，只在心中一念间</b>" in stripped
 
 
 def test_strip_keyboard_emoji_ids_removes_custom_icons_cleanly() -> None:

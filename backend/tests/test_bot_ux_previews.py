@@ -126,7 +126,7 @@ def test_current_user_ux_previews(request, monkeypatch):
     pages = render_ux_previews(e)
     assert PREVIEW.read_text() == preview_document(pages)
     account, rows = pages['我的账号 · 完整等级与直接保号入口']
-    assert '🗡️</tg-emoji> <code>Lv2 · 筑基</code>' in account and '✦ <b>筑基 <tg-emoji emoji-id="6050704202382974828">🗡️</tg-emoji> 御剑乘风斩尘缘</b> ✦' in account
+    assert '<b>Lv2 · 筑基</b>' in account and '<b>筑基 <tg-emoji emoji-id="6050704202382974828">🗡️</tg-emoji> 御剑乘风斩尘缘</b>' in account
     assert '观影奖励' not in account
     assert '今日观影奖励 +8 积分 · +5 成长' in pages['我的账号 · 今日观影奖励'][0]
     assert rows[0] == ['⏳ 续期 30 天', '🤖 开启自动保号']
@@ -136,7 +136,7 @@ def test_current_user_ux_previews(request, monkeypatch):
                for body, rows in pages.values())
     group_card = pages['群内账号卡 · 昵称与分区'][0]
     assert not any(text in group_card for text in ('续期', '缺口', '近30天核验', '有效日', '删除候选'))
-    assert group_card.startswith('💠 <a href="tg://user?id=') and 'ViewerA' not in group_card
+    assert group_card.startswith('👤 <a href="tg://user?id=') and 'ViewerA' not in group_card and '尊享白名单' in group_card
     assert '📋 资料' in pages['/kk · 私聊一屏看全'][0]
     group_kk, group_rows = pages['/kk · 群内同样一屏看全，备注只提示']
     for text in ('📋 资料', 'Telegram <code>', '注册渠道', '邀请人', '求片剩余', '最近活跃', '📝 有备注，私聊 /kk 查看'):

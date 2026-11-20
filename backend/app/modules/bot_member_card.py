@@ -100,7 +100,8 @@ class MemberCardMixin:
         info = self._member_level_info(member)
         account = str(member.get('username') or '—')
         name = self._member_nickname(member, link=True, fallback=account) or f'<b>{escape(account)}</b>'
-        return card([(self._whitelist_decoration(member) or '👤 ') + name, *self._member_head(member, info)],
+        lead = (self._whitelist_decoration(member) or '👤 ') if not info else '👤 '
+        return card([lead + name, *self._member_head(member, info)],
                     [box('✨ 权益', self._member_rights(member)),
                      box('🎬 观看', self._member_watch(member, managing=False)),
                      self._member_points(member, info, managing=False)])

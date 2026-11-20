@@ -16,25 +16,25 @@ class PlayHubBotMixin:
         def button(label,op,arg):return {'text':label,'callback_data':f'pp:{token}:{op}:{arg}'}
         rows=[]
         if p['view']=='playhub':
-            body='🎲 <b>一起玩一局</b>'
+            head='🎲 <b>一起玩一局</b>'
+            items=[]
             if self._plugin_on('blackwhite'):
                 cfg={**BW_DEFAULTS,**self._plugins.config('blackwhite')}
-                body+=f'\n黑白板 · 5人 · 参与需 {cfg["default_stake"]} 积分/人'
+                items.append(f'⚫⚪ <b>黑白板</b> · 5人 · 参与需 {cfg["default_stake"]} 积分/人')
                 choices=[button('黑白板玩法','gamehelp','bw')]
                 if not private:choices.insert(0,button('创建黑白板','launch','bw'))
                 rows.append(choices)
             if self._plugin_on('niuniu'):
                 cfg={**NIUNIU_DEFAULTS,**self._plugins.config('niuniu')}
-                body+=f'\n🐂 牛牛 · 庄家担保 {4*cfg["default_stake"]} 积分 · 闲家每位 {cfg["default_stake"]} 积分'
+                items.append(f'🐂 <b>牛牛</b> · 庄家担保 {4*cfg["default_stake"]} 积分 · 闲家每位 {cfg["default_stake"]} 积分')
                 choices=[button('牛牛玩法','gamehelp','niuniu')]
                 if not private:choices.insert(0,button('创建牛牛','launch','niuniu'))
                 rows.append(choices)
             if self._plugin_on('dice'):
-                body+=f'\n🎲 骰局 · 群内大小 · {window_seconds(self._dice_config())}秒封盘'
+                items.append(f'🎲 <b>骰局</b> · 群内大小 · {window_seconds(self._dice_config())}秒封盘\n授权群 <code>/猜大小 庄本</code> 坐庄，其他群友直接发送 <code>/大 金额</code> 或 <code>/小 金额</code> 即确认')
                 rows.append([button('骰局玩法','gamehelp','dice')])
-                body+='\n授权群 /猜大小 庄本 坐庄，其他群友直接发送 /大 金额 或 /小 金额即确认'
             if self._plugin_on('pk'):
-                body+='\n🎲 骰子 PK · 回复对方消息发 /pk 100 挑战（不写数字是友谊赛），/pkrank 看连胜榜'
+                items.append('⚔️ <b>骰子 PK</b> · 回复对方消息发 <code>/pk 100</code> 挑战（不写数字是友谊赛），<code>/pkrank</code> 看连胜榜')
             if self._plugin_on('game_center') and str(self._cfg().get('miniapp_url') or '').strip():
                 from app.modules.game_center_config import deep_link
                 base = self._cfg()['miniapp_url']
@@ -43,12 +43,14 @@ class PlayHubBotMixin:
                     base = 'https://t.me/' + username
                 url = deep_link(base)
                 if url:
+                    items.append('🃏 <b>游戏大厅</b> · 德州扑克 / 炸金花 / 象棋 / 五子棋（含欢乐豆练习场）')
                     entry = {'text': '🎮 游戏中心', 'url': url}
                     if private and not username:
                         entry = {'text': '🎮 游戏中心', 'web_app': {'url': url}}
                     rows.append([entry])
             if self._plugin_on('points_ranking'):rows.append([button('积分榜','view','leaderboard')])
-            if private and (self._plugin_on('niuniu') or self._plugin_on('blackwhite')):body+='\n\n到授权群用 /黑白板 或 /牛牛 创建牌局。'
+            body = head + ('\n<blockquote>' + '\n'.join(items) + '</blockquote>' if items else '')
+            if private and (self._plugin_on('niuniu') or self._plugin_on('blackwhite')):body+='\n<i>到授权群用 /黑白板 或 /牛牛 创建牌局。</i>'
             if not rows:body+='\n\n暂未开放玩法'
         else:
             which=p['which']

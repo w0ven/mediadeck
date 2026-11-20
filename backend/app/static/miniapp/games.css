@@ -514,7 +514,7 @@
   max-width: 560px;
   flex: 1;
   min-height: 650px;
-  padding-bottom: env(safe-area-inset-bottom);
+  padding-bottom: 0;
 }
 .gc-table-bar {
   display: flex;
@@ -1096,50 +1096,27 @@
 .gc-dock {
   position: relative;
   flex: none;
-  margin: 0 6px;
-  padding: 10px 12px 12px;
-  border: solid color-mix(in srgb, var(--trim) 30%, transparent);
-  border-width: 0 1px;
-  border-radius: 24px 24px 0 0;
-  background: linear-gradient(180deg, #3d1574d9, #250b4ef2);
-  box-shadow: 0 -12px 30px #14002e66, inset 0 1px 0 color-mix(in srgb, var(--trim) 45%, transparent);
-  backdrop-filter: blur(14px);
-}
-.gc-holdem.gc-table {
-  padding-bottom: 0;
-}
-.gc-holdem .gc-dock {
   margin: 0 6px calc(18px + max(24px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
   padding: 9px 12px 12px;
-  border-width: 1px;
+  border: 1px solid color-mix(in srgb, var(--trim) 30%, transparent);
   border-radius: 22px;
+  background: linear-gradient(180deg, #3d1574d9, #250b4ef2);
   box-shadow: 0 -10px 28px #14002e66, 0 12px 26px #0e002499, inset 0 1px 0 color-mix(in srgb, var(--trim) 45%, transparent);
-}
-.gc-holdem .gc-me-row {
-  gap: 8px;
-}
-.gc-holdem .gc-me-row > .gc-avatar-ring {
-  width: 39px;
-  height: 39px;
-}
-.gc-holdem .gc-me-row .avatar {
-  width: 33px;
-  height: 33px;
-  font-size: 14px;
+  backdrop-filter: blur(14px);
 }
 .gc-me-row {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
 }
 .gc-me-row > .gc-avatar-ring {
-  width: 43px;
-  height: 43px;
+  width: 39px;
+  height: 39px;
 }
 .gc-me-row .avatar {
-  width: 37px;
-  height: 37px;
-  font-size: 15px;
+  width: 33px;
+  height: 33px;
+  font-size: 14px;
 }
 .gc-me-name {
   display: flex;
@@ -1606,6 +1583,7 @@
 }
 .gc-board-dock {
   padding: 8px 10px 10px;
+  margin-bottom: calc(10px + max(20px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
 }
 .gc-board-actions .gc-action {
   min-height: 42px;
@@ -2708,14 +2686,13 @@ html[data-theme="light"] .gc-feature {
     margin: 4px 0 5px;
   }
   .gc-dock {
-    padding-top: 4px;
-    padding-bottom: 9px;
-  }
-  .gc-holdem .gc-dock {
     margin-bottom: calc(10px + max(18px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
     padding: 6px 10px 9px;
   }
-  .gc-holdem .gc-felt {
+  .gc-board-dock {
+    margin-bottom: max(12px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
+  }
+  .gc-felt {
     min-height: 332px;
   }
   .gc-pot-art {
@@ -2745,6 +2722,11 @@ html[data-theme="light"] .gc-feature {
   .gc-holdem .gc-turn-line .link {
     font-size: 9px;
     padding: 0;
+  }
+}
+@media (max-height:660px) {
+  .gc-board-dock {
+    margin-bottom: max(2px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px));
   }
 }
 @media (prefers-reduced-motion:reduce) {

@@ -1376,7 +1376,7 @@ window.createGamesUI = ({
         <div class="gc-avatar-ring ${moving ? 'gc-active' : ''}" ${moving ? 'data-gc-ring' : ''}>${avatar(seat, t)}</div>
         <div class="grow">
           <div class="gc-duel-name">${esc(seat.name)}${seat.player === t.host ? '<span class="gc-host">房主</span>' : ''}
-            ${color ? `<span class="gc-side ${color}">${sideName(t, color)}</span>` : ''}${label(seat, t)}</div>
+            ${color ? `<span class="gc-side ${color}">${sideName(t, color)}</span>` : ''}${pos === 'bottom' ? '' : label(seat, t)}</div>
           <div class="tiny muted gc-duel-status">${status}</div>
         </div>${h?.clocks ? `
         <div class="gc-clock ${moving ? 'on' : ''}"><b class="num" data-gc-clock="${esc(seat.player)}">--:--</b>${moving ? '<small data-gc-step></small>' : ''}</div>` : ''}
@@ -1601,10 +1601,9 @@ window.createGamesUI = ({
             </div>
             <div class="grow">
               <div class="gc-me-name">
-                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${myPos ? `<span class="gc-pos-tag">${esc(myPos)}</span>` : ''}${t.game === 'holdem' ? '' : label(bottom, t)}
+                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${myPos ? `<span class="gc-pos-tag">${esc(myPos)}</span>` : ''}
                 ${p && (t.game !== 'holdem' || p.bet > 0) ? `<span class="gc-bet num">${img('chip')} ${fmtChips(t.game === 'holdem' ? p.bet : p.invested, t)}</span>` : ''}
               </div>
-              ${t.game === 'holdem' ? '' : titlePlaque(bottom, t)}
               <div class="tiny muted">${me ? `${t.game === 'holdem' ? '桌上筹码 ' + fmtChips(p?.stack ?? me.stack, t) + ' · ' : ''}可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分` : '旁观视角 · 不展示未公开手牌'}</div>
             </div>
           </div>` : ''}

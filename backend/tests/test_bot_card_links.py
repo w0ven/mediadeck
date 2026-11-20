@@ -237,7 +237,7 @@ def test_interactive_code_picker_and_admin_preset_buttons_and_library_stats(env)
         ]
         await click(env, 'me_nodes', umid, chat=VIEWER, user=VIEWER)
         nodes_text = env.tg.text(VIEWER, umid)
-        assert '🟢 状态：<b>在线</b>' in nodes_text
+        assert '🟢 当前在线：<b>1</b> 路播放' in nodes_text
         await click(env, 'library_stats', umid, chat=VIEWER, user=VIEWER)
         stats_text = env.tg.text(VIEWER, umid)
         assert '📊 <b>媒体库统计</b>' in stats_text and '影视总计' in stats_text and 'Emby' in stats_text

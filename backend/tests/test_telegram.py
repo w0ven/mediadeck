@@ -1633,7 +1633,7 @@ def test_watch_rank_pages_show_telegram_handle_not_emby_name() -> None:
     page = bot._watch_rank_pages(1)[0]
     assert "米砂糖" in page and "tg://user?id=1001" in page
     assert "@misakaioo" not in page
-    assert "💠白名单" in page
+    assert 'emoji-id="6048861618463318199">💠</tg-emoji>白名单' in page
     assert "emby_alice" not in page and "emby_bob" not in page and "emby_carol" not in page
     assert "Telegram用户" in page and "tg://user?id=1002" in page
     assert "未绑定" in page

@@ -165,4 +165,4 @@ def test_actual_handler_two_100_cards_sign_rate_and_emby_policy_320mbps_staggere
             assert app.state.plugins.config('inventory')['streams_cap'] == 10
             assert app.state.points.balance('u1') == 300
         asyncio.run(flow())
-        assert any(m == 'sendMessage' and '+100Mbps' in p.get('text', '') for m, p in delivered)
+        assert any(m in ('sendMessage', 'editMessageText') and '+100Mbps' in p.get('text', '') for m, p in delivered)
