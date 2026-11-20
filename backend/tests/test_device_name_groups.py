@@ -200,8 +200,19 @@ def test_bot_device_page_lists_signed_in_devices_not_groups(members):
         text, keyboard = captured[-1]
         assert "已登录 <b>1</b> 台设备" in text and "iPhone" in text and "Player A 6.2" in text
         assert "Living Room" not in text and "设备分组" not in text
+        assert any(b.get("callback_data") == "dev_ask:1" for row in keyboard for b in row)
         manage = [b for row in keyboard for b in row if "web_app" in b]
         assert manage == ([{"text": "📱 在会员面板管理设备",
                             "web_app": {"url": "https://app.example.test/app?page=devices"}}]
                           if config.get("miniapp_url") else [])
+
+        # Tapping logout shows an explicit confirmation screen before kicking the device.
+        asyncio.run(bot._handle_callback({
+            "id": "synthetic-ask", "data": "dev_ask:1", "from": {"id": 1001},
+            "message": {"message_id": 1, "chat": {"id": 1001, "type": "private"}},
+        }))
+        ask_text, ask_kb = captured[-1]
+        assert "确认登出设备" in ask_text and "iPhone" in ask_text
+        assert any(b.get("callback_data") == "dev_kick:1" for row in ask_kb for b in row)
+        assert len(emby._devices) == 2  # not removed before confirm
     assert member["max_streams"] == members.get("viewer-a")["max_streams"]

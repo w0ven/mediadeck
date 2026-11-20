@@ -483,7 +483,10 @@ def test_mini_app_browser_flows(client, tmp_path):
         fits('miniapp-me-narrow-light.png')
         page.locator('[data-go="level"]').click()
         page.locator('.hero .gm').wait_for()
+        assert page.locator('[data-back]').is_visible()
         fits('miniapp-level-narrow-light.png')
+        page.locator('[data-back]').click()
+        page.locator('#tabbar:not([hidden])').wait_for()
         assert not errors, errors
         browser.close()
 
@@ -510,4 +513,47 @@ def test_whitelist_member_keeps_level_tag_in_rankings(client):
     assert _level_tag({'group_id': 'standard', 'activity_level': {'level': 2, 'name': '筑基', 'icon': '🗡️'}}) == {
         'level': 2, 'name': '筑基', 'icon': '🗡️',
     }
+
+
+def test_miniapp_request_cancel_and_custom_item_notice_endpoints(client):
+    created = client.post(
+        '/api/app/requests',
+        headers=headers(),
+        json={'media_type': 'movie', 'tmdb_id': 9002, 'create_key': 'cancel-test-key-123456'},
+    ).json()
+    assert created['created'] and created['status'] == 'open'
+    mine = client.get('/api/app/requests/mine', headers=headers()).json()
+    row = next(r for r in mine['rows'] if r['id'] == created['id'])
+    assert row['can_cancel'] is True
+
+    # Another user cannot cancel someone else's open request.
+    assert client.post(f"/api/app/requests/{created['id']}/cancel", headers=headers(777000222)).status_code == 409
+
+    cancelled = client.post(f"/api/app/requests/{created['id']}/cancel", headers=headers()).json()
+    assert cancelled['ok'] and cancelled['status'] == 'cancelled'
+    mine_after = client.get('/api/app/requests/mine', headers=headers()).json()
+    assert next(r for r in mine_after['rows'] if r['id'] == created['id'])['can_cancel'] is False
+
+    # Custom shop item notice can be viewed directly in MiniApp.
+    item = app.state.shop.create({
+        'kind': 'custom',
+        'name': '专属客户端礼包',
+        'cost': 10,
+        'amount': 1,
+        'purchase_notice': '兑换激活码：VIP-8888-DEMO',
+        'retention_days': 7,
+        'enabled': True,
+    })
+    redeemed = client.post(
+        f"/api/app/shop/{item['id']}/redeem",
+        headers=headers(),
+        json={'request_id': 'custom-notice-key-123456', 'expected_spec': app.state.shop.get(item['id'])},
+    ).json()
+    assert redeemed['ok']
+    bag_items = client.get('/api/app/items', headers=headers()).json()['rows']
+    custom_card = next(r for r in bag_items if r['kind'] == 'custom')
+    notice = client.get(f"/api/app/items/{custom_card['id']}/notice", headers=headers()).json()
+    assert notice['ok'] and 'VIP-8888-DEMO' in notice['notice']
+    assert client.get(f"/api/app/items/{custom_card['id']}/notice", headers=headers(777000222)).status_code == 404
+
 

@@ -38,7 +38,7 @@ def api(monkeypatch):
         app.state.members.upsert('group-test-user', 'GroupUser', {'group_id': 'standard'})
         app.state.members.bind_telegram('group-test-user', '9001')
         async def users():
-            return [{'Id': 'group-test-user', 'Policy': {'IsAdministrator': False}}]
+            return [{'Id': 'group-test-user', 'Name': 'GroupUser', 'Policy': {'IsAdministrator': False}}]
         async def delete(uid):
             state.deleted.append(uid)
             return True

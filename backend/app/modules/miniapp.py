@@ -688,11 +688,26 @@ def register(app: Any) -> None:
                     'media_label': r.get('media_label'), 'demand_text': r.get('demand_text'),
                     'status': r.get('status'), 'status_label': r.get('status_label'),
                     'poster': poster_url(r.get('poster_path') or ''), 'created_at': r.get('created_at'),
-                    'followed': follow}
+                    'followed': follow, 'can_cancel': (not follow and r.get('status') == 'open')}
         seen = {r['id'] for r in own}
         rows = [shape(r) for r in own] + [shape(r, True) for r in followed if r['id'] not in seen]
         rows.sort(key=lambda r: -int(r['id']))
         return {'rows': rows[:40], **await io(quota_info, ctx['uid'])}
+
+    @app.post('/api/app/requests/{rid}/cancel')
+    async def app_request_cancel(rid: int, ctx=Ctx):
+        try:
+            row = await io(state.requests.authorize, rid, ctx['uid'])
+            if str(row.get('emby_user_id')) != ctx['uid']:
+                raise RequestError('只能撤回自己的求片')
+            res = await io(state.requests.finish, rid, ctx['uid'], 'cancelled', revision=row['revision'])
+        except (RequestError, KeyError, TypeError, ValueError) as exc:
+            raise _fail(409, 'rejected', str(exc) or '撤回失败') from None
+        b = bot()
+        if b is not None:
+            with contextlib.suppress(Exception):
+                await b.flush_request_notifications()
+        return {'ok': True, 'status': res['request']['status']}
 
     # -- bag ------------------------------------------------------------------------
 
@@ -746,8 +761,20 @@ def register(app: Any) -> None:
             {'id': r['id'], 'name': r['spec'].get('name') or '道具', 'kind': r['spec'].get('kind'),
              'duration_days': r['spec'].get('duration_days'), 'used_at': r.get('used_at'),
              'expires_at': r.get('expires_at'), 'active': bool(r.get('active')),
+             'notice_state': r.get('notice_state') or '',
              'error': r.get('expiry_error') or ''}
             for r in rows]}
+
+    @app.get('/api/app/items/{card_id}/notice')
+    async def app_item_notice(card_id: int, ctx=Ctx):
+        inventory = getattr(state, 'inventory', None)
+        if inventory is None:
+            raise _fail(503, 'disabled', '背包暂不可用')
+        try:
+            content = await io(inventory.custom_notice, ctx['uid'], card_id)
+        except Exception as exc:  # noqa: BLE001
+            raise _fail(404, 'gone', _public(exc)) from None
+        return {'ok': True, 'name': content['name'], 'notice': content['notice']}
 
     @app.post('/api/app/items/{card_id}/use')
     async def app_item_use(card_id: int, payload: dict = Body(default={}), ctx=Ctx):  # noqa: B008
