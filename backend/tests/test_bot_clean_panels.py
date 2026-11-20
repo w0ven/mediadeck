@@ -152,7 +152,7 @@ def test_chat_commands_replace_legacy_scope_and_actual_language(bot):
         assert method == "setMyCommands"
         assert payload["scope"] == {"type": "chat", "chat_id": "900"}
         assert {c["command"] for c in payload["commands"]} == {
-            "start", "me", "card", "usage", "rebind", "rank", "today", "help", "rules", "manage", "kk", "prouser",
+            "start", "me", "card", "checkin", "usage", "requests", "rebind", "rank", "today", "help", "rules", "manage", "kk", "prouser",
             "games", "pointsrank", "transfer", "renew", "score", "revuser", "rmemby", "renewall", "scoreall", "gift", "invite", "code", "auth"}
     assert [p["language_code"] for _, p in bot.calls] == ["", "zh", "en"]
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
@@ -160,7 +160,7 @@ def test_chat_commands_replace_legacy_scope_and_actual_language(bot):
     bot.members.set_roles("admin1", [], actor="test")
     run(bot._sync_chat_commands("900", "900", "zh-hans"))
     assert {c["command"] for c in bot.calls[-1][1]["commands"]} == {
-        "start", "me", "card", "usage", "rebind", "rank", "today", "help", "rules", "games", "pointsrank", "transfer"}
+        "start", "me", "card", "checkin", "usage", "requests", "rebind", "rank", "today", "help", "rules", "games", "pointsrank", "transfer"}
 
 
 def test_changing_bot_identity_never_deletes_other_bots_menu(bot):

@@ -7,7 +7,7 @@
 
 ```html
 🎬 <b>我的影库</b> · 欢迎回来，<b>u1</b>
-<blockquote><code>普通用户</code>
+<blockquote><b>普通用户</b>
 ✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
@@ -20,7 +20,7 @@
 
 ```html
 🎬 <b>我的影库</b> · 欢迎回来，<b>up1</b>
-<blockquote><code>普通用户</code>
+<blockquote><b>普通用户</b>
 ✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
@@ -33,7 +33,7 @@
 
 ```html
 🎬 <b>我的影库</b> · 欢迎回来，<b>admin1</b>
-<blockquote><code>普通用户</code>
+<blockquote><b>普通用户</b>
 ✅ 正常 · 30 天后到期 · 🪙 积分 <b>暂不可用</b></blockquote>
 ```
 
@@ -114,11 +114,9 @@
 
 ```html
 🌐 <b>播放线路</b>
-
-<b>演示线路</b>
-<code>https://play.invalid</code>
-
-当前在线：暂不可用，请稍后刷新。
+<blockquote><b>演示线路</b>
+<code>https://play.invalid</code></blockquote>
+<blockquote>⚪ 当前在线：暂不可用，请稍后刷新。</blockquote>
 ```
 
 按钮：
@@ -525,7 +523,7 @@
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未禁用
@@ -556,7 +554,7 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ⛔ 已停用 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：已封禁 · Emby：已禁用
@@ -587,7 +585,7 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：已禁用
@@ -618,7 +616,7 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ⛔ 已停用 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：已封禁 · Emby：未禁用
@@ -649,7 +647,7 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未知，请刷新核实
@@ -681,7 +679,7 @@ Telegram <code>1001</code>
 
 ```html
 🛠 <b>管理目标 · DemoViewer</b>
-<blockquote><code>演示组</code>
+<blockquote><b>演示组</b>
 ✅ 正常 · ♾ 永久有效</blockquote>
 <blockquote><b>🔒 封禁</b>
 本地封禁：未封禁 · Emby：未禁用

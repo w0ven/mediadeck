@@ -107,7 +107,6 @@ class ActivityBotMixin:
         info = levels.status(member['emby_user_id'])
         level = info['level']
         title = info['worn_title'] or level['title']
-        badge = self._whitelist_decoration(member) or '👤 '
         status = self._status_label(member)
         term = '♾ 永久有效' if info['exempt'] else expiry_line(info['expires_at'])
         hero = [*self._identity_plaque_lines(member, title=title), f"{status} · {term}"]
@@ -116,7 +115,7 @@ class ActivityBotMixin:
         if renewal:
             econ += renewal
         lines = [
-            badge + f"<b>{escape(str(member.get('username') or '—'))}</b>",
+            f"👤 <b>{escape(str(member.get('username') or '—'))}</b>",
             '<blockquote>' + '\n'.join(hero) + '</blockquote>',
             '<blockquote>' + '\n'.join(econ) + '</blockquote>',
         ]

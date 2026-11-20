@@ -37,11 +37,10 @@ class PacketBotMixin:
         title = f'🧧 <b>{mode}红包</b>'
         if row['audience'] == 'whitelist':
             title += ' · 白名单'
-        body = (title + f"\n<b>{name(row.get('public_actor_name'))}</b>"
-                f" · {row['total']} 积分 · {row['parts']} 份")
+        meta = f"<b>{name(row.get('public_actor_name'))}</b> · 🪙 <b>{row['total']} 积分</b> · {row['parts']} 份"
         keyboard = []
         if row['status'] == 'draft':
-            body += '\n\n✨ 核对一下，确认后大家就能领取'
+            body = f"{title}\n<blockquote>{meta}\n✨ 核对一下，确认后大家就能领取</blockquote>"
             def edit(field, value, text):
                 return {'text': text, 'callback_data': f'rpedit:{nonce}:{field}:{value}'}
             keyboard.append([edit('mode', 'random', ('✓ ' if mode == '拼手气' else '') + '拼手气'),
@@ -61,26 +60,27 @@ class PacketBotMixin:
                              {'text': '取消', 'callback_data': 'rpcancel:' + nonce}])
             return body, keyboard
         if row['status'] == 'cancelled':
-            return body + '\n\n已取消', keyboard
+            return f"{title}\n<blockquote>{meta}\n已取消</blockquote>", keyboard
         if row['permanent']:
-            body += f'\n\n已领取 <b>{row["claimed_count"]}/{row["parts"]}</b>'
+            perm = [meta, f'已领取 <b>{row["claimed_count"]}/{row["parts"]}</b>']
             if row['status']=='active':
-                body += '\n🌸 留一份好手气，等你来领取'
+                perm.append('🌸 留一份好手气，等你来领取')
                 keyboard.append([{'text':'🧧 拆开好运','callback_data':'rpclaim:'+nonce}])
             else:
-                body += '\n✨ 已领完，领取结果见独立结果卡'
-            return body,keyboard
+                perm.append('✨ 已领完，领取结果见独立结果卡')
+            return f"{title}\n<blockquote>" + "\n".join(perm) + "</blockquote>",keyboard
         active = row['status'] == 'active' and row['expires_at'] > time.time()
         state = '已领取' if active else ('已领完' if row['status'] == 'exhausted' else '已过期')
-        body += f"\n\n{state} <b>{row['claimed_count']}/{row['parts']}</b>"
+        box_lines = [meta, f"{state} <b>{row['claimed_count']}/{row['parts']}</b>"]
         results = service.claims(nonce, row['claimed_count'])
         pages = max(1, (len(results) + RESULTS_PER_PAGE - 1) // RESULTS_PER_PAGE)
         page = min(max(0, row.get('result_page', 0)), pages - 1)
         for claim in results[page * RESULTS_PER_PAGE:(page + 1) * RESULTS_PER_PAGE]:
-            body += f"\n{name(claim['display_name'])} · <b>{claim['amount']}</b> 积分"
+            box_lines.append(f"{name(claim['display_name'])} · <b>{claim['amount']}</b> 积分")
         if row['status'] == 'exhausted' and results:
             best = min(results, key=lambda c: (-c['amount'], c['slot']))
-            body += f"\n\n🏆 手气最佳 <b>{name(best['display_name'])}</b> · {best['amount']} 积分"
+            box_lines.append(f"🏆 手气最佳 <b>{name(best['display_name'])}</b> · {best['amount']} 积分")
+        body = f"{title}\n<blockquote>" + "\n".join(box_lines) + "</blockquote>"
         if active:
             keyboard.append([{'text': '领取红包', 'callback_data': 'rpclaim:' + nonce}])
         if pages > 1:

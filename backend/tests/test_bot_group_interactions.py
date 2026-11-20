@@ -227,7 +227,7 @@ def test_group_myinfo_is_own_brief_card(bot):
     run(bot._handle_message(_msg("/myinfo", user=ALICE, username="alice_tg")))
     body = last_text(bot)
     assert body.startswith(f'👤 <a href="tg://user?id={ALICE}">')
-    assert "<code>普通用户</code>" in body and "✅ 正常" in body and "到期" in body
+    assert "<b>普通用户</b>" in body and "<code>" not in body.splitlines()[1] and "✅ 正常" in body and "到期" in body
     assert "密码" not in body and "token" not in body
     assert "选择要查看的内容" not in body
     assert bot._panel[f"g:{GROUP}:0:{ALICE}"]
@@ -443,7 +443,7 @@ def test_group_command_scopes_are_chat_and_chat_member_not_telegram_admins(bot):
                        if m == "setMyCommands" and p["scope"]["type"] == "chat")
     admin_cmds = next(p["commands"] for m, p in bot.calls
                       if m == "setMyCommands" and p["scope"]["type"] == "chat_member")
-    assert {c["command"] for c in member_cmds} == {"start", "me", "card", "usage", "rank", "today", "rules", "help", "transfer", "redpacket",
+    assert {c["command"] for c in member_cmds} == {"start", "me", "card", "checkin", "usage", "rank", "today", "rules", "help", "transfer", "redpacket",
                                                "games", "blackwhite", "niuniu", "pk", "pkrank", "pkme", "pointsrank"}
     assert next(c['description'] for c in member_cmds if c['command']=='games') == '一起玩 · 坐庄请发 /猜大小 庄本'
     assert next(c['description'] for c in admin_cmds if c['command']=='games') == '一起玩 · 坐庄请发 /猜大小 庄本'
@@ -538,8 +538,9 @@ def test_command_menu_categories_labels_and_supported_scope(admin, group):
     if not (group and admin):
         assert descriptions['transfer'] == '积分转账·扣本人余额'
     if group:
-        assert not {'rebind', 'manage', 'renewall', 'scoreall', 'gift', 'code', 'auth', 'invite'} & set(names)
+        assert not {'requests', 'rebind', 'manage', 'renewall', 'scoreall', 'gift', 'code', 'auth', 'invite'} & set(names)
     else:
+        assert {'requests', 'checkin'} <= set(names)
         assert not {'redpacket', 'blackwhite', 'niuniu'} & set(names)
 
 

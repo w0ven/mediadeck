@@ -139,7 +139,10 @@
     if (lv === 8) return 'aura aura-lv8';
     if (lv === 7) return 'aura aura-lv7';
     if (tag.whitelist) return 'aura aura-wl';
-    if (lv >= 5) return 'aura aura-hi';
+    if (lv === 6) return 'aura aura-lv6';
+    if (lv === 5) return 'aura aura-hi';
+    if (lv === 4) return 'aura aura-lv4';
+    if (lv === 3) return 'aura aura-lv3';
     return '';
   }
   function face(name, url, cls = '', style = '') {
@@ -178,7 +181,9 @@
   }
   function lvClass(tag) {
     if (!tag) return '';
-    return tag.whitelist ? 'wl' : `lv${tag.level}`;
+    const lv = tag.level != null ? `lv${tag.level}` : '';
+    if (tag.whitelist) return lv ? `${lv} wl` : 'wl';
+    return lv;
   }
   function lvTag(tag, xs = false, bare = false) {
     if (!tag) return '';
@@ -217,14 +222,15 @@
   }
   function plaque(text, tag, big = false, ident = null) {
     const lvNum = Number((ident && ident.level) ?? (tag && tag.level)) || 1;
-    const tier = tag && tag.whitelist ? 7 : Math.min(9, Math.max(1, lvNum));
-    const ornInner = lvNum >= 4 || (tag && tag.whitelist) ? realmImg('orn', '❖', 'realm-ic orn-ic') : (ORN[tier] || '❖');
+    const isWl = !!(tag && tag.whitelist);
+    const tier = Math.min(9, Math.max(1, isWl && lvNum < 5 ? 5 : lvNum));
+    const ornInner = lvNum >= 4 || isWl ? realmImg('orn', '❖', 'realm-ic orn-ic') : (ORN[tier] || '❖');
     const orn = `<span class="orn">${ornInner}</span>`;
     const embInner = ident ? lvIconHtml(ident.level, ident.icon) : '';
     const head = ident && ident.name
       ? `<span class="txt nm">${esc(ident.name)}</span>${embInner ? `<span class="emb">${embInner}</span>` : ''}` : '';
     const isLong = Array.from(String(text || '')).length >= 10;
-    return `<span class="plaque t${tier}${big ? ' big' : ''}${isLong ? ' long' : ''}">${orn}${head}<span class="txt">${esc(text)}</span>${orn}</span>`;
+    return `<span class="plaque t${tier}${isWl ? ' is-wl' : ''}${big ? ' big' : ''}${isLong ? ' long' : ''}">${orn}${head}<span class="txt">${esc(text)}</span>${orn}</span>`;
   }
   function myTag() {
     const me = S.me;
@@ -430,7 +436,7 @@
 
   function ongoingCardHtml(item) {
     const feeText = item.entry_fee > 0 ? `${item.entry_fee} 积分` : '免费';
-    const joinedBadge = item.joined ? '<span class="pill green" style="font-size:10.5px;padding:2px 8px">已报名</span>' : '';
+    const joinedBadge = item.joined ? '<span class="chip ok" style="font-size:10.5px;padding:2px 8px">已报名</span>' : '';
     return `<button class="card it" type="button" data-lot-id="${esc(item.id)}" style="display:flex;align-items:center;gap:12px;width:100%;text-align:left;margin-bottom:8px">
       <div class="ic sm" style="--c:#c07bff">${icon('ticket')}</div>
       <div class="grow">
@@ -713,11 +719,22 @@
   async function renderGallery(alive) {
     const me = S.me || await loadMe();
     if (!alive()) return;
-    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><span class="lvtag">${lvIconHtml(row.level, row.icon)} Lv${row.level}</span>${plaque(row.title, { level: row.level }, false, row)}</div>`).join('');
+    const tierNotes = {
+      1: '凡尘微光 · 青木初萌',
+      2: '御剑寒芒 · 剑气斜掠',
+      3: '真火赤纹 · 暖焰吐纳',
+      4: '剑阵星盘 · 双剑冰芒',
+      5: '紫霄雷域 · 电弧流光',
+      6: '太虚星璇 · 阴阳流转',
+      7: '帝皇金阙 · 皇道扫光',
+      8: '太清圣莲 · 霓虹霞阵',
+      9: '逆仙踏天 · 冰龙神环',
+    };
+    const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><div class="sheen"></div><div class="g1-top"><span class="lvtag">${lvIconHtml(row.level, row.icon)} Lv${row.level} · ${esc(row.name)}</span><span class="g1-tier">${esc(tierNotes[row.level] || '仙道本命')}</span></div><div class="g1-plaque">${plaque(row.title, { level: row.level }, false, row)}</div></div>`).join('');
     const sample = me.worn_title || me.level.title;
-    setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级自带的道号铭牌与流光样式；自定义称号会按佩戴者的境界套用对应样式。</div>
-      <div class="gallery">${rows}<div class="g1 wl"><span class="lvtag">${wlIconHtml()} 白名单</span>${plaque(sample, { whitelist: true }, false, me.level)}</div></div>
-      <div class="card small" style="margin-top:12px"><div class="tiny muted">铭牌显示「境界名 + 标志 + 道号」，文字带本级配色的仙气流光。Lv3 起铭牌外有光晕；Lv5 起光晕更强、边框发光；Lv7～Lv9 再加扫光和呼吸神环，Lv9 踏天配专属冰龙神印与双极冰紫流光；白名单固定用水晶色。</div></div>`);
+    setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级专属背景意境与道号铭牌特效（Lv1 → Lv9 逐级蜕变，越往上光效与阵纹越华丽）。</div>
+      <div class="gallery">${rows}<div class="g1 wl"><div class="sheen"></div><div class="g1-top"><span class="lvtag wl">${wlIconHtml()} 尊享白名单</span><span class="g1-tier">冰晶棱光 · 尊享加持</span></div><div class="g1-plaque">${plaque(sample, { whitelist: true, level: me.level.level }, false, me.level)}</div></div></div>
+      <div class="card small" style="margin-top:12px"><div class="tiny muted">个人背景卡与称号铭牌随境界同步升华：Lv1～Lv3 由凡入道凝真火，Lv4～Lv6 化剑阵、引紫雷、转星璇，Lv7 仙帝耀金扫光，Lv8 道祖绽霓虹圣莲，Lv9 踏天凝冰龙极光神环；白名单会员叠加水晶棱光边框。</div></div>`);
   }
 
   // -- 播放线路 / 积分流水 ---------------------------------------------------------

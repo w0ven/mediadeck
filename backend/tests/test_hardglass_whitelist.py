@@ -31,13 +31,14 @@ def test_decorations_do_not_reset_custom_limits_or_add_roles(subject):
     before=subject.db.one("SELECT * FROM members WHERE emby_user_id='u1'")
     member=subject.members.get('u1')
     home,keys=subject._home('901','Alice')
-    assert home.startswith('💠 ') and home.count('内部成员') == 1
+    wl_badge = '<tg-emoji emoji-id="6048861618463318199">💠</tg-emoji> '
+    assert home.startswith(wl_badge) and home.count('内部成员') == 1
     assert '白名单 · 专属成员' not in home
     assert 'admin' not in {b.get('callback_data') for row in keys for b in row}
     assert member['roles']==[] and member['max_streams']==3
-    assert subject._whitelist_decoration(member) == '💠 '
+    assert subject._whitelist_decoration(member) == wl_badge
     assert '内部成员' in subject._user_card(member)
-    assert subject._usage_text(member).startswith('💠 ')
+    assert subject._usage_text(member).startswith(wl_badge)
     assert subject.db.one("SELECT * FROM members WHERE emby_user_id='u1'")==before
     subject.groups.seed_defaults()
     assert subject.groups.get(WHITELIST_GROUP_ID)['name']=='内部成员'
@@ -68,7 +69,7 @@ def test_reserved_group_id_survives_renaming_and_name_is_escaped(subject):
     subject.members.upsert('u1','alice',{'group_id':WHITELIST_GROUP_ID})
     home,_=subject._home('901','Alice')
     assert '&lt;b&gt;Internal&lt;/b&gt;' in home
-    assert home.startswith('💠 ')
+    assert home.startswith('<tg-emoji emoji-id="6048861618463318199">💠</tg-emoji> ')
     assert '白名单 · 专属成员' not in home
 
 
