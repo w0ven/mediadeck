@@ -1601,10 +1601,10 @@ window.createGamesUI = ({
             </div>
             <div class="grow">
               <div class="gc-me-name">
-                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${myPos ? `<span class="gc-pos-tag">${esc(myPos)}</span>` : ''}${label(bottom, t)}
+                ${esc(bottom.name)}${bottom.player === t.host ? '<span class="gc-host">房主</span>' : ''}${myPos ? `<span class="gc-pos-tag">${esc(myPos)}</span>` : ''}${t.game === 'holdem' ? '' : label(bottom, t)}
                 ${p && (t.game !== 'holdem' || p.bet > 0) ? `<span class="gc-bet num">${img('chip')} ${fmtChips(t.game === 'holdem' ? p.bet : p.invested, t)}</span>` : ''}
               </div>
-              ${titlePlaque(bottom, t)}
+              ${t.game === 'holdem' ? '' : titlePlaque(bottom, t)}
               <div class="tiny muted">${me ? `${t.game === 'holdem' ? '桌上筹码 ' + fmtChips(p?.stack ?? me.stack, t) + ' · ' : ''}可用 ${num(funds(t.me.wallet, t))} ${unit(t)} · 已冻结 ${num(t.me.wallet.frozen)} 积分` : '旁观视角 · 不展示未公开手牌'}</div>
             </div>
           </div>` : ''}
