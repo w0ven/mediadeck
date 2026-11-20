@@ -1105,6 +1105,28 @@
   box-shadow: 0 -12px 30px #14002e66, inset 0 1px 0 color-mix(in srgb, var(--trim) 45%, transparent);
   backdrop-filter: blur(14px);
 }
+.gc-holdem.gc-table {
+  padding-bottom: 0;
+}
+.gc-holdem .gc-dock {
+  margin: 0 6px calc(18px + max(24px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
+  padding: 9px 12px 12px;
+  border-width: 1px;
+  border-radius: 22px;
+  box-shadow: 0 -10px 28px #14002e66, 0 12px 26px #0e002499, inset 0 1px 0 color-mix(in srgb, var(--trim) 45%, transparent);
+}
+.gc-holdem .gc-me-row {
+  gap: 8px;
+}
+.gc-holdem .gc-me-row > .gc-avatar-ring {
+  width: 39px;
+  height: 39px;
+}
+.gc-holdem .gc-me-row .avatar {
+  width: 33px;
+  height: 33px;
+  font-size: 14px;
+}
 .gc-me-row {
   display: flex;
   align-items: center;
@@ -2269,6 +2291,10 @@
 }
 .gc-holdem .gc-hand {
   min-height: 82px;
+  padding-top: 2px;
+}
+.gc-holdem .gc-hand-label {
+  margin: 3px 0 6px;
 }
 .gc-holdem .gc-hand .gc-card.lg {
   width: 58px;
@@ -2671,9 +2697,6 @@ html[data-theme="light"] .gc-feature {
   .gc-felt {
     min-height: 340px;
   }
-  .gc-holdem .gc-felt {
-    min-height: 364px;
-  }
   .gc-card.lg {
     width: 62px;
     height: 87px;
@@ -2687,6 +2710,13 @@ html[data-theme="light"] .gc-feature {
   .gc-dock {
     padding-top: 4px;
     padding-bottom: 9px;
+  }
+  .gc-holdem .gc-dock {
+    margin-bottom: calc(10px + max(18px, env(safe-area-inset-bottom, 0px), var(--tg-safe-area-inset-bottom, 0px)));
+    padding: 6px 10px 9px;
+  }
+  .gc-holdem .gc-felt {
+    min-height: 332px;
   }
   .gc-pot-art {
     width: 43px;
