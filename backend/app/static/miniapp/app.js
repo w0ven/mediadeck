@@ -304,8 +304,12 @@
     if (opts.bag) S.bag = opts.bag;
     render();
   }
+  function subHead(title = '', floating = false) {
+    return `<div class="sub-nav${floating ? ' floating' : ''}"><button class="sub-back" type="button" data-back>‹ 返回</button>${title ? `<span class="sub-title">${esc(title)}</span>` : ''}</div>`;
+  }
   screen.addEventListener('click', (e) => {
-    if (e.target.closest('[data-retry]')) render();
+    if (e.target.closest('[data-retry]')) { render(); return; }
+    if (e.target.closest('[data-back]')) { haptic.tap(); back(); }
   });
   $('#tabbar').addEventListener('click', (e) => {
     const btn = e.target.closest('[data-tab]');
@@ -644,6 +648,7 @@
       </div>`;
     }).join('');
     setScreen(`
+      ${subHead('等级与权益')}
       <div class="hero ${lvClass(tag)}" style="text-align:center"><div class="sheen"></div>
         <div class="realm-sub">${esc(realmSub)}</div>
         ${crest}
@@ -713,7 +718,7 @@
     $('[data-gallery]', target).onclick = () => push(renderGallery);
   }
   async function renderTitlesPage(alive) {
-    setScreen('<div id="titles-body"></div>');
+    setScreen(`${subHead('我的称号')}<div id="titles-body"></div>`);
     await titlesBody($('#titles-body'), alive);
   }
   async function renderGallery(alive) {
@@ -732,7 +737,7 @@
     };
     const rows = me.levels.map((row) => `<div class="g1 lv${row.level}"><div class="sheen"></div><div class="g1-top"><span class="lvtag">${lvIconHtml(row.level, row.icon)} Lv${row.level} · ${esc(row.name)}</span><span class="g1-tier">${esc(tierNotes[row.level] || '仙道本命')}</span></div><div class="g1-plaque">${plaque(row.title, { level: row.level }, false, row)}</div></div>`).join('');
     const sample = me.worn_title || me.level.title;
-    setScreen(`<div class="tiny muted" style="margin:6px 4px 10px">各等级专属背景意境与道号铭牌特效（Lv1 → Lv9 逐级蜕变，越往上光效与阵纹越华丽）。</div>
+    setScreen(`${subHead('称号样式一览')}<div class="tiny muted" style="margin:6px 4px 10px">各等级专属背景意境与道号铭牌特效（Lv1 → Lv9 逐级蜕变，越往上光效与阵纹越华丽）。</div>
       <div class="gallery">${rows}<div class="g1 wl"><div class="sheen"></div><div class="g1-top"><span class="lvtag wl">${wlIconHtml()} 尊享白名单</span><span class="g1-tier">冰晶棱光 · 尊享加持</span></div><div class="g1-plaque">${plaque(sample, { whitelist: true, level: me.level.level }, false, me.level)}</div></div></div>
       <div class="card small" style="margin-top:12px"><div class="tiny muted">个人背景卡与称号铭牌随境界同步升华：Lv1～Lv3 由凡入道凝真火，Lv4～Lv6 化剑阵、引紫雷、转星璇，Lv7 仙帝耀金扫光，Lv8 道祖绽霓虹圣莲，Lv9 踏天凝冰龙极光神环；白名单会员叠加水晶棱光边框。</div></div>`);
   }
@@ -747,6 +752,7 @@
         <div class="row"><b>${esc(l.label || '线路')}</b><button class="btn sm ghost" type="button" data-copy="${i}">复制</button></div>
         <code class="u">${esc(l.url)}</code>${l.hint ? `<div class="tiny muted">${esc(l.hint)}</div>` : ''}</div>`).join('');
     setScreen(`
+      ${subHead('播放线路')}
       <div class="card row"><span>当前在线</span><b class="num">${data.online == null ? '暂不可用' : esc(data.online) + ' 路播放'}</b></div>
       ${lines || '<div class="empty">暂无线路信息</div>'}
       ${data.note ? `<div class="card small" style="white-space:pre-wrap">${esc(data.note)}</div>` : ''}
@@ -761,7 +767,7 @@
     const rows = data.rows.map((r) => `<div class="rrow"><span class="grow"><span class="small">${esc(r.reason || '变动')}</span>
         <div class="tiny muted">${stamp(r.at)} · 余额 ${num(r.balance)}</div></span>
         <b class="num" style="color:${r.delta >= 0 ? 'var(--ok)' : 'var(--bad)'}">${r.delta >= 0 ? '+' : ''}${num(r.delta)}</b></div>`).join('');
-    setScreen(`<div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))"><span>当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
+    setScreen(`${subHead('积分流水')}<div class="card row" style="background:linear-gradient(135deg,color-mix(in srgb,#ffcc5c 22%,transparent),var(--glass))"><span>当前积分</span><b class="num" style="font-size:26px">${num(data.balance)}</b></div>
       <div class="h"><span>最近 30 条</span></div>
       <div class="list">${rows || '<div class="empty">还没有积分变动</div>'}</div>`);
   }
@@ -810,6 +816,7 @@
     const used = data.available ? devices.length : null;
     const slots = limit ? `<div class="slots">${Array.from({ length: limit }, (_, i) => `<span class="${used != null && i < used ? 'on' : ''}"></span>`).join('')}</div>` : '';
     setScreen(`
+      ${subHead('我的设备')}
       <div class="card">
         <div class="row" style="align-items:baseline;justify-content:flex-start;gap:6px">
           <b class="num" style="font-size:34px;line-height:1">${used ?? '—'}</b><span class="muted">${limit ? `/ ${esc(limit)} 台在用` : '台设备已登录'}</span></div>
@@ -874,6 +881,7 @@
     let mode = 'random';
     let generated = randomPassword();
     setScreen(`
+      ${subHead('修改密码')}
       <div class="card"><div class="row"><span class="muted">用户名</span><span><b class="num">${esc(me.username)}</b>
         <button class="btn sm ghost" type="button" id="copy-user" style="margin-left:6px">复制</button></span></div></div>
       <div class="seg"><button type="button" data-mode="random" class="on">随机生成</button><button type="button" data-mode="custom">自己设置</button></div>
@@ -923,11 +931,12 @@
         },
       });
       if (!done) return;
-      setScreen(`<div class="card" style="text-align:center;padding:22px 16px">
+      setScreen(`${subHead('修改密码')}<div class="card" style="text-align:center;padding:22px 16px">
           <div style="font-size:32px;line-height:1;color:var(--ok);margin-bottom:8px">${icon('circle-check')}</div><b style="font-size:17px">密码已修改</b>
           <div class="kv" style="margin-top:12px"><span class="muted">用户名</span><b class="mono num">${esc(done.username)}</b></div>
           <div class="kv"><span class="muted">新密码</span><code class="mono num">${esc(password)}</code></div>
           <button class="btn block" type="button" id="copy-pw" style="margin-top:12px">复制新密码</button>
+          <button class="btn ghost block" type="button" data-back style="margin-top:8px">完成并返回</button>
           ${(done.notices || []).map((n) => `<div class="banner" style="margin:12px 0 0;text-align:left">${icon('triangle-alert')}<span>${esc(n)}</span></div>`).join('')}
           <div class="tiny muted" style="margin-top:10px">请保存好新密码，不要转发。离开这个页面后不会再显示。</div></div>`);
       $('#copy-pw').onclick = () => copy(password);
@@ -1000,13 +1009,19 @@
     const r = S.req;
     setScreen(`<div id="req-quota"></div>
       <form class="search" id="req-form">${icon('search')}<input id="req-q" type="search" enterkeyhint="search" placeholder="输入片名搜索" value="${esc(r.q)}" maxlength="100">
+        ${r.q ? '<button class="search-clear" type="button" id="req-clear" aria-label="清空搜索">×</button>' : ''}
         <button class="btn sm" type="submit">搜索</button></form>
-      <div class="pills">${[['', '全部'], ['movie', '电影'], ['tv', '剧集']].map(([k, l]) => `<button type="button" data-type="${k}" class="${r.type === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="pills">${[['', '全部'], ['movie', '电影'], ['tv', '剧集']].map(([k, l]) => `<button type="button" data-type="${k}" class="${r.type === k ? 'on' : ''}">${l}</button>`).join('')}
+        ${r.q ? '<button type="button" id="req-back-mine" style="margin-left:auto">‹ 我的求片</button>' : ''}</div>
       <div id="req-body"></div>`);
+    const clearSearch = () => { haptic.tap(); Object.assign(r, { q: '', results: null, page: 1 }); render(); };
+    if ($('#req-clear')) $('#req-clear').onclick = clearSearch;
+    if ($('#req-back-mine')) $('#req-back-mine').onclick = clearSearch;
+    $('#req-q').onsearch = () => { if (!$('#req-q').value.trim() && r.q) clearSearch(); };
     $('#req-form').onsubmit = (e) => {
       e.preventDefault();
       const q = $('#req-q').value.trim();
-      if (!q) { toast('请输入片名', true); return; }
+      if (!q) { if (r.q) clearSearch(); else toast('请输入片名', true); return; }
       $('#req-q').blur();
       Object.assign(r, { q, results: null, page: 1 });
       render();
@@ -1020,12 +1035,31 @@
       const mine = await api('/api/app/requests/mine');
       if (!alive()) return;
       $('#req-quota').innerHTML = quotaCard(mine);
-      body.innerHTML = `<div class="h"><span>我的求片</span></div>${mine.rows.length ? `<div class="list">${mine.rows.map((row) => {
+      const filteredRows = r.type ? mine.rows.filter((row) => (r.type === 'movie' ? row.media_label === '电影' : row.media_label === '剧集')) : mine.rows;
+      body.innerHTML = `<div class="h"><span>我的求片</span>${mine.rows.length ? `<span class="muted">共 ${mine.rows.length} 条</span>` : ''}</div>${filteredRows.length ? `<div class="list">${filteredRows.map((row, idx) => {
         const [cls, label] = REQ_STATUS[row.status] || ['', row.status_label || row.status];
+        const cancelBtn = row.can_cancel ? `<button class="link danger-link tiny" type="button" data-req-cancel="${idx}" style="margin-left:6px">撤回</button>` : '';
         return `<div class="rrow"><span class="grow"><span class="small"><b>${esc(row.title || '未命名')}</b></span>
           <div class="tiny muted">${esc(row.media_label || '')}${row.demand_text ? ' · ' + esc(row.demand_text) : ''} · ${day(row.created_at)}${row.followed ? ' · 关注' : ''}</div></span>
-          <span class="chip ${cls}">${esc(label)}</span></div>`;
-      }).join('')}</div>` : '<div class="empty">还没有求过片。搜一下想看的电影或剧集吧。</div>'}`;
+          <span style="display:flex;align-items:center"><span class="chip ${cls}">${esc(label)}</span>${cancelBtn}</span></div>`;
+      }).join('')}</div>` : `<div class="empty">${mine.rows.length ? '当前类型下没有求片记录。' : '还没有求过片。搜一下想看的电影或剧集吧。'}</div>`}`;
+      $$('[data-req-cancel]', body).forEach((b) => {
+        b.onclick = async () => {
+          const row = filteredRows[Number(b.dataset.reqCancel)];
+          const done = await confirmSheet({
+            title: '撤回求片',
+            rows: [['影片', esc(row.title || `#${row.id}`)], ['范围', esc(row.demand_text || row.media_label || '默认')]],
+            note: '确认撤回这条待处理的求片工单吗？撤回后不自动退回本月求片次数。',
+            okText: '确认撤回',
+            danger: true,
+            onConfirm: () => api(`/api/app/requests/${row.id}/cancel`, { method: 'POST' }),
+          });
+          if (!done) return;
+          haptic.ok();
+          toast('求片工单已撤回');
+          render();
+        };
+      });
       return;
     }
     if (!r.results) {
@@ -1084,7 +1118,8 @@
         : '<div class="card small muted">媒体库里还没有这部。</div>';
     const poster = t.poster || pick.poster || '';
     setScreen(`
-      ${poster ? `<div class="backdrop" style="background-image:url('${esc(poster)}')"></div>` : ''}
+      ${subHead('影片详情', true)}
+      ${poster ? `<div class="backdrop" style="background-image:url('${esc(poster)}');margin-top:-44px"></div>` : ''}
       <div class="row" style="align-items:flex-end;gap:12px;${poster ? 'margin-top:-92px;' : ''}margin-bottom:12px;position:relative;justify-content:flex-start">
         <div class="poster${poster ? '' : ' no-img'}" style="--h:${hue(title)};width:100px;flex:none">${posterHtml(poster, '')}</div>
         <div class="grow"><div style="font-weight:600;font-size:17px;line-height:1.25;margin-bottom:4px">${esc(title)}</div>
@@ -1294,7 +1329,7 @@
       let sub;
       if (r.kind === 'custom') {
         sub = r.expires_at ? `保留到 ${stamp(r.expires_at)}` : '';
-        side = '<span class="chip">说明已发到 Bot</span>';
+        side = `<button class="btn sm ghost" type="button" data-notice="${i}">查看说明</button>`;
       } else if (r.used_at == null) {
         sub = r.duration_days ? `生效后 ${r.duration_days} 天` : '长期有效';
         side = `<button class="btn sm" type="button" data-use="${i}">${r.kind === 'title_card' ? '创建称号' : '使用'}</button>`;
@@ -1325,6 +1360,29 @@
         if (done.warning) toast(done.warning, true);
         await refreshBalance();
         itemsBody(body, alive);
+      };
+    });
+    $$('[data-notice]', body).forEach((b) => {
+      b.onclick = async () => {
+        const r = rows[Number(b.dataset.notice)];
+        b.disabled = true;
+        try {
+          const res = await api(`/api/app/items/${r.id}/notice`);
+          await sheet(`
+            <div class="row" style="margin-bottom:8px"><h3>${esc(res.name || r.name)} · 使用说明</h3></div>
+            <div class="card small" style="white-space:pre-wrap;max-height:52vh;overflow:auto;user-select:text">${esc(res.notice || '暂无说明内容')}</div>
+            <div class="row" style="gap:10px;margin-top:12px">
+              <button class="btn ghost grow" type="button" data-copy-notice>复制说明</button>
+              <button class="btn grow" type="button" data-cancel>关闭</button>
+            </div>`, (box) => {
+            const cp = $('[data-copy-notice]', box);
+            if (cp) cp.onclick = () => copy(res.notice || '');
+          });
+        } catch (err) {
+          if (!fatal(err)) toast(err.message, true);
+        } finally {
+          if (b.isConnected) b.disabled = false;
+        }
       };
     });
   }

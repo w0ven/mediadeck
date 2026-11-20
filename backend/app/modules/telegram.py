@@ -2454,20 +2454,50 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             kick_btns = []
             for device in devices[:6]:
                 did = str(device.get("id") or "")
-                if did and len(f"dev_kick:{did}".encode()) <= 64:
+                if did and len(f"dev_ask:{did}".encode()) <= 64:
                     short_name = str(device.get("name") or "设备")[:14]
-                    kick_btns.append({"text": f"❌ 登出 {short_name}", "callback_data": f"dev_kick:{did}"})
+                    kick_btns.append({"text": f"❌ 登出 {short_name}", "callback_data": f"dev_ask:{did}"})
             for i in range(0, len(kick_btns), 2):
                 keyboard.append(kick_btns[i:i + 2])
         miniapp = str(self._cfg().get("miniapp_url") or "").strip()
         if devices is not None and cap:
             lines += ["", f"<i>最多同时登录 {cap} 台，超出会自动登出最久没用的。</i>"]
         if miniapp and not _GROUP.get():
-            lines += ["", "<i>点击上方「❌ 登出」或在会员面板移除设备，它会立刻退出登录。</i>"]
+            lines += ["", "<i>点击上方「❌ 登出」确认移除，或在会员面板管理设备。</i>"]
             keyboard.append([{"text": "📱 在会员面板管理设备", "web_app": {"url": miniapp + "?page=devices"}}])
         keyboard.append([{"text": "🔄 刷新", "callback_data": "devices"},
                          {"text": "◀ 我的账号", "callback_data": "me"}])
         return "\n".join(lines), keyboard
+
+    async def _device_ask(self, chat_id: Any, message_id: int, member: dict[str, Any], device_id: str) -> None:
+        if _GROUP.get() or not member:
+            return
+        from app.modules.member_devices import ago_text
+        service = getattr(self, "_member_devices", None)
+        uid = str(member.get("emby_user_id") or "")
+        devices = None
+        if service and device_id:
+            with contextlib.suppress(Exception):
+                devices = await service.for_user(uid)
+        target = next((d for d in (devices or []) if str(d.get("id")) == str(device_id)), None)
+        if not target:
+            await self._edit(chat_id, message_id, *(await self._devices_view(member, notice="ℹ️ 该设备已不在登录列表中。")))
+            return
+        software = " ".join(v for v in (target.get("app"), target.get("version")) if v) or "—"
+        body = (
+            "📺 <b>确认登出设备</b>\n\n"
+            "<blockquote>"
+            f"设备：<b>{escape(str(target.get('name') or '设备'))}</b>\n"
+            f"客户端：{escape(software)}\n"
+            f"最近活跃：{ago_text(target.get('last_active'))}\n"
+            "⚠️ 确认后该设备将立刻退出登录（正在播放的画面会中断），之后仍可用账号密码重新登录。"
+            "</blockquote>"
+        )
+        kb = [
+            [{"text": "✅ 确认登出该设备", "callback_data": f"dev_kick:{device_id}"}],
+            [{"text": "◀ 取消返回设备列表", "callback_data": "devices"}],
+        ]
+        await self._edit(chat_id, message_id, body, kb)
 
     async def _device_kick(self, chat_id: Any, message_id: int, member: dict[str, Any], device_id: str) -> None:
         if _GROUP.get() or not member:
@@ -2644,24 +2674,39 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         await self.send(chat_id, body, self.bag_back())
 
     async def _orders_view(self, chat_id: Any, message_id: int,
-                           member: dict[str, Any]) -> None:
+                           member: dict[str, Any], page: int = 0) -> None:
         rows: list[dict[str, Any]] = []
         if self._shop is not None:
             with contextlib.suppress(Exception):
                 rows = self._shop.orders(
-                    user_id=str(member.get("emby_user_id") or ""), limit=10)
+                    user_id=str(member.get("emby_user_id") or ""), limit=200)
+        nav_tail = [[{"text": "📜 积分流水", "callback_data": "me_points"}], *self.bag_back()]
         if not rows:
             await self._edit(chat_id, message_id,
                              "🧾 <b>兑换记录</b>\n\n📭 还没有兑换过",
                              self.bag_back())
             return
-        lines = ["🧾 <b>兑换记录</b>\n"]
-        for row in rows:
+        page_size = 10
+        pages = max(1, (len(rows) + page_size - 1) // page_size)
+        page = max(0, min(int(page or 0), pages - 1))
+        chunk = rows[page * page_size:(page + 1) * page_size]
+        head = "🧾 <b>兑换记录</b>" + (f" · 第 {page + 1}/{pages} 页" if pages > 1 else "")
+        item_lines = []
+        for row in chunk:
             when = time.strftime("%m-%d %H:%M",
                                  time.localtime(row.get("created_at") or 0))
-            lines.append(
-                f"{when} · {escape(str(row.get('item_name') or '-'))} · -{row.get('cost')} 积分")
-        await self._edit(chat_id, message_id, "\n".join(lines), self.bag_back())
+            item_lines.append(
+                f"{when} · <b>{escape(str(row.get('item_name') or '-'))}</b> · -{row.get('cost')} 积分")
+        pager: list[dict[str, str]] = []
+        if page > 0:
+            pager.append({"text": "◀ 上一页", "callback_data": f"orders:{page - 1}"})
+        if page + 1 < pages:
+            pager.append({"text": "下一页 ▶", "callback_data": f"orders:{page + 1}"})
+        keyboard: list[list[dict[str, str]]] = []
+        if pager:
+            keyboard.append(pager)
+        keyboard.extend(nav_tail)
+        await self._edit(chat_id, message_id, f"{head}\n<blockquote>" + "\n".join(item_lines) + "</blockquote>", keyboard)
 
     async def _inventory_view(self, chat_id, message_id, member, page=0):
         if not self._inventory:
@@ -5605,7 +5650,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if in_group and data in ("register", "claim", "rebind", "resetpw", "me_nodes", "me_routing",
                                  "req_new", "request_center", "watch_recent", "transfer", "shop", "invites", "invite_confirm"):
             return
-        if in_group and (data.startswith(("resetpw", "delself:", "dev_kick:", "cardask:")) or data in ("delete_account", "library_stats")):
+        if in_group and (data.startswith(("resetpw", "delself:", "dev_kick:", "dev_ask:", "cardask:")) or data in ("delete_account", "library_stats")):
             return
         self._touch_panel(chat_id, message_id)
         if message.get('photo'):
@@ -5622,7 +5667,7 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
         if data in ('home', 'me', 'bag', 'bag_records', 'request_center', 'admin', 'help', 'rules',
                     'shop', 'invites', 'invite_confirm', 'orders', 'my_requests', 'usage', 'watch_recent',
                     'me_status', 'me_points', 'me_nodes', 'me_routing', 'devices', 'expiry',
-                    'play_hub', 'points_board', 'me_proxy', 'library_stats') or data.startswith(('me_proxy:', 'me_points:', 'dev_kick:', 'cardask:')):
+                    'play_hub', 'points_board', 'me_proxy', 'library_stats') or data.startswith(('me_proxy:', 'me_points:', 'orders:', 'dev_kick:', 'dev_ask:', 'cardask:')):
             self._pending.pop(self._pkey(chat_id), None)
             self._rq_abandon(chat_id)
             waiting = None
@@ -5699,7 +5744,8 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return
         if data == "admin_cancel":
             self._pending.pop(self._pkey(chat_id), None)
-            await self._edit(chat_id, message_id, "已取消，什么都没做。")
+            cancel_kb = None if in_group else (self.admin_menu() if self.is_admin(member) else BACK_HOME)
+            await self._edit(chat_id, message_id, "已取消，什么都没做。", cancel_kb)
             return
         if data == "admin":
             await self._admin_home(chat_id, message_id, member)
@@ -5934,8 +5980,13 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             await self._shop_redeem(chat_id, message_id, member,
                                     data.split(":", 1)[1])
             return
-        if data == "orders":
-            await self._orders_view(chat_id, message_id, member)
+        if data == "orders" or data.startswith("orders:"):
+            page = 0
+            if ":" in data:
+                tail = data.split(":", 1)[1]
+                if tail.isdigit():
+                    page = int(tail)
+            await self._orders_view(chat_id, message_id, member, page=page)
             return
         if data.startswith("rq:"):
             if not in_group:
@@ -5977,6 +6028,9 @@ class TelegramBot(MemberCardMixin, ActivityBotMixin, InviteBotMixin, GroupComman
             return
         if data == "devices":
             await self._edit(chat_id, message_id, *(await self._devices_view(member)))
+            return
+        if data.startswith("dev_ask:"):
+            await self._device_ask(chat_id, message_id, member, data.split(":", 1)[1])
             return
         if data.startswith("dev_kick:"):
             await self._device_kick(chat_id, message_id, member, data.split(":", 1)[1])

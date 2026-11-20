@@ -1349,13 +1349,18 @@ class RequestBotMixin:
     async def _cmd_req(self, chat_id, actor, args):
         member = self._member_for_chat(str(chat_id))
         if member:
+            mid = self._panel.get(self._pkey(chat_id))
+            if mid and self._admin_panel(chat_id, int(mid)):
+                mid = None
+            raw = args[0] if args else ""
+            status = "open" if raw in ("", "active", "open") else (raw if raw in STATUS_LABELS else "open")
             return await self._rq_list(
                 chat_id,
-                self._panel.get(self._pkey(chat_id)),
+                mid,
                 member,
                 {
                     "mode": "staff",
-                    "status": args[0] if args and args[0] in STATUS_LABELS else "open",
+                    "status": status,
                     "page": 0,
                 },
             )

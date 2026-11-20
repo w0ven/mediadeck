@@ -10,11 +10,12 @@ from typing import Any
 
 class RebindBotMixin:
     async def _start_rebind(self, chat_id: Any, tg_id: str) -> None:
-        back = [[{"text": "取消", "callback_data": "home"}]]
+        is_member = bool(self._member_for_chat(tg_id))
+        back = [[{"text": "◀ 我的账号" if is_member else "取消", "callback_data": "me" if is_member else "home"}]]
         if not self._rebinding or self._emby is None:
             await self._show(chat_id, "换绑服务暂不可用，请联系管理员。", back)
             return
-        if self._member_for_chat(tg_id):
+        if is_member:
             self._pending[self._pkey(chat_id)] = ('rebind_target', time.time() + 300, {})
             await self._show(chat_id,
                 '🔗 <b>更换 TG</b>\n请输入新 TG 数字 ID。\n新 TG 验证 Emby 密码后等待群管理员审核；审核前绑定不变。\n\n旧 TG 无法使用？用新 TG 打开「TG 换绑」。', back)
@@ -97,7 +98,7 @@ class RebindBotMixin:
                 [{'text': '返回首页', 'callback_data': 'home'}]]
 
     async def _pick_rebind_target(self, chat_id: Any, tg_id: str, text: str) -> None:
-        back = [[{'text': '取消', 'callback_data': 'home'}]]
+        back = [[{'text': '◀ 我的账号', 'callback_data': 'me'}]]
         try:
             if not self._private_link():
                 raise ValueError('Bot 地址暂不可用，请稍后重试。')
