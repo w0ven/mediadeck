@@ -9,9 +9,13 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import hashlib
 import re
 import sqlite3
+import threading
+import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -99,6 +103,8 @@ class LiveEmby:
         self._identity_data_dir = identity_data_dir
         self._identity_url = normalize_base_url(identity_url)
         self._default_avatar_path = (default_avatar_path or "").strip()
+        self._auth_keys_neg_cache: OrderedDict[str, float] = OrderedDict()
+        self._auth_keys_neg_lock = threading.Lock()
 
     # -- connection ----------------------------------------------------------
     def _conn(self) -> tuple[str, dict[str, str], float, bool]:
@@ -501,6 +507,27 @@ class LiveEmby:
             # Neither paths nor credential-bearing sqlite errors leave here.
             raise RuntimeError("local personal identity authority unavailable") from None
 
+    def _auth_keys_neg_cached(self, base: str, token: str) -> bool:
+        key = hashlib.sha256(f"{base}|{token}".encode()).hexdigest()
+        now = time.monotonic()
+        with self._auth_keys_neg_lock:
+            exp = self._auth_keys_neg_cache.get(key)
+            if exp is not None:
+                if exp > now:
+                    self._auth_keys_neg_cache.move_to_end(key)
+                    return True
+                self._auth_keys_neg_cache.pop(key, None)
+        return False
+
+    def _auth_keys_neg_remember(self, base: str, token: str, ttl: float = 60.0) -> None:
+        key = hashlib.sha256(f"{base}|{token}".encode()).hexdigest()
+        exp = time.monotonic() + ttl
+        with self._auth_keys_neg_lock:
+            self._auth_keys_neg_cache[key] = exp
+            self._auth_keys_neg_cache.move_to_end(key)
+            while len(self._auth_keys_neg_cache) > 4096:
+                self._auth_keys_neg_cache.popitem(last=False)
+
     async def personal_user_for_token(self, token: str) -> str | None:
         """Restricted routes never select an owner by a caller's DeviceId.
 
@@ -515,6 +542,18 @@ class LiveEmby:
         if not token or len(token) > 2048:
             return None
         base, _, timeout, verify = self._conn()
+        norm_base = normalize_base_url(base)
+        has_local_authority = bool(self._identity_data_dir or self._identity_url)
+        if has_local_authority:
+            if (not self._identity_data_dir or not self._identity_url
+                    or norm_base != self._identity_url):
+                raise RuntimeError("local personal identity authority URL mismatch")
+            # Local Tokens_2 is always queried live (zero owner/revocation cache:
+            # IsActive=0 takes effect on the very next call). Only the negative
+            # "not an Emby server API key" check on /emby/Auth/Keys is cached for
+            # 60s to prevent thousands of expected 403 errors in embyserver.txt.
+            if self._auth_keys_neg_cached(norm_base, token):
+                return await asyncio.to_thread(self._local_personal_owner, token)
         headers = {"X-Emby-Token": token}
         async with self._client(timeout, verify) as client:
             key_reply = await client.get(f"{base}/emby/Auth/Keys", headers=headers)
@@ -529,11 +568,11 @@ class LiveEmby:
                     return None
             elif key_reply.status_code != 403:
                 raise RuntimeError("credential authority unavailable")
-            if self._identity_data_dir or self._identity_url:
-                if (not self._identity_data_dir or not self._identity_url
-                        or normalize_base_url(base) != self._identity_url):
-                    raise RuntimeError("local personal identity authority URL mismatch")
-                return await asyncio.to_thread(self._local_personal_owner, token)
+            if has_local_authority:
+                owner_guid = await asyncio.to_thread(self._local_personal_owner, token)
+                if owner_guid:
+                    self._auth_keys_neg_remember(norm_base, token)
+                return owner_guid
             reply = await client.get(f"{base}/emby/Sessions", headers=headers)
             if reply.status_code in (401, 403):
                 return None

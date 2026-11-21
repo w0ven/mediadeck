@@ -93,6 +93,9 @@ class WhitelistRoute:
         self.registry_path = registry_path
         self._registry_identity: tuple[int, int, int] | None = None
         self._mobile: dict[str, set[str]] = {}
+        self._utag_map: dict[str, list[str]] = {}
+        self._utag_built_at: float = 0.0
+        self._utag_miss_at: float = 0.0
 
     def entry(self, headers: Any, *, required: bool = False) -> PlaybackEntry | None:
         entries = self.state.settings_service.integration_config()["external_entries"]
@@ -351,10 +354,39 @@ class WhitelistRoute:
                 raise ValueError
         except (KeyError, ValueError, TypeError):
             refuse()
+        uid = self._resolve_uid_by_utag(tag)
+        self.member(uid)
+        return uid
+
+    def _resolve_uid_by_utag(self, tag: str) -> str:
+        now = time.monotonic()
+        db_obj = getattr(self.state, "db", None)
+        if db_obj is not None and hasattr(db_obj, "query"):
+            if not self._utag_map or (now - self._utag_built_at) > 30.0:
+                new_map: dict[str, list[str]] = {}
+                for row in db_obj.query("SELECT emby_user_id FROM members"):
+                    u = str(row.get("emby_user_id") or "")
+                    if u:
+                        new_map.setdefault(user_tag(u), []).append(u)
+                self._utag_map = new_map
+                self._utag_built_at = now
+            hits = self._utag_map.get(tag) or []
+            if len(hits) != 1 and (now - self._utag_miss_at) > 5.0:
+                # Throttled refresh on miss in case a brand-new member just enrolled
+                self._utag_miss_at = now
+                new_map = {}
+                for row in db_obj.query("SELECT emby_user_id FROM members"):
+                    u = str(row.get("emby_user_id") or "")
+                    if u:
+                        new_map.setdefault(user_tag(u), []).append(u)
+                self._utag_map = new_map
+                self._utag_built_at = now
+                hits = self._utag_map.get(tag) or []
+            if len(hits) != 1:
+                refuse()
+            return hits[0]
         matches = [m for m in self.state.members.list(limit=None)
                    if user_tag(str(m.get("emby_user_id") or "")) == tag]
         if len(matches) != 1:
             refuse()
-        uid = str(matches[0]["emby_user_id"])
-        self.member(uid)
-        return uid
+        return str(matches[0]["emby_user_id"])
