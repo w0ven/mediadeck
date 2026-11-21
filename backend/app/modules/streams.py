@@ -144,6 +144,10 @@ class StreamAdmission:
             "ON watch_playbacks(user_id,session_id)"
         )
         self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_watch_playbacks_issued "
+            "ON watch_playbacks(issued_at, closed_at)"
+        )
+        self._db.execute(
             "CREATE TABLE IF NOT EXISTS concurrency_notice_plays ("
             "user_id TEXT NOT NULL, play_id TEXT NOT NULL, session_id TEXT NOT NULL, "
             "created_at REAL NOT NULL, PRIMARY KEY(user_id, play_id))"

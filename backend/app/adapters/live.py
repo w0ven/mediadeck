@@ -260,33 +260,44 @@ class LiveEmby:
         if not (username or "").strip() or not password:
             return None
         base, _headers, timeout, verify = self._conn()
+        device_id = f"auth-verify-{uuid.uuid4().hex[:12]}"
         client_auth = (
-            'MediaBrowser Client="mediadeck", Device="redeem", '
-            'DeviceId="mediadeck-redeem", Version="0.1.0"'
+            'MediaBrowser Client="EmbyWeb", Device="AuthVerify", '
+            f'DeviceId="{device_id}", Version="1.0.0"'
         )
-        try:
-            async with self._client(timeout, verify) as client:
+        async with self._client(timeout, verify) as client:
+            try:
                 r = await client.post(
                     f"{base}/emby/Users/AuthenticateByName",
                     headers={"X-Emby-Authorization": client_auth},
                     json={"Username": username.strip(), "Pw": password},
                 )
-        except httpx.HTTPError:
-            return None
-        if r.status_code in (401, 403):
-            return None
-        if r.status_code != 200:
-            return None
-        try:
-            data = r.json() or {}
-        except ValueError:
-            return None
-        if not isinstance(data, dict):
-            return None
-        user = data.get("User") or {}
-        if not isinstance(user, dict) or not user.get("Id"):
-            return None
-        return user
+            except httpx.HTTPError:
+                return None
+            if r.status_code in (401, 403):
+                return None
+            if r.status_code != 200:
+                return None
+            try:
+                data = r.json() or {}
+            except ValueError:
+                return None
+            if not isinstance(data, dict):
+                return None
+            access_token = str(data.get("AccessToken") or "").strip()
+            try:
+                user = data.get("User") or {}
+                if not isinstance(user, dict) or not user.get("Id"):
+                    return None
+                return user
+            finally:
+                if access_token:
+                    with contextlib.suppress(httpx.HTTPError):
+                        await client.post(
+                            f"{base}/emby/Sessions/Logout",
+                            headers={"X-Emby-Token": access_token},
+                            timeout=5.0,
+                        )
 
     async def apply_policy(self, user_id: str, policy_patch: dict[str, Any]) -> bool:
         # Explicit Web/operator edits retain their existing semantics.
@@ -855,7 +866,7 @@ class LiveEmby:
                     await client.post(
                         f"{base}/emby/Sessions/{session_id}/Message",
                         headers=headers,
-                        json={"Text": reason, "Header": "mediadeck", "TimeoutMs": 8000},
+                        json={"Text": reason, "Header": "播放受限提醒", "TimeoutMs": 8000},
                     )
             r = await client.post(
                 f"{base}/emby/Sessions/{session_id}/Playing/Stop", headers=headers)

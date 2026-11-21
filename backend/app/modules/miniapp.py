@@ -41,6 +41,18 @@ class InitDataError(ValueError):
     pass
 
 
+class _MiniAppStaticFiles(StaticFiles):
+    """Serve Mini App runtime assets while refusing internal Markdown docs."""
+
+    def lookup_path(self, path: str) -> tuple[str, Any]:
+        if Path(path).suffix.lower() == '.md':
+            return '', None
+        full_path, stat_result = super().lookup_path(path)
+        if full_path and Path(full_path).suffix.lower() == '.md':
+            return '', None
+        return full_path, stat_result
+
+
 def verify_init_data(raw: str, bot_token: str, *, now: float | None = None,
                      max_age: int = INIT_MAX_AGE) -> dict[str, Any]:
     """Validate Telegram WebApp initData and return the signed user."""
@@ -210,7 +222,7 @@ def register(app: Any) -> None:
                 html = html.replace(f'/app/assets/{asset}', f'/app/assets/{asset}?v={quote(ver)}')
         return HTMLResponse(html, headers={'Cache-Control': 'no-cache'})
 
-    app.mount('/app/assets', StaticFiles(directory=str(STATIC)), name='miniapp-assets')
+    app.mount('/app/assets', _MiniAppStaticFiles(directory=str(STATIC)), name='miniapp-assets')
 
     # -- me ---------------------------------------------------------------------
 

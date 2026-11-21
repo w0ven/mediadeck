@@ -315,6 +315,7 @@ CREATE TABLE IF NOT EXISTS watch_samples (
     PRIMARY KEY(session_key, ended_at)
 );
 CREATE INDEX IF NOT EXISTS idx_watch_samples_user_time ON watch_samples(emby_user_id, ended_at);
+CREATE INDEX IF NOT EXISTS idx_watch_samples_ended ON watch_samples(ended_at);
 CREATE TABLE IF NOT EXISTS watch_sample_totals (
     emby_user_id TEXT PRIMARY KEY, seconds REAL NOT NULL,
     first_at REAL NOT NULL, last_at REAL NOT NULL
@@ -350,6 +351,7 @@ CREATE TABLE IF NOT EXISTS watch_playbacks (
     PRIMARY KEY(user_id, play_id)
 );
 CREATE INDEX IF NOT EXISTS idx_watch_playback_session ON watch_playbacks(user_id,session_id);
+CREATE INDEX IF NOT EXISTS idx_watch_playbacks_issued ON watch_playbacks(issued_at, closed_at);
 
 -- One bounded, credential-free observation summary per existing viewer.
 CREATE TABLE IF NOT EXISTS watch_diagnostics (
