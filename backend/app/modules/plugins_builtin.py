@@ -435,6 +435,7 @@ class ViewingReportPlugin(Plugin):
         # never cancel an in-flight send merely because the batch is large.
         deadline = time.monotonic() + 480
         self.ctx.set_state(self.spec.id, delivery)
+        eligible: list[tuple[str, dict[str, Any], dict[str, Any]]] = []
         for uid, row in delivery["recipients"].items():
             if row["state"] == "sending":
                 row.update(state="unknown", reason="上次发送中断，结果不明；请核实后手动重试")
@@ -452,64 +453,99 @@ class ViewingReportPlugin(Plugin):
                 row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
                 self.ctx.set_state(self.spec.id, delivery)
                 continue
-            if time.monotonic() >= deadline:
+            eligible.append((uid, row, member))
+
+        report_detail = getattr(self.ctx.stats, "report_detail", None)
+        get_member = getattr(self.ctx.members, "get", None)
+        chunk_size = 6
+        halted = False
+        for offset in range(0, len(eligible), chunk_size):
+            if halted or time.monotonic() >= deadline:
                 break
-            row["attempts"] += 1
-            try:
-                report_detail = getattr(self.ctx.stats, 'report_detail', None)
-                if days == 7 and callable(report_detail):
-                    # Retries retain this batch's original complete week.
-                    detail = report_detail(uid, now=delivery['created_at']) or {}
+            chunk = eligible[offset:offset + chunk_size]
+            # Compute SQLite-backed stats sequentially on the event-loop thread
+            # (preserving snapshot() non-reentrancy), then fetch Emby artwork &
+            # render Pillow posters concurrently across the bounded chunk.
+            staged: list[tuple[str, dict[str, Any], dict[str, Any], tuple[float, int, int | None, str, dict[str, Any]] | None]] = []
+            for uid, row, member in chunk:
+                if time.monotonic() >= deadline:
+                    break
+                try:
+                    if days == 7 and callable(report_detail):
+                        detail = report_detail(uid, now=delivery["created_at"]) or {}
+                    else:
+                        detail = self.ctx.stats.member_detail(uid, days=days) or {}
+                    hours, plays, total_bytes = _summarise(detail)
+                    caption = self._text(label, days, hours, plays, total_bytes, detail)
+                    staged.append((uid, row, member, (hours, plays, total_bytes, caption, detail)))
+                except Exception:  # noqa: BLE001 - recorded in order below before any Telegram call
+                    staged.append((uid, row, member, None))
+
+            if not staged:
+                break
+            posters = await asyncio.gather(
+                *(
+                    self._poster(m, label, days, meta[0], meta[1], meta[2], meta[4])
+                    if meta is not None else asyncio.sleep(0, result=None)
+                    for _, _, m, meta in staged
+                ),
+                return_exceptions=True,
+            )
+
+            for (uid, row, member, meta), poster_res in zip(staged, posters, strict=True):
+                if time.monotonic() >= deadline:
+                    break
+                row["attempts"] += 1
+                if meta is None or isinstance(poster_res, BaseException):
+                    if isinstance(poster_res, asyncio.CancelledError):
+                        raise poster_res
+                    report_delivery.record_failure(row, {"state": "retry", "reason": "报告生成失败"}, time.time())
+                    self.ctx.set_state(self.spec.id, delivery)
+                    continue
+                hours, plays, total_bytes, caption, _ = meta
+                photo = poster_res
+                current = get_member(uid) if callable(get_member) else linked.get(uid)
+                if not current or str(current.get("tg_user_id")) != row["tg_user_id"]:
+                    row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
+                    self.ctx.set_state(self.spec.id, delivery)
+                    continue
+                if plays <= 0:
+                    empty += 1
+                if time.monotonic() >= deadline:
+                    row["attempts"] -= 1
+                    self.ctx.set_state(self.spec.id, delivery)
+                    halted = True
+                    break
+                row.update(state="sending", updated_at=int(time.time()))
+                self.ctx.set_state(self.spec.id, delivery)  # crash-safe: uncertain != unsent
+                ok = False
+                token = report_delivery.CALL_DELIVERY.set(None)
+                try:
+                    notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
+                    if photo and callable(notify_photo):
+                        ok = await notify_photo(member, photo, caption)
+                    error = report_delivery.CALL_DELIVERY.get()
+                    # Only a known content rejection may fall back immediately. A
+                    # lost photo ACK must not cause a duplicate text notification.
+                    if not ok and (not photo or not callable(notify_photo) or
+                                   (error and error.get("content_error"))):
+                        ok = await self.ctx.telegram.notify_member(member, caption)
+                    error = report_delivery.CALL_DELIVERY.get() or report_delivery.failure()
+                except Exception as exc:  # noqa: BLE001 - safe structured reason only
+                    error = report_delivery.failure(exc=exc)
+                finally:
+                    report_delivery.CALL_DELIVERY.reset(token)
+                if ok:
+                    sent += 1
+                    row.update(state="sent", reason="", next_at=0, updated_at=int(time.time()))
                 else:
-                    detail = self.ctx.stats.member_detail(uid, days=days) or {}
-                hours, plays, total_bytes = _summarise(detail)
-                caption = self._text(label, days, hours, plays, total_bytes, detail)
-                photo = await self._poster(member, label, days, hours, plays, total_bytes, detail)
-            except Exception:  # noqa: BLE001 - no Telegram send has happened yet
-                report_delivery.record_failure(row, {"state": "retry", "reason": "报告生成失败"}, time.time())
+                    report_delivery.record_failure(row, error, time.time())
+                    if error.get("retry_after"):
+                        delivery["pause_until"] = int(time.time() + error["retry_after"])
                 self.ctx.set_state(self.spec.id, delivery)
-                continue
-            get_member = getattr(self.ctx.members, "get", None)
-            current = get_member(uid) if callable(get_member) else linked.get(uid)
-            if not current or str(current.get("tg_user_id")) != row["tg_user_id"]:
-                row.update(state="failed", reason="账号已移除或绑定已变化，未发送")
-                self.ctx.set_state(self.spec.id, delivery)
-                continue
-            if plays <= 0:
-                empty += 1
-            if time.monotonic() >= deadline:
-                row["attempts"] -= 1
-                self.ctx.set_state(self.spec.id, delivery)
-                break
-            row.update(state="sending", updated_at=int(time.time()))
-            self.ctx.set_state(self.spec.id, delivery)  # crash-safe: uncertain != unsent
-            ok = False
-            token = report_delivery.CALL_DELIVERY.set(None)
-            try:
-                notify_photo = getattr(self.ctx.telegram, "notify_member_photo", None)
-                if photo and callable(notify_photo):
-                    ok = await notify_photo(member, photo, caption)
-                error = report_delivery.CALL_DELIVERY.get()
-                # Only a known content rejection may fall back immediately. A
-                # lost photo ACK must not cause a duplicate text notification.
-                if not ok and (not photo or not callable(notify_photo) or
-                               (error and error.get("content_error"))):
-                    ok = await self.ctx.telegram.notify_member(member, caption)
-                error = report_delivery.CALL_DELIVERY.get() or report_delivery.failure()
-            except Exception as exc:  # noqa: BLE001 - safe structured reason only
-                error = report_delivery.failure(exc=exc)
-            finally:
-                report_delivery.CALL_DELIVERY.reset(token)
-            if ok:
-                sent += 1
-                row.update(state="sent", reason="", next_at=0, updated_at=int(time.time()))
-            else:
-                report_delivery.record_failure(row, error, time.time())
-                if error.get("retry_after"):
-                    delivery["pause_until"] = int(time.time() + error["retry_after"])
-            self.ctx.set_state(self.spec.id, delivery)
-            if delivery.get("pause_until", 0) > time.time():
-                break  # rate limit applies to this batch, not only one recipient
+                if delivery.get("pause_until", 0) > time.time():
+                    halted = True
+                    break  # rate limit applies to this batch, not only one recipient
         result = report_delivery.summary(delivery)
         return {**result, "周期": label, "已发送": sent, "无记录仍发送": empty}
 

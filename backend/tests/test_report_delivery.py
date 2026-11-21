@@ -309,3 +309,43 @@ async def test_large_batch_yields_between_recipients_and_resumes_receipts(report
     await r.plugin.run(r.config)
     assert r.calls == ['one', 'two']
     assert all(row['state'] == 'sent' for row in r.plugin.delivery_status()['recipients'])
+
+
+@pytest.mark.asyncio
+async def test_chunked_poster_prerender_bounds_concurrency_and_isolates_render_error(report):
+    import asyncio
+    r = report
+    r.people[:] = [
+        {'emby_user_id': f'u{i}', 'tg_user_id': f'{200 + i}', 'username': f'Member {i}'}
+        for i in range(10)
+    ]
+    in_flight = 0
+    max_in_flight = 0
+    photos_sent = []
+
+    async def parallel_poster(self_or_member, *args):
+        nonlocal in_flight, max_in_flight
+        member = args[0] if hasattr(self_or_member, 'ctx') else self_or_member
+        in_flight += 1
+        max_in_flight = max(max_in_flight, in_flight)
+        try:
+            await asyncio.sleep(0.01)
+            if member['emby_user_id'] == 'u2':
+                raise RuntimeError('synthetic poster failure')
+            return f"img:{member['emby_user_id']}".encode()
+        finally:
+            in_flight -= 1
+
+    async def send_photo(member, photo, caption):
+        photos_sent.append((member['emby_user_id'], photo))
+        return True
+
+    r.plugin._poster = parallel_poster
+    r.ctx.telegram.notify_member_photo = send_photo
+    result = await r.plugin.run(r.config)
+    assert 2 <= max_in_flight <= 6
+    assert result['已送达'] == 9 and result['等待重试'] == 1
+    assert [u for u, _ in photos_sent] == [f'u{i}' for i in range(10) if i != 2]
+    rows = {row['user_id']: row for row in r.plugin.delivery_status()['recipients']}
+    assert rows['u2']['state'] == 'retry' and rows['u2']['reason'] == '报告生成失败'
+
