@@ -6,6 +6,7 @@ midnight. This deliberately does not change the existing watch/traffic ledger.
 """
 from __future__ import annotations
 
+import contextlib
 import math
 import threading
 import time
@@ -23,8 +24,10 @@ BEIJING_OFFSET = 8 * 3600
 # so instead of invalidating on every single row insert (which would miss on
 # nearly every request), we keep a rolling snapshot and incrementally merge
 # only the tail rows with ended_at > watermark (a few dozen rows, <1 ms).
+# In-process rolling cache for the 30-day verified interval scan, stored on
+# each Database instance so a GC'd Database never collides via reused id(db).
 _INTERVAL_CACHE_LOCK = threading.Lock()
-_INTERVAL_CACHE: dict[int, dict[str, Any]] = {}
+_INTERVAL_CACHE_ATTR = '_activity_interval_cache'
 _INTERVAL_CACHE_FULL_TTL = 600.0
 
 
@@ -129,12 +132,11 @@ def member_activity(db: Database, members: list[dict[str, Any]], *, now: float,
         if use_fast_reader:
             now_mono = time.monotonic()
             reset_ver = getattr(db, '_sample_reset_version', 0)
-            db_key = id(db)
             all_intervals: dict[str, list[tuple[float, float]]] | None = None
             all_invalid: set[str] = set()
             all_last: dict[str, float] = {}
             with _INTERVAL_CACHE_LOCK:
-                entry = _INTERVAL_CACHE.get(db_key)
+                entry = getattr(db, _INTERVAL_CACHE_ATTR, None)
             if (entry is not None
                     and entry['reset_ver'] == reset_ver
                     and entry['verification_since'] == verification_since
@@ -203,10 +205,8 @@ def member_activity(db: Database, members: list[dict[str, Any]], *, now: float,
                 all_intervals = {uid: _merge_intervals(lst) for uid, lst in built_intervals.items()}
                 all_invalid = built_invalid
                 all_last = built_last
-                with _INTERVAL_CACHE_LOCK:
-                    if len(_INTERVAL_CACHE) > 32:
-                        _INTERVAL_CACHE.clear()
-                    _INTERVAL_CACHE[db_key] = {
+                with _INTERVAL_CACHE_LOCK, contextlib.suppress(AttributeError, TypeError):
+                    setattr(db, _INTERVAL_CACHE_ATTR, {
                         'reset_ver': reset_ver,
                         'verification_since': verification_since,
                         'query_since': query_since,
@@ -217,7 +217,7 @@ def member_activity(db: Database, members: list[dict[str, Any]], *, now: float,
                         'intervals': all_intervals,
                         'invalid': all_invalid,
                         'last': all_last,
-                    }
+                    })
             for uid in wanted:
                 if uid in all_intervals:
                     intervals[uid] = all_intervals[uid]
