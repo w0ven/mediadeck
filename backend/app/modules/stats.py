@@ -92,6 +92,41 @@ class StatsService:
         epoch = db.one("SELECT value FROM meta WHERE key='watch_verified_since'") or {}
         self._verification_since = float(epoch.get('value') or 0)
         self._hours_cache: tuple[int, float, int, float, float, dict[str, float]] | None = None
+        self._ensure_prune_indexes()
+
+    def _ensure_prune_indexes(self) -> None:
+        if not hasattr(self._db, 'execute') or not hasattr(self._db, 'query'):
+            return
+        objects = self._db.query(
+            "SELECT type, name FROM sqlite_master WHERE type IN ('table', 'index')"
+        )
+        tables = {r['name'] for r in objects if r.get('type') == 'table'}
+        indexes = {r['name'] for r in objects if r.get('type') == 'index'}
+        for table, idx, ddl in (
+            (
+                'watch_samples',
+                'idx_watch_samples_ended',
+                'CREATE INDEX IF NOT EXISTS idx_watch_samples_ended ON watch_samples(ended_at)',
+            ),
+            (
+                'activity_watch_intervals',
+                'idx_activity_intervals_ended',
+                (
+                    'CREATE INDEX IF NOT EXISTS idx_activity_intervals_ended '
+                    'ON activity_watch_intervals(ended_at)'
+                ),
+            ),
+            (
+                'watch_playbacks',
+                'idx_watch_playbacks_issued',
+                (
+                    'CREATE INDEX IF NOT EXISTS idx_watch_playbacks_issued '
+                    'ON watch_playbacks(issued_at, closed_at)'
+                ),
+            ),
+        ):
+            if table in tables and idx not in indexes:
+                self._db.execute(ddl)
 
     def bind_live_watch(self, provider: Any) -> None:
         self._live_watch = provider
@@ -657,12 +692,14 @@ class StatsService:
         self._db.execute('DELETE FROM watch_legacy_events WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_samples WHERE ended_at < ?', (cutoff_ts,))
         self._db.execute('DELETE FROM watch_verified_samples WHERE ended_at < ?', (cutoff_ts,))
+        stale_open_cutoff = now - 30 * 86400
         playbacks = self._db.execute(
             'DELETE FROM watch_playbacks WHERE '
             '(closed_at > 0 AND closed_at < ? AND issued_at < ?) '
-            'OR (closed_at = 0 AND issued_at > 0 AND issued_at < ? '
-            'AND session_id NOT IN (SELECT session_id FROM watch_checkpoints))',
-            (short_cutoff, short_cutoff, short_cutoff),
+            'OR (closed_at = 0 AND issued_at >= 0 AND issued_at < ? '
+            'AND ((issued_at > 0 AND issued_at < ?) '
+            'OR session_id NOT IN (SELECT session_id FROM watch_checkpoints)))',
+            (short_cutoff, short_cutoff, short_cutoff, stale_open_cutoff),
         )
         plugin_runs = self._db.execute(
             'DELETE FROM plugin_runs WHERE started_at < ? AND id NOT IN ('

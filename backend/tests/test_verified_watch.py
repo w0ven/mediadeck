@@ -192,3 +192,44 @@ def test_prune_bounds_operational_tables_without_touching_recent_or_active_state
     assert not db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:event:-1001:10'")
     assert db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:event:-1001:11'")
     assert db.one("SELECT 1 FROM meta WHERE key='telegram.membership:1:latest'")
+
+
+def test_prune_indexes_and_stale_or_zero_issued_playbacks_cleanup(env, monkeypatch):
+    db, _, _, _ = env
+    expected_indexes = {
+        'idx_watch_samples_ended',
+        'idx_activity_intervals_ended',
+        'idx_watch_playbacks_issued',
+    }
+    present = {
+        r['name'] for r in db.query("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert expected_indexes.issubset(present)
+
+    for idx in expected_indexes:
+        db.execute(f'DROP INDEX {idx}')
+    rebuilt_stats = StatsService(db)
+    rebuilt = {
+        r['name'] for r in db.query("SELECT name FROM sqlite_master WHERE type='index'")
+    }
+    assert expected_indexes.issubset(rebuilt)
+
+    now = BASE + 100 * 86400
+    monkeypatch.setattr('app.modules.stats.time.time', lambda: now)
+    db.execute("INSERT INTO watch_checkpoints VALUES('resident-sid','{}')")
+    db.execute("INSERT INTO watch_playbacks VALUES('u','zero-closed-old','s-closed','d','f',0,?,'{}')",
+               (now - 20 * 86400,))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','zero-abandoned','s-zero','d','f',0,0,'{}')")
+    db.execute("INSERT INTO watch_playbacks VALUES('u','zero-resident','resident-sid','d','f',0,0,'{}')")
+    db.execute("INSERT INTO watch_playbacks VALUES('u','resident-stale-31d','resident-sid','d','f',?,0,'{}')",
+               (now - 31 * 86400,))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','resident-active-20d','resident-sid','d','f',?,0,'{}')",
+               (now - 20 * 86400,))
+    db.execute("INSERT INTO watch_playbacks VALUES('u','open-recent-2d','s-open','d','f',?,0,'{}')",
+               (now - 2 * 86400,))
+
+    result = rebuilt_stats.prune(keep_days=400)
+    assert result['watch_playbacks'] == 3
+    remaining = {r['play_id'] for r in db.query('SELECT play_id FROM watch_playbacks')}
+    assert remaining == {'zero-resident', 'resident-active-20d', 'open-recent-2d'}
+

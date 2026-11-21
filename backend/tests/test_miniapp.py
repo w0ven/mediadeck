@@ -557,3 +557,31 @@ def test_miniapp_request_cancel_and_custom_item_notice_endpoints(client):
     assert client.get(f"/api/app/items/{custom_card['id']}/notice", headers=headers(777000222)).status_code == 404
 
 
+def test_miniapp_assets_reject_markdown_docs_while_serving_runtime_assets(client):
+    from app.modules.miniapp import STATIC
+
+    assert (STATIC / 'ICONS.md').is_file()
+    assert (STATIC / 'lottery-assets' / 'SOURCES.md').is_file()
+    assert (STATIC / 'game-assets' / 'SOURCES.md').is_file()
+
+    for doc_path in (
+        '/app/assets/ICONS.md',
+        '/app/assets/ICONS.MD',
+        '/app/assets/lottery-assets/SOURCES.md',
+        '/app/assets/game-assets/SOURCES.md',
+        '/app/assets/vendor/README.md',
+    ):
+        assert client.get(doc_path).status_code == 404, doc_path
+        assert client.head(doc_path).status_code == 404, doc_path
+
+    for runtime_asset in (
+        '/app/assets/app.js',
+        '/app/assets/app.css',
+        '/app/assets/game-assets/crown.webp',
+    ):
+        res = client.get(runtime_asset)
+        assert res.status_code == 200, runtime_asset
+        assert len(res.content) > 0
+
+
+

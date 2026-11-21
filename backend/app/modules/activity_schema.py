@@ -27,6 +27,7 @@ def migrate(db):
         started_at REAL NOT NULL, ended_at REAL NOT NULL CHECK(ended_at>started_at),
         PRIMARY KEY(emby_user_id,day,started_at)
     );
+    CREATE INDEX IF NOT EXISTS idx_activity_intervals_ended ON activity_watch_intervals(ended_at);
     CREATE TABLE IF NOT EXISTS activity_watch_days (
         emby_user_id TEXT NOT NULL, day TEXT NOT NULL,
         verified_seconds REAL NOT NULL DEFAULT 0,

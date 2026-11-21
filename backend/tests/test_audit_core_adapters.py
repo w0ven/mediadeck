@@ -87,3 +87,98 @@ async def test_create_user_uploads_default_avatar_when_configured(monkeypatch, t
     assert seen[1].headers["content-type"] == "image/png"
     assert seen[1].content == base64.b64encode(raw_png)
 
+
+@pytest.mark.asyncio
+async def test_authenticate_user_uses_ephemeral_neutral_device_and_revokes_token(monkeypatch):
+    import json
+    import re
+
+    seen: list[httpx.Request] = []
+    call_idx = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal call_idx
+        seen.append(request)
+        if request.url.path == "/emby/Users/AuthenticateByName":
+            body = json.loads(request.content)
+            if body.get("Pw") != "valid-pass":
+                return httpx.Response(401)
+            call_idx += 1
+            return httpx.Response(
+                200,
+                json={
+                    "User": {"Id": f"u-{call_idx}", "Name": body["Username"]},
+                    "AccessToken": f"ephemeral-tok-{call_idx}",
+                },
+            )
+        if request.url.path == "/emby/Sessions/Logout":
+            if request.headers.get("x-emby-token") == "ephemeral-tok-2":
+                raise httpx.ReadTimeout("logout network timeout")
+            return httpx.Response(204)
+        return httpx.Response(404)
+
+    factory = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: factory(transport=transport, **kwargs))
+
+    emby = LiveEmby(lambda: {"enabled": True, "url": "https://emby.invalid", "api_key": "admin-key"})
+
+    first = await emby.authenticate_user("alice", "valid-pass")
+    second = await emby.authenticate_user("alice", "valid-pass")
+    wrong = await emby.authenticate_user("alice", "wrong-pass")
+
+    assert first == {"Id": "u-1", "Name": "alice"}
+    assert second == {"Id": "u-2", "Name": "alice"}
+    assert wrong is None
+    assert [r.url.path for r in seen] == [
+        "/emby/Users/AuthenticateByName",
+        "/emby/Sessions/Logout",
+        "/emby/Users/AuthenticateByName",
+        "/emby/Sessions/Logout",
+        "/emby/Users/AuthenticateByName",
+    ]
+
+    auth_headers = [seen[0].headers["x-emby-authorization"], seen[2].headers["x-emby-authorization"]]
+    device_ids = []
+    for header in auth_headers:
+        assert "mediadeck" not in header.lower()
+        assert "redeem" not in header.lower()
+        match = re.fullmatch(
+            r'MediaBrowser Client="EmbyWeb", Device="AuthVerify", '
+            r'DeviceId="(auth-verify-[0-9a-f]{12})", Version="1\.0\.0"',
+            header,
+        )
+        assert match is not None, header
+        device_ids.append(match.group(1))
+    assert device_ids[0] != device_ids[1]
+
+    assert seen[1].headers["x-emby-token"] == "ephemeral-tok-1"
+    assert seen[3].headers["x-emby-token"] == "ephemeral-tok-2"
+    assert seen[1].extensions.get("timeout", {}).get("read") == 5.0
+
+
+@pytest.mark.asyncio
+async def test_stop_session_sends_neutral_chinese_alert_header(monkeypatch):
+    import json
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(204)
+
+    factory = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: factory(transport=transport, **kwargs))
+
+    emby = LiveEmby(lambda: {"enabled": True, "url": "https://emby.invalid", "api_key": "admin-key"})
+    assert await emby.stop_session("sess-demo", "同时播放路数已达上限") is True
+    assert [r.url.path for r in seen] == [
+        "/emby/Sessions/sess-demo/Message",
+        "/emby/Sessions/sess-demo/Playing/Stop",
+    ]
+    msg_payload = json.loads(seen[0].content)
+    assert msg_payload == {"Text": "同时播放路数已达上限", "Header": "播放受限提醒", "TimeoutMs": 8000}
+    assert "mediadeck" not in seen[0].content.decode("utf-8").lower()
+
+
