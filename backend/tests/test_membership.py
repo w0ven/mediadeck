@@ -573,6 +573,26 @@ def test_prune_keeps_play_events_holding_archived_bytes(stack) -> None:
     assert len(stack["db"].query("SELECT * FROM play_events")) == 1
 
 
+def test_prune_preserves_audit_log_and_cleans_old_terminal_play_jobs(stack) -> None:
+    now = int(time.time())
+    old_ts = now - 120 * 86400
+    stack["db"].execute(
+        "INSERT INTO audit_log (ts, actor, action, subject) VALUES (?, 'admin', 'member.renew', 'u1')",
+        (old_ts,),
+    )
+    stack["db"].execute(
+        "INSERT INTO play_jobs (bot_id, job_key, kind, state, payload_json, created_at, due_at, expires_at) "
+        "VALUES ('b1', 'done1', 'dice.delete', 'deleted', '{}', ?, ?, ?), "
+        "('b1', 'live1', 'dice.delete', 'queued', '{}', ?, ?, ?)",
+        (old_ts, old_ts, old_ts + 60, old_ts, now + 60, now + 3600),
+    )
+    res = StatsService(stack["db"]).prune(30)
+    assert res["audit_log"] == 0
+    assert res["play_jobs"] == 1
+    assert stack["db"].one("SELECT COUNT(*) AS n FROM audit_log WHERE action='member.renew'")["n"] == 1
+    assert [r["job_key"] for r in stack["db"].query("SELECT job_key FROM play_jobs")] == ["live1"]
+
+
 # ---- image cache -----------------------------------------------------------
 def test_cache_key_ignores_credentials_but_not_size() -> None:
     c = ImageCache(tempfile.mkdtemp())

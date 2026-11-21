@@ -127,3 +127,38 @@ def test_malformed_guid_blob_refused(authority, monkeypatch):
     with sqlite3.connect(authority / "users.db") as db:
         db.execute("UPDATE LocalUsersv2 SET guid=?", (b"short",))
     assert asyncio.run(adapter(authority, monkeypatch).personal_user_for_token("personal")) is None
+
+
+def test_auth_keys_negative_cache_skips_repeat_403_without_masking_revocation_or_401(authority, monkeypatch):
+    auth_keys_calls = 0
+
+    def reply(request):
+        nonlocal auth_keys_calls
+        assert request.url.path == "/emby/Auth/Keys"
+        auth_keys_calls += 1
+        if request.headers.get("x-emby-token") == "invalid-401":
+            return httpx.Response(401, json={"Items": []})
+        return httpx.Response(403, json={})
+
+    live = LiveEmby(
+        lambda: {"enabled": True, "url": BASE, "api_key": "configured-api"},
+        identity_data_dir=str(authority),
+        identity_url=BASE,
+    )
+    monkeypatch.setattr(live, "_client", lambda *_: httpx.AsyncClient(transport=httpx.MockTransport(reply)))
+
+    # First call hits /emby/Auth/Keys once, second call uses 60s negative cache (0 extra 403s)
+    assert asyncio.run(live.personal_user_for_token("personal")) == GUID
+    assert auth_keys_calls == 1
+    assert asyncio.run(live.personal_user_for_token("personal")) == GUID
+    assert auth_keys_calls == 1
+
+    # Revoking IsActive=0 in Tokens_2 still takes effect immediately on the very next call
+    with sqlite3.connect(authority / "authentication.db") as db:
+        db.execute("UPDATE Tokens_2 SET IsActive=0")
+    assert asyncio.run(live.personal_user_for_token("personal")) is None
+
+    # 401 tokens are never negatively cached
+    assert asyncio.run(live.personal_user_for_token("invalid-401")) is None
+    assert asyncio.run(live.personal_user_for_token("invalid-401")) is None
+    assert auth_keys_calls == 3

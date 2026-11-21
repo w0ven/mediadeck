@@ -107,7 +107,7 @@ from app.modules.whitelist_route import (
     target,
 )
 
-app = FastAPI(title="mediadeck", version="0.1.0")
+app = FastAPI(title="mediadeck", version="0.1.0", docs_url=None, redoc_url=None, openapi_url=None)
 security = HTTPBasic(auto_error=False)
 SESSION_COOKIE = "mediadeck_session"
 SESSION_TTL = 7 * 86400

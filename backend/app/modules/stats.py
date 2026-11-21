@@ -718,7 +718,22 @@ class StatsService:
             self._db.execute('DELETE FROM activity_watch_intervals WHERE ended_at < ?', (interval_cutoff,))
         if 'request_inputs' in tables:
             self._db.execute('DELETE FROM request_inputs WHERE expires_at > 0 AND expires_at < ?', (now - 86400,))
-        audit = self._db.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff_ts,))
+        play_jobs_pruned = 0
+        if 'play_jobs' in tables:
+            while True:
+                n = self._db.execute(
+                    "DELETE FROM play_jobs WHERE id IN ("
+                    "SELECT id FROM play_jobs WHERE state IN ('deleted', 'gone', 'expired', 'cancelled') "
+                    "AND created_at > 0 AND created_at < ? LIMIT 5000)",
+                    (short_cutoff,),
+                )
+                play_jobs_pruned += n
+                if n < 5000:
+                    break
+        # audit_log retention is owned exclusively by audit_retention.py (which purges only
+        # high-volume device.auto_logout / device.member_logout older than 90d while preserving
+        # member/card/points/admin audit records). Never bulk-delete all audit_log rows here.
+        audit = 0
         with self._db.write() as conn:
             conn.execute('PRAGMA optimize')
         return {
@@ -728,4 +743,5 @@ class StatsService:
             "watch_playbacks": playbacks,
             "plugin_runs": plugin_runs,
             "membership_events": membership_events,
+            "play_jobs": play_jobs_pruned,
         }
