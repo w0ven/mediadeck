@@ -1003,11 +1003,14 @@ window.createGamesUI = ({
     return { text: zh, cls: `gc-act-${act}` };
   }
   function seatHtml(seat, pos, t, hand = t.hand, highlightBest = []) {
-    if (!seat) return `
-      <div class="gc-seat gc-pos${pos} gc-empty-seat">
+    if (!seat) {
+      const canInvite = t.currency !== 'beans' && t.phase !== 'closed' && !!t.deep_link;
+      return `
+      <div class="gc-seat gc-pos${pos} gc-empty-seat ${canInvite ? 'gc-invite-trigger' : ''}" ${canInvite ? 'data-gc-invite role="button" tabindex="0" aria-label="邀请好友入座"' : ''}>
         <div class="gc-avatar-ring">＋</div>
-        <span>空位</span>
+        <span>${canInvite ? '邀请入座' : '空位'}</span>
       </div>`;
+    }
     const p = handPlayers(t, hand).find(p => p.player === seat.player);
     const active = t.hand?.current_player === seat.player;
     const won = !t.hand && hand?.result?.winners?.includes(seat.player);
@@ -1043,7 +1046,7 @@ window.createGamesUI = ({
       ? t.seats.filter(s => (s.ready || s.player === t.host) && (s.player !== t.me.player || enough)).length
       : t.seats.filter(s => !s.away && s.stack > 0).length);
     const missing = Math.max(0, 2 - eligible), empty = Math.max(0, 2 - t.seats.length);
-    let reason = empty ? `还差 ${empty} 人入座才能开局，可以点「群播报说明」分享桌链接`
+    let reason = empty ? `还差 ${empty} 人入座才能开局，点空位「＋」或「邀请好友」拉人上桌`
       : missing ? t.game === 'zjh' ? `等待 ${missing} 位玩家点准备` : `等待 ${missing} 位玩家带入筹码`
       : t.me.is_host ? '人数够了，点「开始」就能开局' : `人数够了，等房主 ${host?.name || ''} 开始`;
     if ((t.game === 'zjh' || isBoard(t.game)) && ss.message) reason = ss.message;
@@ -1362,11 +1365,15 @@ window.createGamesUI = ({
   const colorOf = (t, h, seat) => seat && (h?.players?.find(p => p.player === seat.player)?.color || seat.color) || null;
   const sideName = (t, color) => !color ? '' : t.game === 'gomoku' ? color === 'black' ? '执黑' : '执白' : color === 'red' ? '红方' : '黑方';
   function duelBar(t, seat, pos, h) {
-    if (!seat) return `
-      <div class="gc-duel-bar ${pos} gc-duel-empty">
+    if (!seat) {
+      const canInvite = t.currency !== 'beans' && t.phase !== 'closed' && !!t.deep_link;
+      return `
+      <div class="gc-duel-bar ${pos} gc-duel-empty ${canInvite ? 'gc-invite-trigger' : ''}" ${canInvite ? 'data-gc-invite role="button" tabindex="0" aria-label="邀请好友对弈"' : ''}>
         <div class="gc-avatar-ring"><span>＋</span></div>
-        <div class="grow"><b>等待对手</b><div class="tiny muted">${t.currency === 'beans' ? '机器人马上就位' : '分享桌链接，邀请朋友来下'}</div></div>
+        <div class="grow"><b>等待对手</b><div class="tiny muted">${t.currency === 'beans' ? '机器人马上就位' : canInvite ? '点击邀请好友来下' : '分享桌链接，邀请朋友来下'}</div></div>
+        ${canInvite ? `<span class="gc-invite-pill">${icon('user-plus')} 邀请好友</span>` : ''}
       </div>`;
+    }
     const color = colorOf(t, h, seat), moving = t.hand?.current_player === seat.player;
     const status = t.hand ? moving ? (seat.bot ? '思考中…' : seat.player === t.me.player ? '轮到你走' : '走棋中')
       + (t.hand.in_check ? ' · <b class="gc-check">被将军</b>' : '') : '等待对方'
@@ -1440,6 +1447,7 @@ window.createGamesUI = ({
               : `每局押 ${num(t.rules.stake)} 积分 · 第 ${num(t.hand_no || 0)} 局`}</span>
               <button class="gc-connection" data-gc-connection data-state="${c.status}"></button></div>
           </div>
+          ${t.currency !== 'beans' && t.deep_link && t.phase !== 'closed' ? `<button class="gc-tool gc-sound-btn" type="button" data-gc-invite aria-label="邀请好友">${icon('share-2')}</button>` : ''}
           <button class="gc-tool gc-sound-btn" data-gc-sound aria-label="声音">${icon(sound.pref('sfx') || sound.pref('music') ? 'volume-2' : 'volume-x')}</button>
           <button class="gc-tool" data-gc-rules>玩法</button>
           <button class="gc-tool" data-gc-leave ${disabled(!me)}>离桌</button>
@@ -1449,7 +1457,7 @@ window.createGamesUI = ({
           ${duelBar(t, top, 'top', h)}
           <div class="gc-board-frame">${t.game === 'xiangqi' ? xqBoard(t, c, h, colorOf(t, h, bottom) === 'black' ? 'black' : 'red') : goBoard(t, c, h)}
             ${!h ? `
-              <div class="gc-board-note"><b>${t.seats.length}<small>/2</small></b><span>等待开局</span><span class="gc-idle" data-gc-idle></span></div>` : ''}
+              <div class="gc-board-note"><b>${t.seats.length}<small>/2</small></b><span>等待开局</span>${t.currency !== 'beans' && t.seats.length < 2 && t.deep_link && t.phase !== 'closed' ? `<button class="btn sm gc-board-invite-btn" type="button" data-gc-invite>${icon('user-plus')} 邀请好友对弈</button>` : ''}<span class="gc-idle" data-gc-idle></span></div>` : ''}
           </div>
           ${duelBar(t, bottom, 'bottom', h)}
         </div>
@@ -1584,7 +1592,8 @@ window.createGamesUI = ({
         <div class="gc-connection-row">
           <button class="gc-connection" data-gc-connection data-state="${c.status}"></button>
           ${timeout && t.game === 'holdem' ? timeoutHtml
-            : t.currency === 'beans' ? '<span>练习场 · 点玩家头像可送花/丢炸弹</span>' : '<button class="link" data-gc-broadcast>群播报说明</button>'}
+            : t.currency === 'beans' ? '<span>练习场 · 点玩家头像可送花/丢炸弹</span>'
+            : `<span>${t.deep_link && t.phase !== 'closed' ? '<button class="link" data-gc-invite>邀请好友</button> · ' : ''}<button class="link" data-gc-broadcast>群播报说明</button></span>`}
         </div>
         ${t.game === 'zjh' ? timeoutHtml : ''}
         <div data-gc-retry-slot>${pendingHtml()}</div>
@@ -1716,6 +1725,18 @@ window.createGamesUI = ({
     $('[data-gc-leave]', root).onclick = () => leave(c);
     const broadcastBtn = $('[data-gc-broadcast]', root);
     if (broadcastBtn) broadcastBtn.onclick = () => broadcast(t);
+    $$('[data-gc-invite]', root).forEach(el => {
+      el.onclick = e => {
+        e.stopPropagation();
+        haptic.select();
+        inviteSheet(t);
+      };
+      if (el.tagName !== 'BUTTON') {
+        el.onkeydown = e => {
+          if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); haptic.select(); inviteSheet(t); }
+        };
+      }
+    });
     const seat = $('[data-gc-seat]', root);
     if (seat) seat.onclick = () => t.game === 'holdem' ? buySheet({ ...t.rules, currency: t.currency, name: t.tier_name }, t.me.wallet, false, 0, amount => tableWrite(c, 'seat', { buy_in: amount })) : tableWrite(c, 'seat');
     $$('[data-gc-action]', root).forEach(b => b.onclick = () => {
@@ -2198,6 +2219,74 @@ window.createGamesUI = ({
       $$('[data-gc-focus]', root).forEach(b => b.onclick = () => { stopAuto(); resultSheet(c, h, b.dataset.gcFocus); });
     });
   }
+  async function copyTableLink(link) {
+    try {
+      await navigator.clipboard.writeText(link);
+      haptic.notify('success');
+      toast('桌链接已复制');
+      return true;
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = link;
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      let ok = false;
+      try { ok = document.execCommand('copy'); } catch { /* best effort */ }
+      ta.remove();
+      if (ok) { haptic.notify('success'); toast('桌链接已复制'); return true; }
+      toast('复制失败，请使用 Telegram 转发', true);
+      return false;
+    }
+  }
+  function shareTableLink(t) {
+    if (!t?.deep_link) return toast('当前环境未配置分享链接', true);
+    let link;
+    try { link = new URL(t.deep_link); } catch { return toast('桌链接无效', true); }
+    if (link.protocol !== 'https:') return toast('桌链接无效', true);
+    const ruleBrief = isBoard(t.game)
+      ? `每局押 ${num(t.rules?.stake)} 积分`
+      : t.game === 'zjh'
+        ? `底注 ${num(t.rules?.ante)} 积分`
+        : `盲注 ${num(t.rules?.small_blind)}/${num(t.rules?.big_blind)}`;
+    const text = `来一起玩${names[t.game]}（${t.tier_name} · ${ruleBrief}），点开直接上桌对局！`;
+    const url = `https://t.me/share/url?url=${encodeURIComponent(t.deep_link)}&text=${encodeURIComponent(text)}`;
+    if (tg?.openTelegramLink) tg.openTelegramLink(url);
+    else copyTableLink(t.deep_link);
+  }
+  function inviteSheet(t) {
+    if (!t?.deep_link) return broadcast(t);
+    const hostName = t.seats.find(s => s.player === t.host)?.name || '房主';
+    const ruleBrief = isBoard(t.game)
+      ? `每局押 ${num(t.rules?.stake)} 积分 · 零抽水`
+      : t.game === 'zjh'
+        ? `底注 ${num(t.rules?.ante)} 积分 · ${t.rules?.cap == null ? '不封顶' : '封顶 ' + num(t.rules?.cap)}`
+        : `无限注 · 盲注 ${num(t.rules?.small_blind)}/${num(t.rules?.big_blind)}`;
+    showSheet(`
+      <h3>邀请好友上桌</h3>
+      <p>转发给 Telegram 好友或群聊，对方点开直接进入本桌（先看桌，入座不扣分）。</p>
+      <div class="gc-broadcast-card">
+        <b>${esc(names[t.game])} · ${esc(t.tier_name)}</b>
+        <div>${esc(hostName)} · 当前 ${t.seats.length}/${t.max_players} 人 · ${esc(ruleBrief)}</div>
+        <span>直达本桌 → 入座准备即可开局</span>
+      </div>
+      <div class="gc-invite-actions">
+        <button class="btn block" type="button" data-gc-share-tg>${icon('share-2')} 转发给 Telegram 好友 / 群聊</button>
+        <button class="btn ghost block" type="button" data-gc-copy-link>${icon('link')} 复制桌链接</button>
+      </div>
+      <div class="gc-invite-foot">
+        <button class="link" type="button" data-gc-open-broadcast>群播报说明</button>
+        <button class="link" type="button" data-cancel>关闭</button>
+      </div>`, (root, close) => {
+      const shareBtn = $('[data-gc-share-tg]', root);
+      if (shareBtn) shareBtn.onclick = () => { close(); shareTableLink(t); };
+      const copyBtn = $('[data-gc-copy-link]', root);
+      if (copyBtn) copyBtn.onclick = async () => { if (await copyTableLink(t.deep_link)) close(); };
+      const bcBtn = $('[data-gc-open-broadcast]', root);
+      if (bcBtn) bcBtn.onclick = () => broadcast(t);
+    });
+  }
   function broadcast(t = null) {
     showSheet(`
       <h3>群播报怎么用？</h3>
@@ -2207,16 +2296,16 @@ window.createGamesUI = ({
         <span>上桌 → 先看桌，再确认入座</span>
       </div>
       <div class="gc-note">首手开局或散桌后卡片会被删除。默认不开启播报；这里是说明，不表示本桌已经发卡。发送失败由服务端重试。你也可以把桌链接分享给朋友。</div>
-      ${t?.deep_link ? '<button class="btn block" data-gc-share>分享桌链接</button>' : ''}
-      <button class="link gc-close" data-cancel>知道了</button>`, root => {
+      ${t?.deep_link ? `
+      <div class="gc-invite-actions">
+        <button class="btn block" type="button" data-gc-share>${icon('share-2')} 分享桌链接</button>
+        <button class="btn ghost block" type="button" data-gc-copy-link>${icon('link')} 复制桌链接</button>
+      </div>` : ''}
+      <button class="link gc-close" data-cancel>知道了</button>`, (root, close) => {
       const b = $('[data-gc-share]', root);
-      if (b) b.onclick = () => {
-        const link = new URL(t.deep_link);
-        if (link.protocol !== 'https:') return toast('桌链接无效', true);
-        const url = `https://t.me/share/url?url=${encodeURIComponent(t.deep_link)}&text=${encodeURIComponent('来一起玩' + names[t.game])}`;
-        if (tg?.openTelegramLink) tg.openTelegramLink(url);
-        else navigator.clipboard?.writeText(t.deep_link).then(() => toast('桌链接已复制')).catch(() => toast('复制失败，请从 Telegram 分享', true));
-      };
+      if (b) b.onclick = () => shareTableLink(t);
+      const copyBtn = $('[data-gc-copy-link]', root);
+      if (copyBtn) copyBtn.onclick = async () => { if (await copyTableLink(t.deep_link)) close(); };
     });
   }
   function boardRules(game, config) {

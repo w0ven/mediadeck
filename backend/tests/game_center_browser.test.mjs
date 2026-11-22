@@ -1262,3 +1262,67 @@ test('real gomoku practice: robot replies on the server clock, undo takes back a
     assert.equal(env.errors.length, 0, env.errors.join('\n'));
   } finally { await env.close(); }
 });
+
+test('table invite & empty seat actions: gomoku/xiangqi empty opponent bar, center invite, header share and holdem empty seat', { timeout: 60000 }, async () => {
+  const env = await environment();
+  try {
+    const page = await env.pageFor(1, 'dark', 390, 700, false, true);
+    await page.addInitScript(() => {
+      window.__sharedLinks = [];
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: { writeText: async text => { window.__copiedText = text; } },
+      });
+    });
+    const gomoku = (await env.request(1, '/tables', 'POST', { game: 'gomoku', tier: 'normal' })).table;
+    await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + gomoku.id);
+    await page.locator('.gc-board-table[data-phase="waiting"]').waitFor();
+    await page.evaluate(() => {
+      if (window.Telegram?.WebApp) {
+        window.Telegram.WebApp.openTelegramLink = url => { window.__sharedLinks.push(url); };
+      }
+    });
+    // Board geometry & 390x700 viewport fit must stay intact with the new invite triggers.
+    await capture(page, '28-gomoku-waiting-invite.png');
+    await boardFill(page, '28-gomoku-waiting');
+    await page.setViewportSize({ width: 390, height: 700 });
+    assert.equal(await page.locator('.gc-duel-bar.gc-duel-empty[data-gc-invite]').count(), 1, 'empty opponent bar is clickable');
+    assert.equal(await page.locator('.gc-board-invite-btn[data-gc-invite]').count(), 1, 'center note has invite button');
+    assert.equal(await page.locator('.gc-board-bar [data-gc-invite]').count(), 1, 'header has share icon');
+
+    // Tapping the empty opponent bar (+) opens the invite sheet and shares via Telegram.
+    await page.locator('.gc-duel-bar.gc-duel-empty[data-gc-invite]').click();
+    await page.locator('.gc-sheet [data-gc-share-tg]').waitFor();
+    assert.match(await page.locator('.gc-sheet').innerText(), /邀请好友上桌[\s\S]*五子棋 · 普通场/);
+    await page.locator('.gc-sheet [data-gc-share-tg]').click();
+    const shared = await page.evaluate(() => window.__sharedLinks);
+    assert.equal(shared.length, 1, 'openTelegramLink called');
+    assert.match(shared[0], /^https:\/\/t\.me\/share\/url\?url=.*gc_/, 'shared deep link points to the table');
+
+    // Center invite button copies link cleanly.
+    await page.locator('.gc-board-invite-btn').click();
+    await page.locator('.gc-sheet [data-gc-copy-link]').click();
+    const copied = await page.evaluate(() => window.__copiedText);
+    assert.equal(copied, gomoku.deep_link, 'copied exact table deep_link');
+
+    // Practice tables never show invite buttons.
+    await env.request(1, `/tables/${gomoku.id}/leave`, 'POST', {});
+    const prac = (await env.request(1, '/tables', 'POST', { game: 'xiangqi', tier: 'practice', robot_level: 'easy' })).table;
+    await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + prac.id);
+    await page.locator('.gc-board-table[data-phase="waiting"]').waitFor();
+    assert.equal(await page.locator('[data-gc-invite]').count(), 0, 'practice table hides invite buttons');
+    await env.request(1, `/tables/${prac.id}/leave`, 'POST', {});
+
+    // Holdem empty seat (+) also opens the invite sheet.
+    const holdem = (await env.request(1, '/tables', 'POST', { game: 'holdem', tier: 'normal', buy_in: 200 })).table;
+    await page.goto(ORIGIN + '/app?tgWebAppStartParam=gc_' + holdem.id);
+    await page.locator('.gc-holdem').waitFor();
+    await capture(page, '29-holdem-empty-seat-invite.png');
+    assert(await page.locator('.gc-empty-seat[data-gc-invite]').count() >= 1, 'holdem empty seats are clickable');
+    await page.locator('.gc-empty-seat[data-gc-invite]').first().click();
+    await page.locator('.gc-sheet [data-gc-share-tg]').waitFor();
+    assert.match(await page.locator('.gc-sheet').innerText(), /德州扑克 · 普通场/);
+    await closeSheet(page);
+    assert.equal(env.errors.length, 0, env.errors.join('\n'));
+  } finally { await env.close(); }
+});
