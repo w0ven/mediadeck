@@ -252,7 +252,7 @@ class LevelLifecyclePlugin(Plugin):
             held = 0
             if shortfall:
                 held = levels.db.one(
-                    "SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND scope IN ('gc_zjh','gc_holdem')",
+                    "SELECT COALESCE(SUM(amount),0) n FROM play_escrows WHERE user_id=? AND amount>0",
                     (uid,),
                 )['n']
             if stage == 'expired':
