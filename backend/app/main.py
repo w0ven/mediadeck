@@ -1738,6 +1738,33 @@ async def _admit_playback(request: Request, item_id: str,
     return uid
 
 
+def _redact_playback_paths(data: Any) -> Any:
+    """Strip internal server filesystem paths before returning PlaybackInfo to clients."""
+    if os.environ.get("MEDIADECK_REDACT_PLAYBACK_PATHS", "1").strip() == "0":
+        return data
+    if not isinstance(data, dict):
+        return data
+    sources = data.get("MediaSources")
+    if not isinstance(sources, list):
+        return data
+    out = dict(data)
+    clean_sources = []
+    for src in sources:
+        if not isinstance(src, dict):
+            clean_sources.append(src)
+            continue
+        s_copy = {k: v for k, v in src.items() if k != "Path"}
+        streams = s_copy.get("MediaStreams")
+        if isinstance(streams, list):
+            s_copy["MediaStreams"] = [
+                {k: v for k, v in st.items() if k != "Path"} if isinstance(st, dict) else st
+                for st in streams
+            ]
+        clean_sources.append(s_copy)
+    out["MediaSources"] = clean_sources
+    return out
+
+
 @app.api_route("/api/playback/info/{item_id}", methods=["GET", "HEAD", "POST"], include_in_schema=False)
 async def playback_info_proxy(item_id: str, request: Request) -> Response:
     query = dict(request.query_params)
@@ -1772,7 +1799,7 @@ async def playback_info_proxy(item_id: str, request: Request) -> Response:
         status = 503 if admission.reason in {"sessions-unavailable", "session-unresolved"} else 403
         raise HTTPException(status, "playback admission refused", headers={
             "Cache-Control": "private, no-store", "X-Mediadeck-Decision": admission.reason})
-    return JSONResponse(data, status_code=code, headers={"Cache-Control": "private, no-store"})
+    return JSONResponse(_redact_playback_paths(data), status_code=code, headers={"Cache-Control": "private, no-store"})
 
 
 @app.post("/api/access/route-login", include_in_schema=False)

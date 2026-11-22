@@ -111,6 +111,16 @@ def test_header_only_actual_PlaybackInfo_handler_produces_native_URL(
     registry.write_text("{}")
     app.state.whitelist_route.registry_path = str(registry)
     body = metadata()
+    body["MediaSources"][0]["MediaStreams"] = [
+        {"Index": 0, "Type": "Video"},
+        {
+            "Index": 5,
+            "Type": "Subtitle",
+            "IsExternal": True,
+            "Path": "/config/cmcc-batches/44/movie/sub.zh.ass",
+            "DeliveryUrl": "/Videos/item42/src/Subtitles/5/Stream.ass",
+        },
+    ]
     monkeypatch.setattr(
         app.state.emby, "playback_info", AsyncMock(return_value=(200, deepcopy(body)))
     )
@@ -121,7 +131,12 @@ def test_header_only_actual_PlaybackInfo_handler_produces_native_URL(
     # nginx maps the public Emby endpoint to this existing Deck handler.
     r = client.post("/api/playback/info/item42", headers=headers, json={})
     assert r.status_code == 200
-    url = r.json()["MediaSources"][0]["DirectStreamUrl"]
+    payload = r.json()
+    ms0 = payload["MediaSources"][0]
+    assert "Path" not in ms0
+    assert all("Path" not in st for st in ms0["MediaStreams"])
+    assert ms0["MediaStreams"][1]["DeliveryUrl"] == "/Videos/item42/src/Subtitles/5/Stream.ass"
+    url = ms0["DirectStreamUrl"]
     parsed = urlsplit(url)
     assert not parsed.netloc and parsed.path == "/Videos/item42/stream.mkv"
     assert parse_qs(parsed.query)["api_key"] == [CALLER]

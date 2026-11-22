@@ -28,7 +28,14 @@ def test_normal_playback_info_keeps_original_upstream_source(client, monkeypatch
     monkeypatch.setattr(app.state.emby, "playback_info", upstream)
     response = client.post("/api/playback/info/item42", headers=headers(), json={})
     assert response.status_code == 200, response.text
-    assert response.json() == original
+    assert original["MediaSources"][0]["Path"] == "/media/example.mkv"
+    assert response.json() == {
+        "PlaySessionId": "ordinary-play",
+        "MediaSources": [{
+            "Id": "ordinary-source", "Protocol": "File",
+            "SupportsTranscoding": True, "Container": "mkv",
+        }],
+    }
     assert upstream.await_count == 1
     assert app.state.db.query("SELECT * FROM stream_leases WHERE user_id='u1'") == []
     bound = app.state.db.one("SELECT * FROM watch_playbacks WHERE user_id='u1'")
