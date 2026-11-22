@@ -998,6 +998,20 @@
   border-radius: 99px;
   background: var(--plate);
 }
+.gc-empty-seat.gc-invite-trigger {
+  cursor: pointer;
+}
+.gc-empty-seat.gc-invite-trigger:active .gc-avatar-ring {
+  transform: scale(.93);
+}
+.gc-empty-seat.gc-invite-trigger .gc-avatar-ring {
+  border-color: #f7d67cd9;
+  box-shadow: 0 0 18px #f3cf7347, inset 0 0 12px #ffffff2e;
+}
+.gc-empty-seat.gc-invite-trigger > span {
+  color: #ffe39a;
+  border: 1px solid #f3cf7359;
+}
 .gc-mini-cards {
   display: flex;
   justify-content: center;
@@ -1631,8 +1645,35 @@
 .gc-duel-bar.gc-duel-empty .gc-avatar-ring {
   display: grid;
   place-items: center;
-  background: #ffffff1a;
+  background: radial-gradient(circle at 50% 30%, #ffffff38, #ffffff14 70%);
+  border: 1px dashed #ffe39a88;
   color: #ffe39a;
+}
+.gc-duel-bar.gc-duel-empty.gc-invite-trigger {
+  cursor: pointer;
+  border-color: #f3cf7366;
+  transition: transform .14s ease, border-color .16s ease, box-shadow .16s ease;
+}
+.gc-duel-bar.gc-duel-empty.gc-invite-trigger:active {
+  transform: scale(.985);
+}
+.gc-invite-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 10px;
+  border-radius: 99px;
+  font-size: 11.5px;
+  font-weight: 800;
+  color: #2a1400;
+  background: linear-gradient(135deg, #ffe597, #f0b649);
+  box-shadow: 0 3px 10px #f0b64940;
+  white-space: nowrap;
+}
+.gc-invite-pill svg {
+  width: 13px;
+  height: 13px;
 }
 .gc-duel-name {
   display: flex;
@@ -1879,15 +1920,30 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 2px;
+  gap: 4px;
   padding: 12px 18px;
   border-radius: 18px;
   text-align: center;
   color: #fff;
-  background: #1c0838b3;
+  background: #1c0838cc;
   border: 1px solid #f3cf7380;
   box-shadow: 0 14px 30px #0009;
-  backdrop-filter: blur(6px);
+  backdrop-filter: blur(8px);
+}
+.gc-board-invite-btn {
+  margin-top: 4px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 13px;
+  border-radius: 99px;
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+.gc-board-invite-btn svg {
+  width: 13px;
+  height: 13px;
 }
 /* The result sits above the dock so the final position (winning five, mated king) stays visible. */
 .gc-board-result {
@@ -2526,6 +2582,28 @@
   padding: 7px;
   text-align: center;
   margin-top: 10px;
+}
+.gc-invite-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+.gc-invite-actions .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.gc-invite-actions .btn svg {
+  width: 15px;
+  height: 15px;
+}
+.gc-invite-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 4px 2px;
 }
 html[data-theme="light"] .gc:not(.gc-table) {
   --gc-gold: #b2750b;
