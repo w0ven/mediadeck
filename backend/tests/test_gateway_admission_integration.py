@@ -179,7 +179,6 @@ http {{ access_log off;
  server {{ listen 127.0.0.1:{port};
  {stream}
  {admission}
- location ^~ /cmcc-source/ {{ proxy_pass {state.gateway_url}; }}
  location / {{ proxy_pass http://emby_playback_origin; }}
  }} }}''')
         subprocess.run([nginx, "-t", "-p", str(tmp_path), "-c", str(config)], check=True, capture_output=True)
@@ -415,12 +414,11 @@ def test_hls_native_metadata_and_capability_routes_keep_their_gates(chain, monke
     assert len(chain.emby) == 1 and not chain.cloud
     info = chain.net.post(chain.edge_url + "/emby/Items/item42/PlaybackInfo", headers=headers(), json={})
     assert info.status_code == 200 and info.json()["PlaySessionId"]
-    # Opaque source URLs retain their existing bearer-capability contract, not
-    # an unauthenticated stream-start exception. Wrong capability never resolves.
-    assert chain.net.get(chain.edge_url + "/cmcc-source/mobile?cap=wrong").status_code == 403
-    before = app.state.streams.inspect.await_count
-    assert chain.net.head(chain.edge_url + "/cmcc-source/mobile?cap=" + chain.cap).status_code == 302
-    assert app.state.streams.inspect.await_count == before
+    # Retired bearer-capability route is permanently closed on both nginx and gateway.
+    assert chain.net.get(chain.edge_url + "/cmcc-source").status_code == 410
+    assert chain.net.get(chain.edge_url + "/cmcc-source/mobile?cap=wrong").status_code == 410
+    assert chain.net.head(chain.edge_url + "/cmcc-source/mobile?cap=" + chain.cap).status_code == 410
+    assert chain.net.get(chain.gateway_url + "/cmcc-source/mobile?cap=" + chain.cap).status_code == 410
     app.state.emby.active_sessions_raw.side_effect = RuntimeError("offline")
     count = len(chain.emby)
     assert chain.net.get(chain.edge_url + hls, headers=headers()).status_code == 500

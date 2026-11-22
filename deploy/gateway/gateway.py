@@ -127,13 +127,10 @@ class Handler(BaseHTTPRequestHandler):
   if self.path=='/health':return self.send(200,b'ok')
   q=urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query); sid=(q.get('MediaSourceId') or q.get('mediaSourceId') or [''])[0]
   if self.duanju_local(q,sid):return
-  reg=load_registry()
   path=urllib.parse.urlsplit(self.path).path
-  if path.startswith('/cmcc-source/'):
-   name=path.removeprefix('/cmcc-source/');source=reg.get(name)
-   cap=(q.get('cap') or [''])[0]
-   if not source or not hmac.compare_digest(cap,hashlib.sha256(source['url'].encode()).hexdigest()):return self.send(403,b'Invalid source capability')
-   return self.resolve(source)
+  if path=='/cmcc-source' or path.startswith('/cmcc-source/'):
+   return self.send(410,b'Legacy source capability retired',{'Cache-Control':'private, no-store'})
+  reg=load_registry()
   source=reg.get(sid)
   if not source:return self.forward()
   path=urllib.parse.urlsplit(self.path).path

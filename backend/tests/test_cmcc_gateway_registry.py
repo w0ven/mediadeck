@@ -217,19 +217,14 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(len(self.forwarded), 1)
         self.assertEqual(self.resolved, [])
 
-    def test_cmcc_source_requires_capability(self):
-        code, body, _ = self._get('/cmcc-source/named?cap=deadbeef')
-        self.assertEqual(code, 403)
-        self.assertEqual(body, b'Invalid source capability')
-        self.assertEqual(self.resolved, [])
-
-    def test_cmcc_source_valid_cap_resolves(self):
+    def test_cmcc_source_retired_returns_410(self):
         cap = hashlib.sha256(self.url.encode()).hexdigest()
-        code, _, headers = self._get('/cmcc-source/named?cap=' + cap)
-        self.assertEqual(code, 302)
-        self.assertEqual(self.resolved, [self.url])
-        self.assertEqual(headers.get('location'), 'https://example.cmecloud.cn/x')
-        self.assertIn('private, no-store', headers.get('cache-control', ''))
+        for path in ('/cmcc-source', '/cmcc-source/named?cap=deadbeef', '/cmcc-source/named?cap=' + cap):
+            code, body, headers = self._get(path)
+            self.assertEqual(code, 410)
+            self.assertEqual(body, b'Legacy source capability retired')
+            self.assertIn('private, no-store', headers.get('cache-control', ''))
+        self.assertEqual(self.resolved, [])
 
     def test_gd_stream_without_static_forwards(self):
         code, _, _ = self._get('/emby/Videos/42/stream.mkv?MediaSourceId=sid-cmcc')
@@ -237,14 +232,22 @@ class RoutingTests(unittest.TestCase):
         self.assertEqual(self.forwarded, ['/emby/Videos/42/stream.mkv?MediaSourceId=sid-cmcc'])
 
     def test_deleted_registry_does_not_keep_cmcc_auth(self):
-        cap = hashlib.sha256(self.url.encode()).hexdigest()
-        code, _, _ = self._get('/cmcc-source/named?cap=' + cap)
-        self.assertEqual(code, 302)
-        self.reg.unlink()
-        code, body, _ = self._get('/cmcc-source/named?cap=' + cap)
-        self.assertEqual(code, 502)
-        self.assertEqual(body, b'Playback dispatch unavailable')
-        self.assertEqual(len(self.resolved), 1)
+        class FakeEmby:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+            def read(self):
+                return b'{"MediaSources":[{"Id":"sid-cmcc"}]}'
+        with mock.patch.object(gateway.Handler, 'admit', return_value=True), \
+             mock.patch.object(gateway.urllib.request, 'urlopen', return_value=FakeEmby()):
+            code, _, _ = self._get('/emby/Videos/42/original.mkv?MediaSourceId=sid-cmcc&api_key=tok')
+            self.assertEqual(code, 302)
+            self.reg.unlink()
+            code, body, _ = self._get('/emby/Videos/42/original.mkv?MediaSourceId=sid-cmcc&api_key=tok')
+            self.assertEqual(code, 502)
+            self.assertEqual(body, b'Playback dispatch unavailable')
+            self.assertEqual(len(self.resolved), 1)
 
 
 class ConfigTests(unittest.TestCase):
@@ -318,17 +321,27 @@ class MissingConfigRejectTests(unittest.TestCase):
         except urllib.error.HTTPError as e:
             return e.code, e.read()
 
+    def _authed_get(self):
+        class FakeEmby:
+            def __enter__(self):
+                return self
+            def __exit__(self, *a):
+                pass
+            def read(self):
+                return b'{"MediaSources":[{"Id":"named"}]}'
+        with mock.patch.object(gateway.Handler, 'admit', return_value=True), \
+             mock.patch.object(gateway.urllib.request, 'urlopen', return_value=FakeEmby()):
+            return self._get('/emby/Videos/42/original.mkv?MediaSourceId=named&api_key=tok')
+
     def test_unset_host_rejects_registry_url_without_inferring(self):
-        cap = hashlib.sha256(self.foreign.encode()).hexdigest()
-        code, body = self._get('/cmcc-source/named?cap=' + cap)
+        code, body = self._authed_get()
         self.assertEqual(code, 502)
         self.assertEqual(body, b'Invalid source configuration')
 
     def test_configured_host_does_not_follow_foreign_registry_host(self):
         os.environ['CMCC_OPENLIST_PUBLIC_HOST'] = 'allowed.example'
         gateway.configure()
-        cap = hashlib.sha256(self.foreign.encode()).hexdigest()
-        code, body = self._get('/cmcc-source/named?cap=' + cap)
+        code, body = self._authed_get()
         self.assertEqual(code, 502)
         self.assertEqual(body, b'Invalid source configuration')
 
@@ -340,9 +353,8 @@ class MissingConfigRejectTests(unittest.TestCase):
             headers = {'Location': 'https://cdn.example.cmecloud.cn/obj'}  # noqa: RUF012 - immutable test response fixture
             def close(self):
                 pass
-        cap = hashlib.sha256(self.foreign.encode()).hexdigest()
         with mock.patch.object(gateway.OPENER, 'open', return_value=FakeResp()):
-            code, _ = self._get('/cmcc-source/named?cap=' + cap)
+            code, _ = self._authed_get()
         self.assertEqual(code, 302)
 
 

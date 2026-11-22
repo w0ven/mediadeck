@@ -157,12 +157,8 @@ server {
         rewrite ^ /api/playback/stopped break;
         proxy_pass http://127.0.0.1:8300;
     }
-    location ^~ /cmcc-source/ {
-        set $md_wl_uri $request_uri;
-        set $md_wl_method $request_method;
-        auth_request /_wl_admission;
-        proxy_pass http://127.0.0.1:8339;
-    }
+    location = /cmcc-source { return 410; }
+    location ^~ /cmcc-source/ { return 410; }
     location @wl_gd_origin {
         auth_request /_wl_admission;
         proxy_pass http://127.0.0.1:8096$md_wl_uri;

@@ -417,7 +417,6 @@ http {{
   proxy_pass http://emby_playback_origin;
  }}
  {snippet}
- location ^~ /cmcc-source/ {{ proxy_pass http://emby_playback_origin; }}
  location / {{ proxy_pass http://emby_playback_origin; }}
  }}
 }}
@@ -465,7 +464,8 @@ http {{
                 assert "location" not in result.headers
             assert len(calls) == before  # no URL issuer was contacted for the third play
             assert edge.get("/_deck_admission").status_code == 404
-            assert edge.get("/cmcc-source/demo?cap=source-capability").status_code == 302
+            assert edge.get("/cmcc-source").status_code == 410
+            assert edge.get("/cmcc-source/demo?cap=source-capability").status_code == 410
             assert edge.post("/Sessions/Playing/Stopped", headers=headers("a"),
                              json={"PlaySessionId": play_ids["a"]}).status_code == 204
             assert edge.get("/Videos/item42/master.m3u8", headers=headers("c")).status_code == 200
