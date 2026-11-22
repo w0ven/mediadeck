@@ -776,6 +776,26 @@ def test_existing_renewal_notice_includes_table_frozen_amount(gc):
     assert '有 49 积分正冻结在牌桌' in calls[0]
 
 
+def test_renewal_notice_includes_board_and_bot_game_escrows(gc):
+    from app.modules.economy_rules import economy_write
+    from app.modules.level_lifecycle import LevelLifecyclePlugin
+    expiry = int(time.time()) + 100
+    member = {'emby_user_id':'u0', 'tg_user_id':'9000', 'activity_managed':True, 'expires_at_effective':expiry}
+    calls = []
+    async def send(chat, body):
+        calls.append(body)
+        return True
+    with economy_write(gc.db) as conn:
+        conn.execute("INSERT INTO play_escrows(scope,ref,user_id,amount,reserved,created_at) VALUES('gc_xiangqi','tb_xq1','u0',30,30,100)")
+        conn.execute("INSERT INTO play_escrows(scope,ref,user_id,amount,reserved,created_at) VALUES('gc_gomoku','tb_gm1','u0',20,20,101)")
+        conn.execute("INSERT INTO play_escrows(scope,ref,user_id,amount,reserved,created_at) VALUES('niuniu','nn_1','u0',15,15,102)")
+    levels = SimpleNamespace(db=gc.db, members=SimpleNamespace(list=lambda **kw:[member]),
+                             status=lambda *a:{'renewal_price':10000,'shortfall':5050})
+    plugin = LevelLifecyclePlugin(SimpleNamespace(telegram=SimpleNamespace(enabled=True,send=send)))
+    asyncio.run(plugin.notices(levels, int(time.time())))
+    assert '有 65 积分正冻结在牌桌' in calls[0]
+
+
 def test_running_zjh_host_leave_transfers_before_settlement(gc):
     t = start(gc, 3)
     deadline = t['turn_deadline']
