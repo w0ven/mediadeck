@@ -41,6 +41,7 @@ def test_loadprobe_announce_is_loopback_only(monkeypatch):
     assert load("loadprobe").ThreadingHTTPServer.request_queue_size >= 256
     assert load("meterd").ThreadingHTTPServer.request_queue_size >= 256
     assert load("stream_rate_proxy").RateServer.request_queue_size >= 256
+    assert load("union_file_reader").UnionServer.request_queue_size >= 256
 
 
 def test_installer_bootstraps_certificate_before_tls_site_and_has_meter_tools():

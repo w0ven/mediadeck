@@ -184,7 +184,7 @@ def test_mixed_old_35_and_new_15_links_share_stricter_live_budget(relay):
 def test_four_mixed_large_ranges_outlast_upstream_socket_timeout_without_disconnect(relay, monkeypatch):
     """A 50ms upstream *idle* timeout is not a 50ms response lifetime.
 
-    Scale down the production 35s socket timeout: four concurrent, differently
+    Scale down the production 60s socket timeout: four concurrent, differently
     signed large Ranges spend >1s being paced, but no individual read stalls.
     The client side uses the unpatched HTTPConnection with its own 10s timeout.
     """
@@ -192,7 +192,7 @@ def test_four_mixed_large_ranges_outlast_upstream_socket_timeout_without_disconn
     configured = []
 
     class ShortIdleTimeoutConnection(original):
-        def __init__(self, host, port=None, timeout=35, **kwargs):
+        def __init__(self, host, port=None, timeout=60, **kwargs):
             configured.append(timeout)
             super().__init__(host, port, timeout=0.05, **kwargs)
 
@@ -215,7 +215,7 @@ def test_four_mixed_large_ranges_outlast_upstream_socket_timeout_without_disconn
         before = time.monotonic()
         result = list(executor.map(transfer, range(4)))
         elapsed = time.monotonic() - before
-    assert configured == [35] * 4  # relay really used the short-idle-timeout subclass
+    assert configured == [60] * 4  # relay really used the short-idle-timeout subclass
     assert all(status == 206 and data == PAYLOAD[i * 6 * MiB:(i + 1) * 6 * MiB]
                for i, (status, data) in enumerate(result))
     assert len(PAYLOAD) / RATE_15 * .95 <= elapsed < 5, elapsed

@@ -120,9 +120,10 @@ class RateHandler(BaseHTTPRequestHandler):
             self.send_error(400)
             return
         # Socket timeout is PER blocking send/recv, not a lifetime limit on
-        # a multi-hour response. nginx's existing upstream idle timeout is
-        # 30s; the reader gets 35s, without timing out during pacing sleeps.
-        upstream = http.client.HTTPConnection("127.0.0.1", reader_port, timeout=35)
+        # a multi-hour response. nginx's upstream read timeout is 65s; give
+        # the reader 60s (< 65s) so slow cloud cold-starts succeed cleanly
+        # while application errors surface before nginx cuts with 504.
+        upstream = http.client.HTTPConnection("127.0.0.1", reader_port, timeout=60)
         token = None
         sent_headers = False
         try:

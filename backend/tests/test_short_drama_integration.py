@@ -32,7 +32,7 @@ def test_normal_playback_info_keeps_original_upstream_source(client, monkeypatch
     assert response.json() == {
         "PlaySessionId": "ordinary-play",
         "MediaSources": [{
-            "Id": "ordinary-source", "Protocol": "File",
+            "Id": "ordinary-source", "Protocol": "File", "Path": "/stream/example.mkv",
             "SupportsTranscoding": True, "Container": "mkv",
         }],
     }
