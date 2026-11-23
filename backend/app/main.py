@@ -6,6 +6,7 @@ import contextlib
 import json
 import logging
 import os
+import posixpath
 import re
 import secrets
 import threading
@@ -1738,8 +1739,42 @@ async def _admit_playback(request: Request, item_id: str,
     return uid
 
 
+_VIRTUAL_STREAM_DIR = "/stream"
+_URL_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_CODEC_EXT_MAP = {
+    "subrip": "srt",
+    "webvtt": "vtt",
+    "pgssub": "sup",
+    "dvd_subtitle": "sub",
+    "mov_text": "srt",
+}
+
+
+def _clean_leaf_token(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = value.strip()
+    if not cleaned or _URL_SCHEME_RE.match(cleaned):
+        return ""
+    candidate = posixpath.basename(cleaned.replace("\\", "/").rstrip("/"))
+    candidate = re.sub(r"[/\\\x00-\x1f\x7f:?*\"<>|#]+", "_", candidate).strip(" .")
+    return "" if candidate in ("", ".", "..") else candidate
+
+
+def _sanitize_virtual_leaf(raw_path: Any, fallback_name: Any = "", container: Any = "") -> str:
+    """Extract or synthesize a safe filename without leaking server directories or URLs."""
+    leaf = _clean_leaf_token(raw_path)
+    if not leaf:
+        stem = _clean_leaf_token(fallback_name) or "media"
+        raw_ext = str(container or "").split(",")[0].strip().lower()
+        raw_ext = _CODEC_EXT_MAP.get(raw_ext, raw_ext)
+        ext = re.sub(r"[^a-z0-9]+", "", raw_ext)
+        leaf = f"{stem}.{ext}" if ext and not stem.lower().endswith(f".{ext}") else stem
+    return leaf
+
+
 def _redact_playback_paths(data: Any) -> Any:
-    """Strip internal server filesystem paths before returning PlaybackInfo to clients."""
+    """Replace internal filesystem paths with safe virtual filenames for client compatibility."""
     if os.environ.get("MEDIADECK_REDACT_PLAYBACK_PATHS", "1").strip() == "0":
         return data
     if not isinstance(data, dict):
@@ -1749,17 +1784,49 @@ def _redact_playback_paths(data: Any) -> Any:
         return data
     out = dict(data)
     clean_sources = []
-    for src in sources:
+    used_source_paths: set[str] = set()
+    for idx, src in enumerate(sources, start=1):
         if not isinstance(src, dict):
             clean_sources.append(src)
             continue
-        s_copy = {k: v for k, v in src.items() if k != "Path"}
+        s_copy = dict(src)
+        leaf = _sanitize_virtual_leaf(
+            s_copy.get("Path"),
+            s_copy.get("Name") or s_copy.get("Id") or f"source_{idx}",
+            s_copy.get("Container"),
+        )
+        vdir = _VIRTUAL_STREAM_DIR
+        vpath = f"{vdir}/{leaf}"
+        if vpath in used_source_paths:
+            suffix = 2
+            while f"{_VIRTUAL_STREAM_DIR}_{suffix}/{leaf}" in used_source_paths:
+                suffix += 1
+            vdir = f"{_VIRTUAL_STREAM_DIR}_{suffix}"
+            vpath = f"{vdir}/{leaf}"
+        used_source_paths.add(vpath)
+        s_copy["Path"] = vpath
+
         streams = s_copy.get("MediaStreams")
         if isinstance(streams, list):
-            s_copy["MediaStreams"] = [
-                {k: v for k, v in st.items() if k != "Path"} if isinstance(st, dict) else st
-                for st in streams
-            ]
+            clean_streams = []
+            for st in streams:
+                if not isinstance(st, dict):
+                    clean_streams.append(st)
+                    continue
+                if st.get("Path") is not None:
+                    st_copy = dict(st)
+                    sub_leaf = _sanitize_virtual_leaf(
+                        st.get("Path"),
+                        st.get("Title") or st.get("Language") or "subtitle",
+                        st.get("Codec"),
+                    )
+                    st_copy["Path"] = f"{vdir}/{sub_leaf}"
+                    clean_streams.append(st_copy)
+                elif "Path" in st:
+                    clean_streams.append({k: v for k, v in st.items() if k != "Path"})
+                else:
+                    clean_streams.append(st)
+            s_copy["MediaStreams"] = clean_streams
         clean_sources.append(s_copy)
     out["MediaSources"] = clean_sources
     return out

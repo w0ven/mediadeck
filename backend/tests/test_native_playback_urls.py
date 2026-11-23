@@ -133,9 +133,12 @@ def test_header_only_actual_PlaybackInfo_handler_produces_native_URL(
     assert r.status_code == 200
     payload = r.json()
     ms0 = payload["MediaSources"][0]
-    assert "Path" not in ms0
-    assert all("Path" not in st for st in ms0["MediaStreams"])
+    assert ms0["Path"] == "/stream/E01.mkv"
+    assert "Path" not in ms0["MediaStreams"][0]
+    assert ms0["MediaStreams"][1]["Path"] == "/stream/sub.zh.ass"
     assert ms0["MediaStreams"][1]["DeliveryUrl"] == "/Videos/item42/src/Subtitles/5/Stream.ass"
+    raw_dump = repr(payload)
+    assert "/media/" not in raw_dump and "/config/" not in raw_dump
     url = ms0["DirectStreamUrl"]
     parsed = urlsplit(url)
     assert not parsed.netloc and parsed.path == "/Videos/item42/stream.mkv"
