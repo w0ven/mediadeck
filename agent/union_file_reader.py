@@ -15,12 +15,15 @@ import argparse
 import ctypes
 import errno
 import fcntl
+import math
 import mimetypes
 import os
 import re
 import socket
 import stat
+import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote_to_bytes, urlsplit
 
@@ -31,6 +34,9 @@ RESOLVE_BENEATH = 0x08
 CHUNK_BYTES = 65536
 DEFAULT_MAX_INFLIGHT = 128
 SOCKET_TIMEOUT_S = 30.0
+BODY_WRITE_TIMEOUT_S = 630.0
+INFLIGHT_LOG_STEP = 16
+REJECT_LOG_INTERVAL_S = 10.0
 
 _NOT_FOUND_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.EISDIR})
 _ESCAPE_ERRNOS = frozenset({errno.ELOOP, errno.EXDEV})
@@ -196,6 +202,7 @@ class UnionServer(ThreadingHTTPServer):
         bind: tuple[str, int],
         specs: list[tuple[str, bool]],
         max_inflight: int = DEFAULT_MAX_INFLIGHT,
+        body_write_timeout: float = BODY_WRITE_TIMEOUT_S,
     ) -> None:
         if bind[0] not in ("127.0.0.1", "::1"):
             raise ValueError("loopback only")
@@ -203,6 +210,8 @@ class UnionServer(ThreadingHTTPServer):
             raise ValueError("at least one root required")
         if max_inflight < 1:
             raise ValueError("max_inflight must be >= 1")
+        if not math.isfinite(body_write_timeout) or body_write_timeout <= 0 or body_write_timeout > 86400:
+            raise ValueError("body_write_timeout must be finite and in (0, 86400]")
         self.address_family = socket.AF_INET6 if ":" in bind[0] else socket.AF_INET
         roots: list[MountRoot] = []
         for raw_path, follow in specs:
@@ -217,8 +226,60 @@ class UnionServer(ThreadingHTTPServer):
                     raise ValueError(f"not a strict directory: {raw_path}")
                 roots.append(MountRoot(path=raw_path, follow_contained_symlinks=False))
         self.roots = roots
+        self.max_inflight = max_inflight
+        self.body_write_timeout = float(body_write_timeout)
         self.inflight = threading.BoundedSemaphore(max_inflight)
+        self._stats_lock = threading.Lock()
+        self.inflight_current = 0
+        self.inflight_peak = 0
+        self.rejected_503 = 0
+        self._last_peak_logged = 0
+        self._last_503_log_at = 0.0
         super().__init__(bind, UnionHandler)
+
+    def _emit(self, line: str) -> None:
+        try:
+            print(line, file=sys.stderr, flush=True)
+        except Exception:
+            pass
+
+    def _record_enter(self) -> None:
+        log_line: str | None = None
+        step = min(INFLIGHT_LOG_STEP, self.max_inflight)
+        with self._stats_lock:
+            self.inflight_current += 1
+            if self.inflight_current > self.inflight_peak:
+                self.inflight_peak = self.inflight_current
+                if (
+                    self.inflight_peak >= self._last_peak_logged + step
+                    or self.inflight_peak == self.max_inflight
+                ):
+                    self._last_peak_logged = self.inflight_peak
+                    log_line = (
+                        f"[union_file_reader] inflight_peak={self.inflight_peak}/{self.max_inflight} "
+                        f"current={self.inflight_current} rejected_503={self.rejected_503}"
+                    )
+        if log_line:
+            self._emit(log_line)
+
+    def _record_leave(self) -> None:
+        with self._stats_lock:
+            if self.inflight_current > 0:
+                self.inflight_current -= 1
+
+    def _record_reject_503(self) -> None:
+        now = time.monotonic()
+        log_line: str | None = None
+        with self._stats_lock:
+            self.rejected_503 += 1
+            if self._last_503_log_at == 0.0 or (now - self._last_503_log_at) >= REJECT_LOG_INTERVAL_S:
+                self._last_503_log_at = now
+                log_line = (
+                    f"[union_file_reader] inflight_full rejected_503={self.rejected_503} "
+                    f"current={self.inflight_current}/{self.max_inflight} peak={self.inflight_peak}"
+                )
+        if log_line:
+            self._emit(log_line)
 
     def _process_request_guarded(
         self, request: socket.socket, client_address: tuple[str, int]
@@ -226,12 +287,14 @@ class UnionServer(ThreadingHTTPServer):
         try:
             self.process_request_thread(request, client_address)
         finally:
+            self._record_leave()
             self.inflight.release()
 
     def process_request(
         self, request: socket.socket, client_address: tuple[str, int]
     ) -> None:
         if not self.inflight.acquire(blocking=False):
+            self._record_reject_503()
             try:
                 request.settimeout(0.5)
                 request.sendall(
@@ -244,7 +307,10 @@ class UnionServer(ThreadingHTTPServer):
                 pass
             self.shutdown_request(request)
             return
+        entered = False
         try:
+            self._record_enter()
+            entered = True
             worker = threading.Thread(
                 target=self._process_request_guarded,
                 args=(request, client_address),
@@ -252,6 +318,8 @@ class UnionServer(ThreadingHTTPServer):
             )
             worker.start()
         except BaseException:
+            if entered:
+                self._record_leave()
             self.inflight.release()
             self.shutdown_request(request)
             raise
@@ -260,6 +328,8 @@ class UnionServer(ThreadingHTTPServer):
 class UnionHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     timeout = SOCKET_TIMEOUT_S
+    # Unbuffered wfile so each 64 KiB write maps directly to sendall() under body_write_timeout.
+    wbufsize = 0
 
     def log_message(self, *_args: object) -> None:
         pass
@@ -373,14 +443,24 @@ class UnionHandler(BaseHTTPRequestHandler):
 
             offset = start
             remaining = amount
-            while remaining > 0:
-                data = os.pread(fd, min(CHUNK_BYTES, remaining), offset)
-                if not data:
-                    break
-                self.wfile.write(data)
-                n = len(data)
-                offset += n
-                remaining -= n
+            # Separate streaming body write timeout from header read timeout so paused
+            # players under nginx proxy_buffering=off are not cut at 30s; always restore
+            # the header timeout on exit so reused sockets can never stall idly for 630s.
+            self.connection.settimeout(self.server.body_write_timeout)
+            try:
+                while remaining > 0:
+                    data = os.pread(fd, min(CHUNK_BYTES, remaining), offset)
+                    if not data:
+                        break
+                    self.wfile.write(data)
+                    n = len(data)
+                    offset += n
+                    remaining -= n
+            finally:
+                try:
+                    self.connection.settimeout(self.timeout)
+                except OSError:
+                    pass
         except (BrokenPipeError, ConnectionResetError, OSError):
             self.close_connection = True
         finally:
@@ -392,6 +472,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=9812)
     parser.add_argument("--max-inflight", type=int, default=DEFAULT_MAX_INFLIGHT)
+    parser.add_argument(
+        "--body-write-timeout",
+        type=float,
+        default=BODY_WRITE_TIMEOUT_S,
+        help="Per-write socket timeout in seconds while streaming response body",
+    )
     parser.add_argument(
         "--root",
         action="append",
@@ -410,7 +496,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     specs = [(p, False) for p in args.root] + [(p, True) for p in args.symlink_root]
-    server = UnionServer((args.host, args.port), specs, max_inflight=args.max_inflight)
+    server = UnionServer(
+        (args.host, args.port),
+        specs,
+        max_inflight=args.max_inflight,
+        body_write_timeout=args.body_write_timeout,
+    )
     try:
         server.serve_forever()
     finally:

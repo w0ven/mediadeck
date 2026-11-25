@@ -361,3 +361,161 @@ def test_traversal_authority_form_and_symlink_escapes_are_rejected(union_env):
     # Symlink on symlink-root escaping outside root_real must be rejected
     status, _hdrs, body = _req(port, "GET", "/GD4Movies/44/escape_gd4.txt")
     assert status == 404 and b"TOP_SECRET" not in body
+
+
+def test_body_write_timeout_separation_restores_header_timeout_and_survives_pause(
+    tmp_path: Path, monkeypatch
+):
+    import socket as sock_mod
+
+    root = tmp_path / "pool"
+    root.mkdir()
+    # Explicitly cap both SO_SNDBUF and SO_RCVBUF to 64 KiB so a 4 MiB body deterministically
+    # fills loopback buffers and blocks sendall() even on high-bandwidth tuned CI kernels.
+    size = 4 * 1024 * 1024
+    payload_file = root / "pause_test.mkv"
+    with open(payload_file, "wb") as f:
+        f.write(b"A" * size)
+
+    class _TinyRcvBufConn(http.client.HTTPConnection):
+        def connect(self):
+            s = sock_mod.socket(sock_mod.AF_INET, sock_mod.SOCK_STREAM)
+            s.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_RCVBUF, 64 * 1024)
+            s.settimeout(self.timeout)
+            s.connect((self.host, self.port))
+            self.sock = s
+
+    observed_timeouts: list[float | None] = []
+    orig_setup = ufr.UnionHandler.setup
+    orig_serve = ufr.UnionHandler.serve
+
+    def small_sndbuf_setup(self):
+        self.request.setsockopt(sock_mod.SOL_SOCKET, sock_mod.SO_SNDBUF, 64 * 1024)
+        orig_setup(self)
+
+    def spy_serve(self):
+        orig_serve(self)
+        try:
+            observed_timeouts.append(self.connection.gettimeout())
+        except OSError:
+            pass
+
+    monkeypatch.setattr(ufr.UnionHandler, "timeout", 0.25)
+    monkeypatch.setattr(ufr.UnionHandler, "setup", small_sndbuf_setup)
+    monkeypatch.setattr(ufr.UnionHandler, "serve", spy_serve)
+
+    # 1. Pause longer than header timeout (0.25s) but shorter than body_write_timeout (2.5s) succeeds intact
+    srv = ufr.UnionServer(("127.0.0.1", 0), [(str(root), False)], body_write_timeout=2.5)
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        conn = _TinyRcvBufConn("127.0.0.1", srv.server_port, timeout=10)
+        conn.request("GET", "/pause_test.mkv", headers={"Range": f"bytes=0-{size - 1}"})
+        resp = conn.getresponse()
+        assert resp.status == 206
+        first = resp.read(65536)
+        assert len(first) == 65536
+        # Pause longer than header timeout (0.25s) and verify server is actively blocked mid-stream
+        threading.Event().wait(0.75)
+        assert srv.inflight_current == 1
+        assert not observed_timeouts
+        total = len(first)
+        while True:
+            chunk = resp.read(262144)
+            if not chunk:
+                break
+            total += len(chunk)
+        conn.close()
+        assert total == size
+        for _ in range(50):
+            if observed_timeouts and srv.inflight_current == 0:
+                break
+            threading.Event().wait(0.02)
+        assert observed_timeouts[-1] == pytest.approx(0.25)
+        assert srv.inflight_peak >= 1
+        assert srv.inflight_current == 0
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        th.join(timeout=3)
+
+    # 2. Stalling longer than body_write_timeout (0.2s) cuts the transfer and releases inflight slot
+    short_srv = ufr.UnionServer(("127.0.0.1", 0), [(str(root), False)], body_write_timeout=0.2)
+    short_th = threading.Thread(target=short_srv.serve_forever, daemon=True)
+    short_th.start()
+    try:
+        conn = _TinyRcvBufConn("127.0.0.1", short_srv.server_port, timeout=5)
+        conn.request("GET", "/pause_test.mkv", headers={"Range": f"bytes=0-{size - 1}"})
+        resp = conn.getresponse()
+        assert resp.status == 206
+        head = resp.read(65536)
+        threading.Event().wait(0.6)
+        read_total = len(head)
+        try:
+            while True:
+                b = resp.read(262144)
+                if not b:
+                    break
+                read_total += len(b)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+        assert read_total < size
+        for _ in range(50):
+            if short_srv.inflight_current == 0:
+                break
+            threading.Event().wait(0.02)
+        assert short_srv.inflight_current == 0
+    finally:
+        short_srv.shutdown()
+        short_srv.server_close()
+        short_th.join(timeout=3)
+
+
+def test_body_write_timeout_cli_and_inflight_stats_validation(tmp_path: Path):
+    root = tmp_path / "pool"
+    root.mkdir()
+    (root / "ok.bin").write_bytes(b"OK")
+
+    args = ufr.parse_args(["--root", str(root), "--body-write-timeout", "420.5"])
+    assert args.body_write_timeout == pytest.approx(420.5)
+
+    for bad in (0.0, -5.0, float("nan"), float("inf"), 1e9):
+        with pytest.raises(ValueError, match="body_write_timeout"):
+            ufr.UnionServer(("127.0.0.1", 0), [(str(root), False)], body_write_timeout=bad)
+
+    capped = ufr.UnionServer(("127.0.0.1", 0), [(str(root), False)], max_inflight=1)
+    cap_thread = threading.Thread(target=capped.serve_forever, daemon=True)
+    cap_thread.start()
+    try:
+        import socket as sock_mod
+
+        slow = sock_mod.create_connection(("127.0.0.1", capped.server_port), timeout=5)
+        try:
+            slow.sendall(b"GET /ok.bin HTTP/1.1\r\n")
+            for _ in range(50):
+                if capped.inflight_current == 1:
+                    break
+                threading.Event().wait(0.01)
+            assert capped.inflight_current == 1
+            assert capped.inflight_peak == 1
+            status2, _, _ = _req(capped.server_port, "GET", "/ok.bin")
+            assert status2 == 503
+            assert capped.rejected_503 == 1
+            slow.sendall(b"Host: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            while slow.recv(1024):
+                pass
+        finally:
+            slow.close()
+        for _ in range(50):
+            if capped.inflight_current == 0:
+                break
+            threading.Event().wait(0.01)
+        assert capped.inflight_current == 0
+        assert capped.inflight_peak == 1
+    finally:
+        capped.shutdown()
+        capped.server_close()
+        cap_thread.join(timeout=3)
+
